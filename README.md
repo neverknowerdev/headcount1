@@ -5,22 +5,10 @@ This is an MVP implementation of an agent orchestration system. It is distribute
 ## Prerequisites
 - **Go**: >= 1.21
 - **Node.js**: >= 18 (and `npm`)
-- **PostgreSQL**: A running instance (version 13+)
 
 ## Local Build & Run Instructions
 
-### 1. Database Setup
-Ensure PostgreSQL is running and create a database named `orchestrator`:
-```sh
-psql -U postgres -c "CREATE DATABASE orchestrator;"
-```
-
-Then, initialize the database schema:
-```sh
-psql "postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable" -f db/migration/001_init.sql
-```
-
-### 2. Building the Project
+### 1. Building the Project
 You can build the single binary containing both the frontend and backend with our provided Makefile:
 
 ```sh
@@ -30,13 +18,18 @@ make build
 
 This creates an executable file named `orchestrator`.
 
-### 3. Running the Server
-You can run the generated binary directly. By default, it will look for PostgreSQL at `postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable`.
+### 2. Running the Server
+You can run the generated binary directly. By default, it will create a local SQLite database named `orchestrator.db` and perform automatic migrations on startup!
 
-If your database connection string is different, set the `DATABASE_URL` environment variable:
+```sh
+./orchestrator
+```
+
+**PostgreSQL Support (Optional)**:
+If you prefer to use an external PostgreSQL database, you can supply a Postgres connection string via the `DATABASE_URL` environment variable:
 ```sh
 export DATABASE_URL="postgres://username:password@localhost:5432/orchestrator?sslmode=disable"
 ./orchestrator
 ```
 
-The server will start on port `8080`. You can access the UI at http://localhost:8080.
+The server will start on port `8080`. You can access the UI at [http://localhost:8080](http://localhost:8080).
