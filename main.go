@@ -2,6 +2,7 @@ package main
 
 import (
 	"database/sql"
+	"agent-orchestrator/db/migration"
 	"embed"
 	"io/fs"
 	"log"
@@ -11,6 +12,9 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	_ "github.com/lib/pq"
+	"github.com/golang-migrate/migrate/v4"
+	"github.com/golang-migrate/migrate/v4/database/postgres"
+	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"agent-orchestrator/server"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/engine"
@@ -31,6 +35,10 @@ func main() {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 	defer database.Close()
+
+
+
+	runDBMigration(database)
 
 	if err := database.Ping(); err != nil {
 		log.Fatalf("Failed to ping database: %v", err)
@@ -90,4 +98,30 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+func runDBMigration(db *sql.DB) {
+	d, err := iofs.New(migration.FS, ".")
+	if err != nil {
+		log.Fatalf("failed to create migration iofs: %v", err)
+	}
+
+	driver, err := postgres.WithInstance(db, &postgres.Config{})
+	if err != nil {
+		log.Fatalf("failed to create migration driver: %v", err)
+	}
+
+	m, err := migrate.NewWithInstance(
+		"iofs", d,
+		"postgres", driver,
+	)
+	if err != nil {
+		log.Fatalf("failed to create migrate instance: %v", err)
+	}
+
+	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
+		log.Fatalf("failed to run migrate up: %v", err)
+	}
+
+	log.Println("Database migration completed successfully")
 }
