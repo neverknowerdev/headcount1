@@ -6,7 +6,7 @@ setup:
 build-frontend:
 	cd frontend && npm run build
 
-build: build-frontend
+build: setup build-frontend
 	go build -o orchestrator main.go
 
 dev:
