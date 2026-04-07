@@ -1,8 +1,8 @@
 package skills
 
 import (
+	"gorm.io/gorm"
 	"context"
-	"database/sql"
 	"fmt"
 	"io"
 	"net/http"
@@ -18,7 +18,7 @@ type Manager struct {
 	q *db.Queries
 }
 
-func NewManager(database *sql.DB) *Manager {
+func NewManager(database *gorm.DB) *Manager {
 	return &Manager{
 		q: db.New(database),
 	}
@@ -45,10 +45,10 @@ func (m *Manager) ImportSkill(ctx context.Context, companyID int32, name, source
 		return nil, fmt.Errorf("unsupported source URL format")
 	}
 
-	skill, err := m.q.CreateSkill(ctx, db.CreateSkillParams{
+	skill, err := m.q.CreateSkill(ctx, db.Skill{
 		CompanyID: companyID,
 		Name:      name,
-		SourceUrl: sql.NullString{String: sourceURL, Valid: true},
+		SourceUrl: sourceURL,
 		LocalPath: localPath,
 	})
 	if err != nil {

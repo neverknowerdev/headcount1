@@ -1,7 +1,6 @@
 package server
 
 import (
-	"database/sql"
 	"encoding/json"
 	"io"
 	"log"
@@ -13,6 +12,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
+	"gorm.io/gorm"
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/skills"
@@ -28,13 +28,13 @@ var upgrader = websocket.Upgrader{
 }
 
 type Server struct {
-	db     *sql.DB
+	db     *gorm.DB
 	q      db.Querier
 	hub    *eventhub.Hub
 	engine *engine.ForgeEngine
 }
 
-func NewServer(database *sql.DB, eng *engine.ForgeEngine) *Server {
+func NewServer(database *gorm.DB, eng *engine.ForgeEngine) *Server {
 	return &Server{
 		db:     database,
 		q:      db.New(database),
@@ -158,13 +158,12 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	p := db.CreateProjectParams{
+	p := db.Project{
 		CompanyID: req.CompanyID,
 		Name:      req.Name,
+		Description: req.Description,
 	}
-	if req.Description != "" {
-		p.Description = sql.NullString{String: req.Description, Valid: true}
-	}
+
 	proj, err := s.q.CreateProject(r.Context(), p)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -199,17 +198,14 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	p := db.CreateAgentParams{
+	p := db.Agent{
 		CompanyID:    req.CompanyID,
 		Name:         req.Name,
 		SystemPrompt: req.SystemPrompt,
+		Description:  req.Description,
+		Model:        req.Model,
 	}
-	if req.Description != "" {
-		p.Description = sql.NullString{String: req.Description, Valid: true}
-	}
-	if req.Model != "" {
-		p.Model = sql.NullString{String: req.Model, Valid: true}
-	}
+
 	agent, err := s.q.CreateAgent(r.Context(), p)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -243,17 +239,14 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	p := db.CreateTaskParams{
+	p := db.Task{
 		ProjectID: req.ProjectID,
 		Title:     req.Title,
 		Status:    "backlog",
+		AgentID:   req.AgentID,
+		Description: req.Description,
 	}
-	if req.AgentID != nil {
-		p.AgentID = sql.NullInt32{Int32: *req.AgentID, Valid: true}
-	}
-	if req.Description != "" {
-		p.Description = sql.NullString{String: req.Description, Valid: true}
-	}
+
 	task, err := s.q.CreateTask(r.Context(), p)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -291,10 +284,7 @@ func (s *Server) updateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := s.q.UpdateTaskStatus(r.Context(), db.UpdateTaskStatusParams{
-		ID:     int32(id),
-		Status: req.Status,
-	})
+	task, err := s.q.UpdateTaskStatus(r.Context(), int32(id), req.Status)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -331,14 +321,13 @@ func (s *Server) createComment(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	p := db.CreateCommentParams{
+	p := db.Comment{
 		TaskID:     req.TaskID,
 		AuthorType: req.AuthorType,
 		Content:    req.Content,
+		AuthorID:   req.AuthorID,
 	}
-	if req.AuthorID != nil {
-		p.AuthorID = sql.NullInt32{Int32: *req.AuthorID, Valid: true}
-	}
+
 	comment, err := s.q.CreateComment(r.Context(), p)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
@@ -408,13 +397,13 @@ func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	p := db.CreateAttachmentParams{
+	p := db.Attachment{
 		TaskID:   int32(taskID),
 		Filename: handler.Filename,
 		FilePath: filePath,
 	}
 	if mimeType := handler.Header.Get("Content-Type"); mimeType != "" {
-		p.MimeType = sql.NullString{String: mimeType, Valid: true}
+		p.MimeType = mimeType
 	}
 
 	attachment, err := s.q.CreateAttachment(r.Context(), p)

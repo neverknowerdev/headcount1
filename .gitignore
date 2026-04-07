@@ -1,2 +1,4 @@
 orchestrator
 migrate.log
+orchestrator.db
+server.log

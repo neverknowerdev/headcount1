@@ -1,24 +1,25 @@
 package main
 
 import (
-	"database/sql"
-	"agent-orchestrator/db/migration"
 	"embed"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	_ "github.com/lib/pq"
-	"github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/database/postgres"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
-	"agent-orchestrator/server"
-	"agent-orchestrator/eventhub"
+
+	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
+	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/server"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/driver/postgres"
+	"gorm.io/gorm"
 )
 
 //go:embed all:frontend/dist
@@ -26,22 +27,39 @@ var frontendDist embed.FS
 
 func main() {
 	dbConnStr := os.Getenv("DATABASE_URL")
-	if dbConnStr == "" {
-		dbConnStr = "postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable"
+
+	var database *gorm.DB
+	var err error
+
+	if strings.HasPrefix(dbConnStr, "postgres://") {
+		log.Println("Connecting to PostgreSQL database")
+		database, err = gorm.Open(postgres.Open(dbConnStr), &gorm.Config{})
+	} else {
+		log.Println("Connecting to SQLite database")
+		if dbConnStr == "" {
+			dbConnStr = "orchestrator.db"
+		}
+		database, err = gorm.Open(sqlite.Open(dbConnStr), &gorm.Config{})
 	}
 
-	database, err := sql.Open("postgres", dbConnStr)
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
-	defer database.Close()
 
-
-
-	runDBMigration(database)
-
-	if err := database.Ping(); err != nil {
-		log.Fatalf("Failed to ping database: %v", err)
+	log.Println("Running AutoMigrate...")
+	err = database.AutoMigrate(
+		&db.Company{},
+		&db.Project{},
+		&db.LLMProvider{},
+		&db.Agent{},
+		&db.Skill{},
+		&db.Task{},
+		&db.Comment{},
+		&db.Attachment{},
+		&db.Run{},
+	)
+	if err != nil {
+		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
 	hub := eventhub.NewHub()
@@ -98,30 +116,4 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
-}
-
-func runDBMigration(db *sql.DB) {
-	d, err := iofs.New(migration.FS, ".")
-	if err != nil {
-		log.Fatalf("failed to create migration iofs: %v", err)
-	}
-
-	driver, err := postgres.WithInstance(db, &postgres.Config{})
-	if err != nil {
-		log.Fatalf("failed to create migration driver: %v", err)
-	}
-
-	m, err := migrate.NewWithInstance(
-		"iofs", d,
-		"postgres", driver,
-	)
-	if err != nil {
-		log.Fatalf("failed to create migrate instance: %v", err)
-	}
-
-	if err := m.Up(); err != nil && err != migrate.ErrNoChange {
-		log.Fatalf("failed to run migrate up: %v", err)
-	}
-
-	log.Println("Database migration completed successfully")
 }
