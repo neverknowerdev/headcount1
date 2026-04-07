@@ -3,14 +3,13 @@ package engine
 import (
 	"bufio"
 	"context"
-	"database/sql"
 	"fmt"
-
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
+
+	"gorm.io/gorm"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
@@ -21,7 +20,7 @@ type ForgeEngine struct {
 	hub *eventhub.Hub
 }
 
-func NewForgeEngine(database *sql.DB, hub *eventhub.Hub) *ForgeEngine {
+func NewForgeEngine(database *gorm.DB, hub *eventhub.Hub) *ForgeEngine {
 	return &ForgeEngine{
 		q:   db.New(database),
 		hub: hub,
@@ -36,7 +35,7 @@ func (e *ForgeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 
 	switch task.Status {
 	case "to-do":
-		_, err = e.q.UpdateTaskStatus(ctx, db.UpdateTaskStatusParams{ID: task.ID, Status: "refinement"})
+		_, err = e.q.UpdateTaskStatus(ctx, task.ID, "refinement")
 		if err != nil {
 			return err
 		}
@@ -51,16 +50,16 @@ func (e *ForgeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 }
 
 func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string) {
-	if !task.AgentID.Valid {
+	if task.AgentID == nil {
 		return
 	}
 
-	agent, err := e.q.GetAgent(ctx, task.AgentID.Int32)
+	agent, err := e.q.GetAgent(ctx, *task.AgentID)
 	if err != nil {
 		return
 	}
 
-	run, err := e.q.CreateRun(ctx, db.CreateRunParams{
+	run, err := e.q.CreateRun(ctx, db.Run{
 		TaskID:  task.ID,
 		AgentID: agent.ID,
 		Status:  "running",
@@ -71,7 +70,7 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 	e.hub.BroadcastEvent("run_started", run)
 
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
-	contextStr := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s\n\nComments:\n", task.Title, task.Description.String, mode)
+	contextStr := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s\n\nComments:\n", task.Title, task.Description, mode)
 	for _, c := range comments {
 		contextStr += fmt.Sprintf("[%s]: %s\n", c.AuthorType, c.Content)
 	}
@@ -88,7 +87,7 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 	cmd := exec.CommandContext(ctx, "npx", "forgecode", "--prompt", promptFile)
 	cmd.Env = append(os.Environ(),
 		fmt.Sprintf("SYSTEM_PROMPT=%s", agent.SystemPrompt),
-		fmt.Sprintf("AGENT_MODEL=%s", agent.Model.String),
+		fmt.Sprintf("AGENT_MODEL=%s", agent.Model),
 	)
 
 	stdoutPipe, err := cmd.StdoutPipe()
@@ -130,8 +129,6 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 
 	err = cmd.Wait()
 
-	now := sql.NullTime{Time: time.Now(), Valid: true}
-
 	status := "completed"
 	taskNextStatus := "in-review"
 
@@ -142,27 +139,15 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 		taskNextStatus = "blocked"
 	}
 
-	e.q.UpdateRunLog(ctx, db.UpdateRunLogParams{
-		ID:         run.ID,
-		LogContent: sql.NullString{String: fullLog.String(), Valid: true},
-		Status:     status,
-		EndedAt:    now,
-	})
+	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
-	e.q.UpdateTaskStatus(ctx, db.UpdateTaskStatusParams{
-		ID:     task.ID,
-		Status: taskNextStatus,
-	})
+	e.q.UpdateTaskStatus(ctx, task.ID, taskNextStatus)
 	e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": taskNextStatus})
 }
 
 func (e *ForgeEngine) failRun(ctx context.Context, runID int32, errorMsg string) {
-	e.q.UpdateRunLog(ctx, db.UpdateRunLogParams{
-		ID:         runID,
-		LogContent: sql.NullString{String: errorMsg, Valid: true},
-		Status:     "failed",
-	})
+	e.q.UpdateRunLog(ctx, runID, errorMsg, "failed")
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 }

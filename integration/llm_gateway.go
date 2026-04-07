@@ -2,13 +2,13 @@ package integration
 
 import (
 	"bytes"
-	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 	"agent-orchestrator/db"
 )
 
@@ -16,7 +16,7 @@ type LLMGateway struct {
 	q *db.Queries
 }
 
-func NewLLMGateway(database *sql.DB) *LLMGateway {
+func NewLLMGateway(database *gorm.DB) *LLMGateway {
 	return &LLMGateway{
 		q: db.New(database),
 	}
