@@ -1,33 +1,64 @@
-import React from 'react';
-import { Link } from 'react-router-dom';
-import { Home, Users, Activity } from 'lucide-react';
+import React, { useEffect, useState } from 'react';
+import axios from 'axios';
+import { CompanySwitcher } from './CompanySwitcher';
+import { Sidebar } from './Sidebar';
+import { useStore } from '../store';
+import { Onboarding } from '../pages/Onboarding';
+import { useLocation } from 'react-router-dom';
 
-export const Layout: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+interface LayoutProps {
+  children: React.ReactNode;
+}
+
+export const Layout: React.FC<LayoutProps> = ({ children }) => {
+  const { setCompanies, setSelectedCompanyId, companies, selectedCompanyId } = useStore();
+  const [loading, setLoading] = useState(true);
+  const location = useLocation();
+
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      try {
+        const res = await axios.get('/api/companies');
+        const comps = res.data || [];
+        setCompanies(comps);
+
+        if (comps.length > 0 && !selectedCompanyId) {
+          setSelectedCompanyId(comps[0].id);
+        }
+      } catch (e) {
+        console.error(e);
+      } finally {
+        setLoading(false);
+      }
+    };
+
+    fetchInitialData();
+  }, [setCompanies, setSelectedCompanyId, selectedCompanyId]);
+
+  if (loading) {
+    return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
+  }
+
+  if (companies.length === 0 && location.pathname !== '/onboarding') {
+      window.location.href = '/onboarding';
+      return null;
+  }
+
+  if (location.pathname === '/onboarding') {
+      if (companies.length > 0) {
+          window.location.href = '/';
+          return null;
+      }
+      return <Onboarding />;
+  }
+
+
   return (
-    <div className="flex h-screen bg-gray-100">
-      <aside className="w-64 bg-white border-r flex flex-col">
-        <div className="p-4 border-b">
-          <h1 className="text-xl font-bold text-indigo-600">Forge Orchestrator</h1>
-        </div>
-        <nav className="flex-1 p-4 space-y-2">
-          <Link to="/" className="flex items-center space-x-2 text-gray-700 p-2 rounded hover:bg-gray-50">
-            <Home size={20} />
-            <span>Dashboard</span>
-          </Link>
-          <Link to="/agents" className="flex items-center space-x-2 text-gray-700 p-2 rounded hover:bg-gray-50">
-            <Users size={20} />
-            <span>Agents</span>
-          </Link>
-          <Link to="/runs" className="flex items-center space-x-2 text-gray-700 p-2 rounded hover:bg-gray-50">
-            <Activity size={20} />
-            <span>Run Logs</span>
-          </Link>
-        </nav>
-      </aside>
-      <main className="flex-1 overflow-auto">
-        <div className="p-8">
-          {children}
-        </div>
+    <div className="h-screen flex overflow-hidden bg-gray-50">
+      <CompanySwitcher />
+      <Sidebar />
+      <main className="flex-1 overflow-y-auto p-8">
+        {children}
       </main>
     </div>
   );

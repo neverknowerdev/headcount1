@@ -1,99 +1,52 @@
-import React, { useState, useEffect } from 'react';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useStore } from '../store';
 
 export const AgentManager: React.FC = () => {
-  const [agents, setAgents] = useState<any[]>([]);
-  const [companies, setCompanies] = useState<any[]>([]);
+    const { selectedCompanyId } = useStore();
+    const [agents, setAgents] = useState<any[]>([]);
 
-  const [companyId, setCompanyId] = useState('');
-  const [name, setName] = useState('');
-  const [systemPrompt, setSystemPrompt] = useState('');
-  const [model, setModel] = useState('gpt-4');
+    const fetchAgents = useCallback(async () => {
+        if (!selectedCompanyId) return;
+        try {
+            const res = await axios.get(`/api/agents?company_id=${selectedCompanyId}`);
+            setAgents(res.data || []);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [selectedCompanyId]);
 
-  useEffect(() => {
-    fetchCompanies();
-  }, []);
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        fetchAgents();
+    }, [fetchAgents]);
 
-  useEffect(() => {
-    if (companyId) {
-      fetchAgents();
-    }
-  }, [companyId]);
+    return (
+        <div className="h-full flex flex-col space-y-6">
+            <h1 className="text-2xl font-bold">Agents</h1>
 
-  const fetchCompanies = async () => {
-    const res = await axios.get('/api/companies');
-    setCompanies(res.data || []);
-    if (res.data?.length > 0) setCompanyId(res.data[0].id.toString());
-  };
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                {agents.map(agent => (
+                    <div key={agent.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col">
+                        <div className="flex justify-between items-start mb-4">
+                            <h3 className="text-lg font-bold text-gray-900">{agent.name}</h3>
+                            <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
+                        </div>
+                        {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
 
-  const fetchAgents = async () => {
-    const res = await axios.get(`/api/agents?company_id=${companyId}`);
-    setAgents(res.data || []);
-  };
-
-  const createAgent = async (e: React.FormEvent) => {
-    e.preventDefault();
-    await axios.post('/api/agents', {
-      company_id: parseInt(companyId),
-      name,
-      system_prompt: systemPrompt,
-      model
-    });
-    setName('');
-    setSystemPrompt('');
-    fetchAgents();
-  };
-
-  return (
-    <div>
-      <h1 className="text-2xl font-bold mb-6">Agent Management</h1>
-
-      <div className="mb-8">
-        <label className="block mb-2 text-sm font-medium">Select Company</label>
-        <select
-          value={companyId}
-          onChange={(e) => setCompanyId(e.target.value)}
-          className="border p-2 rounded w-64"
-        >
-          {companies.map(c => (
-            <option key={c.id} value={c.id}>{c.name}</option>
-          ))}
-        </select>
-      </div>
-
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <div className="bg-white p-6 rounded-lg border shadow-sm">
-          <h2 className="text-lg font-semibold mb-4">Create New Agent</h2>
-          <form onSubmit={createAgent} className="space-y-4">
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Name</label>
-              <input type="text" value={name} onChange={e => setName(e.target.value)} required className="mt-1 block w-full border rounded-md shadow-sm p-2" />
+                        <div className="mt-auto">
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
+                            <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">
+                                {agent.system_prompt}
+                            </div>
+                        </div>
+                    </div>
+                ))}
             </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">System Prompt</label>
-              <textarea value={systemPrompt} onChange={e => setSystemPrompt(e.target.value)} required rows={4} className="mt-1 block w-full border rounded-md shadow-sm p-2" />
-            </div>
-            <div>
-              <label className="block text-sm font-medium text-gray-700">Model</label>
-              <input type="text" value={model} onChange={e => setModel(e.target.value)} required className="mt-1 block w-full border rounded-md shadow-sm p-2" />
-            </div>
-            <button type="submit" className="w-full bg-indigo-600 text-white px-4 py-2 rounded">Create Agent</button>
-          </form>
+            {agents.length === 0 && (
+                <div className="text-center text-gray-500 italic mt-10">No agents hired yet.</div>
+            )}
         </div>
-
-        <div className="space-y-4">
-          <h2 className="text-lg font-semibold">Existing Agents</h2>
-          {agents.map(agent => (
-            <div key={agent.id} className="bg-white p-4 rounded-lg border shadow-sm">
-              <h3 className="font-bold text-indigo-600">{agent.name}</h3>
-              <p className="text-sm text-gray-500 mt-1">Model: {agent.model?.String || agent.model}</p>
-              <div className="mt-2 text-sm text-gray-700 bg-gray-50 p-2 rounded overflow-x-auto max-h-32">
-                {agent.system_prompt}
-              </div>
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
+    );
 };

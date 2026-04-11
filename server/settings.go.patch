@@ -1,0 +1,11 @@
+--- server/settings.go
++++ server/settings.go
+@@ -37,6 +37,9 @@
+		return Settings{BasePath: basePath}
+	}
+
++	if settings.BasePath == "" {
++		return Settings{BasePath: "/tmp/.paperclip2"}
++	}
+	return settings
+ }
