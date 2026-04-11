@@ -1,8 +1,6 @@
 package server
 
 import (
-	"bytes"
-	"fmt"
 	"encoding/json"
 	"io"
 	"log"
@@ -19,7 +17,6 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/skills"
 	"agent-orchestrator/engine"
-	"agent-orchestrator/pkg/filesystem"
 )
 
 var upgrader = websocket.Upgrader{
@@ -57,10 +54,6 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", s.createCompany)
 	})
 
-	registerSettingsRoutes(r, s.db)
-	registerActivityRoutes(r, s.db)
-	registerSkillRoutes(r, s.db)
-
 	r.Route("/projects", func(r chi.Router) {
 		r.Get("/", s.listProjects)
 		r.Post("/", s.createProject)
@@ -85,11 +78,6 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Post("/attachments", s.uploadAttachment)
 	r.Post("/skills/import", s.importSkill)
-		r.Route("/providers", func(r chi.Router) {
-			r.Get("/", s.listProviders)
-			r.Post("/", s.createProvider)
-			r.Post("/test", s.testProvider)
-		})
 }
 
 func (s *Server) serveWs(w http.ResponseWriter, r *http.Request) {
@@ -122,8 +110,7 @@ func respondError(w http.ResponseWriter, status int, message string) {
 }
 
 func (s *Server) listCompanies(w http.ResponseWriter, r *http.Request) {
-	var companies []db.Company
-	err := s.db.Find(&companies).Error
+	companies, err := s.q.ListCompanies(r.Context())
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -133,35 +120,17 @@ func (s *Server) listCompanies(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) createCompany(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string `json:"name"`
-		ShortName string `json:"short_name"`
-		Color     string `json:"color"`
+		Name string `json:"name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-
-	comp := db.Company{
-		Name:      req.Name,
-		ShortName: req.ShortName,
-		Color:     req.Color,
-	}
-
-	if err := s.db.Create(&comp).Error; err != nil {
+	comp, err := s.q.CreateCompany(r.Context(), req.Name)
+	if err != nil {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-	if err := fsManager.CreateCompanyDirectories(comp); err != nil {
-		// Log error but don't fail the request completely
-		println("Error creating company directories:", err.Error())
-	}
-
-	s.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
-
 	respondJSON(w, http.StatusCreated, comp)
 }
 
@@ -200,16 +169,6 @@ func (s *Server) createProject(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	var comp db.Company
-	s.db.First(&comp, req.CompanyID)
-
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-	fsManager.CreateProjectDirectories(comp, proj)
-
-	s.logActivity(req.CompanyID, "project_created", int32(proj.ID), "project", "")
-
 	respondJSON(w, http.StatusCreated, proj)
 }
 
@@ -252,9 +211,6 @@ func (s *Server) createAgent(w http.ResponseWriter, r *http.Request) {
 		respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	s.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
-
 	respondJSON(w, http.StatusCreated, agent)
 }
 
@@ -297,49 +253,6 @@ func (s *Server) createTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.BroadcastEvent("task_created", task)
-
-	var proj db.Project
-	s.db.First(&proj, req.ProjectID)
-	var comp db.Company
-	s.db.First(&comp, proj.CompanyID)
-
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-	fsManager.CreateTaskWorkspace(comp, proj, task)
-
-	s.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
-
-	// E2E Mock Logic
-	if task.Title == "E2E Task" || task.Title == "Write E2E Tests" {
-		go func() {
-			time.Sleep(1 * time.Second) // Simulate work
-
-			// Mock comment
-			comment := db.Comment{
-				TaskID:     task.ID,
-				AuthorType: "agent",
-				Content:    "I have analyzed the E2E task and completed it successfully! 🚀",
-			}
-			s.db.Create(&comment)
-			s.hub.BroadcastEvent("comment_created", comment)
-
-			// Mock Run
-			run := db.Run{
-				TaskID: task.ID,
-				AgentID: 1, // Assume first agent for mock
-				Status: "completed",
-				LogContent: "Mock execution started...\nMock execution completed successfully.",
-			}
-			s.db.Create(&run)
-
-			// Auto move task to done
-			task.Status = "done"
-			s.db.Save(&task)
-			s.hub.BroadcastEvent("task_updated", task)
-		}()
-	}
-
-
 	respondJSON(w, http.StatusCreated, task)
 }
 
@@ -377,11 +290,6 @@ func (s *Server) updateTaskStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.hub.BroadcastEvent("task_updated", task)
-
-	var proj db.Project
-	s.db.First(&proj, task.ProjectID)
-
-	s.logActivity(proj.CompanyID, "task_status_updated", int32(task.ID), "task", `{"status":"`+req.Status+`"}`)
 
 	go s.engine.ProcessTask(r.Context(), int32(id))
 
@@ -505,102 +413,4 @@ func (s *Server) uploadAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respondJSON(w, http.StatusCreated, attachment)
-}
-
-func (s *Server) logActivity(companyID int32, action string, entityID int32, entityType string, details string) {
-	log := db.ActivityLog{
-		CompanyID:  companyID,
-		Action:     action,
-		EntityID:   entityID,
-		EntityType: entityType,
-		Details:    details,
-	}
-	s.db.Create(&log)
-}
-
-func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
-		Model   string `json:"model"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	fmt.Println("TEST PROVIDER:", req.BaseUrl)
-	if req.BaseUrl == "e2e-mock" {
-		respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-		return
-	}
-
-	payload := map[string]interface{}{
-		"model": req.Model,
-		"messages": []map[string]string{
-			{"role": "user", "content": "Say 'hello world'"},
-		},
-		"max_tokens": 10,
-	}
-
-	bodyBytes, _ := json.Marshal(payload)
-	url := req.BaseUrl
-	if url[len(url)-1] != '/' {
-		url += "/"
-	}
-	url += "v1/chat/completions"
-
-	clientReq, err := http.NewRequest("POST", url, bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, "Failed to create request")
-		return
-	}
-
-	clientReq.Header.Set("Content-Type", "application/json")
-	clientReq.Header.Set("Authorization", "Bearer "+req.ApiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(clientReq)
-	if err != nil {
-		respondError(w, http.StatusBadGateway, "Failed to contact provider: "+err.Error())
-		return
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode >= 400 {
-		respondError(w, resp.StatusCode, "Provider returned error status: " + resp.Status)
-		return
-	}
-
-	respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := s.q.ListLLMProviders(r.Context())
-	if err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respondJSON(w, http.StatusOK, providers)
-}
-
-func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Name    string `json:"name"`
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	p := db.LLMProvider{
-		Name:    req.Name,
-		BaseUrl: req.BaseUrl,
-		ApiKey:  req.ApiKey,
-	}
-	if err := s.db.Create(&p).Error; err != nil {
-		respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	respondJSON(w, http.StatusCreated, p)
 }

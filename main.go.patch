@@ -1,0 +1,10 @@
+--- main.go
++++ main.go
+@@ -51,6 +51,7 @@
+		&db.Comment{},
+		&db.Attachment{},
+		&db.Run{},
++		&db.ActivityLog{},
+	)
+	if err != nil {
+		log.Fatalf("AutoMigrate failed: %v", err)

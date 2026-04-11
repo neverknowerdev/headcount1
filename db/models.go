@@ -7,6 +7,8 @@ import (
 type Company struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Name      string    `json:"name" gorm:"not null"`
+	ShortName string    `json:"short_name" gorm:"not null"`
+	Color     string    `json:"color"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -104,4 +106,15 @@ type Run struct {
 	LogContent  string     `json:"log_content"`
 	StartedAt   time.Time  `json:"started_at"`
 	EndedAt     *time.Time `json:"ended_at"`
+}
+
+type ActivityLog struct {
+	ID         int32     `json:"id" gorm:"primaryKey"`
+	CompanyID  int32     `json:"company_id" gorm:"not null"`
+	Company    Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Action     string    `json:"action" gorm:"not null"`      // e.g., "task_created", "task_status_updated", "agent_run_started"
+	EntityID   int32     `json:"entity_id"`                   // Optional, ID of the task, agent, etc.
+	EntityType string    `json:"entity_type"`                 // e.g., "task", "agent", "skill"
+	Details    string    `json:"details"`                     // JSON string with more context
+	CreatedAt  time.Time `json:"created_at"`
 }
