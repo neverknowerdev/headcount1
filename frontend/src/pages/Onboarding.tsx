@@ -28,6 +28,7 @@ export const Onboarding: React.FC = () => {
 
     const [testLog, setTestLog] = useState<string | null>(null);
     const [showLog, setShowLog] = useState(false);
+    const [providerType, setProviderType] = useState<string | null>(null);
 
     useEffect(() => {
         if (name) {
@@ -51,6 +52,7 @@ export const Onboarding: React.FC = () => {
         setTestResult(null);
         setTestLog(null);
         setShowLog(false);
+        setProviderType(null);
         try {
             const res = await axios.post('/api/providers/test', {
                 base_url: providerUrl,
@@ -58,8 +60,9 @@ export const Onboarding: React.FC = () => {
                 model: providerModel
             });
             setTestResult('success');
-            if (res.data && res.data.log) {
-                setTestLog(res.data.log);
+            if (res.data) {
+                if (res.data.log) setTestLog(res.data.log);
+                if (res.data.provider_type) setProviderType(res.data.provider_type);
             }
         } catch (error: any) {
             setTestResult('error');
@@ -158,7 +161,7 @@ export const Onboarding: React.FC = () => {
                                 {isTesting ? 'Testing...' : 'Test Connection'}
                             </button>
 
-                            {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful!</p>}
+                            {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful! ({providerType || 'unknown'} detected)</p>}
                             {testResult === 'error' && <p className="text-red-600 text-sm font-semibold">Connection failed. Check details and try again.</p>}
 
                             {testLog && (
