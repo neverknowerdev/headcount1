@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -530,7 +529,7 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.BaseUrl == "e2e-mock" {
-		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "log": "Mock connection successful."})
+		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": "Mock connection successful."})
 		return
 	}
 
@@ -539,64 +538,92 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		url += "/"
 	}
 
-	var payload []byte
-	var isAnthropic bool
+	// Helper to make request
+	makeRequest := func(isAnthropic bool) (int, string, error) {
+		reqUrl := url
+		var payload []byte
+		var clientReq *http.Request
+		var err error
 
-	if strings.Contains(url, "anthropic.com") {
-		isAnthropic = true
-		url += "v1/messages"
-		p := map[string]interface{}{
-			"model": req.Model,
-			"messages": []map[string]string{
-				{"role": "user", "content": "Say 'hello world'"},
-			},
-			"max_tokens": 10,
+		if isAnthropic {
+			reqUrl += "v1/messages"
+			p := map[string]interface{}{
+				"model": req.Model,
+				"messages": []map[string]string{
+					{"role": "user", "content": "Say 'hello world'"},
+				},
+				"max_tokens": 10,
+			}
+			payload, _ = json.Marshal(p)
+		} else {
+			reqUrl += "v1/chat/completions"
+			p := map[string]interface{}{
+				"model": req.Model,
+				"messages": []map[string]string{
+					{"role": "user", "content": "Say 'hello world'"},
+				},
+				"max_tokens": 10,
+			}
+			payload, _ = json.Marshal(p)
 		}
-		payload, _ = json.Marshal(p)
-	} else {
-		// Default to OpenAI compatible
-		url += "v1/chat/completions"
-		p := map[string]interface{}{
-			"model": req.Model,
-			"messages": []map[string]string{
-				{"role": "user", "content": "Say 'hello world'"},
-			},
-			"max_tokens": 10,
+
+		clientReq, err = http.NewRequest("POST", reqUrl, bytes.NewBuffer(payload))
+		if err != nil {
+			return 0, "", err
 		}
-		payload, _ = json.Marshal(p)
+
+		clientReq.Header.Set("Content-Type", "application/json")
+		if isAnthropic {
+			clientReq.Header.Set("x-api-key", req.ApiKey)
+			clientReq.Header.Set("anthropic-version", "2023-06-01")
+		} else {
+			clientReq.Header.Set("Authorization", "Bearer "+req.ApiKey)
+		}
+
+		client := &http.Client{Timeout: 5 * time.Second}
+		resp, err := client.Do(clientReq)
+		if err != nil {
+			return 0, "", err
+		}
+		defer resp.Body.Close()
+
+		respBody, _ := io.ReadAll(resp.Body)
+		logMsg := "Request URL: " + reqUrl + "\\nStatus: " + resp.Status + "\\nResponse: " + string(respBody)
+		return resp.StatusCode, logMsg, nil
 	}
 
-	clientReq, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	// Try OpenAI format first
+	var combinedLog string
+
+	status, logMsg, err := makeRequest(false)
+	combinedLog += "--- OpenAI Format Attempt ---\\n"
 	if err != nil {
-		respondJSON(w, http.StatusInternalServerError, map[string]interface{}{"error": "Failed to create request", "log": err.Error()})
-		return
-	}
-
-	clientReq.Header.Set("Content-Type", "application/json")
-	if isAnthropic {
-		clientReq.Header.Set("x-api-key", req.ApiKey)
-		clientReq.Header.Set("anthropic-version", "2023-06-01")
+		combinedLog += "Error: " + err.Error() + "\\n"
 	} else {
-		clientReq.Header.Set("Authorization", "Bearer "+req.ApiKey)
+		combinedLog += logMsg + "\\n"
+		if status >= 200 && status < 300 {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": combinedLog})
+			return
+		}
 	}
 
-	client := &http.Client{Timeout: 10 * time.Second}
-	resp, err := client.Do(clientReq)
-	if err != nil {
-		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Connection failed", "log": "HTTP Error: " + err.Error()})
-		return
-	}
-	defer resp.Body.Close()
-
-	respBody, _ := io.ReadAll(resp.Body)
-	logMsg := "Request URL: " + url + "\nStatus: " + resp.Status + "\nResponse: " + string(respBody)
-
-	if resp.StatusCode >= 400 {
-		respondJSON(w, resp.StatusCode, map[string]interface{}{"error": "Provider returned error", "log": logMsg})
+	// If failed, try Anthropic format
+	combinedLog += "\\n--- Anthropic Format Attempt ---\\n"
+	status2, logMsg2, err2 := makeRequest(true)
+	if err2 != nil {
+		combinedLog += "Error: " + err2.Error() + "\\n"
+		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Connection failed for both formats", "log": combinedLog})
 		return
 	}
 
-	respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "log": logMsg})
+	combinedLog += logMsg2 + "\\n"
+	if status2 >= 200 && status2 < 300 {
+		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "anthropic", "log": combinedLog})
+		return
+	}
+
+	// Both failed
+	respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "Provider returned error for both formats", "log": combinedLog})
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {
