@@ -46,12 +46,15 @@ export const Onboarding: React.FC = () => {
         }
     };
 
+    const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
+
     const handleTestProvider = async () => {
         setIsTesting(true);
         setTestResult(null);
         setTestLog(null);
         setShowLog(false);
         setProviderType(null);
+        setResolvedUrl(null);
         try {
             const res = await axios.post('/api/providers/test', {
                 base_url: providerUrl,
@@ -62,6 +65,7 @@ export const Onboarding: React.FC = () => {
             if (res.data) {
                 if (res.data.log) setTestLog(res.data.log);
                 if (res.data.provider_type) setProviderType(res.data.provider_type);
+                if (res.data.url) setResolvedUrl(res.data.url);
             }
         } catch (error: any) {
             if (error.response && error.response.data) {
@@ -85,7 +89,7 @@ export const Onboarding: React.FC = () => {
         try {
             await axios.post('/api/providers', {
                 name: 'Main Provider',
-                base_url: providerUrl,
+                base_url: resolvedUrl || providerUrl,
                 api_key: providerKey
             });
 

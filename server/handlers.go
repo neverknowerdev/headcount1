@@ -530,23 +530,19 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if req.BaseUrl == "e2e-mock" {
-		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": "Mock connection successful."})
+		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": "Mock connection successful.", "url": req.BaseUrl})
 		return
 	}
 
-	url := strings.TrimSuffix(req.BaseUrl, "/")
-	url = strings.TrimSuffix(url, "/v1")
-	url += "/"
+	url := strings.TrimSpace(req.BaseUrl)
 
 	// Helper to make request
-	makeRequest := func(isAnthropic bool) (int, string, string, error) {
-		reqUrl := url
+	makeRequest := func(reqUrl string, isAnthropic bool) (int, string, string, error) {
 		var payload []byte
 		var clientReq *http.Request
 		var err error
 
 		if isAnthropic {
-			reqUrl += "v1/messages"
 			p := map[string]interface{}{
 				"model": req.Model,
 				"messages": []map[string]string{
@@ -556,7 +552,6 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 			}
 			payload, _ = json.Marshal(p)
 		} else {
-			reqUrl += "v1/chat/completions"
 			p := map[string]interface{}{
 				"model": req.Model,
 				"messages": []map[string]string{
@@ -588,27 +583,32 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		defer resp.Body.Close()
 
 		respBody, _ := io.ReadAll(resp.Body)
-		logMsg := "Request URL: " + reqUrl + "\\nStatus: " + resp.Status + "\\nResponse: " + string(respBody)
+
+		// Avoid dumping massive HTML into logs
+		bodyStr := string(respBody)
+		if strings.Contains(strings.ToLower(bodyStr), "<html") {
+			bodyStr = "<HTML response omitted>"
+		}
+
+		logMsg := "Request URL: " + reqUrl + "\nStatus: " + resp.Status + "\nResponse: " + bodyStr
 
 		// Attempt to parse understandable error message
 		var parsedErr string
 		if resp.StatusCode >= 400 {
-			bodyStr := strings.ToLower(string(respBody))
+			lowerBodyStr := strings.ToLower(string(respBody))
 			if resp.StatusCode == 401 || resp.StatusCode == 403 {
 				parsedErr = "Invalid API Key or unauthorized access."
 			} else if resp.StatusCode == 429 {
 				parsedErr = "Rate limit exceeded or insufficient quota."
-			} else if strings.Contains(bodyStr, "model") && (strings.Contains(bodyStr, "not found") || strings.Contains(bodyStr, "does not exist") || strings.Contains(bodyStr, "invalid") || strings.Contains(bodyStr, "unsupported")) {
+			} else if strings.Contains(lowerBodyStr, "model") && (strings.Contains(lowerBodyStr, "not found") || strings.Contains(lowerBodyStr, "does not exist") || strings.Contains(lowerBodyStr, "invalid") || strings.Contains(lowerBodyStr, "unsupported")) {
 				parsedErr = "Model is not supported or not found."
 			} else if resp.StatusCode == 404 {
-			    // 404 is tricky. It could be wrong endpoint format (e.g. duplicate /v1) or wrong model on some providers
-			    if strings.Contains(bodyStr, "model") {
+			    if strings.Contains(lowerBodyStr, "model") {
 			        parsedErr = "Model is not supported or not found."
 			    } else {
 			        parsedErr = "Endpoint not found (404). Please check the Base URL."
 			    }
 			} else {
-			    // Try to extract standard error message JSON field
 			    var errJson map[string]interface{}
 			    if err := json.Unmarshal(respBody, &errJson); err == nil {
 			        if errObj, ok := errJson["error"].(map[string]interface{}); ok {
@@ -626,52 +626,64 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		return resp.StatusCode, logMsg, parsedErr, nil
 	}
 
-	// Try OpenAI format first
+	// Determine urls to try
+	var openAiUrls []string
+	var anthropicUrls []string
+
+	// 1. Exact URL as typed
+	openAiUrls = append(openAiUrls, url)
+	anthropicUrls = append(anthropicUrls, url)
+
+	// 2. Intelligent suffixes if missing
+	cleanUrl := strings.TrimSuffix(url, "/")
+	if !strings.HasSuffix(cleanUrl, "/v1/chat/completions") && !strings.HasSuffix(cleanUrl, "/v1/messages") {
+		baseClean := strings.TrimSuffix(cleanUrl, "/v1")
+		openAiUrls = append(openAiUrls, baseClean+"/v1/chat/completions")
+		anthropicUrls = append(anthropicUrls, baseClean+"/v1/messages")
+	}
+
 	var combinedLog string
 	var lastParsedErr string
 
-	status, logMsg, parsedErr, err := makeRequest(false)
-	combinedLog += "--- OpenAI Format Attempt ---\\n"
-	if err != nil {
-		combinedLog += "Error: " + err.Error() + "\\n"
-	} else {
-		combinedLog += logMsg + "\\n"
-		lastParsedErr = parsedErr
-		if status >= 200 && status < 300 {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": combinedLog})
-			return
+	// Try OpenAI URLs
+	for _, testUrl := range openAiUrls {
+		combinedLog += "--- OpenAI Format Attempt (" + testUrl + ") ---\n"
+		status, logMsg, parsedErr, err := makeRequest(testUrl, false)
+
+		if err != nil {
+			combinedLog += "Error: " + err.Error() + "\n"
+		} else {
+			combinedLog += logMsg + "\n"
+			lastParsedErr = parsedErr
+			if status >= 200 && status < 300 {
+				respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "url": testUrl, "log": combinedLog})
+				return
+			}
 		}
 	}
 
-	// If failed, try Anthropic format
-	combinedLog += "\\n--- Anthropic Format Attempt ---\\n"
-	status2, logMsg2, parsedErr2, err2 := makeRequest(true)
-	if err2 != nil {
-		combinedLog += "Error: " + err2.Error() + "\\n"
-		errMsg := "Connection failed."
-		if lastParsedErr != "" {
-		    errMsg = lastParsedErr
+	// Try Anthropic URLs
+	for _, testUrl := range anthropicUrls {
+		combinedLog += "\n--- Anthropic Format Attempt (" + testUrl + ") ---\n"
+		status, logMsg, parsedErr, err := makeRequest(testUrl, true)
+
+		if err != nil {
+			combinedLog += "Error: " + err.Error() + "\n"
+		} else {
+			combinedLog += logMsg + "\n"
+			lastParsedErr = parsedErr
+			if status >= 200 && status < 300 {
+				respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "anthropic", "url": testUrl, "log": combinedLog})
+				return
+			}
 		}
-		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": errMsg, "log": combinedLog})
-		return
 	}
 
-	combinedLog += logMsg2 + "\\n"
-	if status2 >= 200 && status2 < 300 {
-		respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "anthropic", "log": combinedLog})
-		return
-	}
-
-	// Both failed
-	finalErr := parsedErr2
-	if finalErr == "" || finalErr == "Endpoint not found (404). Please check the Base URL." {
-	    if lastParsedErr != "" {
-	        finalErr = lastParsedErr
-	    }
-	}
+	finalErr := lastParsedErr
 	if finalErr == "" {
-	    finalErr = "Provider returned error for both formats"
+	    finalErr = "Provider returned error for all attempted URLs"
 	}
+
 	respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": finalErr, "log": combinedLog})
 }
 
