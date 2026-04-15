@@ -18,17 +18,33 @@ export const Onboarding: React.FC = () => {
     const [providerModel, setProviderModel] = useState('gpt-4');
     const [isTesting, setIsTesting] = useState(false);
     const [testResult, setTestResult] = useState<string | null>(null);
+    const [testLog, setTestLog] = useState<string | null>(null);
+    const [showLog, setShowLog] = useState(false);
+    const [providerType, setProviderType] = useState<string | null>(null);
 
+    const [availableModels, setAvailableModels] = useState<string[]>([]);
+    const [isLoadingModels, setIsLoadingModels] = useState(false);
 
     // Step 3: CEO
     const [ceoName, setCeoName] = useState('CEO Agent');
     const [ceoPrompt, setCeoPrompt] = useState('');
 
 
-
-    const [testLog, setTestLog] = useState<string | null>(null);
-    const [showLog, setShowLog] = useState(false);
-    const [providerType, setProviderType] = useState<string | null>(null);
+    const handleLoadModels = async () => {
+        if (!providerUrl || !providerKey) return;
+        setIsLoadingModels(true);
+        try {
+            const res = await axios.get(`/api/providers/models?base_url=${encodeURIComponent(providerUrl)}&api_key=${encodeURIComponent(providerKey)}`);
+            if (res.data && Array.isArray(res.data)) {
+                setAvailableModels(res.data.map((m: any) => m.id));
+            }
+        } catch (e) {
+            console.error('Could not load models', e);
+            // Ignore error and leave empty array to fallback to manual input
+        } finally {
+            setIsLoadingModels(false);
+        }
+    };
 
     useEffect(() => {
         if (name) {
@@ -154,7 +170,33 @@ export const Onboarding: React.FC = () => {
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <div className="mt-1 flex rounded-md shadow-sm">
+                                    {availableModels.length > 0 ? (
+                                        <select
+                                            value={providerModel}
+                                            onChange={e => setProviderModel(e.target.value)}
+                                            className="flex-1 min-w-0 block w-full px-3 py-2 rounded-none rounded-l-md border border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        >
+                                            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
+                                        </select>
+                                    ) : (
+                                        <input
+                                            required
+                                            type="text"
+                                            value={providerModel}
+                                            onChange={e => setProviderModel(e.target.value)}
+                                            className="flex-1 min-w-0 block w-full px-3 py-2 rounded-none rounded-l-md border border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
+                                        />
+                                    )}
+                                    <button
+                                        type="button"
+                                        onClick={handleLoadModels}
+                                        disabled={isLoadingModels || !providerUrl || !providerKey}
+                                        className="inline-flex items-center px-3 py-2 border border-l-0 border-gray-300 rounded-r-md bg-gray-50 text-gray-500 text-sm font-medium hover:bg-gray-100 focus:outline-none disabled:bg-gray-200"
+                                    >
+                                        {isLoadingModels ? 'Loading...' : 'Discover'}
+                                    </button>
+                                </div>
                             </div>
 
                             <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
