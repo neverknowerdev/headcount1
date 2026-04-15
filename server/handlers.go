@@ -539,7 +539,7 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	url += "/"
 
 	// Helper to make request
-	makeRequest := func(isAnthropic bool) (int, string, error) {
+	makeRequest := func(isAnthropic bool) (int, string, string, error) {
 		reqUrl := url
 		var payload []byte
 		var clientReq *http.Request
@@ -569,7 +569,7 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 
 		clientReq, err = http.NewRequest("POST", reqUrl, bytes.NewBuffer(payload))
 		if err != nil {
-			return 0, "", err
+			return 0, "", "", err
 		}
 
 		clientReq.Header.Set("Content-Type", "application/json")
@@ -583,24 +583,60 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		client := &http.Client{Timeout: 5 * time.Second}
 		resp, err := client.Do(clientReq)
 		if err != nil {
-			return 0, "", err
+			return 0, "", "", err
 		}
 		defer resp.Body.Close()
 
 		respBody, _ := io.ReadAll(resp.Body)
 		logMsg := "Request URL: " + reqUrl + "\\nStatus: " + resp.Status + "\\nResponse: " + string(respBody)
-		return resp.StatusCode, logMsg, nil
+
+		// Attempt to parse understandable error message
+		var parsedErr string
+		if resp.StatusCode >= 400 {
+			bodyStr := strings.ToLower(string(respBody))
+			if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				parsedErr = "Invalid API Key or unauthorized access."
+			} else if resp.StatusCode == 429 {
+				parsedErr = "Rate limit exceeded or insufficient quota."
+			} else if strings.Contains(bodyStr, "model") && (strings.Contains(bodyStr, "not found") || strings.Contains(bodyStr, "does not exist") || strings.Contains(bodyStr, "invalid") || strings.Contains(bodyStr, "unsupported")) {
+				parsedErr = "Model is not supported or not found."
+			} else if resp.StatusCode == 404 {
+			    // 404 is tricky. It could be wrong endpoint format (e.g. duplicate /v1) or wrong model on some providers
+			    if strings.Contains(bodyStr, "model") {
+			        parsedErr = "Model is not supported or not found."
+			    } else {
+			        parsedErr = "Endpoint not found (404). Please check the Base URL."
+			    }
+			} else {
+			    // Try to extract standard error message JSON field
+			    var errJson map[string]interface{}
+			    if err := json.Unmarshal(respBody, &errJson); err == nil {
+			        if errObj, ok := errJson["error"].(map[string]interface{}); ok {
+			            if msg, ok := errObj["message"].(string); ok {
+			                parsedErr = msg
+			            }
+			        }
+			    }
+			    if parsedErr == "" {
+			        parsedErr = "Provider returned error status: " + resp.Status
+			    }
+			}
+		}
+
+		return resp.StatusCode, logMsg, parsedErr, nil
 	}
 
 	// Try OpenAI format first
 	var combinedLog string
+	var lastParsedErr string
 
-	status, logMsg, err := makeRequest(false)
+	status, logMsg, parsedErr, err := makeRequest(false)
 	combinedLog += "--- OpenAI Format Attempt ---\\n"
 	if err != nil {
 		combinedLog += "Error: " + err.Error() + "\\n"
 	} else {
 		combinedLog += logMsg + "\\n"
+		lastParsedErr = parsedErr
 		if status >= 200 && status < 300 {
 			respondJSON(w, http.StatusOK, map[string]interface{}{"status": "ok", "provider_type": "openai", "log": combinedLog})
 			return
@@ -609,10 +645,14 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 
 	// If failed, try Anthropic format
 	combinedLog += "\\n--- Anthropic Format Attempt ---\\n"
-	status2, logMsg2, err2 := makeRequest(true)
+	status2, logMsg2, parsedErr2, err2 := makeRequest(true)
 	if err2 != nil {
 		combinedLog += "Error: " + err2.Error() + "\\n"
-		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Connection failed for both formats", "log": combinedLog})
+		errMsg := "Connection failed."
+		if lastParsedErr != "" {
+		    errMsg = lastParsedErr
+		}
+		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": errMsg, "log": combinedLog})
 		return
 	}
 
@@ -623,7 +663,16 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Both failed
-	respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": "Provider returned error for both formats", "log": combinedLog})
+	finalErr := parsedErr2
+	if finalErr == "" || finalErr == "Endpoint not found (404). Please check the Base URL." {
+	    if lastParsedErr != "" {
+	        finalErr = lastParsedErr
+	    }
+	}
+	if finalErr == "" {
+	    finalErr = "Provider returned error for both formats"
+	}
+	respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": finalErr, "log": combinedLog})
 }
 
 func (s *Server) listProviders(w http.ResponseWriter, r *http.Request) {

@@ -22,29 +22,12 @@ export const Onboarding: React.FC = () => {
     const [showLog, setShowLog] = useState(false);
     const [providerType, setProviderType] = useState<string | null>(null);
 
-    const [availableModels, setAvailableModels] = useState<string[]>([]);
-    const [isLoadingModels, setIsLoadingModels] = useState(false);
 
     // Step 3: CEO
     const [ceoName, setCeoName] = useState('CEO Agent');
     const [ceoPrompt, setCeoPrompt] = useState('');
 
 
-    const handleLoadModels = async () => {
-        if (!providerUrl || !providerKey) return;
-        setIsLoadingModels(true);
-        try {
-            const res = await axios.get(`/api/providers/models?base_url=${encodeURIComponent(providerUrl)}&api_key=${encodeURIComponent(providerKey)}`);
-            if (res.data && Array.isArray(res.data)) {
-                setAvailableModels(res.data.map((m: any) => m.id));
-            }
-        } catch (e) {
-            console.error('Could not load models', e);
-            // Ignore error and leave empty array to fallback to manual input
-        } finally {
-            setIsLoadingModels(false);
-        }
-    };
 
     useEffect(() => {
         if (name) {
@@ -81,11 +64,16 @@ export const Onboarding: React.FC = () => {
                 if (res.data.provider_type) setProviderType(res.data.provider_type);
             }
         } catch (error: any) {
-            setTestResult('error');
-            if (error.response && error.response.data && error.response.data.log) {
-                setTestLog(error.response.data.log);
+            if (error.response && error.response.data) {
+                if (error.response.data.error) setTestResult(error.response.data.error);
+                else setTestResult('Connection failed. Check details and try again.');
+
+                if (error.response.data.log) setTestLog(error.response.data.log);
             } else if (error.message) {
+                setTestResult(error.message);
                 setTestLog(error.message);
+            } else {
+                setTestResult('Connection failed. Check details and try again.');
             }
         } finally {
             setIsTesting(false);
@@ -161,7 +149,7 @@ export const Onboarding: React.FC = () => {
                     <form className="mt-8 space-y-6" onSubmit={handleCreateProvider}>
                         <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
                             <div>
-                                <label className="text-sm font-medium text-gray-700">OpenAI Compatible URL</label>
+                                <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
                                 <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                             <div>
@@ -170,33 +158,7 @@ export const Onboarding: React.FC = () => {
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <div className="mt-1 flex rounded-md shadow-sm">
-                                    {availableModels.length > 0 ? (
-                                        <select
-                                            value={providerModel}
-                                            onChange={e => setProviderModel(e.target.value)}
-                                            className="flex-1 min-w-0 block w-full px-3 py-2 rounded-none rounded-l-md border border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                        >
-                                            {availableModels.map(m => <option key={m} value={m}>{m}</option>)}
-                                        </select>
-                                    ) : (
-                                        <input
-                                            required
-                                            type="text"
-                                            value={providerModel}
-                                            onChange={e => setProviderModel(e.target.value)}
-                                            className="flex-1 min-w-0 block w-full px-3 py-2 rounded-none rounded-l-md border border-gray-300 focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                        />
-                                    )}
-                                    <button
-                                        type="button"
-                                        onClick={handleLoadModels}
-                                        disabled={isLoadingModels || !providerUrl || !providerKey}
-                                        className="inline-flex items-center px-3 py-2 border border-l-0 border-gray-300 rounded-r-md bg-gray-50 text-gray-500 text-sm font-medium hover:bg-gray-100 focus:outline-none disabled:bg-gray-200"
-                                    >
-                                        {isLoadingModels ? 'Loading...' : 'Discover'}
-                                    </button>
-                                </div>
+                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
 
                             <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
@@ -204,7 +166,7 @@ export const Onboarding: React.FC = () => {
                             </button>
 
                             {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful! ({providerType || 'unknown'} detected)</p>}
-                            {testResult === 'error' && <p className="text-red-600 text-sm font-semibold">Connection failed. Check details and try again.</p>}
+                            {testResult && testResult !== 'success' && <p className="text-red-600 text-sm font-semibold whitespace-pre-wrap">{testResult}</p>}
 
                             {testLog && (
                                 <div className="mt-2 border rounded-md overflow-hidden">
