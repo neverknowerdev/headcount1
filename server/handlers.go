@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"time"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -533,10 +534,9 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := req.BaseUrl
-	if url[len(url)-1] != '/' {
-		url += "/"
-	}
+	url := strings.TrimSuffix(req.BaseUrl, "/")
+	url = strings.TrimSuffix(url, "/v1")
+	url += "/"
 
 	// Helper to make request
 	makeRequest := func(isAnthropic bool) (int, string, error) {
@@ -655,4 +655,60 @@ func (s *Server) createProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	respondJSON(w, http.StatusCreated, p)
+}
+func (s *Server) getProviderModels(w http.ResponseWriter, r *http.Request) {
+	baseUrl := r.URL.Query().Get("base_url")
+	apiKey := r.URL.Query().Get("api_key")
+
+	if baseUrl == "" || apiKey == "" {
+		respondError(w, http.StatusBadRequest, "Missing base_url or api_key")
+		return
+	}
+
+	if baseUrl == "e2e-mock" {
+		respondJSON(w, http.StatusOK, []map[string]string{{"id": "gpt-4"}, {"id": "gpt-3.5-turbo"}})
+		return
+	}
+
+	url := strings.TrimSuffix(baseUrl, "/")
+	url = strings.TrimSuffix(url, "/v1")
+	url += "/v1/models"
+
+	clientReq, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to create request")
+		return
+	}
+
+	clientReq.Header.Set("Authorization", "Bearer "+apiKey)
+
+	client := &http.Client{Timeout: 5 * time.Second}
+	resp, err := client.Do(clientReq)
+	if err != nil {
+		respondJSON(w, http.StatusBadGateway, map[string]interface{}{"error": "Failed to fetch models", "log": err.Error()})
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 400 {
+		respBody, _ := io.ReadAll(resp.Body)
+		respondJSON(w, resp.StatusCode, map[string]interface{}{"error": "Provider error", "log": string(respBody)})
+		return
+	}
+
+	var data struct {
+		Data []struct {
+			ID string `json:"id"`
+		} `json:"data"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&data); err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to parse models response")
+		return
+	}
+
+	models := []map[string]string{}
+	for _, m := range data.Data {
+		models = append(models, map[string]string{"id": m.ID})
+	}
+	respondJSON(w, http.StatusOK, models)
 }
