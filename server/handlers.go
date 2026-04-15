@@ -635,11 +635,16 @@ func (s *Server) testProvider(w http.ResponseWriter, r *http.Request) {
 	anthropicUrls = append(anthropicUrls, url)
 
 	// 2. Intelligent suffixes if missing
-	cleanUrl := strings.TrimSuffix(url, "/")
-	if !strings.HasSuffix(cleanUrl, "/v1/chat/completions") && !strings.HasSuffix(cleanUrl, "/v1/messages") {
-		baseClean := strings.TrimSuffix(cleanUrl, "/v1")
-		openAiUrls = append(openAiUrls, baseClean+"/v1/chat/completions")
-		anthropicUrls = append(anthropicUrls, baseClean+"/v1/messages")
+	cleanUrl := strings.TrimSuffix(strings.TrimSpace(url), "/")
+	if !strings.HasSuffix(cleanUrl, "/chat/completions") && !strings.HasSuffix(cleanUrl, "/messages") {
+		// If it ends with /v1, we use it directly, else we add /v1
+		baseClean := cleanUrl
+		if !strings.HasSuffix(baseClean, "/v1") {
+			baseClean += "/v1"
+		}
+
+		openAiUrls = append(openAiUrls, baseClean+"/chat/completions")
+		anthropicUrls = append(anthropicUrls, baseClean+"/messages")
 	}
 
 	var combinedLog string
