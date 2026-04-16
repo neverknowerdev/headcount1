@@ -1,24 +1,65 @@
-import React, { useState, useEffect } from 'react';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
+import { useStore } from '../store';
+import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
+import type { DropResult } from '@hello-pangea/dnd';
+import { Plus } from 'lucide-react';
+import { TaskModal } from '../components/TaskModal';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
 
-export const ProjectBoard: React.FC = () => {
-  const { projectId } = useParams();
-  const [tasks, setTasks] = useState<any[]>([]);
-  const [newTaskTitle, setNewTaskTitle] = useState('');
+interface Task {
+    id: number;
+    title: string;
+    description: string;
+    status: string;
+}
 
-  const fetchTasks = async () => {
+interface Project {
+    id: number;
+    name: string;
+}
+
+export const ProjectBoard: React.FC = () => {
+  const { selectedCompanyId } = useStore();
+  const [projects, setProjects] = useState<Project[]>([]);
+  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
+  const [tasks, setTasks] = useState<Task[]>([]);
+  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
+
+  const fetchProjects = useCallback(async () => {
+    if (!selectedCompanyId) return;
     try {
-      const res = await axios.get(`/api/tasks?project_id=${projectId}`);
+      const res = await axios.get(`/api/projects?company_id=${selectedCompanyId}`);
+      const projs = res.data || [];
+      setProjects(projs);
+      if (projs.length > 0 && !selectedProjectId) {
+          setSelectedProjectId(projs[0].id);
+      }
+    } catch (e) {
+      console.error(e);
+    }
+  }, [selectedCompanyId, selectedProjectId]);
+
+  const fetchTasks = useCallback(async () => {
+    if (!selectedProjectId) return;
+    try {
+      const res = await axios.get(`/api/tasks?project_id=${selectedProjectId}`);
       setTasks(res.data || []);
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [selectedProjectId]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchProjects();
+  }, [fetchProjects]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchTasks();
     const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
     ws.onmessage = (event) => {
@@ -28,14 +69,14 @@ export const ProjectBoard: React.FC = () => {
       }
     };
     return () => ws.close();
-  }, [projectId]);
+  }, [fetchTasks]);
 
   const createTask = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newTaskTitle) return;
+    if (!newTaskTitle || !selectedProjectId) return;
     try {
       await axios.post('/api/tasks', {
-        project_id: parseInt(projectId || '0'),
+        project_id: selectedProjectId,
         title: newTaskTitle
       });
       setNewTaskTitle('');
@@ -49,54 +90,109 @@ export const ProjectBoard: React.FC = () => {
       await axios.put(`/api/tasks/${id}/status`, { status });
     } catch (e) {
       console.error(e);
+      fetchTasks(); // rollback on error
     }
   };
+
+  const onDragEnd = (result: DropResult) => {
+      if (!result.destination) return;
+
+      const { source, destination, draggableId } = result;
+      if (source.droppableId !== destination.droppableId) {
+          // Optimistic UI update
+          setTasks(prev => prev.map(t =>
+              t.id.toString() === draggableId ? { ...t, status: destination.droppableId } : t
+          ));
+          updateTaskStatus(parseInt(draggableId), destination.droppableId);
+      }
+  };
+
+  if (projects.length === 0) {
+      return (
+          <div className="flex flex-col items-center justify-center h-full space-y-4">
+              <p className="text-gray-500">No projects yet.</p>
+              <button className="bg-indigo-600 text-white px-4 py-2 rounded" onClick={() => window.location.href='/projects'}>Go create a project</button>
+          </div>
+      );
+  }
 
   return (
     <div className="h-full flex flex-col">
       <div className="flex justify-between items-center mb-6">
-        <h1 className="text-2xl font-bold">Project Board</h1>
+        <div className="flex items-center space-x-4">
+            <h1 className="text-2xl font-bold">Tasks</h1>
+            <select
+                value={selectedProjectId || ''}
+                onChange={e => setSelectedProjectId(parseInt(e.target.value))}
+                className="border-gray-300 rounded-md text-sm pl-3 pr-8 py-2 border shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
+            >
+                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+            </select>
+        </div>
+
         <form onSubmit={createTask} className="flex gap-2">
           <input
             type="text"
             value={newTaskTitle}
             onChange={(e) => setNewTaskTitle(e.target.value)}
             placeholder="New Task Title"
-            className="border p-2 rounded text-sm"
+            className="border border-gray-300 p-2 rounded-md text-sm w-64 shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
           />
-          <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded text-sm">
-            Add Task
+          <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
+            <Plus size={16} className="mr-1"/> Add Task
           </button>
         </form>
       </div>
 
-      <div className="flex-1 overflow-x-auto">
-        <div className="flex gap-4 min-w-max pb-4 h-full">
-          {STATUSES.map(status => (
-            <div key={status} className="w-80 bg-gray-50 rounded-lg p-4 flex flex-col">
-              <h3 className="font-semibold text-gray-700 uppercase text-xs mb-4">{status}</h3>
-              <div className="flex-1 overflow-y-auto space-y-3">
-                {tasks.filter(t => t.status === status).map(task => (
-                  <div key={task.id} className="bg-white p-4 rounded border shadow-sm cursor-pointer hover:border-indigo-300">
-                    <p className="font-medium text-sm">{task.title}</p>
-                    <div className="mt-4 flex gap-2 overflow-x-auto pb-2">
-                      {STATUSES.filter(s => s !== status).map(s => (
-                        <button
-                          key={s}
-                          onClick={() => updateTaskStatus(task.id, s)}
-                          className="text-xs px-2 py-1 bg-gray-100 rounded hover:bg-gray-200 whitespace-nowrap"
-                        >
-                          → {s}
-                        </button>
-                      ))}
+      <div className="flex-1 overflow-x-auto overflow-y-hidden">
+        <DragDropContext onDragEnd={onDragEnd}>
+            <div className="flex gap-4 min-w-max pb-4 h-full items-start">
+            {STATUSES.map(status => (
+                <div key={status} className="w-72 bg-gray-100 rounded-lg flex flex-col max-h-full">
+                <div className="p-3 border-b border-gray-200">
+                    <h3 className="font-semibold text-gray-700 uppercase text-xs tracking-wider flex justify-between">
+                        {status.replace('-', ' ')}
+                        <span className="bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full text-xs">
+                            {tasks.filter(t => t.status === status).length}
+                        </span>
+                    </h3>
+                </div>
+
+                <Droppable droppableId={status}>
+                    {(provided, snapshot) => (
+                    <div
+                        ref={provided.innerRef}
+                        {...provided.droppableProps}
+                        className={`flex-1 overflow-y-auto p-3 space-y-3 min-h-[150px] transition-colors ${snapshot.isDraggingOver ? 'bg-indigo-50' : ''}`}
+                    >
+                        {tasks.filter(t => t.status === status).map((task, index) => (
+                            <Draggable key={task.id} draggableId={task.id.toString()} index={index}>
+                                {(provided, snapshot) => (
+                                    <div
+                                        ref={provided.innerRef}
+                                        {...provided.draggableProps}
+                                        {...provided.dragHandleProps}
+                                        onClick={() => setViewingTaskId(task.id)}
+                                        className={`bg-white p-4 rounded-md border shadow-sm ${snapshot.isDragging ? 'shadow-lg ring-2 ring-indigo-500 border-transparent' : 'hover:border-indigo-300'} transition-shadow cursor-grab`}
+                                    >
+                                        <p className="font-medium text-sm text-gray-900">{task.title}</p>
+                                        <div className="mt-4 flex justify-between items-center">
+                                            <span className="text-xs text-gray-400">T-{task.id}</span>
+                                        </div>
+                                    </div>
+                                )}
+                            </Draggable>
+                        ))}
+                        {provided.placeholder}
                     </div>
-                  </div>
-                ))}
-              </div>
+                    )}
+                </Droppable>
+                </div>
+            ))}
             </div>
-          ))}
-        </div>
+        </DragDropContext>
       </div>
+      {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => setViewingTaskId(null)} />}
     </div>
   );
 };

@@ -1,31 +1,35 @@
-import React, { useState, useEffect } from 'react';
+/* eslint-disable @typescript-eslint/no-explicit-any */
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useParams, Link } from 'react-router-dom';
+import { useStore } from '../store';
+import { Folder } from 'lucide-react';
 
 export const CompanyView: React.FC = () => {
-  const { companyId } = useParams();
+  const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<any[]>([]);
   const [newProjectName, setNewProjectName] = useState('');
 
-  useEffect(() => {
-    fetchProjects();
-  }, [companyId]);
-
-  const fetchProjects = async () => {
+  const fetchProjects = useCallback(async () => {
+    if (!selectedCompanyId) return;
     try {
-      const res = await axios.get(`/api/projects?company_id=${companyId}`);
+      const res = await axios.get(`/api/projects?company_id=${selectedCompanyId}`);
       setProjects(res.data || []);
     } catch (e) {
       console.error(e);
     }
-  };
+  }, [selectedCompanyId]);
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    fetchProjects();
+  }, [fetchProjects]);
 
   const createProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName) return;
+    if (!newProjectName || !selectedCompanyId) return;
     try {
       await axios.post('/api/projects', {
-        company_id: parseInt(companyId || '0'),
+        company_id: selectedCompanyId,
         name: newProjectName
       });
       setNewProjectName('');
@@ -37,7 +41,7 @@ export const CompanyView: React.FC = () => {
 
   return (
     <div>
-      <h1 className="text-2xl font-bold mb-6">Company Projects</h1>
+      <h1 className="text-2xl font-bold mb-6">Projects</h1>
 
       <form onSubmit={createProject} className="mb-8 flex gap-4">
         <input
@@ -45,19 +49,23 @@ export const CompanyView: React.FC = () => {
           value={newProjectName}
           onChange={(e) => setNewProjectName(e.target.value)}
           placeholder="New Project Name"
-          className="border p-2 rounded"
+          className="border border-gray-300 p-2 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
         />
-        <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded">
+        <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
           Create Project
         </button>
       </form>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.map(p => (
-          <Link key={p.id} to={`/project/${p.id}`} className="block p-6 bg-white rounded-lg border shadow-sm hover:shadow-md transition">
-            <h3 className="text-lg font-semibold">{p.name}</h3>
+          <div key={p.id} className="block p-6 bg-white rounded-lg border shadow-sm hover:shadow-md transition">
+            <div className="flex items-center mb-4 text-indigo-600">
+                <Folder className="mr-2" />
+                <h3 className="text-lg font-semibold text-gray-900">{p.name}</h3>
+            </div>
             {p.description && <p className="text-sm text-gray-600 mt-2">{p.description}</p>}
-          </Link>
+            <p className="text-xs text-gray-400 mt-4">ID: {p.id}</p>
+          </div>
         ))}
       </div>
     </div>
