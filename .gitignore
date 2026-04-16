@@ -2,3 +2,7 @@ orchestrator
 migrate.log
 orchestrator.db
 server.log
+node_modules/
+e2e/node_modules/
+e2e/playwright-report/
+e2e/test-results/

@@ -57,6 +57,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.ActivityLog{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
@@ -72,6 +73,7 @@ func main() {
 	r.Use(middleware.Recoverer)
 
 	r.Route("/api", func(r chi.Router) {
+		r.Use(srv.E2EMockMiddleware)
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("pong"))
 		})
