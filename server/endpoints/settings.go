@@ -1,13 +1,10 @@
-package server
+package endpoints
 
 import (
 	"encoding/json"
 	"net/http"
 	"os"
 	"path/filepath"
-
-	"github.com/go-chi/chi/v5"
-	"gorm.io/gorm"
 )
 
 type Settings struct {
@@ -26,7 +23,6 @@ func LoadSettings() Settings {
 	settingsPath := getSettingsFilePath()
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
-		// return default
 		homeDir, err := os.UserHomeDir()
 		basePath := "/tmp/.paperclip2"
 		if err == nil {
@@ -37,7 +33,6 @@ func LoadSettings() Settings {
 
 	var settings Settings
 	if err := json.Unmarshal(data, &settings); err != nil {
-		// return default
 		homeDir, err := os.UserHomeDir()
 		basePath := "/tmp/.paperclip2"
 		if err == nil {
@@ -61,26 +56,24 @@ func SaveSettings(settings Settings) error {
 	return os.WriteFile(settingsPath, data, 0644)
 }
 
-func registerSettingsRoutes(r chi.Router, db *gorm.DB) {
-	r.Get("/settings", func(w http.ResponseWriter, r *http.Request) {
-		settings := LoadSettings()
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(settings)
-	})
+func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
+	settings := LoadSettings()
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(settings)
+}
 
-	r.Post("/settings", func(w http.ResponseWriter, r *http.Request) {
-		var settings Settings
-		if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
-			http.Error(w, err.Error(), http.StatusBadRequest)
-			return
-		}
+func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
+	var settings Settings
+	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
 
-		if err := SaveSettings(settings); err != nil {
-			http.Error(w, err.Error(), http.StatusInternalServerError)
-			return
-		}
+	if err := SaveSettings(settings); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
 
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(settings)
-	})
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(settings)
 }
