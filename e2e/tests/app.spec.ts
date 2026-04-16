@@ -36,16 +36,20 @@ test.describe('Paperclip2 App', () => {
         await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
 
         // Create Project
-        await page.fill('input[placeholder="New Project Name"]', 'Project Alpha');
         await page.click('button:has-text("Create Project")');
-        await expect(page.getByText('Project Alpha')).toBeVisible();
+        await page.waitForSelector('div.bg-white.p-6');
+        await page.fill('div.bg-white.p-6 input:first-of-type', 'Project Alpha');
+        await page.click('div.bg-white.p-6 >> button:has-text("Create")');
+        await page.waitForTimeout(1000); // Wait for modal to close and state to update
+        await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });
 
         // Navigate to Tasks
         await page.click('a:has-text("Tasks")');
 
         // Add Task (This specific title triggers the mock engine we added)
-        await page.fill('input[placeholder="New Task Title"]', 'Write E2E Tests');
-        await page.click('button:has-text("Add Task")');
+        await page.click('button:has-text("New Task")');
+        await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
+        await page.click('button:has-text("Create Task")');
 
         // Task should initially be in backlog or immediately picked up depending on speed
         // Click to open the Task modal

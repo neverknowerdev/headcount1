@@ -26,7 +26,7 @@ export const ProjectBoard: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
 
   const fetchProjects = useCallback(async () => {
@@ -71,19 +71,7 @@ export const ProjectBoard: React.FC = () => {
     return () => ws.close();
   }, [fetchTasks]);
 
-  const createTask = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTaskTitle || !selectedProjectId) return;
-    try {
-      await axios.post('/api/tasks', {
-        project_id: selectedProjectId,
-        title: newTaskTitle
-      });
-      setNewTaskTitle('');
-    } catch (e) {
-      console.error(e);
-    }
-  };
+
 
   const updateTaskStatus = async (id: number, status: string) => {
     try {
@@ -130,18 +118,9 @@ export const ProjectBoard: React.FC = () => {
             </select>
         </div>
 
-        <form onSubmit={createTask} className="flex gap-2">
-          <input
-            type="text"
-            value={newTaskTitle}
-            onChange={(e) => setNewTaskTitle(e.target.value)}
-            placeholder="New Task Title"
-            className="border border-gray-300 p-2 rounded-md text-sm w-64 shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-          />
-          <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
-            <Plus size={16} className="mr-1"/> Add Task
-          </button>
-        </form>
+        <button onClick={() => setIsCreateModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
+            <Plus size={16} className="mr-1"/> New Task
+        </button>
       </div>
 
       <div className="flex-1 overflow-x-auto overflow-y-hidden">
@@ -193,6 +172,7 @@ export const ProjectBoard: React.FC = () => {
         </DragDropContext>
       </div>
       {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => setViewingTaskId(null)} />}
+      {isCreateModalOpen && <TaskModal projectId={selectedProjectId || undefined} onClose={() => setIsCreateModalOpen(false)} onTaskCreated={fetchTasks} />}
     </div>
   );
 };
