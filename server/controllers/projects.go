@@ -25,18 +25,20 @@ func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID   int32  `json:"company_id"`
-		Name        string `json:"name"`
-		Description string `json:"description"`
+		CompanyID       int32  `json:"company_id"`
+		Name            string `json:"name"`
+		Description     string `json:"description"`
+		WorkspaceFolder string `json:"workspace_folder"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 	p := db.Project{
-		CompanyID:   req.CompanyID,
-		Name:        req.Name,
-		Description: req.Description,
+		CompanyID:       req.CompanyID,
+		Name:            req.Name,
+		Description:     req.Description,
+		WorkspaceFolder: req.WorkspaceFolder,
 	}
 
 	proj, err := api.q.CreateProject(r.Context(), p)
@@ -49,6 +51,21 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	api.db.First(&comp, req.CompanyID)
 
 	settings := LoadSettings()
+	if req.WorkspaceFolder != "" {
+		// Add the workspace folder to settings
+		found := false
+		for _, f := range settings.WorkspaceFolders {
+			if f == req.WorkspaceFolder {
+				found = true
+				break
+			}
+		}
+		if !found {
+			settings.WorkspaceFolders = append(settings.WorkspaceFolders, req.WorkspaceFolder)
+			SaveSettings(settings)
+		}
+	}
+
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
 

@@ -7,6 +7,7 @@ const navItems = [
   { icon: CheckSquare, label: 'Tasks', path: '/tasks' },
   { icon: FolderOpen, label: 'Projects', path: '/projects' },
   { icon: Users, label: 'Agents', path: '/agents' },
+  { icon: Settings, label: 'LLM Providers', path: '/providers' },
   { icon: Code, label: 'Skills', path: '/skills' },
   { icon: Activity, label: 'Run Logs', path: '/runs' },
   { icon: Settings, label: 'Settings', path: '/settings' },

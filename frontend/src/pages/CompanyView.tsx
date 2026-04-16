@@ -7,7 +7,8 @@ import { Folder } from 'lucide-react';
 export const CompanyView: React.FC = () => {
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<any[]>([]);
-  const [newProjectName, setNewProjectName] = useState('');
+  const [isModalOpen, setIsModalOpen] = useState(false);
+  const [formData, setFormData] = useState({ name: '', workspace_folder: '' });
 
   const fetchProjects = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -26,13 +27,15 @@ export const CompanyView: React.FC = () => {
 
   const createProject = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newProjectName || !selectedCompanyId) return;
+    if (!formData.name || !selectedCompanyId) return;
     try {
       await axios.post('/api/projects', {
         company_id: selectedCompanyId,
-        name: newProjectName
+        name: formData.name,
+        workspace_folder: formData.workspace_folder
       });
-      setNewProjectName('');
+      setFormData({ name: '', workspace_folder: '' });
+      setIsModalOpen(false);
       fetchProjects();
     } catch (e) {
       console.error(e);
@@ -43,18 +46,11 @@ export const CompanyView: React.FC = () => {
     <div>
       <h1 className="text-2xl font-bold mb-6">Projects</h1>
 
-      <form onSubmit={createProject} className="mb-8 flex gap-4">
-        <input
-          type="text"
-          value={newProjectName}
-          onChange={(e) => setNewProjectName(e.target.value)}
-          placeholder="New Project Name"
-          className="border border-gray-300 p-2 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-        />
-        <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
+      <div className="mb-8">
+        <button onClick={() => setIsModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
           Create Project
         </button>
-      </form>
+      </div>
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.map(p => (
@@ -68,6 +64,28 @@ export const CompanyView: React.FC = () => {
           </div>
         ))}
       </div>
+
+      {isModalOpen && (
+        <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+            <h2 className="text-xl font-bold mb-4">Create Project</h2>
+            <form onSubmit={createProject} className="space-y-4">
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Project Name</label>
+                <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value, workspace_folder: `/tmp/${e.target.value.toLowerCase().replace(/\s+/g, '-')}`})} className="w-full border rounded p-2" />
+              </div>
+              <div>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Local Path)</label>
+                <input required type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2" />
+              </div>
+              <div className="flex justify-end space-x-3 pt-4">
+                <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>
+                <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700">Create</button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

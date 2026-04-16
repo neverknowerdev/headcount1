@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
@@ -11,36 +12,78 @@ import (
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
-	projID, err := strconv.Atoi(r.URL.Query().Get("project_id"))
-	if err != nil {
+	projIDStr := r.URL.Query().Get("project_id")
+	if projIDStr == "" {
 		api.respondError(w, http.StatusBadRequest, "project_id is required")
 		return
 	}
-	tasks, err := api.q.ListTasksByProject(r.Context(), int32(projID))
-	if err != nil {
+	projID, _ := strconv.Atoi(projIDStr)
+
+	query := api.db.Where("project_id = ?", projID)
+
+	sprintIDStr := r.URL.Query().Get("sprint_id")
+	if sprintIDStr != "" {
+		sprintID, _ := strconv.Atoi(sprintIDStr)
+		query = query.Where("sprint_id = ?", sprintID)
+	}
+
+	priority := r.URL.Query().Get("priority")
+	if priority != "" {
+		query = query.Where("priority = ?", priority)
+	}
+
+	agentIDStr := r.URL.Query().Get("agent_id")
+	if agentIDStr != "" {
+		agentID, _ := strconv.Atoi(agentIDStr)
+		query = query.Where("agent_id = ?", agentID)
+	}
+
+	var tasks []db.Task
+	if err := query.Order("id").Find(&tasks).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
 	api.respondJSON(w, http.StatusOK, tasks)
 }
 
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectID   int32  `json:"project_id"`
-		AgentID     *int32 `json:"agent_id"`
-		Title       string `json:"title"`
-		Description string `json:"description"`
+		ProjectID   int32   `json:"project_id"`
+		AgentID     *int32  `json:"agent_id"`
+		SprintID    *int32  `json:"sprint_id"`
+		ParentID    *int32  `json:"parent_id"`
+		Title       string  `json:"title"`
+		Description string  `json:"description"`
+		Priority    string  `json:"priority"`
+		DueDate     *string `json:"due_date"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
+
+	var dueDate *time.Time
+	if req.DueDate != nil {
+		t, _ := time.Parse(time.RFC3339, *req.DueDate)
+		dueDate = &t
+	}
+
+	priority := req.Priority
+	if priority == "" {
+		priority = "Normal"
+	}
+
 	p := db.Task{
 		ProjectID:   req.ProjectID,
 		Title:       req.Title,
 		Status:      "backlog",
 		AgentID:     req.AgentID,
+		SprintID:    req.SprintID,
+		ParentID:    req.ParentID,
 		Description: req.Description,
+		Priority:    priority,
+		DueDate:     dueDate,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
