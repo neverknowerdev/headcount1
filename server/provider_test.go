@@ -8,6 +8,7 @@ import (
 	"os"
 	"testing"
 	"strings"
+	"agent-orchestrator/server/controllers"
 
 	"github.com/stretchr/testify/assert"
 )
@@ -20,7 +21,7 @@ func TestProviderConnection(t *testing.T) {
 		t.Skip("Skipping provider test since real API keys are not provided in env")
 	}
 
-	s := &Server{} // Mock server, we just want to test the handler logic
+	api := &endpoints.API{} // Mock API, we just want to test the handler logic
 
 	runTest := func(name, url, key, model string) {
 		t.Run(name, func(t *testing.T) {
@@ -34,7 +35,7 @@ func TestProviderConnection(t *testing.T) {
 			assert.NoError(t, err)
 
 			rr := httptest.NewRecorder()
-			s.testProvider(rr, req)
+			api.TestProvider(rr, req)
 
 			assert.Equal(t, http.StatusOK, rr.Code, "Expected OK status for %s, got: %v", name, rr.Body.String())
 

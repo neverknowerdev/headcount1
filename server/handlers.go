@@ -10,7 +10,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/engine"
-	"agent-orchestrator/server/endpoints"
+	"agent-orchestrator/server/controllers"
 )
 
 type Server struct {
