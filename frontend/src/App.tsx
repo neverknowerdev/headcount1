@@ -7,6 +7,7 @@ import { AgentManager } from './pages/AgentManager';
 import { AgentDetails } from './pages/AgentDetails';
 import { RunLogs } from './pages/RunLogs';
 import { ProvidersManager } from './pages/ProvidersManager';
+import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { Settings } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
@@ -19,6 +20,7 @@ function App() {
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="/tasks" element={<ProjectBoard />} />
+          <Route path="/sprints" element={<SprintsManager />} />
           <Route path="/projects" element={<CompanyView />} />
           <Route path="/agents" element={<AgentManager />} />
           <Route path="/agents/:id" element={<AgentDetails />} />
