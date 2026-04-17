@@ -50,6 +50,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		Name            string `json:"name"`
 		BaseUrl         string `json:"base_url"`
 		ApiKey          string `json:"api_key"`
+		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
 	}
@@ -66,6 +67,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 
 	provider.Name = req.Name
 	provider.BaseUrl = req.BaseUrl
+	provider.ProviderType = req.ProviderType
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
@@ -86,6 +88,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		Name            string `json:"name"`
 		BaseUrl         string `json:"base_url"`
 		ApiKey          string `json:"api_key"`
+		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
 	}
@@ -97,6 +100,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		Name:            req.Name,
 		BaseUrl:         req.BaseUrl,
 		ApiKey:          req.ApiKey,
+		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
 	}
@@ -109,9 +113,10 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
-		Model   string `json:"model"`
+		BaseUrl      string `json:"base_url"`
+		ApiKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		ProviderType string `json:"provider_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")

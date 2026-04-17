@@ -91,6 +91,7 @@ export const Onboarding: React.FC = () => {
                 name: 'Main Provider',
                 base_url: resolvedUrl || providerUrl,
                 api_key: providerKey,
+                provider_type: providerType,
                 default_model: providerModel,
                 supported_models: providerModel
             });

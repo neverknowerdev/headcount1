@@ -6,7 +6,8 @@ export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
-    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '' });
+    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '', provider_type: '' });
+    const [originalModels, setOriginalModels] = useState<string[]>([]);
     const [supportedModels, setSupportedModels] = useState<string[]>(['']);
     const [testResult, setTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
     const [isSaving, setIsSaving] = useState(false);
@@ -25,12 +26,13 @@ export const ProvidersManager: React.FC = () => {
         fetchProviders();
     }, []);
 
-    const testSingleModel = async (model: string, base_url: string, api_key: string) => {
+    const testSingleModel = async (model: string, base_url: string, api_key: string, provider_type: string) => {
         try {
             const res = await axios.post('/api/providers/test', {
                 base_url,
                 api_key,
-                model
+                model,
+                provider_type
             });
             return res.data;
         } catch (e: any) {
@@ -43,12 +45,15 @@ export const ProvidersManager: React.FC = () => {
         setTestingProgress('');
         if (p) {
             setEditingId(p.id);
-            setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '' });
-            setSupportedModels(p.supported_models ? p.supported_models.split(',').map((m:string) => m.trim()) : ['']);
+            setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '', provider_type: p.provider_type || '' });
+            const existingModels = p.supported_models ? p.supported_models.split(',').map((m:string) => m.trim()) : [];
+            setSupportedModels(existingModels.length ? existingModels : ['']);
+            setOriginalModels(existingModels);
         } else {
             setEditingId(null);
-            setFormData({ name: '', base_url: '', api_key: '', default_model: '' });
+            setFormData({ name: '', base_url: '', api_key: '', default_model: '', provider_type: '' });
             setSupportedModels(['']);
+            setOriginalModels([]);
         }
         setIsModalOpen(true);
     };
@@ -68,17 +73,38 @@ export const ProvidersManager: React.FC = () => {
             // Deduplicate models
             const uniqueModels = Array.from(new Set(modelsToTest));
 
-            // Test all configured models before saving
-            for (const model of uniqueModels) {
-                if (!editingId || formData.api_key) {
-                     setTestingProgress(`Testing model: ${model}...`);
-                     await testSingleModel(model, formData.base_url, formData.api_key);
+            // Determine which models actually need testing (the new ones or if API key is new)
+            // If editing and no new API key, only test newly added models.
+            // But we can't test without API key if it's hidden. So only test if we have an API key or if they are NEW models.
+            // Since we can't test new models without an API key, require API key if new models are added during edit.
+
+            const newModels = uniqueModels.filter(m => !originalModels.includes(m) && m !== formData.default_model); // Also consider default_model test if changed
+
+            if (editingId && !formData.api_key && newModels.length > 0) {
+                throw new Error("You must provide the API key to test newly added models.");
+            }
+
+            let detectedProviderType = formData.provider_type;
+            let detectedBaseUrl = formData.base_url;
+
+            const modelsToActuallyTest = (!editingId || formData.api_key) ? uniqueModels : newModels;
+
+            for (const model of modelsToActuallyTest) {
+                setTestingProgress(`Testing model: ${model}...`);
+                const testRes = await testSingleModel(model, detectedBaseUrl, formData.api_key, detectedProviderType);
+                if (testRes && testRes.provider_type) {
+                    detectedProviderType = testRes.provider_type;
+                }
+                if (testRes && testRes.url) {
+                    detectedBaseUrl = testRes.url;
                 }
             }
             setTestingProgress('');
 
             const finalData = {
                 ...formData,
+                base_url: detectedBaseUrl,
+                provider_type: detectedProviderType,
                 supported_models: validSupported.join(',')
             };
 
@@ -114,7 +140,7 @@ export const ProvidersManager: React.FC = () => {
         setTestingProgress(`Testing ${provider.default_model || 'gpt-3.5-turbo'}...`);
         try {
             const modelToTest = provider.default_model || 'gpt-3.5-turbo';
-            const res = await testSingleModel(modelToTest, provider.base_url, provider.api_key);
+            const res = await testSingleModel(modelToTest, provider.base_url, provider.api_key, provider.provider_type);
             setTestResult(res);
         } catch (e: any) {
             setTestResult({ error: e.message || 'Unknown error' });
