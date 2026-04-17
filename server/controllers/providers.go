@@ -47,9 +47,11 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name    string `json:"name"`
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
+		Name            string `json:"name"`
+		BaseUrl         string `json:"base_url"`
+		ApiKey          string `json:"api_key"`
+		DefaultModel    string `json:"default_model"`
+		SupportedModels string `json:"supported_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -64,6 +66,8 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 
 	provider.Name = req.Name
 	provider.BaseUrl = req.BaseUrl
+	provider.DefaultModel = req.DefaultModel
+	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
 		provider.ApiKey = req.ApiKey
 	}
@@ -79,18 +83,22 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
+		Name            string `json:"name"`
+		BaseUrl         string `json:"base_url"`
+		ApiKey          string `json:"api_key"`
+		DefaultModel    string `json:"default_model"`
+		SupportedModels string `json:"supported_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 	p := db.LLMProvider{
-		Name:    req.Name,
-		BaseUrl: req.BaseUrl,
-		ApiKey:  req.ApiKey,
+		Name:            req.Name,
+		BaseUrl:         req.BaseUrl,
+		ApiKey:          req.ApiKey,
+		DefaultModel:    req.DefaultModel,
+		SupportedModels: req.SupportedModels,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

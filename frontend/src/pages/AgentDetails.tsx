@@ -101,10 +101,23 @@ export const AgentDetails: React.FC = () => {
                         </div>
 
                         <div className="bg-white p-6 rounded-lg shadow border">
-                            <h3 className="font-bold mb-4">Proxy URL for CLI</h3>
-                            <p className="font-mono text-sm bg-gray-100 p-2 rounded break-all">
-                                {window.location.protocol}//{window.location.host}/api/proxy/agent/{agent.id}/v1/chat/completions
-                            </p>
+                            <h3 className="font-bold mb-4">Configuration</h3>
+                            <div className="space-y-4">
+                                <div>
+                                    <p className="text-sm text-gray-500 mb-1">Active Provider</p>
+                                    <p className="font-medium">{providers.find(p => p.id === agent.provider_id)?.name || 'None'}</p>
+                                </div>
+                                <div>
+                                    <p className="text-sm text-gray-500 mb-1">Active Model</p>
+                                    <p className="font-medium">{agent.model || 'None'}</p>
+                                </div>
+                                <div className="pt-2">
+                                    <p className="text-sm text-gray-500 mb-2">Proxy URL for CLI</p>
+                                    <p className="font-mono text-sm bg-gray-100 p-2 rounded break-all">
+                                        {window.location.protocol}//{window.location.host}/api/proxy/agent/{agent.id}/v1/chat/completions
+                                    </p>
+                                </div>
+                            </div>
                         </div>
                     </div>
                 )}
@@ -126,15 +139,27 @@ export const AgentDetails: React.FC = () => {
                             <input type="text" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2" />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">LLM Provider</label>
-                            <select value={formData.provider_id} onChange={e => setFormData({...formData, provider_id: e.target.value})} className="w-full border rounded p-2">
+                            <div className="flex justify-between items-center mb-1">
+                                <label className="block text-sm font-medium text-gray-700">LLM Provider</label>
+                                <Link to="/providers" className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
+                            </div>
+                            <select value={formData.provider_id} onChange={e => {
+                                const selectedProviderId = e.target.value;
+                                const provider = providers.find(p => p.id.toString() === selectedProviderId);
+                                setFormData({...formData, provider_id: selectedProviderId, model: provider?.default_model || ''});
+                            }} className="w-full border rounded p-2">
                                 <option value="">-- Select Provider --</option>
                                 {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                             </select>
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
-                            <input type="text" required value={formData.model} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2" />
+                            <select required value={formData.model} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2">
+                                <option value="">-- Select Model --</option>
+                                {providers.find(p => p.id.toString() === formData.provider_id)?.supported_models?.split(',').map((m: string) => m.trim()).filter((m: string) => m).map((m: string) => (
+                                    <option key={m} value={m}>{m}</option>
+                                ))}
+                            </select>
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
