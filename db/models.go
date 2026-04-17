@@ -41,6 +41,7 @@ type LLMProvider struct {
 	Name            string    `json:"name" gorm:"not null"`
 	BaseUrl         string    `json:"base_url" gorm:"not null"`
 	ApiKey          string    `json:"api_key" gorm:"not null"`
+	ProviderType    string    `json:"provider_type"`
 	DefaultModel    string    `json:"default_model"`
 	SupportedModels string    `json:"supported_models"`
 	CreatedAt       time.Time `json:"created_at"`
