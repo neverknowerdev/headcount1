@@ -54,7 +54,10 @@ func (m *Manager) CreateCompanyDirectories(company db.Company) error {
 }
 
 func (m *Manager) CreateProjectDirectories(company db.Company, project db.Project) error {
-	projectPath := filepath.Join(m.basePath, "companies", company.ShortName, "projects", project.Name)
+	projectPath := filepath.Join(m.basePath, project.WorkspaceFolder)
+	if project.WorkspaceFolder == "" {
+		projectPath = filepath.Join(m.basePath, company.ShortName, project.Name)
+	}
 	dirs := []string{
 		projectPath,
 		filepath.Join(projectPath, "memory"),
@@ -73,7 +76,11 @@ func (m *Manager) CreateProjectDirectories(company db.Company, project db.Projec
 }
 
 func (m *Manager) CreateTaskWorkspace(company db.Company, project db.Project, task db.Task) error {
-	taskPath := filepath.Join(m.basePath, "companies", company.ShortName, "projects", project.Name, "workspace", fmt.Sprintf("task-%d", task.ID))
+	projectPath := filepath.Join(m.basePath, project.WorkspaceFolder)
+	if project.WorkspaceFolder == "" {
+		projectPath = filepath.Join(m.basePath, company.ShortName, project.Name)
+	}
+	taskPath := filepath.Join(projectPath, "workspace", fmt.Sprintf("task-%d", task.ID))
 	if err := os.MkdirAll(taskPath, 0755); err != nil {
 		return fmt.Errorf("failed to create task workspace: %w", err)
 	}

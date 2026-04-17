@@ -90,7 +90,9 @@ export const Onboarding: React.FC = () => {
             await axios.post('/api/providers', {
                 name: 'Main Provider',
                 base_url: resolvedUrl || providerUrl,
-                api_key: providerKey
+                api_key: providerKey,
+                default_model: providerModel,
+                supported_models: providerModel
             });
 
             setStep(3);

@@ -72,11 +72,12 @@ export const CompanyView: React.FC = () => {
             <form onSubmit={createProject} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Project Name</label>
-                <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value, workspace_folder: `/tmp/${e.target.value.toLowerCase().replace(/\s+/g, '-')}`})} className="w-full border rounded p-2" />
+                <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. NextGen Mobile App" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Local Path)</label>
-                <input required type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2" />
+                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Optional Override)</label>
+                <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" placeholder="Leave empty for default" />
+                <p className="text-xs text-gray-500 mt-1">If left empty, a workspace will be generated automatically inside your company's directory.</p>
               </div>
               <div className="flex justify-end space-x-3 pt-4">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>

@@ -37,14 +37,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [projects, setProjects] = useState<any[]>([]);
     const [sprints, setSprints] = useState<any[]>([]);
     const [agents, setAgents] = useState<any[]>([]);
+    const [allTasks, setAllTasks] = useState<any[]>([]);
+    const [parentSearch, setParentSearch] = useState('');
+    const [showParentDropdown, setShowParentDropdown] = useState(false);
 
     useEffect(() => {
         if (!selectedCompanyId) return;
         Promise.all([
             axios.get(`/api/projects?company_id=${selectedCompanyId}`),
             axios.get(`/api/sprints?company_id=${selectedCompanyId}`),
-            axios.get(`/api/agents?company_id=${selectedCompanyId}`)
-        ]).then(([projRes, sprintRes, agentRes]) => {
+            axios.get(`/api/agents?company_id=${selectedCompanyId}`),
+            axios.get(`/api/tasks?company_id=${selectedCompanyId}`)
+        ]).then(([projRes, sprintRes, agentRes, tasksRes]) => {
+            setAllTasks(tasksRes.data || []);
             setProjects(projRes.data || []);
             const fetchedSprints = sprintRes.data || [];
             setSprints(fetchedSprints);
@@ -284,9 +289,49 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
                             <input type="date" value={formData.due_date} onChange={e => setFormData({...formData, due_date: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm" />
                         </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Parent Task ID</label>
-                            <input type="number" value={formData.parent_id} onChange={e => setFormData({...formData, parent_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm" placeholder="e.g. 12" />
+                        <div className="relative">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Parent Task</label>
+                            <div className="flex space-x-2 items-center">
+                                <input
+                                    type="text"
+                                    value={formData.parent_id ? `T-${formData.parent_id}` : parentSearch}
+                                    onChange={e => {
+                                        setFormData({...formData, parent_id: ''});
+                                        setParentSearch(e.target.value);
+                                        setShowParentDropdown(true);
+                                    }}
+                                    onFocus={() => setShowParentDropdown(true)}
+                                    className="w-full border rounded p-2 text-sm shadow-sm"
+                                    placeholder="Search by title or ID..."
+                                />
+                                {formData.parent_id && (
+                                    <button type="button" onClick={() => { setFormData({...formData, parent_id: ''}); setParentSearch(''); }} className="text-gray-400 hover:text-red-500">
+                                        <X size={16} />
+                                    </button>
+                                )}
+                            </div>
+
+                            {showParentDropdown && !formData.parent_id && (
+                                <div className="absolute z-10 w-full mt-1 bg-white border rounded shadow-lg max-h-48 overflow-y-auto">
+                                    {allTasks.filter(t =>
+                                        t.id !== taskId && // Can't be parent of itself
+                                        (t.title.toLowerCase().includes(parentSearch.toLowerCase()) || t.id.toString().includes(parentSearch))
+                                    ).slice(0, 10).map(t => (
+                                        <div
+                                            key={t.id}
+                                            className="p-2 text-sm hover:bg-indigo-50 cursor-pointer border-b last:border-b-0"
+                                            onClick={() => {
+                                                setFormData({...formData, parent_id: t.id.toString()});
+                                                setParentSearch('');
+                                                setShowParentDropdown(false);
+                                            }}
+                                        >
+                                            <span className="text-xs text-gray-500 font-mono mr-2">T-{t.id}</span>
+                                            {t.title}
+                                        </div>
+                                    ))}
+                                </div>
+                            )}
                         </div>
                     </div>
                 </div>
