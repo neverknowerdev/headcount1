@@ -15,8 +15,7 @@ type Querier interface {
 	ListAgentsByCompany(ctx context.Context, companyID int32) ([]Agent, error)
 	GetAgent(ctx context.Context, id int32) (Agent, error)
 	CreateTask(ctx context.Context, t Task) (Task, error)
-	ListTasksByProject(ctx context.Context, projectID int32) ([]Task, error)
-	UpdateTaskStatus(ctx context.Context, id int32, status string) (Task, error)
+	UpdateTask(ctx context.Context, t Task) (Task, error)
 	GetTask(ctx context.Context, id int32) (Task, error)
 	CreateComment(ctx context.Context, c Comment) (Comment, error)
 	ListCommentsByTask(ctx context.Context, taskID int32) ([]Comment, error)
@@ -89,20 +88,8 @@ func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 	return t, err
 }
 
-func (q *Queries) ListTasksByProject(ctx context.Context, projectID int32) ([]Task, error) {
-	var t []Task
-	err := q.db.WithContext(ctx).Where("project_id = ?", projectID).Order("id").Find(&t).Error
-	return t, err
-}
-
-func (q *Queries) UpdateTaskStatus(ctx context.Context, id int32, status string) (Task, error) {
-	var t Task
-	err := q.db.WithContext(ctx).First(&t, id).Error
-	if err != nil {
-		return t, err
-	}
-	t.Status = status
-	err = q.db.WithContext(ctx).Save(&t).Error
+func (q *Queries) UpdateTask(ctx context.Context, t Task) (Task, error) {
+	err := q.db.WithContext(ctx).Save(&t).Error
 	return t, err
 }
 

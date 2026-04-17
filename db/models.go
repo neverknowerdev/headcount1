@@ -76,10 +76,12 @@ type Skill struct {
 
 type Task struct {
 	ID          int32      `json:"id" gorm:"primaryKey"`
-	ProjectID   int32      `json:"project_id" gorm:"not null"`
-	Project     Project    `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
-	SprintID    *int32     `json:"sprint_id"`
-	Sprint      *Sprint    `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:SET NULL;"`
+	CompanyID   int32      `json:"company_id" gorm:"not null"`
+	Company     Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID   *int32     `json:"project_id"`
+	Project     *Project   `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
+	SprintID    int32      `json:"sprint_id" gorm:"not null"`
+	Sprint      Sprint     `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
 	AgentID     *int32     `json:"agent_id"`
 	Agent       *Agent     `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
 	ParentID    *int32     `json:"parent_id"`
@@ -89,6 +91,7 @@ type Task struct {
 	Priority    string     `json:"priority" gorm:"not null;default:'Normal'"`
 	Status      string     `json:"status" gorm:"not null;default:'backlog'"`
 	DueDate     *time.Time `json:"due_date"`
+	IsArchived  bool       `json:"is_archived" gorm:"not null;default:false"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }

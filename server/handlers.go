@@ -64,7 +64,8 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/", api.ListTasks)
 		r.Post("/", api.CreateTask)
 		r.Get("/{id}", api.GetTask)
-		r.Put("/{id}/status", api.UpdateTaskStatus)
+		r.Put("/{id}", api.UpdateTask)
+		r.Put("/{id}/status", api.UpdateTask) // Keep for backward compatibility if needed, though they map to same
 	})
 
 	r.Route("/agents", func(r chi.Router) {

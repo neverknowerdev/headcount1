@@ -35,7 +35,8 @@ func (e *ForgeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 
 	switch task.Status {
 	case "to-do":
-		_, err = e.q.UpdateTaskStatus(ctx, task.ID, "refinement")
+		task.Status = "refinement"
+		_, err = e.q.UpdateTask(ctx, task)
 		if err != nil {
 			return err
 		}
@@ -143,7 +144,8 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
-	e.q.UpdateTaskStatus(ctx, task.ID, taskNextStatus)
+	task.Status = taskNextStatus
+	e.q.UpdateTask(ctx, task)
 	e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": taskNextStatus})
 }
 

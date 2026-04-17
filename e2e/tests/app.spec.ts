@@ -46,9 +46,29 @@ test.describe('Paperclip2 App', () => {
         // Navigate to Tasks
         await page.click('a:has-text("Tasks")');
 
+        // Since Sprint is required to create a task, we need to make sure one is selected.
+        // Wait for projects and sprints to load (if any). Our UI might show "-- Select Sprint --" if none exist.
+        // Create a Sprint first if we can't select one.
+
+        await page.click('button:has-text("Manage Sprints")');
+        await expect(page.getByRole('heading', { name: 'Manage Sprints' })).toBeVisible();
+        await page.click('button:has-text("Create Sprint")');
+        await page.fill('input[placeholder="e.g. Sprint 1"]', 'E2E Sprint');
+        // fill start and end dates to satisfy HTML5 required
+        await page.fill('input[type="date"]', '2024-01-01'); // Start
+        await page.locator('input[type="date"]').nth(1).fill('2024-01-14'); // End
+        await page.click('div.bg-white.p-6 >> button:has-text("Create")');
+        await expect(page.getByText('E2E Sprint')).toBeVisible();
+
+        // Go back to tasks
+        await page.click('a:has-text("Tasks")');
+
         // Add Task (This specific title triggers the mock engine we added)
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
+        // Sprint is auto-selected if there's only one, otherwise we might need to select it.
+        // Focus on the Sprint select specifically
+        await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
         // Task should initially be in backlog or immediately picked up depending on speed
@@ -60,7 +80,7 @@ test.describe('Paperclip2 App', () => {
 
         // Add a human comment
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('.fixed.inset-0').locator('button[type="submit"]').click();
+        await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
 
         // Wait for the mock agent to post a comment
         // The mock waits 1s then posts "I have analyzed the E2E task and completed it successfully! 🚀"
