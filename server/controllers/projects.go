@@ -41,16 +41,23 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		WorkspaceFolder: req.WorkspaceFolder,
 	}
 
+
+	var comp db.Company
+	api.db.First(&comp, req.CompanyID)
+
+	settings := LoadSettings()
+
+	if req.WorkspaceFolder == "" {
+		req.WorkspaceFolder = comp.ShortName + "/" + req.Name
+	}
+	p.WorkspaceFolder = req.WorkspaceFolder
+
 	proj, err := api.q.CreateProject(r.Context(), p)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	var comp db.Company
-	api.db.First(&comp, req.CompanyID)
-
-	settings := LoadSettings()
 	if req.WorkspaceFolder != "" {
 		// Add the workspace folder to settings
 		found := false

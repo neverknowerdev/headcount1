@@ -1,14 +1,16 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Edit2, Play } from 'lucide-react';
+import { Plus, Trash2, Edit2, Play, Minus } from 'lucide-react';
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
-    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '', supported_models: '' });
+    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '' });
+    const [supportedModels, setSupportedModels] = useState<string[]>(['']);
     const [testResult, setTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
     const [isSaving, setIsSaving] = useState(false);
+    const [testingProgress, setTestingProgress] = useState<string>('');
 
     const fetchProviders = async () => {
         try {
@@ -36,18 +38,32 @@ export const ProvidersManager: React.FC = () => {
         }
     };
 
+    const handleOpenModal = (p?: any) => {
+        setTestResult(null);
+        setTestingProgress('');
+        if (p) {
+            setEditingId(p.id);
+            setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '' });
+            setSupportedModels(p.supported_models ? p.supported_models.split(',').map((m:string) => m.trim()) : ['']);
+        } else {
+            setEditingId(null);
+            setFormData({ name: '', base_url: '', api_key: '', default_model: '' });
+            setSupportedModels(['']);
+        }
+        setIsModalOpen(true);
+    };
+
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
         setIsSaving(true);
         setTestResult(null);
+        setTestingProgress('');
 
         try {
             const modelsToTest = [];
             if (formData.default_model) modelsToTest.push(formData.default_model.trim());
-            if (formData.supported_models) {
-                const supported = formData.supported_models.split(',').map(m => m.trim()).filter(m => m);
-                modelsToTest.push(...supported);
-            }
+            const validSupported = supportedModels.map(m => m.trim()).filter(m => m);
+            modelsToTest.push(...validSupported);
 
             // Deduplicate models
             const uniqueModels = Array.from(new Set(modelsToTest));
@@ -55,25 +71,31 @@ export const ProvidersManager: React.FC = () => {
             // Test all configured models before saving
             for (const model of uniqueModels) {
                 if (!editingId || formData.api_key) {
+                     setTestingProgress(`Testing model: ${model}...`);
                      await testSingleModel(model, formData.base_url, formData.api_key);
                 }
             }
+            setTestingProgress('');
+
+            const finalData = {
+                ...formData,
+                supported_models: validSupported.join(',')
+            };
 
             if (editingId) {
-                await axios.put(`/api/providers/${editingId}`, formData);
+                await axios.put(`/api/providers/${editingId}`, finalData);
             } else {
-                await axios.post('/api/providers', formData);
+                await axios.post('/api/providers', finalData);
             }
 
             setIsModalOpen(false);
-            setEditingId(null);
-            setFormData({ name: '', base_url: '', api_key: '', default_model: '', supported_models: '' });
             fetchProviders();
         } catch (e: any) {
             console.error(e);
             setTestResult({ error: e.message || "Save failed" });
         } finally {
             setIsSaving(false);
+            setTestingProgress('');
         }
     };
 
@@ -89,14 +111,33 @@ export const ProvidersManager: React.FC = () => {
 
     const handleTest = async (provider: any) => {
         setTestResult(null);
+        setTestingProgress(`Testing ${provider.default_model || 'gpt-3.5-turbo'}...`);
         try {
-            // Test default model if available, else fallback
             const modelToTest = provider.default_model || 'gpt-3.5-turbo';
             const res = await testSingleModel(modelToTest, provider.base_url, provider.api_key);
             setTestResult(res);
         } catch (e: any) {
             setTestResult({ error: e.message || 'Unknown error' });
+        } finally {
+            setTestingProgress('');
         }
+    };
+
+    const updateSupportedModel = (index: number, value: string) => {
+        const newModels = [...supportedModels];
+        newModels[index] = value;
+        setSupportedModels(newModels);
+    };
+
+    const addSupportedModel = () => {
+        setSupportedModels([...supportedModels, '']);
+    };
+
+    const removeSupportedModel = (index: number) => {
+        const newModels = [...supportedModels];
+        newModels.splice(index, 1);
+        if (newModels.length === 0) newModels.push('');
+        setSupportedModels(newModels);
     };
 
     return (
@@ -104,12 +145,8 @@ export const ProvidersManager: React.FC = () => {
             <div className="flex justify-between items-center">
                 <h1 className="text-2xl font-bold">LLM Providers</h1>
                 <button
-                    onClick={() => {
-                        setEditingId(null);
-                        setFormData({ name: '', base_url: '', api_key: '', default_model: '', supported_models: '' });
-                        setIsModalOpen(true);
-                    }}
-                    className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700"
+                    onClick={() => handleOpenModal()}
+                    className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 shadow-sm"
                 >
                     <Plus size={16} className="mr-2" /> Add Provider
                 </button>
@@ -124,11 +161,7 @@ export const ProvidersManager: React.FC = () => {
                                 <button onClick={() => handleTest(p)} className="text-blue-500 hover:text-blue-700" title="Test Connection">
                                     <Play size={18} />
                                 </button>
-                                <button onClick={() => {
-                                    setEditingId(p.id);
-                                    setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '', supported_models: p.supported_models || '' });
-                                    setIsModalOpen(true);
-                                }} className="text-gray-500 hover:text-gray-700">
+                                <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700">
                                     <Edit2 size={18} />
                                 </button>
                                 <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700">
@@ -138,12 +171,18 @@ export const ProvidersManager: React.FC = () => {
                         </div>
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
-                        {p.supported_models && <p className="text-xs text-gray-500 mt-2 truncate"><span className="font-semibold">Models:</span> {p.supported_models}</p>}
+                        {p.supported_models && <p className="text-xs text-gray-500 mt-2 break-words"><span className="font-semibold">Models:</span> {p.supported_models.split(',').join(', ')}</p>}
                     </div>
                 ))}
             </div>
 
-            {testResult && (
+            {testingProgress && !isModalOpen && (
+                <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
+                    <p className="text-sm font-semibold">{testingProgress}</p>
+                </div>
+            )}
+
+            {testResult && !isModalOpen && (
                 <div className={`mt-4 p-4 rounded ${testResult.error ? 'bg-red-50 text-red-800' : 'bg-green-50 text-green-800'}`}>
                     <h3 className="font-bold mb-2">{testResult.error ? 'Test Failed' : 'Test Succeeded'}</h3>
                     {testResult.error && <p className="text-sm mb-2">{testResult.error}</p>}
@@ -155,9 +194,9 @@ export const ProvidersManager: React.FC = () => {
 
             {isModalOpen && (
                 <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
                         <h2 className="text-xl font-bold mb-4">{editingId ? 'Edit Provider' : 'Add Provider'}</h2>
-                        <form onSubmit={handleSubmit} className="space-y-4">
+                        <form onSubmit={handleSubmit} className="space-y-4 overflow-y-auto flex-1 pr-2">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
                                 <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded p-2" />
@@ -172,20 +211,51 @@ export const ProvidersManager: React.FC = () => {
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Default Model</label>
-                                <input type="text" value={formData.default_model} onChange={e => setFormData({...formData, default_model: e.target.value})} placeholder="e.g. gpt-4o" className="w-full border rounded p-2" />
+                                <input required type="text" value={formData.default_model} onChange={e => setFormData({...formData, default_model: e.target.value})} placeholder="e.g. gpt-4o" className="w-full border rounded p-2" />
                             </div>
+
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Supported Models (comma-separated)</label>
-                                <input type="text" value={formData.supported_models} onChange={e => setFormData({...formData, supported_models: e.target.value})} placeholder="e.g. gpt-4o, gpt-3.5-turbo" className="w-full border rounded p-2" />
-                                <p className="text-xs text-gray-500 mt-1">All models entered will be tested on save.</p>
-                            </div>
-                            <div className="flex justify-end space-x-3 pt-4 border-t mt-6">
-                                <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>
-                                <button type="submit" disabled={isSaving} className={`bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`}>
-                                    {isSaving ? 'Testing & Saving...' : 'Save'}
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Supported Models</label>
+                                {supportedModels.map((m, idx) => (
+                                    <div key={idx} className="flex items-center space-x-2 mb-2">
+                                        <input
+                                            type="text"
+                                            value={m}
+                                            onChange={e => updateSupportedModel(idx, e.target.value)}
+                                            placeholder="Model name (e.g. gpt-3.5-turbo)"
+                                            className="flex-1 border rounded p-2 text-sm"
+                                        />
+                                        <button type="button" onClick={() => removeSupportedModel(idx)} className="text-red-500 hover:text-red-700 p-2 border border-transparent hover:border-red-200 rounded">
+                                            <Minus size={16} />
+                                        </button>
+                                    </div>
+                                ))}
+                                <button type="button" onClick={addSupportedModel} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center mt-2">
+                                    <Plus size={14} className="mr-1" /> Add Model
                                 </button>
+                                <p className="text-xs text-gray-500 mt-2">All configured models will be tested before saving.</p>
                             </div>
+
+                            {testingProgress && (
+                                <div className="mt-4 p-3 rounded bg-blue-50 text-blue-800 border border-blue-200 text-sm font-medium">
+                                    {testingProgress}
+                                </div>
+                            )}
+
+                            {testResult && (
+                                <div className={`mt-4 p-3 rounded text-sm ${testResult.error ? 'bg-red-50 text-red-800 border border-red-200' : 'bg-green-50 text-green-800 border border-green-200'}`}>
+                                    <span className="font-bold">{testResult.error ? 'Test Failed: ' : 'Test Succeeded'}</span>
+                                    {testResult.error && <span>{testResult.error}</span>}
+                                </div>
+                            )}
+
                         </form>
+                        <div className="flex justify-end space-x-3 pt-4 border-t mt-4">
+                            <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700 px-4 py-2">Cancel</button>
+                            <button type="button" onClick={handleSubmit} disabled={isSaving} className={`bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`}>
+                                {isSaving ? 'Saving...' : 'Save Provider'}
+                            </button>
+                        </div>
                     </div>
                 </div>
             )}
