@@ -9,6 +9,16 @@ export const CompanyView: React.FC = () => {
   const [projects, setProjects] = useState<any[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({ name: '', workspace_folder: '' });
+  const [companyShortName, setCompanyShortName] = useState('');
+
+  useEffect(() => {
+    if (selectedCompanyId) {
+        axios.get('/api/companies').then(res => {
+            const comp = res.data.find((c: any) => c.id === selectedCompanyId);
+            if (comp) setCompanyShortName(comp.short_name);
+        });
+    }
+  }, [selectedCompanyId]);
 
   const fetchProjects = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -72,12 +82,16 @@ export const CompanyView: React.FC = () => {
             <form onSubmit={createProject} className="space-y-4">
               <div>
                 <label className="block text-sm font-medium text-gray-700 mb-1">Project Name</label>
-                <input required type="text" value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. NextGen Mobile App" />
+                <input required type="text" value={formData.name} onChange={e => {
+                    const name = e.target.value;
+                    const folder = companyShortName ? `${companyShortName}/${name.toLowerCase().replace(/[^a-z0-9]+/g, '-')}` : '';
+                    setFormData({...formData, name, workspace_folder: folder});
+                }} className="w-full border rounded p-2" placeholder="e.g. NextGen Mobile App" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Optional Override)</label>
-                <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" placeholder="Leave empty for default" />
-                <p className="text-xs text-gray-500 mt-1">If left empty, a workspace will be generated automatically inside your company's directory.</p>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Relative to .paperclip2/)</label>
+                <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" />
+                <p className="text-xs text-gray-500 mt-1">This directory will be created automatically.</p>
               </div>
               <div className="flex justify-end space-x-3 pt-4">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>

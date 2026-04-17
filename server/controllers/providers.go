@@ -113,6 +113,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
+		ProviderID   *int32 `json:"provider_id"`
 		BaseUrl      string `json:"base_url"`
 		ApiKey       string `json:"api_key"`
 		Model        string `json:"model"`
@@ -123,7 +124,30 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	url := strings.TrimSpace(req.BaseUrl)
+	apiKey := req.ApiKey
+	baseUrl := req.BaseUrl
+
+	if req.ProviderID != nil && (apiKey == "" || baseUrl == "") {
+		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
+		if err == nil {
+			if apiKey == "" {
+				apiKey = provider.ApiKey
+			}
+			if baseUrl == "" {
+				baseUrl = provider.BaseUrl
+			}
+			if req.ProviderType == "" {
+				req.ProviderType = provider.ProviderType
+			}
+		}
+	}
+
+	if apiKey == "" {
+		api.respondError(w, http.StatusBadRequest, "API Key is required to test a provider")
+		return
+	}
+
+	url := strings.TrimSpace(baseUrl)
 
 	// Helper to make request
 	makeRequest := func(reqUrl string, isAnthropic bool) (int, string, string, error) {
@@ -158,10 +182,10 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 		clientReq.Header.Set("Content-Type", "application/json")
 		if isAnthropic {
-			clientReq.Header.Set("x-api-key", req.ApiKey)
+			clientReq.Header.Set("x-api-key", apiKey)
 			clientReq.Header.Set("anthropic-version", "2023-06-01")
 		} else {
-			clientReq.Header.Set("Authorization", "Bearer "+req.ApiKey)
+			clientReq.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		client := &http.Client{Timeout: 30 * time.Second} // Increased timeout

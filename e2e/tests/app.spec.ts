@@ -39,6 +39,9 @@ test.describe('Paperclip2 App', () => {
         await page.click('button:has-text("Create Project")');
         await page.waitForSelector('div.bg-white.p-6');
         await page.fill('div.bg-white.p-6 input:first-of-type', 'Project Alpha');
+        // Let auto-generation run, then assert it's somewhat correct.
+        // The value should be pw-inc/project-alpha
+        await expect(page.locator('div.bg-white.p-6 input').nth(1)).toHaveValue('pw-inc/project-alpha');
         await page.click('div.bg-white.p-6 >> button:has-text("Create")');
         await page.waitForTimeout(1000); // Wait for modal to close and state to update
         await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });

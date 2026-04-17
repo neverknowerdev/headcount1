@@ -143,7 +143,7 @@ export const AgentDetails: React.FC = () => {
                                 <label className="block text-sm font-medium text-gray-700">LLM Provider</label>
                                 <Link to="/providers" className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
                             </div>
-                            <select value={formData.provider_id} onChange={e => {
+                            <select value={formData.provider_id || ''} onChange={e => {
                                 const selectedProviderId = e.target.value;
                                 const provider = providers.find(p => p.id.toString() === selectedProviderId);
                                 setFormData({...formData, provider_id: selectedProviderId, model: provider?.default_model || ''});
@@ -154,7 +154,7 @@ export const AgentDetails: React.FC = () => {
                         </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
-                            <select required value={formData.model} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2">
+                            <select required value={formData.model || ''} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2">
                                 <option value="">-- Select Model --</option>
                                 {providers.find(p => p.id.toString() === formData.provider_id)?.supported_models?.split(',').map((m: string) => m.trim()).filter((m: string) => m).map((m: string) => (
                                     <option key={m} value={m}>{m}</option>
