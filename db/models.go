@@ -37,12 +37,14 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID        int32     `json:"id" gorm:"primaryKey"`
-	Name      string    `json:"name" gorm:"not null"`
-	BaseUrl   string    `json:"base_url" gorm:"not null"`
-	ApiKey    string    `json:"api_key" gorm:"not null"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	ID              int32     `json:"id" gorm:"primaryKey"`
+	Name            string    `json:"name" gorm:"not null"`
+	BaseUrl         string    `json:"base_url" gorm:"not null"`
+	ApiKey          string    `json:"api_key" gorm:"not null"`
+	DefaultModel    string    `json:"default_model"`
+	SupportedModels string    `json:"supported_models"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type Agent struct {
