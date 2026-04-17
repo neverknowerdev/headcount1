@@ -56,8 +56,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             setAgents(agentRes.data || []);
 
             // Auto-select first sprint if creating and no sprint is set
+            let updates: any = {};
             if (!taskId && !formData.sprint_id && fetchedSprints.length > 0) {
-                setFormData(prev => ({...prev, sprint_id: fetchedSprints[0].id.toString()}));
+                updates.sprint_id = fetchedSprints[0].id.toString();
+            }
+            if (!taskId && !formData.agent_id && agentRes.data?.length > 0) {
+                const ceo = agentRes.data.find((a: any) => a.name.toLowerCase().includes('ceo'));
+                updates.agent_id = ceo ? ceo.id.toString() : agentRes.data[0].id.toString();
+            }
+            if (Object.keys(updates).length > 0) {
+                setFormData(prev => ({...prev, ...updates}));
             }
         });
     // eslint-disable-next-line react-hooks/exhaustive-deps

@@ -26,9 +26,10 @@ export const ProvidersManager: React.FC = () => {
         fetchProviders();
     }, []);
 
-    const testSingleModel = async (model: string, base_url: string, api_key: string, provider_type: string) => {
+    const testSingleModel = async (model: string, base_url: string, api_key: string, provider_type: string, provider_id?: number | null) => {
         try {
             const res = await axios.post('/api/providers/test', {
+                provider_id,
                 base_url,
                 api_key,
                 model,
@@ -80,10 +81,6 @@ export const ProvidersManager: React.FC = () => {
 
             const newModels = uniqueModels.filter(m => !originalModels.includes(m) && m !== formData.default_model); // Also consider default_model test if changed
 
-            if (editingId && !formData.api_key && newModels.length > 0) {
-                throw new Error("You must provide the API key to test newly added models.");
-            }
-
             let detectedProviderType = formData.provider_type;
             let detectedBaseUrl = formData.base_url;
 
@@ -91,7 +88,7 @@ export const ProvidersManager: React.FC = () => {
 
             for (const model of modelsToActuallyTest) {
                 setTestingProgress(`Testing model: ${model}...`);
-                const testRes = await testSingleModel(model, detectedBaseUrl, formData.api_key, detectedProviderType);
+                const testRes = await testSingleModel(model, detectedBaseUrl, formData.api_key, detectedProviderType, editingId);
                 if (testRes && testRes.provider_type) {
                     detectedProviderType = testRes.provider_type;
                 }
@@ -140,7 +137,7 @@ export const ProvidersManager: React.FC = () => {
         setTestingProgress(`Testing ${provider.default_model || 'gpt-3.5-turbo'}...`);
         try {
             const modelToTest = provider.default_model || 'gpt-3.5-turbo';
-            const res = await testSingleModel(modelToTest, provider.base_url, provider.api_key, provider.provider_type);
+            const res = await testSingleModel(modelToTest, provider.base_url, '', provider.provider_type, provider.id);
             setTestResult(res);
         } catch (e: any) {
             setTestResult({ error: e.message || 'Unknown error' });
@@ -263,7 +260,11 @@ export const ProvidersManager: React.FC = () => {
                             </div>
 
                             {testingProgress && (
-                                <div className="mt-4 p-3 rounded bg-blue-50 text-blue-800 border border-blue-200 text-sm font-medium">
+                                <div className="mt-4 p-3 rounded bg-blue-50 text-blue-800 border border-blue-200 text-sm font-medium flex items-center">
+                                    <svg className="animate-spin -ml-1 mr-3 h-4 w-4 text-blue-600" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+                                        <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+                                        <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+                                    </svg>
                                     {testingProgress}
                                 </div>
                             )}
