@@ -50,6 +50,7 @@ func main() {
 	err = database.AutoMigrate(
 		&db.Company{},
 		&db.Project{},
+		&db.Sprint{},
 		&db.LLMProvider{},
 		&db.Agent{},
 		&db.Skill{},
@@ -58,6 +59,7 @@ func main() {
 		&db.Attachment{},
 		&db.Run{},
 		&db.ActivityLog{},
+		&db.ProxyRequestLog{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)

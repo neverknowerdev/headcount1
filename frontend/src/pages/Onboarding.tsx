@@ -17,6 +17,7 @@ export const Onboarding: React.FC = () => {
     const [providerKey, setProviderKey] = useState('');
     const [providerModel, setProviderModel] = useState('gpt-4');
     const [isTesting, setIsTesting] = useState(false);
+    const [createdProviderId, setCreatedProviderId] = useState<number | null>(null);
     const [testResult, setTestResult] = useState<string | null>(null);
     const [testLog, setTestLog] = useState<string | null>(null);
     const [showLog, setShowLog] = useState(false);
@@ -87,11 +88,15 @@ export const Onboarding: React.FC = () => {
     const handleCreateProvider = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
-            await axios.post('/api/providers', {
+            const providerRes = await axios.post('/api/providers', {
                 name: 'Main Provider',
                 base_url: resolvedUrl || providerUrl,
-                api_key: providerKey
+                api_key: providerKey,
+                provider_type: providerType,
+                default_model: providerModel,
+                supported_models: providerModel
             });
+            setCreatedProviderId(providerRes.data.id);
 
             setStep(3);
         } catch {
@@ -107,7 +112,8 @@ export const Onboarding: React.FC = () => {
                 name: ceoName,
                 description: 'Company CEO',
                 system_prompt: ceoPrompt,
-                model: providerModel
+                model: providerModel,
+                provider_id: createdProviderId
             });
             window.location.href = '/';
             setTimeout(() => window.location.reload(), 100); // Reload to fetch companies and start app

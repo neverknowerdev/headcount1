@@ -5,10 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
+	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
@@ -20,20 +22,87 @@ func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, providers)
 }
 
+func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	err = api.q.DeleteLLMProvider(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	var req struct {
+		Name            string `json:"name"`
+		BaseUrl         string `json:"base_url"`
+		ApiKey          string `json:"api_key"`
+		ProviderType    string `json:"provider_type"`
+		DefaultModel    string `json:"default_model"`
+		SupportedModels string `json:"supported_models"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+
+	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "provider not found")
+		return
+	}
+
+	provider.Name = req.Name
+	provider.BaseUrl = req.BaseUrl
+	provider.ProviderType = req.ProviderType
+	provider.DefaultModel = req.DefaultModel
+	provider.SupportedModels = req.SupportedModels
+	if req.ApiKey != "" {
+		provider.ApiKey = req.ApiKey
+	}
+
+	provider, err = api.q.UpdateLLMProvider(r.Context(), provider)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.respondJSON(w, http.StatusOK, provider)
+}
+
 func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name    string `json:"name"`
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
+		Name            string `json:"name"`
+		BaseUrl         string `json:"base_url"`
+		ApiKey          string `json:"api_key"`
+		ProviderType    string `json:"provider_type"`
+		DefaultModel    string `json:"default_model"`
+		SupportedModels string `json:"supported_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 	p := db.LLMProvider{
-		Name:    req.Name,
-		BaseUrl: req.BaseUrl,
-		ApiKey:  req.ApiKey,
+		Name:            req.Name,
+		BaseUrl:         req.BaseUrl,
+		ApiKey:          req.ApiKey,
+		ProviderType:    req.ProviderType,
+		DefaultModel:    req.DefaultModel,
+		SupportedModels: req.SupportedModels,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -44,16 +113,42 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		BaseUrl string `json:"base_url"`
-		ApiKey  string `json:"api_key"`
-		Model   string `json:"model"`
+		ProviderID   *int32 `json:"provider_id"`
+		BaseUrl      string `json:"base_url"`
+		ApiKey       string `json:"api_key"`
+		Model        string `json:"model"`
+		ProviderType string `json:"provider_type"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	url := strings.TrimSpace(req.BaseUrl)
+	apiKey := req.ApiKey
+	baseUrl := req.BaseUrl
+	providerType := req.ProviderType
+
+	if req.ProviderID != nil && (apiKey == "" || baseUrl == "" || providerType == "") {
+		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
+		if err == nil {
+			if apiKey == "" {
+				apiKey = provider.ApiKey
+			}
+			if baseUrl == "" {
+				baseUrl = provider.BaseUrl
+			}
+			if providerType == "" {
+				providerType = provider.ProviderType
+			}
+		}
+	}
+
+	if apiKey == "" {
+		api.respondError(w, http.StatusBadRequest, "API Key is required to test a provider")
+		return
+	}
+
+	url := strings.TrimSpace(baseUrl)
 
 	// Helper to make request
 	makeRequest := func(reqUrl string, isAnthropic bool) (int, string, string, error) {
@@ -88,10 +183,10 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 		clientReq.Header.Set("Content-Type", "application/json")
 		if isAnthropic {
-			clientReq.Header.Set("x-api-key", req.ApiKey)
+			clientReq.Header.Set("x-api-key", apiKey)
 			clientReq.Header.Set("anthropic-version", "2023-06-01")
 		} else {
-			clientReq.Header.Set("Authorization", "Bearer "+req.ApiKey)
+			clientReq.Header.Set("Authorization", "Bearer "+apiKey)
 		}
 
 		client := &http.Client{Timeout: 30 * time.Second} // Increased timeout
@@ -120,23 +215,23 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			} else if strings.Contains(lowerBodyStr, "model") && (strings.Contains(lowerBodyStr, "not found") || strings.Contains(lowerBodyStr, "does not exist") || strings.Contains(lowerBodyStr, "invalid") || strings.Contains(lowerBodyStr, "unsupported")) {
 				parsedErr = "Model is not supported or not found."
 			} else if resp.StatusCode == 404 {
-			    if strings.Contains(lowerBodyStr, "model") {
-			        parsedErr = "Model is not supported or not found."
-			    } else {
-			        parsedErr = "Endpoint not found (404). Please check the Base URL."
-			    }
+				if strings.Contains(lowerBodyStr, "model") {
+					parsedErr = "Model is not supported or not found."
+				} else {
+					parsedErr = "Endpoint not found (404). Please check the Base URL."
+				}
 			} else {
-			    var errJson map[string]interface{}
-			    if err := json.Unmarshal(respBody, &errJson); err == nil {
-			        if errObj, ok := errJson["error"].(map[string]interface{}); ok {
-			            if msg, ok := errObj["message"].(string); ok {
-			                parsedErr = msg
-			            }
-			        }
-			    }
-			    if parsedErr == "" {
-			        parsedErr = "Provider returned error status: " + resp.Status
-			    }
+				var errJson map[string]interface{}
+				if err := json.Unmarshal(respBody, &errJson); err == nil {
+					if errObj, ok := errJson["error"].(map[string]interface{}); ok {
+						if msg, ok := errObj["message"].(string); ok {
+							parsedErr = msg
+						}
+					}
+				}
+				if parsedErr == "" {
+					parsedErr = "Provider returned error status: " + resp.Status
+				}
 			}
 		}
 
@@ -221,10 +316,10 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		if res.isSuccess {
 			// Short circuit on first success
 			api.respondJSON(w, http.StatusOK, map[string]interface{}{
-				"status": "ok",
+				"status":        "ok",
 				"provider_type": res.providerType,
-				"url": res.testUrl,
-				"log": combinedLog,
+				"url":           res.testUrl,
+				"log":           combinedLog,
 			})
 			return
 		}
@@ -235,7 +330,7 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	finalErr := lastParsedErr
 	if finalErr == "" {
-	    finalErr = "Provider returned error for all attempted URLs"
+		finalErr = "Provider returned error for all attempted URLs"
 	}
 
 	api.respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": finalErr, "log": combinedLog})

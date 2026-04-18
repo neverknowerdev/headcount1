@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
-import { Plus } from 'lucide-react';
+import { Plus, Settings } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
@@ -14,6 +14,7 @@ interface Task {
     title: string;
     description: string;
     status: string;
+    priority: string;
 }
 
 interface Project {
@@ -21,45 +22,61 @@ interface Project {
     name: string;
 }
 
+interface Sprint {
+    id: number;
+    name: string;
+}
+
 export const ProjectBoard: React.FC = () => {
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<Project[]>([]);
-  const [selectedProjectId, setSelectedProjectId] = useState<number | null>(null);
+  const [sprints, setSprints] = useState<Sprint[]>([]);
+
+  const [selectedProjectIds, setSelectedProjectIds] = useState<number[]>([]);
+  const [selectedSprintIds, setSelectedSprintIds] = useState<number[]>([]);
+  const [showArchived, setShowArchived] = useState(false);
+
   const [tasks, setTasks] = useState<Task[]>([]);
-  const [newTaskTitle, setNewTaskTitle] = useState('');
+  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
   const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
 
-  const fetchProjects = useCallback(async () => {
+  const fetchFiltersData = useCallback(async () => {
     if (!selectedCompanyId) return;
     try {
-      const res = await axios.get(`/api/projects?company_id=${selectedCompanyId}`);
-      const projs = res.data || [];
-      setProjects(projs);
-      if (projs.length > 0 && !selectedProjectId) {
-          setSelectedProjectId(projs[0].id);
-      }
+      const [projRes, sprintRes] = await Promise.all([
+          axios.get(`/api/projects?company_id=${selectedCompanyId}`),
+          axios.get(`/api/sprints?company_id=${selectedCompanyId}`)
+      ]);
+      setProjects(projRes.data || []);
+      setSprints(sprintRes.data || []);
     } catch (e) {
       console.error(e);
     }
-  }, [selectedCompanyId, selectedProjectId]);
+  }, [selectedCompanyId]);
 
   const fetchTasks = useCallback(async () => {
-    if (!selectedProjectId) return;
+    if (!selectedCompanyId) return;
     try {
-      const res = await axios.get(`/api/tasks?project_id=${selectedProjectId}`);
+      let url = `/api/tasks?company_id=${selectedCompanyId}&archived=${showArchived}`;
+      if (selectedProjectIds.length > 0) {
+          url += `&project_ids=${selectedProjectIds.join(',')}`;
+      }
+      if (selectedSprintIds.length > 0) {
+          url += `&sprint_ids=${selectedSprintIds.join(',')}`;
+      }
+
+      const res = await axios.get(url);
       setTasks(res.data || []);
     } catch (e) {
       console.error(e);
     }
-  }, [selectedProjectId]);
+  }, [selectedCompanyId, selectedProjectIds, selectedSprintIds, showArchived]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
-    fetchProjects();
-  }, [fetchProjects]);
+    fetchFiltersData();
+  }, [fetchFiltersData]);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     fetchTasks();
     const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
     ws.onmessage = (event) => {
@@ -71,23 +88,9 @@ export const ProjectBoard: React.FC = () => {
     return () => ws.close();
   }, [fetchTasks]);
 
-  const createTask = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newTaskTitle || !selectedProjectId) return;
-    try {
-      await axios.post('/api/tasks', {
-        project_id: selectedProjectId,
-        title: newTaskTitle
-      });
-      setNewTaskTitle('');
-    } catch (e) {
-      console.error(e);
-    }
-  };
-
   const updateTaskStatus = async (id: number, status: string) => {
     try {
-      await axios.put(`/api/tasks/${id}/status`, { status });
+      await axios.put(`/api/tasks/${id}`, { status });
     } catch (e) {
       console.error(e);
       fetchTasks(); // rollback on error
@@ -107,41 +110,57 @@ export const ProjectBoard: React.FC = () => {
       }
   };
 
-  if (projects.length === 0) {
-      return (
-          <div className="flex flex-col items-center justify-center h-full space-y-4">
-              <p className="text-gray-500">No projects yet.</p>
-              <button className="bg-indigo-600 text-white px-4 py-2 rounded" onClick={() => window.location.href='/projects'}>Go create a project</button>
-          </div>
-      );
-  }
-
   return (
     <div className="h-full flex flex-col">
-      <div className="flex justify-between items-center mb-6">
+      <div className="flex flex-col md:flex-row justify-between items-start md:items-center mb-6 space-y-4 md:space-y-0">
         <div className="flex items-center space-x-4">
             <h1 className="text-2xl font-bold">Tasks</h1>
-            <select
-                value={selectedProjectId || ''}
-                onChange={e => setSelectedProjectId(parseInt(e.target.value))}
-                className="border-gray-300 rounded-md text-sm pl-3 pr-8 py-2 border shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-            >
-                {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-            </select>
+            <div className="flex space-x-2 text-sm">
+                <select
+                    multiple
+                    size={1}
+                    value={selectedProjectIds.map(String)}
+                    onChange={e => {
+                        const values = Array.from(e.target.selectedOptions, option => parseInt(option.value));
+                        setSelectedProjectIds(values);
+                    }}
+                    className="border-gray-300 rounded-md py-1 px-2 border shadow-sm"
+                    title="Filter by Projects (Hold Ctrl/Cmd to select multiple)"
+                >
+                    <option value="" disabled>-- Projects --</option>
+                    {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                </select>
+
+                <select
+                    multiple
+                    size={1}
+                    value={selectedSprintIds.map(String)}
+                    onChange={e => {
+                        const values = Array.from(e.target.selectedOptions, option => parseInt(option.value));
+                        setSelectedSprintIds(values);
+                    }}
+                    className="border-gray-300 rounded-md py-1 px-2 border shadow-sm"
+                    title="Filter by Sprints (Hold Ctrl/Cmd to select multiple)"
+                >
+                    <option value="" disabled>-- Sprints --</option>
+                    {sprints.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
+                </select>
+
+                <label className="flex items-center space-x-1 cursor-pointer">
+                    <input type="checkbox" checked={showArchived} onChange={e => setShowArchived(e.target.checked)} className="rounded text-indigo-600" />
+                    <span>Show Archived</span>
+                </label>
+            </div>
         </div>
 
-        <form onSubmit={createTask} className="flex gap-2">
-          <input
-            type="text"
-            value={newTaskTitle}
-            onChange={(e) => setNewTaskTitle(e.target.value)}
-            placeholder="New Task Title"
-            className="border border-gray-300 p-2 rounded-md text-sm w-64 shadow-sm focus:ring-indigo-500 focus:border-indigo-500"
-          />
-          <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
-            <Plus size={16} className="mr-1"/> Add Task
-          </button>
-        </form>
+        <div className="flex gap-2">
+            <button onClick={() => window.location.href='/sprints'} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm flex items-center border hover:bg-gray-200">
+                <Settings size={16} className="mr-1"/> Manage Sprints
+            </button>
+            <button onClick={() => setIsCreateModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
+                <Plus size={16} className="mr-1"/> New Task
+            </button>
+        </div>
       </div>
 
       <div className="flex-1 overflow-x-auto overflow-y-hidden">
@@ -178,6 +197,15 @@ export const ProjectBoard: React.FC = () => {
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
                                         <div className="mt-4 flex justify-between items-center">
                                             <span className="text-xs text-gray-400">T-{task.id}</span>
+                                            {task.priority !== 'Normal' && (
+                                                <span className={`text-[10px] px-2 py-0.5 rounded-full ${
+                                                    task.priority === 'Urgent' ? 'bg-red-100 text-red-800' :
+                                                    task.priority === 'High' ? 'bg-orange-100 text-orange-800' :
+                                                    'bg-blue-100 text-blue-800'
+                                                }`}>
+                                                    {task.priority}
+                                                </span>
+                                            )}
                                         </div>
                                     </div>
                                 )}
@@ -192,7 +220,8 @@ export const ProjectBoard: React.FC = () => {
             </div>
         </DragDropContext>
       </div>
-      {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => setViewingTaskId(null)} />}
+      {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => {setViewingTaskId(null); fetchTasks();}} />}
+      {isCreateModalOpen && <TaskModal onClose={() => setIsCreateModalOpen(false)} onTaskCreated={fetchTasks} />}
     </div>
   );
 };

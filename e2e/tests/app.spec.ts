@@ -15,6 +15,7 @@ test.describe('Paperclip2 App', () => {
         await expect(page.getByText('Setup LLM Provider')).toBeVisible();
         await page.fill('input[type="text"]', 'e2e-mock');
         await page.fill('input[type="password"]', 'test-api-key');
+        await page.locator('label:has-text("Model Name") + input').fill('gpt-4');
         await page.click('button:has-text("Test Connection")');
         await expect(page.getByText('Connection successful!')).toBeVisible();
         await page.click('button:has-text("Next Step")');
@@ -31,21 +32,55 @@ test.describe('Paperclip2 App', () => {
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
 
+        // Verify CEO agent settings initialized correctly
+        await page.goto('/agents/1');
+        await page.click('button:has-text("Settings")');
+        await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
+        await expect(page.locator('select').nth(1)).toHaveValue("gpt-4"); // Model
+        await page.goto('/');
+
         // Navigate to Projects
         await page.click('a:has-text("Projects")');
         await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible();
 
         // Create Project
-        await page.fill('input[placeholder="New Project Name"]', 'Project Alpha');
         await page.click('button:has-text("Create Project")');
-        await expect(page.getByText('Project Alpha')).toBeVisible();
+        await expect(page.getByRole('dialog')).toBeVisible();
+        await page.getByRole('dialog').locator('input').first().fill('Project Alpha');
+        // Let auto-generation run, then assert it's somewhat correct.
+        // The value should be pw-inc/project-alpha
+        await expect(page.getByRole('dialog').locator('input').nth(1)).toHaveValue('pw-inc/project-alpha');
+        await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
+        await page.waitForTimeout(1000); // Wait for modal to close and state to update
+        await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });
 
         // Navigate to Tasks
         await page.click('a:has-text("Tasks")');
 
+        // Since Sprint is required to create a task, we need to make sure one is selected.
+        // Wait for projects and sprints to load (if any). Our UI might show "-- Select Sprint --" if none exist.
+        // Create a Sprint first if we can't select one.
+
+        await page.click('button:has-text("Manage Sprints")');
+        await expect(page.getByRole('heading', { name: 'Manage Sprints' })).toBeVisible();
+        await page.click('button:has-text("Create Sprint")');
+        await page.fill('input[placeholder="e.g. Sprint 1"]', 'E2E Sprint');
+        // fill start and end dates to satisfy HTML5 required
+        await page.fill('input[type="date"]', '2024-01-01'); // Start
+        await page.locator('input[type="date"]').nth(1).fill('2024-01-14'); // End
+        await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
+        await expect(page.getByText('E2E Sprint')).toBeVisible();
+
+        // Go back to tasks
+        await page.click('a:has-text("Tasks")');
+
         // Add Task (This specific title triggers the mock engine we added)
-        await page.fill('input[placeholder="New Task Title"]', 'Write E2E Tests');
-        await page.click('button:has-text("Add Task")');
+        await page.click('button:has-text("New Task")');
+        await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
+        // Sprint is auto-selected if there's only one, otherwise we might need to select it.
+        // Focus on the Sprint select specifically
+        await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
+        await page.click('button:has-text("Create Task")');
 
         // Task should initially be in backlog or immediately picked up depending on speed
         // Click to open the Task modal
@@ -56,7 +91,7 @@ test.describe('Paperclip2 App', () => {
 
         // Add a human comment
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('.fixed.inset-0').locator('button[type="submit"]').click();
+        await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
 
         // Wait for the mock agent to post a comment
         // The mock waits 1s then posts "I have analyzed the E2E task and completed it successfully! 🚀"

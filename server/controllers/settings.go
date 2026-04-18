@@ -5,18 +5,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+
+	"gopkg.in/yaml.v3"
 )
 
 type Settings struct {
-	BasePath string `json:"base_path"`
+	BasePath         string   `json:"base_path" yaml:"base_path"`
+	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
 }
 
 func getSettingsFilePath() string {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/.paperclip2_settings.json"
+		return "/tmp/.paperclip2_settings.yaml"
 	}
-	return filepath.Join(homeDir, ".paperclip2_settings.json")
+	return filepath.Join(homeDir, ".paperclip2_settings.yaml")
 }
 
 func LoadSettings() Settings {
@@ -28,28 +31,28 @@ func LoadSettings() Settings {
 		if err == nil {
 			basePath = filepath.Join(homeDir, ".paperclip2")
 		}
-		return Settings{BasePath: basePath}
+		return Settings{BasePath: basePath, WorkspaceFolders: []string{}}
 	}
 
 	var settings Settings
-	if err := json.Unmarshal(data, &settings); err != nil {
+	if err := yaml.Unmarshal(data, &settings); err != nil {
 		homeDir, err := os.UserHomeDir()
 		basePath := "/tmp/.paperclip2"
 		if err == nil {
 			basePath = filepath.Join(homeDir, ".paperclip2")
 		}
-		return Settings{BasePath: basePath}
+		return Settings{BasePath: basePath, WorkspaceFolders: []string{}}
 	}
 
 	if settings.BasePath == "" {
-		return Settings{BasePath: "/tmp/.paperclip2"}
+		settings.BasePath = "/tmp/.paperclip2"
 	}
 	return settings
 }
 
 func SaveSettings(settings Settings) error {
 	settingsPath := getSettingsFilePath()
-	data, err := json.MarshalIndent(settings, "", "  ")
+	data, err := yaml.Marshal(&settings)
 	if err != nil {
 		return err
 	}
