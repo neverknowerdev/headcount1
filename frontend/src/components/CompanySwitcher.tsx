@@ -31,7 +31,7 @@ export const CompanySwitcher: React.FC = () => {
             <div className="w-8 border-t border-gray-700 my-2"></div>
 
             <button
-                onClick={() => navigate('/onboarding')}
+                onClick={() => navigate('/add-company')}
                 className="w-12 h-12 rounded-full bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 flex items-center justify-center transition-colors"
                 title="Add Workspace"
             >

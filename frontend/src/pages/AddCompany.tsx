@@ -1,53 +1,100 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { useStore } from '../store';
+import { CirclePicker } from 'react-color';
 
+// Predefined popular vibrant colors
+const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548', '#607d8b'];
 
-export const Onboarding: React.FC = () => {
+export const AddCompany: React.FC = () => {
+    const { companies } = useStore();
+    const isInitialOnboarding = companies.length === 0;
+
+    // LocalStorage keys
+    const LS_KEY = 'addCompanyState';
+
+    // Step state
     const [step, setStep] = useState(1);
 
     // Step 1: Company
     const [name, setName] = useState('');
     const [shortName, setShortName] = useState('');
     const [color, setColor] = useState('#4f46e5');
-    const [createdCompanyId, setCreatedCompanyId] = useState<number | null>(null);
 
     // Step 2: Provider
     const [providerUrl, setProviderUrl] = useState('https://api.openai.com/');
     const [providerKey, setProviderKey] = useState('');
     const [providerModel, setProviderModel] = useState('gpt-4');
     const [isTesting, setIsTesting] = useState(false);
-    const [createdProviderId, setCreatedProviderId] = useState<number | null>(null);
     const [testResult, setTestResult] = useState<string | null>(null);
     const [testLog, setTestLog] = useState<string | null>(null);
     const [showLog, setShowLog] = useState(false);
     const [providerType, setProviderType] = useState<string | null>(null);
+    const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
+    // Existing Providers (for step 2 if !isInitialOnboarding)
+    const [existingProviders, setExistingProviders] = useState<any[]>([]);
+    const [selectedExistingProviderId, setSelectedExistingProviderId] = useState<string>('');
 
     // Step 3: CEO
     const [ceoName, setCeoName] = useState('CEO Agent');
     const [ceoPrompt, setCeoPrompt] = useState('');
 
+    // Load from LocalStorage on mount
+    useEffect(() => {
+        const saved = localStorage.getItem(LS_KEY);
+        if (saved) {
+            try {
+                const parsed = JSON.parse(saved);
+                if (parsed.step) setStep(parsed.step);
+                if (parsed.name) setName(parsed.name);
+                if (parsed.shortName) setShortName(parsed.shortName);
+                if (parsed.color) setColor(parsed.color);
+
+                if (parsed.providerUrl) setProviderUrl(parsed.providerUrl);
+                if (parsed.providerKey) setProviderKey(parsed.providerKey);
+                if (parsed.providerModel) setProviderModel(parsed.providerModel);
+                if (parsed.selectedExistingProviderId) setSelectedExistingProviderId(parsed.selectedExistingProviderId);
+
+                if (parsed.ceoName) setCeoName(parsed.ceoName);
+                if (parsed.ceoPrompt) setCeoPrompt(parsed.ceoPrompt);
+            } catch (e) {
+                console.error("Failed to load saved state", e);
+            }
+        }
+
+        if (!isInitialOnboarding) {
+            // Fetch existing providers
+            axios.get('/api/providers').then(res => {
+                if (res.data && res.data.length > 0) {
+                    setExistingProviders(res.data);
+                    setSelectedExistingProviderId(res.data[0].id.toString());
+                    setProviderModel(res.data[0].default_model);
+                }
+            }).catch(console.error);
+        }
+    }, [isInitialOnboarding]);
+
+    // Save to LocalStorage whenever state changes
+    useEffect(() => {
+        const stateToSave = {
+            step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt
+        };
+        localStorage.setItem(LS_KEY, JSON.stringify(stateToSave));
+    }, [step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt]);
 
 
     useEffect(() => {
-        if (name) {
+        if (name && !ceoPrompt) {
             setCeoPrompt(`Your CEO of ${name}. Your goal is to keep an eye on tasks, delegate work to other agents, keep eye on their work, escalate to human if needed, and do whatever we need to achieve company goals`);
         }
-    }, [name]);
+    }, [name, ceoPrompt]);
 
-    const handleCreateCompany = async (e: React.FormEvent) => {
+    const handleCompanyNext = (e: React.FormEvent) => {
         e.preventDefault();
-        try {
-            const res = await axios.post('/api/companies', { name, short_name: shortName, color });
-            setCreatedCompanyId(res.data.id);
-            setStep(2);
-        } catch {
-            alert('Failed to create company');
-        }
+        setStep(2);
     };
-
-    const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
 
     const handleTestProvider = async () => {
         setIsTesting(true);
@@ -85,40 +132,62 @@ export const Onboarding: React.FC = () => {
         }
     };
 
-    const handleCreateProvider = async (e: React.FormEvent) => {
+    const handleProviderNext = (e: React.FormEvent) => {
         e.preventDefault();
-        try {
-            const providerRes = await axios.post('/api/providers', {
-                name: 'Main Provider',
-                base_url: resolvedUrl || providerUrl,
-                api_key: providerKey,
-                provider_type: providerType,
-                default_model: providerModel,
-                supported_models: providerModel
-            });
-            setCreatedProviderId(providerRes.data.id);
-
-            setStep(3);
-        } catch {
-            alert('Failed to save provider');
-        }
+        setStep(3);
     };
 
-    const handleCreateCEO = async (e: React.FormEvent) => {
+    const handleExistingProviderNext = (e: React.FormEvent) => {
+        e.preventDefault();
+        setStep(3);
+    }
+
+    const handleFinish = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
+            let finalProviderId: number | null = null;
+            let finalProviderModel = providerModel;
+
+            if (isInitialOnboarding) {
+                // 1. Create Provider
+                const providerRes = await axios.post('/api/providers', {
+                    name: 'Main Provider',
+                    base_url: resolvedUrl || providerUrl,
+                    api_key: providerKey,
+                    provider_type: providerType,
+                    default_model: providerModel,
+                    supported_models: providerModel
+                });
+                finalProviderId = providerRes.data.id;
+            } else {
+                finalProviderId = parseInt(selectedExistingProviderId);
+                const selectedProv = existingProviders.find(p => p.id === finalProviderId);
+                if (selectedProv && providerModel === selectedProv.default_model) {
+                   // User didn't change model manually, use default
+                   finalProviderModel = selectedProv.default_model;
+                }
+            }
+
+            // 2. Create Company
+            const companyRes = await axios.post('/api/companies', { name, short_name: shortName, color });
+            const finalCompanyId = companyRes.data.id;
+
+            // 3. Create CEO Agent
             await axios.post('/api/agents', {
-                company_id: createdCompanyId,
+                company_id: finalCompanyId,
                 name: ceoName,
                 description: 'Company CEO',
                 system_prompt: ceoPrompt,
-                model: providerModel,
-                provider_id: createdProviderId
+                model: finalProviderModel,
+                provider_id: finalProviderId
             });
+
+            // Success! Clear localstorage and redirect
+            localStorage.removeItem(LS_KEY);
             window.location.href = '/';
-            setTimeout(() => window.location.reload(), 100); // Reload to fetch companies and start app
-        } catch {
-            alert('Failed to create CEO agent');
+        } catch (err) {
+            console.error(err);
+            alert('Failed to complete setup. Check console for details.');
         }
     };
 
@@ -127,14 +196,14 @@ export const Onboarding: React.FC = () => {
             <div className="max-w-md w-full space-y-8 bg-white p-8 rounded-xl shadow-lg">
                 <div>
                     <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
-                        {step === 1 && "Create a Workspace"}
+                        {step === 1 && (isInitialOnboarding ? "Create a Workspace" : "Add Workspace")}
                         {step === 2 && "Setup LLM Provider"}
                         {step === 3 && "Hire your CEO"}
                     </h2>
                 </div>
 
                 {step === 1 && (
-                    <form className="mt-8 space-y-6" onSubmit={handleCreateCompany}>
+                    <form className="mt-8 space-y-6" onSubmit={handleCompanyNext}>
                         <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Company Name</label>
@@ -145,8 +214,19 @@ export const Onboarding: React.FC = () => {
                                 <input required type="text" value={shortName} onChange={e => setShortName(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm" placeholder="acme" />
                             </div>
                             <div>
-                                <label className="text-sm font-medium text-gray-700">Workspace Color</label>
-                                <input required type="color" value={color} onChange={e => setColor(e.target.value)} className="h-10 w-full" />
+                                <label className="text-sm font-medium text-gray-700 mb-2 block">Workspace Color</label>
+                                <div className="mb-4">
+                                  <CirclePicker
+                                      color={color}
+                                      onChangeComplete={(c: any) => setColor(c.hex)}
+                                      colors={presetColors}
+                                      width="100%"
+                                  />
+                                </div>
+                                <div className="flex items-center gap-2">
+                                  <span className="text-xs text-gray-500">Custom:</span>
+                                  <input required type="color" value={color} onChange={e => setColor(e.target.value)} className="h-8 w-16 p-0 border-0 rounded cursor-pointer" />
+                                </div>
                             </div>
                         </div>
                         <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500">
@@ -155,8 +235,8 @@ export const Onboarding: React.FC = () => {
                     </form>
                 )}
 
-                {step === 2 && (
-                    <form className="mt-8 space-y-6" onSubmit={handleCreateProvider}>
+                {step === 2 && isInitialOnboarding && (
+                    <form className="mt-8 space-y-6" onSubmit={handleProviderNext}>
                         <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
@@ -202,8 +282,48 @@ export const Onboarding: React.FC = () => {
                     </form>
                 )}
 
+                {step === 2 && !isInitialOnboarding && (
+                    <form className="mt-8 space-y-6" onSubmit={handleExistingProviderNext}>
+                        <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
+                            <p className="text-sm text-gray-600 mb-2">
+                                Please select an existing LLM Provider to use for this workspace. You can add new providers later in Settings.
+                            </p>
+                            <div>
+                                <label className="text-sm font-medium text-gray-700">Select Provider</label>
+                                <select
+                                    className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                    value={selectedExistingProviderId}
+                                    onChange={(e) => {
+                                        setSelectedExistingProviderId(e.target.value);
+                                        const p = existingProviders.find(prov => prov.id.toString() === e.target.value);
+                                        if (p) setProviderModel(p.default_model);
+                                    }}
+                                    required
+                                >
+                                    {existingProviders.map(p => (
+                                        <option key={p.id} value={p.id}>{p.name} ({p.base_url})</option>
+                                    ))}
+                                </select>
+                            </div>
+                            <div>
+                                <label className="text-sm font-medium text-gray-700">Model Name</label>
+                                <input
+                                    required
+                                    type="text"
+                                    value={providerModel}
+                                    onChange={e => setProviderModel(e.target.value)}
+                                    className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                />
+                            </div>
+                        </div>
+                        <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">
+                            Next Step
+                        </button>
+                    </form>
+                )}
+
                 {step === 3 && (
-                    <form className="mt-8 space-y-6" onSubmit={handleCreateCEO}>
+                    <form className="mt-8 space-y-6" onSubmit={handleFinish}>
                         <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Agent Name</label>
