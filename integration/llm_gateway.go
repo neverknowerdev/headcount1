@@ -29,7 +29,7 @@ func (g *LLMGateway) Mount(r chi.Router) {
 	r.Post("/v1/chat/completions", g.proxyChatCompletions)
 	r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
 		r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
-		r.Get("/v1/models", g.proxyModelsForAgent)
+		r.Get("/v1/models", g.getModelsForAgent)
 	})
 }
 
@@ -208,7 +208,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	}
 }
 
-func (g *LLMGateway) proxyModelsForAgent(w http.ResponseWriter, r *http.Request) {
+func (g *LLMGateway) getModelsForAgent(w http.ResponseWriter, r *http.Request) {
 	agentIDStr := chi.URLParam(r, "agent_id")
 	agentID, err := strconv.Atoi(agentIDStr)
 	if err != nil {

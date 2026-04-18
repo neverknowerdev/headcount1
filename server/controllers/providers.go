@@ -126,8 +126,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	apiKey := req.ApiKey
 	baseUrl := req.BaseUrl
+	providerType := req.ProviderType
 
-	if req.ProviderID != nil && (apiKey == "" || baseUrl == "") {
+	if req.ProviderID != nil && (apiKey == "" || baseUrl == "" || providerType == "") {
 		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
 		if err == nil {
 			if apiKey == "" {
@@ -136,8 +137,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			if baseUrl == "" {
 				baseUrl = provider.BaseUrl
 			}
-			if req.ProviderType == "" {
-				req.ProviderType = provider.ProviderType
+			if providerType == "" {
+				providerType = provider.ProviderType
 			}
 		}
 	}
