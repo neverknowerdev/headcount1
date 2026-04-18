@@ -3,7 +3,7 @@ import axios from 'axios';
 import { CompanySwitcher } from './CompanySwitcher';
 import { Sidebar } from './Sidebar';
 import { useStore } from '../store';
-import { Onboarding } from '../pages/Onboarding';
+import { AddCompany } from '../pages/AddCompany';
 import { useLocation } from 'react-router-dom';
 
 interface LayoutProps {
@@ -39,17 +39,15 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
   }
 
-  if (companies.length === 0 && location.pathname !== '/onboarding') {
-      window.location.href = '/onboarding';
+  // If there are no companies at all, force redirect to /add-company
+  if (companies.length === 0 && location.pathname !== '/add-company') {
+      window.location.href = '/add-company';
       return null;
   }
 
-  if (location.pathname === '/onboarding') {
-      if (companies.length > 0) {
-          window.location.href = '/';
-          return null;
-      }
-      return <Onboarding />;
+  // Allow /add-company to render full screen, regardless of how many companies exist.
+  if (location.pathname === '/add-company') {
+      return <AddCompany />;
   }
 
 

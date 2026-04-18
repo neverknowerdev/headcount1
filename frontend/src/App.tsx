@@ -10,14 +10,14 @@ import { ProvidersManager } from './pages/ProvidersManager';
 import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { Settings } from './pages/Settings';
-import { Onboarding } from './pages/Onboarding';
+import { AddCompany } from './pages/AddCompany';
 
 function App() {
   return (
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/add-company" element={<AddCompany />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="/tasks" element={<ProjectBoard />} />
           <Route path="/sprints" element={<SprintsManager />} />
