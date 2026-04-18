@@ -1,16 +1,16 @@
 package server
 
 import (
-		"encoding/json"
+	"encoding/json"
 	"net/http"
 
+	"agent-orchestrator/db"
+	"agent-orchestrator/engine"
+	"agent-orchestrator/eventhub"
+	"agent-orchestrator/server/controllers"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
-	"agent-orchestrator/db"
-	"agent-orchestrator/eventhub"
-	"agent-orchestrator/engine"
-	"agent-orchestrator/server/controllers"
 )
 
 type Server struct {
@@ -64,12 +64,16 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/", api.ListTasks)
 		r.Post("/", api.CreateTask)
 		r.Get("/{id}", api.GetTask)
-		r.Put("/{id}/status", api.UpdateTaskStatus)
+		r.Put("/{id}", api.UpdateTask)
+		r.Put("/{id}/status", api.UpdateTask) // Keep for backward compatibility if needed, though they map to same
 	})
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
 		r.Post("/", api.CreateAgent)
+		r.Get("/{id}", api.GetAgent)
+		r.Put("/{id}", api.UpdateAgent)
+		r.Get("/{id}/stats", api.GetAgentStats)
 	})
 
 	r.Route("/comments", func(r chi.Router) {
@@ -81,9 +85,16 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.UploadAttachment)
 	})
 
+	r.Route("/sprints", func(r chi.Router) {
+		r.Get("/", api.ListSprints)
+		r.Post("/", api.CreateSprint)
+	})
+
 	r.Route("/providers", func(r chi.Router) {
 		r.Get("/", api.ListProviders)
 		r.Post("/", api.CreateProvider)
+		r.Put("/{id}", api.UpdateProvider)
+		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
 	})
 }

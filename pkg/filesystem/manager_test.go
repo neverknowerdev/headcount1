@@ -44,7 +44,7 @@ func TestFilesystemManager(t *testing.T) {
 	assert.NoError(t, err)
 	assert.False(t, info.IsDir())
 
-	project := db.Project{ID: 1, Name: "project-1"}
+	project := db.Project{ID: 1, Name: "project-1", WorkspaceFolder: "companies/test-co/projects/project-1"}
 	err = manager.CreateProjectDirectories(company, project)
 	assert.NoError(t, err)
 

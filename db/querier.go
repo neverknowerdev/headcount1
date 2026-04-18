@@ -15,8 +15,7 @@ type Querier interface {
 	ListAgentsByCompany(ctx context.Context, companyID int32) ([]Agent, error)
 	GetAgent(ctx context.Context, id int32) (Agent, error)
 	CreateTask(ctx context.Context, t Task) (Task, error)
-	ListTasksByProject(ctx context.Context, projectID int32) ([]Task, error)
-	UpdateTaskStatus(ctx context.Context, id int32, status string) (Task, error)
+	UpdateTask(ctx context.Context, t Task) (Task, error)
 	GetTask(ctx context.Context, id int32) (Task, error)
 	CreateComment(ctx context.Context, c Comment) (Comment, error)
 	ListCommentsByTask(ctx context.Context, taskID int32) ([]Comment, error)
@@ -28,6 +27,12 @@ type Querier interface {
 	CreateSkill(ctx context.Context, s Skill) (Skill, error)
 	GetLLMProvider(ctx context.Context, id int32) (LLMProvider, error)
 	ListLLMProviders(ctx context.Context) ([]LLMProvider, error)
+	CreateSprint(ctx context.Context, s Sprint) (Sprint, error)
+	ListSprintsByCompany(ctx context.Context, companyID int32) ([]Sprint, error)
+	CreateProxyRequestLog(ctx context.Context, p ProxyRequestLog) (ProxyRequestLog, error)
+	UpdateAgent(ctx context.Context, a Agent) (Agent, error)
+	DeleteLLMProvider(ctx context.Context, id int32) error
+	UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error)
 }
 
 type Queries struct {
@@ -83,20 +88,8 @@ func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 	return t, err
 }
 
-func (q *Queries) ListTasksByProject(ctx context.Context, projectID int32) ([]Task, error) {
-	var t []Task
-	err := q.db.WithContext(ctx).Where("project_id = ?", projectID).Order("id").Find(&t).Error
-	return t, err
-}
-
-func (q *Queries) UpdateTaskStatus(ctx context.Context, id int32, status string) (Task, error) {
-	var t Task
-	err := q.db.WithContext(ctx).First(&t, id).Error
-	if err != nil {
-		return t, err
-	}
-	t.Status = status
-	err = q.db.WithContext(ctx).Save(&t).Error
+func (q *Queries) UpdateTask(ctx context.Context, t Task) (Task, error) {
+	err := q.db.WithContext(ctx).Save(&t).Error
 	return t, err
 }
 
@@ -167,5 +160,35 @@ func (q *Queries) GetLLMProvider(ctx context.Context, id int32) (LLMProvider, er
 func (q *Queries) ListLLMProviders(ctx context.Context) ([]LLMProvider, error) {
 	var p []LLMProvider
 	err := q.db.WithContext(ctx).Order("id").Find(&p).Error
+	return p, err
+}
+
+func (q *Queries) CreateSprint(ctx context.Context, s Sprint) (Sprint, error) {
+	err := q.db.WithContext(ctx).Create(&s).Error
+	return s, err
+}
+
+func (q *Queries) ListSprintsByCompany(ctx context.Context, companyID int32) ([]Sprint, error) {
+	var s []Sprint
+	err := q.db.WithContext(ctx).Where("company_id = ?", companyID).Order("id").Find(&s).Error
+	return s, err
+}
+
+func (q *Queries) CreateProxyRequestLog(ctx context.Context, p ProxyRequestLog) (ProxyRequestLog, error) {
+	err := q.db.WithContext(ctx).Create(&p).Error
+	return p, err
+}
+
+func (q *Queries) UpdateAgent(ctx context.Context, a Agent) (Agent, error) {
+	err := q.db.WithContext(ctx).Save(&a).Error
+	return a, err
+}
+
+func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
+	return q.db.WithContext(ctx).Delete(&LLMProvider{}, id).Error
+}
+
+func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
+	err := q.db.WithContext(ctx).Save(&p).Error
 	return p, err
 }
