@@ -77,7 +77,7 @@ export const CompanyView: React.FC = () => {
 
       {isModalOpen && (
         <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
-          <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+          <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md" role="dialog">
             <h2 className="text-xl font-bold mb-4">Create Project</h2>
             <form onSubmit={createProject} className="space-y-4">
               <div>

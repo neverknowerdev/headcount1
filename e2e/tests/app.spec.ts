@@ -45,12 +45,12 @@ test.describe('Paperclip2 App', () => {
 
         // Create Project
         await page.click('button:has-text("Create Project")');
-        await page.waitForSelector('div.bg-white.p-6');
-        await page.fill('div.bg-white.p-6 input:first-of-type', 'Project Alpha');
+        await expect(page.getByRole('dialog')).toBeVisible();
+        await page.getByRole('dialog').locator('input').first().fill('Project Alpha');
         // Let auto-generation run, then assert it's somewhat correct.
         // The value should be pw-inc/project-alpha
-        await expect(page.locator('div.bg-white.p-6 input').nth(1)).toHaveValue('pw-inc/project-alpha');
-        await page.click('div.bg-white.p-6 >> button:has-text("Create")');
+        await expect(page.getByRole('dialog').locator('input').nth(1)).toHaveValue('pw-inc/project-alpha');
+        await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
         await page.waitForTimeout(1000); // Wait for modal to close and state to update
         await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });
 
@@ -68,7 +68,7 @@ test.describe('Paperclip2 App', () => {
         // fill start and end dates to satisfy HTML5 required
         await page.fill('input[type="date"]', '2024-01-01'); // Start
         await page.locator('input[type="date"]').nth(1).fill('2024-01-14'); // End
-        await page.click('div.bg-white.p-6 >> button:has-text("Create")');
+        await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
         await expect(page.getByText('E2E Sprint')).toBeVisible();
 
         // Go back to tasks
