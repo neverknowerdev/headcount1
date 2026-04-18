@@ -45,10 +45,6 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
   }
 
   if (location.pathname === '/onboarding') {
-      if (companies.length > 0) {
-          window.location.href = '/';
-          return null;
-      }
       return <Onboarding />;
   }
 

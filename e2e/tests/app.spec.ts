@@ -83,4 +83,62 @@ test.describe('Paperclip2 App', () => {
 
         // Skipping pure drag and drop since we verified full flow and UI.
     });
+
+    test('can add a new company after initial onboarding', async ({ page }) => {
+        await page.waitForTimeout(2000);
+        await page.goto('/');
+
+        // Step 1: Initial Onboarding
+        await expect(page.getByText('Create a Workspace')).toBeVisible();
+        await page.fill('input[placeholder="Acme Corp"]', 'First Company');
+        await page.fill('input[placeholder="acme"]', 'first-co');
+        await page.click('button:has-text("Next Step")');
+
+        await expect(page.getByText('Setup LLM Provider')).toBeVisible();
+        await page.fill('input[type="text"]', 'e2e-mock');
+        await page.fill('input[type="password"]', 'test-api-key');
+        await page.click('button:has-text("Test Connection")');
+        await expect(page.getByText('Connection successful!')).toBeVisible();
+        await page.click('button:has-text("Next Step")');
+
+        await expect(page.getByText('Hire your CEO')).toBeVisible();
+        await page.fill('input[type="text"]', 'First CEO');
+        await page.click('button:has-text("Finish & Launch")');
+
+        await page.waitForTimeout(2000);
+        await page.goto('/');
+        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
+
+        // Step 2: Add New Company via CompanySwitcher (+)
+        await page.click('button[title="Add Workspace"]');
+
+        // Verify we are in add company flow
+        await expect(page.getByText('Create a Workspace')).toBeVisible();
+        await page.fill('input[placeholder="Acme Corp"]', 'Second Company');
+        await page.fill('input[placeholder="acme"]', 'second-co');
+        await page.click('button:has-text("Next Step")');
+
+        // In Add Company flow, we should see provider selection, not creation
+        await expect(page.getByText('Setup LLM Provider')).toBeVisible();
+        await expect(page.getByText('Select Provider')).toBeVisible();
+        await expect(page.getByText('You can add more providers later in Settings.')).toBeVisible();
+
+        await page.click('button:has-text("Next Step")');
+
+        // CEO step
+        await expect(page.getByText('Hire your CEO')).toBeVisible();
+        await page.fill('input[type="text"]', 'Second CEO');
+        await page.click('button:has-text("Finish & Launch")');
+
+        await page.waitForTimeout(2000);
+        await page.goto('/');
+        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
+
+        // Verify both companies are available in switcher
+        const firstCoButton = page.getByRole('button', { name: 'FC' }); // First Company initials
+        const secondCoButton = page.getByRole('button', { name: 'SC' }); // Second Company initials
+        await expect(firstCoButton).toBeVisible();
+        await expect(secondCoButton).toBeVisible();
+    });
+
 });

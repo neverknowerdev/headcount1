@@ -1,16 +1,30 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { useStore } from '../store';
 
 
 export const Onboarding: React.FC = () => {
+    const { companies } = useStore();
+    const isAddCompanyFlow = companies.length > 0;
+
     const [step, setStep] = useState(1);
+
+    const [existingProviders, setExistingProviders] = useState<any[]>([]);
+
+    useEffect(() => {
+        if (isAddCompanyFlow) {
+            axios.get('/api/providers').then(res => {
+                setExistingProviders(res.data || []);
+            }).catch(console.error);
+        }
+    }, [isAddCompanyFlow]);
 
     // Step 1: Company
     const [name, setName] = useState('');
     const [shortName, setShortName] = useState('');
     const [color, setColor] = useState('#4f46e5');
-    const [createdCompanyId, setCreatedCompanyId] = useState<number | null>(null);
+    // const [createdCompanyId, setCreatedCompanyId] = useState<number | null>(null);
 
     // Step 2: Provider
     const [providerUrl, setProviderUrl] = useState('https://api.openai.com/');
@@ -37,13 +51,14 @@ export const Onboarding: React.FC = () => {
 
     const handleCreateCompany = async (e: React.FormEvent) => {
         e.preventDefault();
-        try {
-            const res = await axios.post('/api/companies', { name, short_name: shortName, color });
-            setCreatedCompanyId(res.data.id);
-            setStep(2);
-        } catch {
-            alert('Failed to create company');
+        // Just move to the next step, create company at the very end
+
+        // Ensure default selection for provider if it's the add flow
+        if (isAddCompanyFlow && existingProviders.length > 0) {
+            setResolvedUrl(existingProviders[0].base_url);
         }
+
+        setStep(2);
     };
 
     const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
@@ -86,24 +101,32 @@ export const Onboarding: React.FC = () => {
 
     const handleCreateProvider = async (e: React.FormEvent) => {
         e.preventDefault();
-        try {
-            await axios.post('/api/providers', {
-                name: 'Main Provider',
-                base_url: resolvedUrl || providerUrl,
-                api_key: providerKey
-            });
-
+        if (!isAddCompanyFlow) {
+            try {
+                await axios.post('/api/providers', {
+                    name: 'Main Provider',
+                    base_url: resolvedUrl || providerUrl,
+                    api_key: providerKey
+                });
+                setStep(3);
+            } catch {
+                alert('Failed to save provider');
+            }
+        } else {
             setStep(3);
-        } catch {
-            alert('Failed to save provider');
         }
     };
 
     const handleCreateCEO = async (e: React.FormEvent) => {
         e.preventDefault();
         try {
+            // 1. Create company first
+            const compRes = await axios.post('/api/companies', { name, short_name: shortName, color });
+            const newCompanyId = compRes.data.id;
+
+            // 2. Create CEO
             await axios.post('/api/agents', {
-                company_id: createdCompanyId,
+                company_id: newCompanyId,
                 name: ceoName,
                 description: 'Company CEO',
                 system_prompt: ceoPrompt,
@@ -112,7 +135,7 @@ export const Onboarding: React.FC = () => {
             window.location.href = '/';
             setTimeout(() => window.location.reload(), 100); // Reload to fetch companies and start app
         } catch {
-            alert('Failed to create CEO agent');
+            alert('Failed to create company or CEO agent');
         }
     };
 
@@ -152,45 +175,68 @@ export const Onboarding: React.FC = () => {
                 {step === 2 && (
                     <form className="mt-8 space-y-6" onSubmit={handleCreateProvider}>
                         <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
-                                <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">API Key</label>
-                                <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
+                            {!isAddCompanyFlow ? (
+                                <>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
+                                        <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">API Key</label>
+                                        <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Model Name</label>
+                                        <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
 
-                            <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
-                                {isTesting ? 'Testing...' : 'Test Connection'}
-                            </button>
-
-                            {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful! ({providerType || 'unknown'} detected)</p>}
-                            {testResult && testResult !== 'success' && <p className="text-red-600 text-sm font-semibold whitespace-pre-wrap">{testResult}</p>}
-
-                            {testLog && (
-                                <div className="mt-2 border rounded-md overflow-hidden">
-                                    <button
-                                        type="button"
-                                        onClick={() => setShowLog(!showLog)}
-                                        className="w-full text-left px-3 py-1.5 bg-gray-50 text-xs font-medium text-gray-600 hover:bg-gray-100 border-b flex justify-between"
-                                    >
-                                        {showLog ? 'Hide execution log' : 'Show execution log'}
-                                        <span>{showLog ? '▲' : '▼'}</span>
+                                    <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
+                                        {isTesting ? 'Testing...' : 'Test Connection'}
                                     </button>
-                                    {showLog && (
-                                        <pre className="p-3 text-xs bg-gray-900 text-gray-300 overflow-x-auto whitespace-pre-wrap max-h-48">
-                                            {testLog}
-                                        </pre>
+
+                                    {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful! ({providerType || 'unknown'} detected)</p>}
+                                    {testResult && testResult !== 'success' && <p className="text-red-600 text-sm font-semibold whitespace-pre-wrap">{testResult}</p>}
+
+                                    {testLog && (
+                                        <div className="mt-2 border rounded-md overflow-hidden">
+                                            <button
+                                                type="button"
+                                                onClick={() => setShowLog(!showLog)}
+                                                className="w-full text-left px-3 py-1.5 bg-gray-50 text-xs font-medium text-gray-600 hover:bg-gray-100 border-b flex justify-between"
+                                            >
+                                                {showLog ? 'Hide execution log' : 'Show execution log'}
+                                                <span>{showLog ? '▲' : '▼'}</span>
+                                            </button>
+                                            {showLog && (
+                                                <pre className="p-3 text-xs bg-gray-900 text-gray-300 overflow-x-auto whitespace-pre-wrap max-h-48">
+                                                    {testLog}
+                                                </pre>
+                                            )}
+                                        </div>
                                     )}
-                                </div>
+                                </>
+                            ) : (
+                                <>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Select Provider</label>
+                                        <select className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" required onChange={(e) => {
+                                            const p = existingProviders.find(prov => prov.id === Number(e.target.value));
+                                            if (p) setResolvedUrl(p.base_url);
+                                        }}>
+                                            {existingProviders.map((p, idx) => (
+                                                <option key={idx} value={p.id}>{p.name} ({p.base_url})</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Model Name</label>
+                                        <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                    <p className="text-sm text-gray-500 mt-2">You can add more providers later in Settings.</p>
+                                </>
                             )}
                         </div>
-                        <button type="submit" disabled={testResult !== 'success'} className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300">
+                        <button type="submit" disabled={!isAddCompanyFlow && testResult !== 'success'} className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300">
                             Next Step
                         </button>
                     </form>
