@@ -116,6 +116,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Description  string `json:"description"`
 		SystemPrompt string `json:"system_prompt"`
 		Model        string `json:"model"`
+		ProviderID   *int32 `json:"provider_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -127,6 +128,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt: req.SystemPrompt,
 		Description:  req.Description,
 		Model:        req.Model,
+		ProviderID:   req.ProviderID,
 	}
 
 	agent, err := api.q.CreateAgent(r.Context(), p)

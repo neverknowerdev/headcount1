@@ -15,6 +15,7 @@ test.describe('Paperclip2 App', () => {
         await expect(page.getByText('Setup LLM Provider')).toBeVisible();
         await page.fill('input[type="text"]', 'e2e-mock');
         await page.fill('input[type="password"]', 'test-api-key');
+        await page.locator('label:has-text("Model Name") + input').fill('gpt-4');
         await page.click('button:has-text("Test Connection")');
         await expect(page.getByText('Connection successful!')).toBeVisible();
         await page.click('button:has-text("Next Step")');
@@ -30,6 +31,13 @@ test.describe('Paperclip2 App', () => {
         await page.goto('/');
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
+
+        // Verify CEO agent settings initialized correctly
+        await page.goto('/agents/1');
+        await page.click('button:has-text("Settings")');
+        await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
+        await expect(page.locator('select').nth(1)).toHaveValue("gpt-4"); // Model
+        await page.goto('/');
 
         // Navigate to Projects
         await page.click('a:has-text("Projects")');
