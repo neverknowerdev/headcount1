@@ -39,6 +39,7 @@ export const AddCompany: React.FC = () => {
     // Step 3: CEO
     const [ceoName, setCeoName] = useState('CEO Agent');
     const [ceoPrompt, setCeoPrompt] = useState('');
+    const [hasManuallyEditedPrompt, setHasManuallyEditedPrompt] = useState(false);
 
     // Load from LocalStorage on mount
     useEffect(() => {
@@ -58,6 +59,7 @@ export const AddCompany: React.FC = () => {
 
                 if (parsed.ceoName) setCeoName(parsed.ceoName);
                 if (parsed.ceoPrompt) setCeoPrompt(parsed.ceoPrompt);
+                if (parsed.hasManuallyEditedPrompt) setHasManuallyEditedPrompt(parsed.hasManuallyEditedPrompt);
             } catch (e) {
                 console.error("Failed to load saved state", e);
             }
@@ -78,17 +80,17 @@ export const AddCompany: React.FC = () => {
     // Save to LocalStorage whenever state changes
     useEffect(() => {
         const stateToSave = {
-            step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt
+            step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt
         };
         localStorage.setItem(LS_KEY, JSON.stringify(stateToSave));
-    }, [step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt]);
+    }, [step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt]);
 
 
     useEffect(() => {
-        if (name && !ceoPrompt) {
+        if (name && !hasManuallyEditedPrompt) {
             setCeoPrompt(`Your CEO of ${name}. Your goal is to keep an eye on tasks, delegate work to other agents, keep eye on their work, escalate to human if needed, and do whatever we need to achieve company goals`);
         }
-    }, [name, ceoPrompt]);
+    }, [name, hasManuallyEditedPrompt]);
 
     const handleCompanyNext = (e: React.FormEvent) => {
         e.preventDefault();
@@ -183,7 +185,7 @@ export const AddCompany: React.FC = () => {
 
             // Success! Clear localstorage and redirect
             localStorage.removeItem(LS_KEY);
-            window.location.href = '/';
+            window.location.href = `/companies/${finalCompanyId}`;
         } catch (err) {
             console.error(err);
             alert('Failed to complete setup. Check console for details.');
@@ -334,7 +336,7 @@ export const AddCompany: React.FC = () => {
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">System Prompt</label>
-                                <textarea required rows={5} value={ceoPrompt} onChange={e => setCeoPrompt(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <textarea required rows={5} value={ceoPrompt} onChange={e => { setCeoPrompt(e.target.value); setHasManuallyEditedPrompt(true); }} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                         </div>
                         <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none">

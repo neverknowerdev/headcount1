@@ -41,6 +41,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)
 		r.Post("/", api.CreateCompany)
+		r.Put("/{id}", api.UpdateCompany)
 	})
 
 	r.Get("/settings", api.GetSettings)

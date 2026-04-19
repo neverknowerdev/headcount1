@@ -1,3 +1,4 @@
+/* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';
 import { useStore } from '../store';
 import { Plus } from 'lucide-react';
@@ -7,8 +8,11 @@ export const CompanySwitcher: React.FC = () => {
     const { companies, selectedCompanyId, setSelectedCompanyId } = useStore();
     const navigate = useNavigate();
 
-    const getInitials = (name: string) => {
-        return name.split(' ').map(n => n[0]).join('').substring(0, 2).toUpperCase();
+    const getInitials = (company: any) => {
+        if (company.short_name) {
+             return company.short_name.substring(0,2).toUpperCase();
+        }
+        return company.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase();
     };
 
     return (
@@ -18,13 +22,13 @@ export const CompanySwitcher: React.FC = () => {
                     key={company.id}
                     onClick={() => {
                         setSelectedCompanyId(company.id);
-                        navigate('/');
+                        navigate(`/companies/${company.id}`);
                     }}
                     className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold transition-transform hover:scale-105 ${selectedCompanyId === company.id ? 'ring-4 ring-white ring-opacity-50' : ''}`}
                     style={{ backgroundColor: company.color || '#4f46e5' }}
                     title={company.name}
                 >
-                    {getInitials(company.name)}
+                    {getInitials(company)}
                 </button>
             ))}
 
