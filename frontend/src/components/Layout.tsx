@@ -4,16 +4,18 @@ import { CompanySwitcher } from './CompanySwitcher';
 import { Sidebar } from './Sidebar';
 import { useStore } from '../store';
 import { AddCompany } from '../pages/AddCompany';
-import { useLocation } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children }) => {
+// Inner component to access router hooks inside BrowserRouter
+const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
   const { setCompanies, setSelectedCompanyId, companies, selectedCompanyId } = useStore();
   const [loading, setLoading] = useState(true);
   const location = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchInitialData = async () => {
@@ -22,8 +24,25 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
         const comps = res.data || [];
         setCompanies(comps);
 
-        if (comps.length > 0 && !selectedCompanyId) {
-          setSelectedCompanyId(comps[0].id);
+        if (comps.length > 0) {
+            // Check if URL has companies/:id
+            const match = location.pathname.match(/\/companies\/(\d+)/);
+            if (match) {
+                const urlCompanyId = parseInt(match[1]);
+                const compExists = comps.find((c: any) => c.id === urlCompanyId);
+                if (compExists) {
+                     setSelectedCompanyId(urlCompanyId);
+                } else {
+                     // Invalid company id in URL, fallback
+                     setSelectedCompanyId(comps[0].id);
+                     navigate(`/companies/${comps[0].id}`);
+                }
+            } else if (!selectedCompanyId) {
+                setSelectedCompanyId(comps[0].id);
+                if (location.pathname === '/') {
+                   navigate(`/companies/${comps[0].id}`);
+                }
+            }
         }
       } catch (e) {
         console.error(e);
@@ -33,7 +52,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     };
 
     fetchInitialData();
-  }, [setCompanies, setSelectedCompanyId, selectedCompanyId]);
+  }, [setCompanies, setSelectedCompanyId]); // removed location/navigate to prevent loops on pure navigation after init
 
   if (loading) {
     return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
@@ -50,7 +69,6 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
       return <AddCompany />;
   }
 
-
   return (
     <div className="h-screen flex overflow-hidden bg-gray-50">
       <CompanySwitcher />
@@ -61,3 +79,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     </div>
   );
 };
+
+export const Layout: React.FC<LayoutProps> = ({ children }) => {
+    return <LayoutContent>{children}</LayoutContent>;
+}

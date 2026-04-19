@@ -3,6 +3,7 @@ package endpoints
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
@@ -50,3 +51,32 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 
 	api.respondJSON(w, http.StatusCreated, comp)
 }
+
+func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	var req struct {
+		ShortName string `json:"short_name"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	var comp db.Company
+	if err := api.db.First(&comp, id).Error; err != nil {
+		api.respondError(w, http.StatusNotFound, "Company not found")
+		return
+	}
+
+	comp.ShortName = req.ShortName
+	if err := api.db.Save(&comp).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.respondJSON(w, http.StatusOK, comp)
