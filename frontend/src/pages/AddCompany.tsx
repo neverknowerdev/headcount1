@@ -2,7 +2,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
-import { CirclePicker } from 'react-color';
 
 // Predefined popular vibrant colors
 const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548', '#607d8b'];
@@ -204,24 +203,28 @@ export const AddCompany: React.FC = () => {
 
                 {step === 1 && (
                     <form className="mt-8 space-y-6" onSubmit={handleCompanyNext}>
-                        <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
+                        <div className="flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Company Name</label>
-                                <input required type="text" value={name} onChange={e => setName(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm" placeholder="Acme Corp" />
+                                <input required type="text" value={name} onChange={e => setName(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm" placeholder="Acme Corp" />
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Short Name (for folders)</label>
-                                <input required type="text" value={shortName} onChange={e => setShortName(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm" placeholder="acme" />
+                                <input required type="text" value={shortName} onChange={e => setShortName(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300 placeholder-gray-500 text-gray-900 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 focus:z-10 sm:text-sm" placeholder="acme" />
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700 mb-2 block">Workspace Color</label>
-                                <div className="mb-4">
-                                  <CirclePicker
-                                      color={color}
-                                      onChangeComplete={(c: any) => setColor(c.hex)}
-                                      colors={presetColors}
-                                      width="100%"
-                                  />
+                                <div className="flex flex-wrap gap-3 mb-4">
+                                    {presetColors.map(c => (
+                                        <button
+                                            key={c}
+                                            type="button"
+                                            onClick={() => setColor(c)}
+                                            className={`w-8 h-8 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${color === c ? 'ring-2 ring-gray-900 ring-offset-2' : ''}`}
+                                            style={{ backgroundColor: c }}
+                                            title={c}
+                                        />
+                                    ))}
                                 </div>
                                 <div className="flex items-center gap-2">
                                   <span className="text-xs text-gray-500">Custom:</span>
@@ -237,18 +240,18 @@ export const AddCompany: React.FC = () => {
 
                 {step === 2 && isInitialOnboarding && (
                     <form className="mt-8 space-y-6" onSubmit={handleProviderNext}>
-                        <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
+                        <div className="flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
-                                <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">API Key</label>
-                                <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
 
                             <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
@@ -284,14 +287,14 @@ export const AddCompany: React.FC = () => {
 
                 {step === 2 && !isInitialOnboarding && (
                     <form className="mt-8 space-y-6" onSubmit={handleExistingProviderNext}>
-                        <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
+                        <div className="flex flex-col gap-4">
                             <p className="text-sm text-gray-600 mb-2">
                                 Please select an existing LLM Provider to use for this workspace. You can add new providers later in Settings.
                             </p>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Select Provider</label>
                                 <select
-                                    className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                    className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
                                     value={selectedExistingProviderId}
                                     onChange={(e) => {
                                         setSelectedExistingProviderId(e.target.value);
@@ -312,7 +315,7 @@ export const AddCompany: React.FC = () => {
                                     type="text"
                                     value={providerModel}
                                     onChange={e => setProviderModel(e.target.value)}
-                                    className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                    className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
                                 />
                             </div>
                         </div>
@@ -324,14 +327,14 @@ export const AddCompany: React.FC = () => {
 
                 {step === 3 && (
                     <form className="mt-8 space-y-6" onSubmit={handleFinish}>
-                        <div className="rounded-md shadow-sm -space-y-px flex flex-col gap-4">
+                        <div className="flex flex-col gap-4">
                             <div>
                                 <label className="text-sm font-medium text-gray-700">Agent Name</label>
-                                <input required type="text" value={ceoName} onChange={e => setCeoName(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <input required type="text" value={ceoName} onChange={e => setCeoName(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                             <div>
                                 <label className="text-sm font-medium text-gray-700">System Prompt</label>
-                                <textarea required rows={5} value={ceoPrompt} onChange={e => setCeoPrompt(e.target.value)} className="appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                <textarea required rows={5} value={ceoPrompt} onChange={e => setCeoPrompt(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                             </div>
                         </div>
                         <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none">
