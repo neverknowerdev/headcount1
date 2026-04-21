@@ -3,8 +3,8 @@ import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings } from 'lucide-react';
 import { useStore } from '../store';
 
-const getNavItems = (companyId: number | null) => {
-  const base = companyId ? `/companies/${companyId}` : '';
+const getNavItems = (companyIdentifier: string | null) => {
+  const base = companyIdentifier ? `/companies/${companyIdentifier}` : '';
   return [
     { icon: LayoutDashboard, label: 'Dashboard', path: base ? base : '/' },
     { icon: CheckSquare, label: 'Tasks', path: `${base}/tasks` },
@@ -20,25 +20,11 @@ const getNavItems = (companyId: number | null) => {
 export const Sidebar: React.FC = () => {
   const location = useLocation();
   const { selectedCompanyId, companies } = useStore();
-  const navItems = useMemo(() => getNavItems(selectedCompanyId), [selectedCompanyId]);
-
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
+  const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
-  const handleShortNameUpdate = async (e: React.FocusEvent<HTMLInputElement>) => {
-      const newShortName = e.target.value;
-      if (!currentCompany || newShortName === currentCompany.short_name) return;
 
-      try {
-         await fetch(`/api/companies/${currentCompany.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ short_name: newShortName })
-         });
-         // We might want to update the store here, but since the user just requested DB save we do our best.
-      } catch (err) {
-         console.error("Failed to update short name", err);
-      }
-  };
+
 
 
   return (
@@ -78,19 +64,7 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-      {currentCompany && (
-        <div className="p-4 border-t border-gray-200">
-           <label className="block text-xs font-medium text-gray-500 uppercase tracking-wider mb-2">Short Name (Slack)</label>
-           <input
-              type="text"
-              maxLength={2}
-              defaultValue={currentCompany.short_name.substring(0,2)}
-              onBlur={handleShortNameUpdate}
-              className="w-full text-sm font-mono bg-gray-50 border border-gray-300 rounded px-2 py-1 text-center uppercase focus:ring-indigo-500 focus:border-indigo-500 focus:outline-none"
-              title="Displayed in left Slack company menu. Max 2 chars."
-           />
-        </div>
-      )}
+
     </div>
   );
 };

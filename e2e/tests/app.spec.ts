@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test';
 test.describe.serial('Paperclip2 App', () => {
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
         await page.waitForTimeout(2000);
-        await page.goto('/companies/1');
+        await page.goto('/');
 
         // Step 1: Create Company (Now on /add-company)
         await expect(page.getByText('Create a Workspace')).toBeVisible();
@@ -29,16 +29,16 @@ test.describe.serial('Paperclip2 App', () => {
         // Main App View
         // wait for navigation to home
         await page.waitForTimeout(2000);
-        await page.goto('/companies/1');
+        await page.goto('/companies/pw-inc');
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
 
         // Verify CEO agent settings initialized correctly
-        await page.goto('/companies/1/agents/1');
+        await page.goto('/companies/pw-inc/agents/1');
         await page.click('button:has-text("Settings")');
         await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
         await expect(page.locator('select').nth(1)).toHaveValue("gpt-4"); // Model
-        await page.goto('/companies/1');
+        await page.goto('/companies/pw-inc');
 
         // Navigate to Projects
         await page.click('a:has-text("Projects")');
@@ -56,7 +56,7 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });
 
         // Navigate to Tasks
-        await page.goto('/companies/1/projects/1');
+        await page.goto('/companies/pw-inc/tasks');
         await page.waitForTimeout(500);
 
         // Add a Sprint
@@ -70,7 +70,7 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByText('E2E Sprint')).toBeVisible();
 
         // Go back to tasks
-        await page.goto('/companies/1/projects/1');
+        await page.goto('/companies/pw-inc/tasks');
         await page.waitForTimeout(500);
 
         // Add Task
@@ -93,9 +93,29 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(doneColumn).toBeVisible();
     });
 
+
+    test('can edit company shortname in settings', async ({ page }) => {
+        page.on('dialog', dialog => dialog.accept());
+        await page.goto('/companies/pw-inc');
+        await page.waitForTimeout(1000);
+
+        // Go to settings
+        await page.click('a:has-text("Settings")');
+        await expect(page.getByRole('heading', { name: 'Company Settings' })).toBeVisible();
+
+        // Edit short name
+        const input = page.locator('input').first(); // the shortname input
+        await input.fill('nw');
+        await page.click('button:has-text("Save Settings")');
+        await page.waitForTimeout(1000);
+
+        // Ensure URL changed
+        await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
+    });
+
     test('can add a second company using existing provider', async ({ page }) => {
         // Navigate to dashboard
-        await page.goto('/companies/1');
+        await page.goto('/companies/nw');
 
         // Wait for dashboard and company switcher to load
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
@@ -121,7 +141,7 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Main App View
         await page.waitForTimeout(2000);
-        await page.goto('/companies/1');
+        await page.goto('/companies/nw');
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
 
         // Verify we are on the second company

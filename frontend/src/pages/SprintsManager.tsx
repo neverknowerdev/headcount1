@@ -2,9 +2,10 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
 import { Plus, Calendar, ArrowLeft } from 'lucide-react';
-import { Link } from 'react-router-dom';
+import { Link, useParams } from 'react-router-dom';
 
 export const SprintsManager: React.FC = () => {
+    const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [sprints, setSprints] = useState<any[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -48,7 +49,7 @@ export const SprintsManager: React.FC = () => {
         <div className="h-full flex flex-col space-y-6">
             <div className="flex justify-between items-center">
                 <div className="flex items-center space-x-4">
-                    <Link to="/tasks" className="text-gray-500 hover:text-gray-900"><ArrowLeft size={20} /></Link>
+                    <Link to={`/companies/${shortName}/tasks`} className="text-gray-500 hover:text-gray-900"><ArrowLeft size={20} /></Link>
                     <h1 className="text-2xl font-bold">Manage Sprints</h1>
                 </div>
                 <button
