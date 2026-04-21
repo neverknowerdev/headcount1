@@ -1,9 +1,11 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
 
 export const AgentManager: React.FC = () => {
+    const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
 
@@ -30,7 +32,7 @@ export const AgentManager: React.FC = () => {
                 {agents.map(agent => (
                     <div key={agent.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col">
                         <div className="flex justify-between items-start mb-4">
-                            <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/agents/${agent.id}`}>{agent.name}</h3>
+                            <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</h3>
                             <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
                         </div>
                         {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
