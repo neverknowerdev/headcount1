@@ -81,7 +81,7 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Check task modal
         await page.click('text=Write E2E Tests');
-        await expect(page.getByText('Task T-1')).toBeVisible();
+        await expect(page.getByText('Task PW-INC-1')).toBeVisible();
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
         await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
         await expect(page.getByText('I have analyzed the E2E task and completed it successfully! 🚀')).toBeVisible({ timeout: 5000 });

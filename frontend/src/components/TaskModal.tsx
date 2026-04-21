@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
+import { useParams } from 'react-router-dom';
 import { X, Send, Save, Archive } from 'lucide-react';
 import { useStore } from '../store';
 
@@ -12,6 +13,8 @@ interface TaskModalProps {
 }
 
 export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose, onTaskCreated }) => {
+    const { shortName } = useParams<{shortName: string}>();
+    const prefix = shortName ? shortName.toUpperCase() : 'T';
     const { selectedCompanyId } = useStore();
     const [task, setTask] = useState<any>(null);
     const [comments, setComments] = useState<any[]>([]);
@@ -186,7 +189,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         {taskId ? (
                             <>
                                 <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-1">
-                                    Task T-{task.id} {formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-2 py-0.5 rounded">Archived</span> : null}
+                                    Task {prefix}-{task.id} {formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-2 py-0.5 rounded">Archived</span> : null}
                                 </span>
                             </>
                         ) : (
@@ -302,7 +305,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             <div className="flex space-x-2 items-center">
                                 <input
                                     type="text"
-                                    value={formData.parent_id ? `T-${formData.parent_id}` : parentSearch}
+                                    value={formData.parent_id ? `${prefix}-${formData.parent_id}` : parentSearch}
                                     onChange={e => {
                                         setFormData({...formData, parent_id: ''});
                                         setParentSearch(e.target.value);
@@ -334,7 +337,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 setShowParentDropdown(false);
                                             }}
                                         >
-                                            <span className="text-xs text-gray-500 font-mono mr-2">T-{t.id}</span>
+                                            <span className="text-xs text-gray-500 font-mono mr-2">{prefix}-{t.id}</span>
                                             {t.title}
                                         </div>
                                     ))}
