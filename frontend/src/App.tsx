@@ -18,16 +18,16 @@ function App() {
       <Layout>
         <Routes>
           <Route path="/add-company" element={<AddCompany />} />
-          <Route path="/companies/:companyId" element={<Dashboard />} />
-          <Route path="/companies/:companyId/tasks" element={<ProjectBoard />} />
-          <Route path="/companies/:companyId/sprints" element={<SprintsManager />} />
-          <Route path="/companies/:companyId/projects" element={<CompanyView />} />
-          <Route path="/companies/:companyId/agents" element={<AgentManager />} />
-          <Route path="/companies/:companyId/agents/:id" element={<AgentDetails />} />
-          <Route path="/companies/:companyId/providers" element={<ProvidersManager />} />
-          <Route path="/companies/:companyId/skills" element={<SkillsManager />} />
-          <Route path="/companies/:companyId/runs" element={<RunLogs />} />
-          <Route path="/companies/:companyId/settings" element={<Settings />} />
+          <Route path="/companies/:shortName" element={<Dashboard />} />
+          <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
+          <Route path="/companies/:shortName/sprints" element={<SprintsManager />} />
+          <Route path="/companies/:shortName/projects" element={<CompanyView />} />
+          <Route path="/companies/:shortName/agents" element={<AgentManager />} />
+          <Route path="/companies/:shortName/agents/:id" element={<AgentDetails />} />
+          <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
+          <Route path="/companies/:shortName/skills" element={<SkillsManager />} />
+          <Route path="/companies/:shortName/runs" element={<RunLogs />} />
+          <Route path="/companies/:shortName/settings" element={<Settings />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

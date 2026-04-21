@@ -26,21 +26,21 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
 
         if (comps.length > 0) {
             // Check if URL has companies/:id
-            const match = location.pathname.match(/\/companies\/(\d+)/);
+            const match = location.pathname.match(/\/companies\/([^\/]+)/);
             if (match) {
-                const urlCompanyId = parseInt(match[1]);
-                const compExists = comps.find((c: any) => c.id === urlCompanyId);
+                const urlShortName = match[1];
+                const compExists = comps.find((c: any) => c.short_name === urlShortName);
                 if (compExists) {
-                     setSelectedCompanyId(urlCompanyId);
+                     setSelectedCompanyId(compExists.id);
                 } else {
-                     // Invalid company id in URL, fallback
+                     // Invalid company short_name in URL, fallback
                      setSelectedCompanyId(comps[0].id);
-                     navigate(`/companies/${comps[0].id}`);
+                     navigate(`/companies/${comps[0].short_name}`);
                 }
             } else if (!selectedCompanyId) {
                 setSelectedCompanyId(comps[0].id);
                 if (location.pathname === '/') {
-                   navigate(`/companies/${comps[0].id}`);
+                   navigate(`/companies/${comps[0].short_name}`);
                 }
             }
         }

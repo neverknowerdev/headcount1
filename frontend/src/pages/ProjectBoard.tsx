@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
@@ -28,6 +29,7 @@ interface Sprint {
 }
 
 export const ProjectBoard: React.FC = () => {
+    const { shortName } = useParams<{shortName: string}>();
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -154,7 +156,7 @@ export const ProjectBoard: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-            <button onClick={() => window.location.href='/sprints'} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm flex items-center border hover:bg-gray-200">
+            <button onClick={() => window.location.href=`/companies/${shortName}/sprints`} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm flex items-center border hover:bg-gray-200">
                 <Settings size={16} className="mr-1"/> Manage Sprints
             </button>
             <button onClick={() => setIsCreateModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">

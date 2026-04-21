@@ -5,7 +5,7 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Save } from 'lucide-react';
 
 export const AgentDetails: React.FC = () => {
-    const { id } = useParams<{id: string}>();
+    const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
     const [stats, setStats] = useState<any>(null);
     const [providers, setProviders] = useState<any[]>([]);
@@ -60,7 +60,7 @@ export const AgentDetails: React.FC = () => {
     return (
         <div className="h-full flex flex-col">
             <div className="mb-6 flex items-center space-x-4">
-                <Link to="/agents" className="text-gray-500 hover:text-gray-900"><ArrowLeft size={20} /></Link>
+                <Link to={`/companies/${shortName}/agents`} className="text-gray-500 hover:text-gray-900"><ArrowLeft size={20} /></Link>
                 <h1 className="text-2xl font-bold">{agent.name}</h1>
             </div>
 
@@ -141,7 +141,7 @@ export const AgentDetails: React.FC = () => {
                         <div>
                             <div className="flex justify-between items-center mb-1">
                                 <label className="block text-sm font-medium text-gray-700">LLM Provider</label>
-                                <Link to="/providers" className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
+                                <Link to={`/companies/${shortName}/providers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
                             </div>
                             <select value={formData.provider_id || ''} onChange={e => {
                                 const selectedProviderId = e.target.value;
