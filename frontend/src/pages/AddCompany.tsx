@@ -4,7 +4,7 @@ import axios from 'axios';
 import { useStore } from '../store';
 
 // Predefined popular vibrant colors
-const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548', '#607d8b'];
+const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
 
 export const AddCompany: React.FC = () => {
     const { companies } = useStore();
@@ -222,8 +222,8 @@ export const AddCompany: React.FC = () => {
                                             key={c}
                                             type="button"
                                             onClick={() => setColor(c)}
-                                            className={`w-8 h-8 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 ${color === c ? 'ring-2 ring-gray-900 ring-offset-2' : ''}`}
-                                            style={{ backgroundColor: c }}
+                                            className={`w-8 h-8 rounded-full cursor-pointer transition-transform hover:scale-110 focus:outline-none`}
+                                            style={{ backgroundColor: c, boxShadow: color === c ? `0 0 0 2px white, 0 0 0 4px ${c}` : 'none' }}
                                             title={c}
                                         />
                                     ))}

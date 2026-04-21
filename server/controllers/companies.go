@@ -1,6 +1,7 @@
 package endpoints
 
 import (
+	"github.com/go-chi/chi/v5"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -80,3 +81,4 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 	}
 
 	api.respondJSON(w, http.StatusOK, comp)
+}
