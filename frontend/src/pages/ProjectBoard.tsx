@@ -1,6 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
@@ -28,6 +29,8 @@ interface Sprint {
 }
 
 export const ProjectBoard: React.FC = () => {
+    const { shortName } = useParams<{shortName: string}>();
+    const prefix = shortName ? shortName.toUpperCase() : 'T';
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -154,7 +157,7 @@ export const ProjectBoard: React.FC = () => {
         </div>
 
         <div className="flex gap-2">
-            <button onClick={() => window.location.href='/sprints'} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm flex items-center border hover:bg-gray-200">
+            <button onClick={() => window.location.href=`/companies/${shortName}/sprints`} className="bg-gray-100 text-gray-700 px-4 py-2 rounded-md text-sm flex items-center border hover:bg-gray-200">
                 <Settings size={16} className="mr-1"/> Manage Sprints
             </button>
             <button onClick={() => setIsCreateModalOpen(true)} className="bg-indigo-600 text-white px-4 py-2 rounded-md text-sm flex items-center shadow-sm hover:bg-indigo-700">
@@ -196,7 +199,7 @@ export const ProjectBoard: React.FC = () => {
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
                                         <div className="mt-4 flex justify-between items-center">
-                                            <span className="text-xs text-gray-400">T-{task.id}</span>
+                                            <span className="text-xs text-gray-400">{prefix}-{task.id}</span>
                                             {task.priority !== 'Normal' && (
                                                 <span className={`text-[10px] px-2 py-0.5 rounded-full ${
                                                     task.priority === 'Urgent' ? 'bg-red-100 text-red-800' :

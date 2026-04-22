@@ -1,11 +1,12 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Paperclip2 App', () => {
+// Use serial mode because the second test depends on the state created by the first
+test.describe.serial('Paperclip2 App', () => {
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
         await page.waitForTimeout(2000);
         await page.goto('/');
 
-        // Step 1: Create Company
+        // Step 1: Create Company (Now on /add-company)
         await expect(page.getByText('Create a Workspace')).toBeVisible();
         await page.fill('input[placeholder="Acme Corp"]', 'Playwright Inc');
         await page.fill('input[placeholder="acme"]', 'pw-inc');
@@ -28,16 +29,16 @@ test.describe('Paperclip2 App', () => {
         // Main App View
         // wait for navigation to home
         await page.waitForTimeout(2000);
-        await page.goto('/');
+        await page.goto('/companies/pw-inc');
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
 
         // Verify CEO agent settings initialized correctly
-        await page.goto('/agents/1');
+        await page.goto('/companies/pw-inc/agents/1');
         await page.click('button:has-text("Settings")');
         await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
         await expect(page.locator('select').nth(1)).toHaveValue("gpt-4"); // Model
-        await page.goto('/');
+        await page.goto('/companies/pw-inc');
 
         // Navigate to Projects
         await page.click('a:has-text("Projects")');
@@ -55,67 +56,97 @@ test.describe('Paperclip2 App', () => {
         await expect(page.getByText('Project Alpha').first()).toBeVisible({ timeout: 10000 });
 
         // Navigate to Tasks
-        await page.click('a:has-text("Tasks")');
+        await page.goto('/companies/pw-inc/tasks');
+        await page.waitForTimeout(500);
 
-        // Since Sprint is required to create a task, we need to make sure one is selected.
-        // Wait for projects and sprints to load (if any). Our UI might show "-- Select Sprint --" if none exist.
-        // Create a Sprint first if we can't select one.
-
+        // Add a Sprint
         await page.click('button:has-text("Manage Sprints")');
         await expect(page.getByRole('heading', { name: 'Manage Sprints' })).toBeVisible();
         await page.click('button:has-text("Create Sprint")');
         await page.fill('input[placeholder="e.g. Sprint 1"]', 'E2E Sprint');
-        // fill start and end dates to satisfy HTML5 required
         await page.fill('input[type="date"]', '2024-01-01'); // Start
         await page.locator('input[type="date"]').nth(1).fill('2024-01-14'); // End
         await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
         await expect(page.getByText('E2E Sprint')).toBeVisible();
 
         // Go back to tasks
-        await page.click('a:has-text("Tasks")');
+        await page.goto('/companies/pw-inc/tasks');
+        await page.waitForTimeout(500);
 
-        // Add Task (This specific title triggers the mock engine we added)
+        // Add Task
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
-        // Sprint is auto-selected if there's only one, otherwise we might need to select it.
-        // Focus on the Sprint select specifically
         await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
-        // Task should initially be in backlog or immediately picked up depending on speed
-        // Click to open the Task modal
+        // Check task modal
         await page.click('text=Write E2E Tests');
-
-        // Verify Modal is open
-        await expect(page.getByText('Task T-1')).toBeVisible();
-
-        // Add a human comment
+        await expect(page.getByText('Task PW-INC-1')).toBeVisible();
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
         await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
-
-        // Wait for the mock agent to post a comment
-        // The mock waits 1s then posts "I have analyzed the E2E task and completed it successfully! 🚀"
         await expect(page.getByText('I have analyzed the E2E task and completed it successfully! 🚀')).toBeVisible({ timeout: 5000 });
-
-        // Verify human comment is also there
         await expect(page.getByText('Let us see if the agent works')).toBeVisible();
-
-        // Close modal
-
         await page.keyboard.press('Escape');
 
-        // Check if task moved to 'done' (our mock auto-moves it to done)
-        // Since drag and drop is tricky in e2e, we verify the backend state update reflected via websockets
-        const doneColumn = page.locator('div:has-text("done")').last(); // Get the done column
+        // Verify done state
+        const doneColumn = page.locator('div:has-text("done")').last();
         await expect(doneColumn).toBeVisible();
     });
 
-    test('can drag and drop tasks', async ({ page }) => {
-        // Assume company and project exist from previous test (if state leaks, or just run them together)
-        // Playwright test runner isolates by default unless we use serial.
-        // Let's use standard page drag and drop APIs if possible, but testing dnd-kit or react-beautiful-dnd in playwright
-        // usually requires mouse events.
 
-        // Skipping pure drag and drop since we verified full flow and UI.
+    test('can edit company shortname in settings', async ({ page }) => {
+        page.on('dialog', dialog => dialog.accept());
+        await page.goto('/companies/pw-inc');
+        await page.waitForTimeout(1000);
+
+        // Go to settings
+        await page.click('a:has-text("Settings")');
+        await expect(page.getByRole('heading', { name: 'Company Settings' })).toBeVisible();
+
+        // Edit short name
+        const input = page.locator('input').first(); // the shortname input
+        await input.fill('nw');
+        await page.click('button:has-text("Save Settings")');
+        await page.waitForTimeout(1000);
+
+        // Ensure URL changed
+        await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
+    });
+
+    test('can add a second company using existing provider', async ({ page }) => {
+        // Navigate to dashboard
+        await page.goto('/companies/nw');
+
+        // Wait for dashboard and company switcher to load
+        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
+
+        // Click the Add Workspace button
+        await page.click('button[title="Add Workspace"]');
+
+        // Step 1: Create second Company
+        await expect(page.getByText('Add Workspace')).toBeVisible();
+        await page.fill('input[placeholder="Acme Corp"]', 'Second Company');
+        await page.fill('input[placeholder="acme"]', 'second-co');
+        await page.click('button:has-text("Next Step")');
+
+        // Step 2: Use existing Provider
+        await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
+        // The mock provider should be auto-selected, just click next
+        await page.click('button:has-text("Next Step")');
+
+        // Step 3: Hire new CEO
+        await expect(page.getByText('Hire your CEO')).toBeVisible();
+        await page.fill('input[type="text"]', 'Second CEO');
+        await page.click('button:has-text("Finish & Launch")');
+
+        // Main App View
+        await page.waitForTimeout(2000);
+        await page.goto('/companies/nw');
+        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
+
+        // Verify we are on the second company
+        // Check if there are 2 company icons in the sidebar
+        const companyButtons = page.locator('button[title="Playwright Inc"], button[title="Second Company"]');
+        await expect(companyButtons).toHaveCount(2);
     });
 });
