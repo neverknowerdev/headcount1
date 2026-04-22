@@ -1,13 +1,13 @@
 package engine
 
 import (
-	"bufio"
+	"bytes"
+	"encoding/json"
+	"io/ioutil"
+	"net/http"
 	"context"
 	"fmt"
-	"os"
-	"os/exec"
-	"path/filepath"
-	"strings"
+		"strings"
 
 	"gorm.io/gorm"
 
@@ -76,68 +76,91 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 		contextStr += fmt.Sprintf("[%s]: %s\n", c.AuthorType, c.Content)
 	}
 
-	tmpDir := os.TempDir()
-	promptFile := filepath.Join(tmpDir, fmt.Sprintf("task_%d_prompt.txt", task.ID))
-	err = os.WriteFile(promptFile, []byte(contextStr), 0644)
-	if err != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to write prompt file: %v", err))
-		return
-	}
-	defer os.Remove(promptFile)
-
-	cmd := exec.CommandContext(ctx, "npx", "forgecode", "--prompt", promptFile)
-	cmd.Env = append(os.Environ(),
-		fmt.Sprintf("SYSTEM_PROMPT=%s", agent.SystemPrompt),
-		fmt.Sprintf("AGENT_MODEL=%s", agent.Model),
-	)
-
-	stdoutPipe, err := cmd.StdoutPipe()
-	if err != nil {
-		e.failRun(ctx, run.ID, err.Error())
+	if agent.ProviderID == nil {
+		e.failRun(ctx, run.ID, "Agent has no provider")
 		return
 	}
 
-	stderrPipe, err := cmd.StderrPipe()
+	provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
 	if err != nil {
-		e.failRun(ctx, run.ID, err.Error())
-		return
-	}
-
-	if err := cmd.Start(); err != nil {
-		e.failRun(ctx, run.ID, err.Error())
+		e.failRun(ctx, run.ID, "Failed to get provider")
 		return
 	}
 
 	var fullLog strings.Builder
+	logLine := func(line string) {
+		fullLog.WriteString(line + "\n")
+		e.hub.BroadcastEvent("run_log", map[string]interface{}{"run_id": run.ID, "line": line})
+	}
 
-	go func() {
-		scanner := bufio.NewScanner(stdoutPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			fullLog.WriteString(line + "\n")
-			e.hub.BroadcastEvent("run_log", map[string]interface{}{"run_id": run.ID, "line": line})
-		}
-	}()
+	reqBody := map[string]interface{}{
+		"model": agent.Model,
+		"messages": []map[string]interface{}{
+			{
+				"role":    "system",
+				"content": agent.SystemPrompt,
+			},
+			{
+				"role":    "user",
+				"content": contextStr,
+			},
+		},
+	}
 
-	go func() {
-		scanner := bufio.NewScanner(stderrPipe)
-		for scanner.Scan() {
-			line := scanner.Text()
-			fullLog.WriteString("ERROR: " + line + "\n")
-			e.hub.BroadcastEvent("run_log", map[string]interface{}{"run_id": run.ID, "line": "ERROR: " + line})
-		}
-	}()
+	reqBodyBytes, _ := json.Marshal(reqBody)
+	logLine(fmt.Sprintf("Sending request to %s...", provider.BaseUrl))
 
-	err = cmd.Wait()
+	req, err := http.NewRequest("POST", provider.BaseUrl+"/v1/chat/completions", bytes.NewBuffer(reqBodyBytes))
+	if err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create request: %v", err))
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+provider.ApiKey)
+
+	client := &http.Client{}
+	resp, err := client.Do(req)
+	if err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to contact provider: %v", err))
+		return
+	}
+	defer resp.Body.Close()
+
+	respBodyBytes, _ := ioutil.ReadAll(resp.Body)
 
 	status := "completed"
-	taskNextStatus := "in-review"
+	taskNextStatus := "in-progress"
+	if mode == "implement" {
+		taskNextStatus = "in-review"
+	}
 
-	if err != nil {
+	if resp.StatusCode != http.StatusOK {
 		status = "failed"
 		taskNextStatus = "blocked"
-	} else if strings.Contains(fullLog.String(), "NEED_USER_INPUT") || strings.Contains(fullLog.String(), "QUESTION_FOR_USER") {
-		taskNextStatus = "blocked"
+		logLine(fmt.Sprintf("ERROR: Provider returned status %d", resp.StatusCode))
+		logLine(string(respBodyBytes))
+	} else {
+		var resPayload struct {
+			Choices []struct {
+				Message struct {
+					Content string `json:"content"`
+				} `json:"message"`
+			} `json:"choices"`
+		}
+		json.Unmarshal(respBodyBytes, &resPayload)
+		agentResponse := ""
+		if len(resPayload.Choices) > 0 {
+			agentResponse = resPayload.Choices[0].Message.Content
+			logLine(agentResponse)
+
+			// Add agent response as a comment
+			comment, _ := e.q.CreateComment(ctx, db.Comment{
+				TaskID:     task.ID,
+				AuthorType: "agent",
+				Content:    agentResponse,
+			})
+			e.hub.BroadcastEvent("comment_created", comment)
+		}
 	}
 
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)

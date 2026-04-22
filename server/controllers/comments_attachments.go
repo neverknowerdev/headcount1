@@ -3,6 +3,7 @@ package endpoints
 import (
 	"encoding/json"
 	"io"
+	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -32,6 +33,7 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		AuthorType string `json:"author_type"`
 		AuthorID   *int32 `json:"author_id"`
 		Content    string `json:"content"`
+		RunAgent   bool   `json:"run_agent"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -50,6 +52,14 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("comment_created", comment)
+
+	if req.RunAgent {
+		task, err := api.q.GetTask(r.Context(), req.TaskID)
+		if err == nil && task.Status != "backlog" {
+			go api.engine.ProcessTask(context.Background(), req.TaskID)
+		}
+	}
+
 	api.respondJSON(w, http.StatusCreated, comment)
 }
 

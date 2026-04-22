@@ -10,6 +10,7 @@ export const AgentDetails: React.FC = () => {
     const [stats, setStats] = useState<any>(null);
     const [providers, setProviders] = useState<any[]>([]);
     const [activeTab, setActiveTab] = useState('overview');
+    const [runs, setRuns] = useState<any[]>([]);
 
     const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '' });
 
@@ -30,6 +31,12 @@ export const AgentDetails: React.FC = () => {
                 model: agentRes.data.model || '',
                 provider_id: agentRes.data.provider_id?.toString() || ''
             });
+        } catch (e) {
+            console.error(e);
+        }
+        try {
+            const runsRes = await axios.get(`/api/agents/${id}/runs`);
+            setRuns(runsRes.data || []);
         } catch (e) {
             console.error(e);
         }
@@ -123,8 +130,19 @@ export const AgentDetails: React.FC = () => {
                 )}
 
                 {activeTab === 'logs' && (
-                    <div className="text-center text-gray-500 py-10 italic">
-                        Run logs by session will be implemented here. For now, check the global Run Logs page.
+                    <div className="space-y-4">
+                        {runs.length === 0 ? (
+                            <p className="text-sm text-gray-500 italic">No runs yet.</p>
+                        ) : (
+                            runs.map((r: any) => (
+                                <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
+                                    <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} for Task #{r.task_id} ({r.status})</summary>
+                                    <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+                                        {r.log_content}
+                                    </pre>
+                                </details>
+                            ))
+                        )}
                     </div>
                 )}
 
