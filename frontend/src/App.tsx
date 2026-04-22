@@ -10,24 +10,25 @@ import { ProvidersManager } from './pages/ProvidersManager';
 import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { Settings } from './pages/Settings';
-import { Onboarding } from './pages/Onboarding';
+import { AddCompany } from './pages/AddCompany';
 
 function App() {
   return (
     <BrowserRouter>
       <Layout>
         <Routes>
-          <Route path="/onboarding" element={<Onboarding />} />
+          <Route path="/add-company" element={<AddCompany />} />
+          <Route path="/companies/:shortName" element={<Dashboard />} />
+          <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
+          <Route path="/companies/:shortName/sprints" element={<SprintsManager />} />
+          <Route path="/companies/:shortName/projects" element={<CompanyView />} />
+          <Route path="/companies/:shortName/agents" element={<AgentManager />} />
+          <Route path="/companies/:shortName/agents/:id" element={<AgentDetails />} />
+          <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
+          <Route path="/companies/:shortName/skills" element={<SkillsManager />} />
+          <Route path="/companies/:shortName/runs" element={<RunLogs />} />
+          <Route path="/companies/:shortName/settings" element={<Settings />} />
           <Route path="/" element={<Dashboard />} />
-          <Route path="/tasks" element={<ProjectBoard />} />
-          <Route path="/sprints" element={<SprintsManager />} />
-          <Route path="/projects" element={<CompanyView />} />
-          <Route path="/agents" element={<AgentManager />} />
-          <Route path="/agents/:id" element={<AgentDetails />} />
-          <Route path="/providers" element={<ProvidersManager />} />
-          <Route path="/skills" element={<SkillsManager />} />
-          <Route path="/runs" element={<RunLogs />} />
-          <Route path="/settings" element={<Settings />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>
       </Layout>

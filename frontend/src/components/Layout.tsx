@@ -3,17 +3,19 @@ import axios from 'axios';
 import { CompanySwitcher } from './CompanySwitcher';
 import { Sidebar } from './Sidebar';
 import { useStore } from '../store';
-import { Onboarding } from '../pages/Onboarding';
-import { useLocation } from 'react-router-dom';
+import { AddCompany } from '../pages/AddCompany';
+import { useLocation, useNavigate } from 'react-router-dom';
 
 interface LayoutProps {
   children: React.ReactNode;
 }
 
-export const Layout: React.FC<LayoutProps> = ({ children }) => {
+// Inner component to access router hooks inside BrowserRouter
+const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
   const { setCompanies, setSelectedCompanyId, companies, selectedCompanyId } = useStore();
   const [loading, setLoading] = useState(true);
   const location = useLocation();
+  const navigate = useNavigate();
 
   useEffect(() => {
     const fetchInitialData = async () => {
@@ -22,8 +24,25 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
         const comps = res.data || [];
         setCompanies(comps);
 
-        if (comps.length > 0 && !selectedCompanyId) {
-          setSelectedCompanyId(comps[0].id);
+        if (comps.length > 0) {
+            // Check if URL has companies/:id
+            const match = location.pathname.match(/\/companies\/([^\/]+)/);
+            if (match) {
+                const urlShortName = match[1];
+                const compExists = comps.find((c: any) => c.short_name === urlShortName);
+                if (compExists) {
+                     setSelectedCompanyId(compExists.id);
+                } else {
+                     // Invalid company short_name in URL, fallback
+                     setSelectedCompanyId(comps[0].id);
+                     navigate(`/companies/${comps[0].short_name}`);
+                }
+            } else if (!selectedCompanyId) {
+                setSelectedCompanyId(comps[0].id);
+                if (location.pathname === '/') {
+                   navigate(`/companies/${comps[0].short_name}`);
+                }
+            }
         }
       } catch (e) {
         console.error(e);
@@ -33,25 +52,22 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     };
 
     fetchInitialData();
-  }, [setCompanies, setSelectedCompanyId, selectedCompanyId]);
+  }, [setCompanies, setSelectedCompanyId]); // removed location/navigate to prevent loops on pure navigation after init
 
   if (loading) {
     return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
   }
 
-  if (companies.length === 0 && location.pathname !== '/onboarding') {
-      window.location.href = '/onboarding';
+  // If there are no companies at all, force redirect to /add-company
+  if (companies.length === 0 && location.pathname !== '/add-company') {
+      window.location.href = '/add-company';
       return null;
   }
 
-  if (location.pathname === '/onboarding') {
-      if (companies.length > 0) {
-          window.location.href = '/';
-          return null;
-      }
-      return <Onboarding />;
+  // Allow /add-company to render full screen, regardless of how many companies exist.
+  if (location.pathname === '/add-company') {
+      return <AddCompany />;
   }
-
 
   return (
     <div className="h-screen flex overflow-hidden bg-gray-50">
@@ -63,3 +79,7 @@ export const Layout: React.FC<LayoutProps> = ({ children }) => {
     </div>
   );
 };
+
+export const Layout: React.FC<LayoutProps> = ({ children }) => {
+    return <LayoutContent>{children}</LayoutContent>;
+}
