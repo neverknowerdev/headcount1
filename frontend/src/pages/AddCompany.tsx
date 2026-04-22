@@ -185,7 +185,7 @@ export const AddCompany: React.FC = () => {
 
             // Success! Clear localstorage and redirect
             localStorage.removeItem(LS_KEY);
-            window.location.href = `/companies/${finalCompanyId}`;
+            window.location.href = `/companies/${companyRes.data.short_name}`;
         } catch (err) {
             console.error(err);
             alert('Failed to complete setup. Check console for details.');

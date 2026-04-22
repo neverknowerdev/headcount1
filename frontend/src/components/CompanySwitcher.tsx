@@ -22,7 +22,7 @@ export const CompanySwitcher: React.FC = () => {
                     key={company.id}
                     onClick={() => {
                         setSelectedCompanyId(company.id);
-                        navigate(`/companies/${company.id}`);
+                        navigate(`/companies/${company.short_name}`);
                     }}
                     className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold transition-transform hover:scale-105 ${selectedCompanyId === company.id ? 'ring-4 ring-white ring-opacity-50' : ''}`}
                     style={{ backgroundColor: company.color || '#4f46e5' }}
