@@ -99,6 +99,16 @@ test.describe.serial('Paperclip2 App', () => {
 
         await page.keyboard.press('Escape');
 
+        // Verify Run Logs page
+        await page.waitForTimeout(2000);
+        await page.goto('/companies/pw-inc/runs');
+        await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
+        await expect(page.getByText('View Details').first()).toBeVisible();
+        await page.getByText('View Details').first().click();
+        await expect(page.getByRole('heading', { name: /Run #\d+ Details/ })).toBeVisible();
+
+
+        await page.goto('/companies/pw-inc/tasks');
         // Verify done state
         const doneColumn = page.locator('div:has-text("done")').last();
         await expect(doneColumn).toBeVisible();

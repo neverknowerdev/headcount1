@@ -6,6 +6,7 @@ import { ProjectBoard } from './pages/ProjectBoard';
 import { AgentManager } from './pages/AgentManager';
 import { AgentDetails } from './pages/AgentDetails';
 import { RunLogs } from './pages/RunLogs';
+import { RunLogDetails } from './pages/RunLogDetails';
 import { ProvidersManager } from './pages/ProvidersManager';
 import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
@@ -27,6 +28,7 @@ function App() {
           <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
           <Route path="/companies/:shortName/skills" element={<SkillsManager />} />
           <Route path="/companies/:shortName/runs" element={<RunLogs />} />
+          <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
           <Route path="/companies/:shortName/settings" element={<Settings />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="*" element={<Navigate to="/" replace />} />
