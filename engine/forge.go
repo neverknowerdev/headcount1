@@ -8,6 +8,7 @@ import (
 	"context"
 	"fmt"
 		"strings"
+	"agent-orchestrator/pkg/utils"
 
 	"gorm.io/gorm"
 
@@ -110,7 +111,7 @@ func (e *ForgeEngine) runForgeCLI(ctx context.Context, task db.Task, mode string
 	reqBodyBytes, _ := json.Marshal(reqBody)
 	logLine(fmt.Sprintf("Sending request to %s...", provider.BaseUrl))
 
-	req, err := http.NewRequest("POST", provider.BaseUrl+"/v1/chat/completions", bytes.NewBuffer(reqBodyBytes))
+	req, err := http.NewRequest("POST", utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(reqBodyBytes))
 	if err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create request: %v", err))
 		return
