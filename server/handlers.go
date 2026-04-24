@@ -93,6 +93,11 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.CreateSprint)
 	})
 
+	r.Route("/runs", func(r chi.Router) {
+		r.Get("/", api.ListCompanyRuns)
+		r.Get("/{id}", api.GetRun)
+	})
+
 	r.Route("/providers", func(r chi.Router) {
 		r.Get("/", api.ListProviders)
 		r.Post("/", api.CreateProvider)
