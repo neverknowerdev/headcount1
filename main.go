@@ -66,7 +66,7 @@ func main() {
 	}
 
 	hub := eventhub.NewHub()
-	eng := engine.NewForgeEngine(database, hub)
+	eng := engine.NewOpenCodeEngine(database, hub)
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 

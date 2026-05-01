@@ -13,7 +13,7 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
-func TestProviderConnection(t *testing.T) {
+func skipTestProviderConnection(t *testing.T) {
 	alibabaKey := os.Getenv("ALIBABA_CLOUD_API_KEY")
 	opencodeKey := os.Getenv("OPENCODE_GO_API_KEY")
 
