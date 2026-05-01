@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -241,18 +242,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	var openAiUrls []string
 	var anthropicUrls []string
 
-	openAiUrls = append(openAiUrls, url)
-	anthropicUrls = append(anthropicUrls, url)
-
-	cleanUrl := strings.TrimSuffix(strings.TrimSpace(url), "/")
-	if !strings.HasSuffix(cleanUrl, "/chat/completions") && !strings.HasSuffix(cleanUrl, "/messages") {
-		baseClean := cleanUrl
-		if !strings.HasSuffix(baseClean, "/v1") {
-			baseClean += "/v1"
-		}
-		openAiUrls = append(openAiUrls, baseClean+"/chat/completions")
-		anthropicUrls = append(anthropicUrls, baseClean+"/messages")
-	}
+	openAiUrls = append(openAiUrls, utils.BuildProviderURL(url, "/chat/completions"))
+	anthropicUrls = append(anthropicUrls, utils.BuildProviderURL(url, "/messages"))
 
 	// Channel to receive the first successful result
 	type TestResult struct {

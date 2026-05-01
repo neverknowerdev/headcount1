@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 	"strings"
+	"agent-orchestrator/pkg/utils"
 
 	"agent-orchestrator/db"
 	"github.com/go-chi/chi/v5"
@@ -56,7 +57,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, provider.BaseUrl+"/v1/chat/completions", bytes.NewBuffer(bodyBytes))
+	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
@@ -118,7 +119,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	}
 	json.Unmarshal(bodyBytes, &reqPayload)
 
-	proxyReq, err := http.NewRequest(r.Method, provider.BaseUrl+"/v1/chat/completions", bytes.NewBuffer(bodyBytes))
+	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return
@@ -228,7 +229,7 @@ func (g *LLMGateway) getModelsForAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, provider.BaseUrl+"/v1/models", nil)
+	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/models"), nil)
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
 		return

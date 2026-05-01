@@ -67,6 +67,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}", api.GetTask)
 		r.Put("/{id}", api.UpdateTask)
 		r.Put("/{id}/status", api.UpdateTask) // Keep for backward compatibility if needed, though they map to same
+		r.Get("/{id}/runs", api.ListTaskRuns)
 	})
 
 	r.Route("/agents", func(r chi.Router) {
@@ -75,6 +76,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}", api.GetAgent)
 		r.Put("/{id}", api.UpdateAgent)
 		r.Get("/{id}/stats", api.GetAgentStats)
+		r.Get("/{id}/runs", api.ListAgentRuns)
 	})
 
 	r.Route("/comments", func(r chi.Router) {
@@ -89,6 +91,11 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/sprints", func(r chi.Router) {
 		r.Get("/", api.ListSprints)
 		r.Post("/", api.CreateSprint)
+	})
+
+	r.Route("/runs", func(r chi.Router) {
+		r.Get("/", api.ListCompanyRuns)
+		r.Get("/{id}", api.GetRun)
 	})
 
 	r.Route("/providers", func(r chi.Router) {

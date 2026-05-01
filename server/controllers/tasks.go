@@ -1,6 +1,7 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"strconv"
@@ -220,8 +221,22 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 
 	if statusChanged {
-		go api.engine.ProcessTask(r.Context(), int32(id))
+		go api.engine.ProcessTask(context.Background(), int32(id))
 	}
 
 	api.respondJSON(w, http.StatusOK, task)
+}
+
+func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var runs []db.Run
+	if err := api.db.Where("task_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, runs)
 }

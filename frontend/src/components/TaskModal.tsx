@@ -21,6 +21,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [newComment, setNewComment] = useState('');
 
     const [isSaving, setIsSaving] = useState(false);
+    const [runs, setRuns] = useState<any[]>([]);
+    const [runAgent, setRunAgent] = useState(true);
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -78,13 +80,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if (!taskId) return;
         const fetchDetails = async () => {
             try {
-                const [taskRes, commentsRes] = await Promise.all([
+                const [taskRes, commentsRes, runsRes] = await Promise.all([
                     axios.get(`/api/tasks/${taskId}`),
-                    axios.get(`/api/comments?task_id=${taskId}`)
+                    axios.get(`/api/comments?task_id=${taskId}`),
+                    axios.get(`/api/tasks/${taskId}/runs`)
                 ]);
                 const t = taskRes.data;
                 setTask(t);
                 setComments(commentsRes.data || []);
+                setRuns(runsRes.data || []);
                 setFormData({
                     title: t.title,
                     description: t.description || '',
@@ -120,7 +124,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             await axios.post('/api/comments', {
                 task_id: taskId,
                 author_type: 'human',
-                content: newComment
+                content: newComment,
+                run_agent: runAgent
             });
             setNewComment('');
         } catch (e) {
@@ -214,6 +219,25 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         </form>
 
                         {taskId && (
+                            <div className="mb-8">
+                                <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Agent Runs</h3>
+                                <div className="space-y-2">
+                                    {runs.length === 0 ? (
+                                        <p className="text-sm text-gray-500 italic">No runs yet.</p>
+                                    ) : (
+                                        runs.map((r: any) => (
+                                            <details key={r.id} className="bg-gray-50 border rounded p-2 text-sm">
+                                                <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} - {r.status}</summary>
+                                                <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+                                                    {r.log_content}
+                                                </pre>
+                                            </details>
+                                        ))
+                                    )}
+                                </div>
+                            </div>
+                        )}
+                        {taskId && (
                             <div className="flex-1 mt-8">
                                 <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Comments & Activity</h3>
                                 <div className="space-y-4" data-testid="comments-list">
@@ -241,6 +265,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                             placeholder="Add a comment..."
                                             className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
                                         />
+                                        <div className="flex items-center px-2">
+                                            <input
+                                                type="checkbox"
+                                                id="runAgentCheckbox"
+                                                checked={runAgent}
+                                                onChange={(e) => setRunAgent(e.target.checked)}
+                                            />
+                                            <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
+                                        </div>
                                         <button type="submit" className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700">
                                             <Send size={18} />
                                         </button>

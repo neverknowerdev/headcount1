@@ -141,3 +141,17 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 
 	api.respondJSON(w, http.StatusCreated, agent)
 }
+
+func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var runs []db.Run
+	if err := api.db.Where("agent_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, runs)
+}
