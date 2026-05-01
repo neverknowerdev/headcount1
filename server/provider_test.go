@@ -46,5 +46,5 @@ func TestProviderConnection(t *testing.T) {
 	}
 
 	runTest("Alibaba DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", alibabaKey, "qwen-plus")
-	runTest("OpenCode Go", "https://opencode.ai/zen/go/v1", opencodeKey, "gpt-4o")
+	runTest("OpenCode Go", "https://opencode.ai/zen/go/v1", opencodeKey, "glm-5.1")
 }
