@@ -115,6 +115,77 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 			}
 		}
 
+		// 3. Mock Task Status Update (when moving to "to-do" or "in-progress")
+		// The engine is triggered on status change, but we want to mock the LLM call.
+		// We intercept PUT /tasks/:id when the task has an e2e-mock provider.
+		if strings.Contains(r.URL.Path, "/tasks/") && r.Method == "PUT" {
+			bodyBytes, _ := io.ReadAll(r.Body)
+			r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
+
+			var req struct {
+				Status string `json:"status"`
+			}
+			json.Unmarshal(bodyBytes, &req)
+
+			if req.Status == "to-do" || req.Status == "in-progress" {
+				// Let the handler run (it will trigger the engine)
+				recorder := &responseRecorder{
+					ResponseWriter: w,
+					StatusCode:     http.StatusOK,
+					Body:           bytes.NewBuffer(nil),
+				}
+				next.ServeHTTP(recorder, r)
+
+				// Write the response back to the client
+				for k, vv := range recorder.Header() {
+					for _, v := range vv {
+						w.Header().Add(k, v)
+					}
+				}
+				w.WriteHeader(recorder.StatusCode)
+				w.Write(recorder.Body.Bytes())
+
+				// The engine will try to call the LLM provider in a goroutine.
+				// We need to mock that call by creating the expected agent response.
+				if recorder.StatusCode == http.StatusOK {
+					var task db.Task
+					if err := json.Unmarshal(recorder.Body.Bytes(), &task); err == nil {
+						go func(taskID int32) {
+							time.Sleep(2 * time.Second) // Wait for engine to start
+
+							// Check if a run was already created by the engine
+							var existingRun db.Run
+							if err := s.db.Where("task_id = ? AND status = ?", taskID, "running").First(&existingRun).Error; err == nil {
+								// Engine created a run, mock the LLM response
+								comment := db.Comment{
+									TaskID:     taskID,
+									AuthorType: "agent",
+									Content:    "I have analyzed the E2E task and completed it successfully! 🚀",
+								}
+								s.db.Create(&comment)
+								s.hub.BroadcastEvent("comment_created", comment)
+
+								// Update the run to completed
+								existingRun.Status = "completed"
+								existingRun.LogContent = "Mock execution started...\nI have analyzed the E2E task and completed it successfully! 🚀\nMock execution completed successfully."
+								s.db.Save(&existingRun)
+								s.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": existingRun.ID, "status": "completed"})
+
+								// Move task to done
+								var updatedTask db.Task
+								if err := s.db.First(&updatedTask, taskID).Error; err == nil {
+									updatedTask.Status = "done"
+									s.db.Save(&updatedTask)
+									s.hub.BroadcastEvent("task_updated", updatedTask)
+								}
+							}
+						}(task.ID)
+					}
+				}
+				return
+			}
+		}
+
 		// Normal execution for everything else
 		next.ServeHTTP(w, r)
 	})
