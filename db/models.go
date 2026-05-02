@@ -88,6 +88,7 @@ type Task struct {
 	ParentID    *int32     `json:"parent_id"`
 	Parent      *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
 	Title       string     `json:"title" gorm:"not null"`
+	TaskType    string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	Description string     `json:"description"`
 	Priority    string     `json:"priority" gorm:"not null;default:'Normal'"`
 	Status      string     `json:"status" gorm:"not null;default:'backlog'"`
@@ -127,6 +128,7 @@ type Run struct {
 	AgentID     int32      `json:"agent_id" gorm:"not null"`
 	Agent       Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
 	Status      string     `json:"status" gorm:"not null"`
+	SessionID   string     `json:"session_id"`
 	LogFilePath string     `json:"log_file_path"`
 	LogContent  string     `json:"log_content"`
 	StartedAt   time.Time  `json:"started_at"`

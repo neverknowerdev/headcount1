@@ -1,6 +1,9 @@
 package main
 
 import (
+	"path/filepath"
+	"runtime"
+
 	"embed"
 	"io/fs"
 	"log"
@@ -26,6 +29,9 @@ import (
 var frontendDist embed.FS
 
 func main() {
+	// Deploy Custom Tool Script for OpenCode
+	go deployOpenCodeCustomTool()
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -123,4 +129,100 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+func deployOpenCodeCustomTool() {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		log.Printf("Failed to get home dir for custom tool: %v", err)
+		return
+	}
+
+	paperclipDir := filepath.Join(homeDir, ".paperclip2")
+	if err := os.MkdirAll(paperclipDir, 0755); err != nil {
+		log.Printf("Failed to create paperclip2 dir: %v", err)
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	serverUrl := "http://127.0.0.1:" + port
+	err = os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
+	if err != nil {
+		log.Printf("Failed to write server_url.txt: %v", err)
+	}
+
+	scriptContent := `import { tool } from "@opencode-ai/plugin"
+
+export default tool({
+    description: "Update the status of the current task. Use this to mark progress.",
+    args: {
+        status: tool.schema.enum(['refinement', 'in-progress', 'blocked', 'in-review']).describe("The new status for the task."),
+    },
+    async execute(args, context) {
+        try {
+            // Retrieve Orchestrator Server URL from config
+            const fs = require('fs');
+            const path = require('path');
+            const os = require('os');
+            const serverUrlPath = path.join(os.homedir(), '.paperclip2', 'server_url.txt');
+            if (!fs.existsSync(serverUrlPath)) {
+                return "Error: Cannot find Orchestrator server URL in ~/.paperclip2/server_url.txt";
+            }
+            const serverUrl = fs.readFileSync(serverUrlPath, 'utf8').trim();
+
+            const sessionID = context.sessionID;
+            if (!sessionID) {
+                return "Error: No session ID found in context.";
+            }
+
+            // GET /api/runs/session/{sessionID}
+            const runRes = await fetch(serverUrl + "/api/runs/session/" + sessionID);
+            if (!runRes.ok) {
+                return "Error: Failed to fetch run for session " + sessionID + ". Status: " + runRes.status;
+            }
+            const runData = await runRes.json();
+            const taskId = runData.task_id;
+
+            if (!taskId) {
+                return "Error: No task found for session " + sessionID + ".";
+            }
+
+            // PUT /api/tasks/{taskId}
+            const updateRes = await fetch(serverUrl + "/api/tasks/" + taskId, {
+                method: 'PUT',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ status: args.status })
+            });
+
+            if (!updateRes.ok) {
+                return "Error: Failed to update task status. Status: " + updateRes.status;
+            }
+
+            return "Task " + taskId + " status successfully updated to '" + args.status + "'.";
+        } catch (e: any) {
+            return "Error updating task status: " + e.message;
+        }
+    },
+})`
+
+	opencodeToolsDir := filepath.Join(homeDir, ".config", "opencode", "tools")
+	if runtime.GOOS == "windows" {
+		opencodeToolsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
+	}
+
+	if err := os.MkdirAll(opencodeToolsDir, 0755); err != nil {
+		log.Printf("Failed to create opencode tools dir: %v", err)
+		return
+	}
+
+	destPath := filepath.Join(opencodeToolsDir, "update_task_status.ts")
+	if err := os.WriteFile(destPath, []byte(scriptContent), 0644); err != nil {
+		log.Printf("Failed to write opencode custom tool: %v", err)
+	} else {
+		log.Printf("Successfully deployed opencode custom tool to %s", destPath)
+	}
 }
