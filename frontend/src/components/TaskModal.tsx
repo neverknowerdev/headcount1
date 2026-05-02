@@ -4,6 +4,8 @@ import axios from 'axios';
 import { useParams } from 'react-router-dom';
 import { X, Send, Save, Archive } from 'lucide-react';
 import { useStore } from '../store';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
@@ -113,6 +115,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
                 setComments(prev => [...prev, msg.payload]);
             }
+            if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
+                setRuns(prev => [...prev, msg.payload]);
+            }
+            if (msg.type === 'run_ended') {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r));
+            }
+            if (msg.type === 'run_log') {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+            }
         };
         return () => ws.close();
     }, [taskId]);
@@ -219,42 +230,78 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         </form>
 
                         {taskId && (
-                            <div className="mb-8">
-                                <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Agent Runs</h3>
-                                <div className="space-y-2">
-                                    {runs.length === 0 ? (
-                                        <p className="text-sm text-gray-500 italic">No runs yet.</p>
-                                    ) : (
-                                        runs.map((r: any) => (
-                                            <details key={r.id} className="bg-gray-50 border rounded p-2 text-sm">
-                                                <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} - {r.status}</summary>
-                                                <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
-                                                    {r.log_content}
-                                                </pre>
-                                            </details>
-                                        ))
-                                    )}
-                                </div>
-                            </div>
-                        )}
-                        {taskId && (
                             <div className="flex-1 mt-8">
-                                <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Comments & Activity</h3>
+                                <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Activity</h3>
                                 <div className="space-y-4" data-testid="comments-list">
-                                    {comments.length === 0 ? (
-                                        <p className="text-sm text-gray-500 italic">No comments yet.</p>
-                                    ) : (
-                                        comments.map((c: any) => (
-                                            <div key={c.id} className={`flex flex-col ${c.author_type === 'agent' ? 'items-start' : 'items-end'}`}>
-                                                <div className={`max-w-[80%] rounded-lg p-3 text-sm ${c.author_type === 'agent' ? 'bg-indigo-50 border border-indigo-100 text-gray-800' : 'bg-gray-200 text-gray-900'}`}>
-                                                    <span className="text-xs font-bold block mb-1 text-gray-500">
-                                                        {c.author_type === 'agent' ? '🤖 Agent' : '👤 You'}
-                                                    </span>
-                                                    <span className="whitespace-pre-wrap">{c.content}</span>
-                                                </div>
-                                            </div>
-                                        ))
-                                    )}
+                                    {(() => {
+                                        // Merge comments and runs into a single chronological timeline
+                                        const timeline: {type: 'comment' | 'run'; data: any; time: number}[] = [];
+                                        comments.forEach((c: any) => {
+                                            timeline.push({ type: 'comment', data: c, time: new Date(c.created_at).getTime() });
+                                        });
+                                        runs.forEach((r: any) => {
+                                            const t = new Date(r.started_at);
+                                            const runTime = t.getFullYear() > 1 ? t.getTime() : new Date(r.ended_at || Date.now()).getTime();
+                                            timeline.push({ type: 'run', data: r, time: runTime });
+                                        });
+                                        timeline.sort((a, b) => a.time - b.time);
+
+                                        if (timeline.length === 0) {
+                                            return <p className="text-sm text-gray-500 italic">No activity yet.</p>;
+                                        }
+
+                                        return timeline.map((item) => {
+                                            if (item.type === 'comment') {
+                                                const c = item.data;
+                                                const ts = new Date(c.created_at);
+                                                const timeStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                return (
+                                                    <div key={`c-${c.id}`} className={`flex flex-col ${c.author_type === 'agent' ? 'items-start' : 'items-end'}`}>
+                                                        <div className={`max-w-[85%] rounded-lg p-3 text-sm ${c.author_type === 'agent' ? 'bg-indigo-50 border border-indigo-100 text-gray-800' : 'bg-gray-200 text-gray-900'}`}>
+                                                            <span className="text-xs font-bold block mb-1 text-gray-500">
+                                                                {c.author_type === 'agent' ? '🤖 Agent' : '👤 You'}
+                                                                <span className="ml-2 font-normal">{timeStr}</span>
+                                                            </span>
+                                                            {c.author_type === 'agent' ? (
+                                                                <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-indigo-700 prose-code:bg-indigo-100 prose-code:px-1 prose-code:rounded prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1">
+                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.content}</ReactMarkdown>
+                                                                </div>
+                                                            ) : (
+                                                                <span className="whitespace-pre-wrap">{c.content}</span>
+                                                            )}
+                                                        </div>
+                                                    </div>
+                                                );
+                                            } else {
+                                                const r = item.data;
+                                                const ts = new Date(r.started_at);
+                                                const runDate = ts.getFullYear() > 1 ? ts : new Date(r.ended_at || Date.now());
+                                                const timeStr = runDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const statusColors: Record<string, string> = {
+                                                    running: 'bg-yellow-100 text-yellow-800 border-yellow-200',
+                                                    completed: 'bg-green-100 text-green-800 border-green-200',
+                                                    failed: 'bg-red-100 text-red-800 border-red-200',
+                                                };
+                                                const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
+                                                return (
+                                                    <div key={`r-${r.id}`} className="flex justify-center">
+                                                        <details className="w-full max-w-[90%] border rounded-lg bg-white shadow-sm">
+                                                            <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
+                                                                <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
+                                                                <div className="flex items-center gap-2">
+                                                                    <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
+                                                                    <span className="text-gray-400">{timeStr}</span>
+                                                                </div>
+                                                            </summary>
+                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t">
+                                                                {r.log_content}
+                                                            </pre>
+                                                        </details>
+                                                    </div>
+                                                );
+                                            }
+                                        });
+                                    })()}
                                 </div>
                                 <div className="mt-4">
                                     <form onSubmit={handleAddComment} className="flex gap-2">
