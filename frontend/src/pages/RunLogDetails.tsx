@@ -59,7 +59,7 @@ export const RunLogDetails: React.FC = () => {
                     </div>
                     <div>
                         <p className="text-sm text-gray-500">Started At</p>
-                        <p className="font-medium">{new Date(run.created_at).toLocaleString()}</p>
+                        <p className="font-medium">{(() => { const d = new Date(run.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (run.ended_at ? new Date(run.ended_at).toLocaleString() : '...'); })()}</p>
                     </div>
                 </div>
 

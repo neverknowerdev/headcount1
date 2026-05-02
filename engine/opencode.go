@@ -111,9 +111,10 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 
 	run, err := e.q.CreateRun(ctx, db.Run{
-		TaskID:  task.ID,
-		AgentID: agent.ID,
-		Status:  "running",
+		TaskID:    task.ID,
+		AgentID:   agent.ID,
+		Status:    "running",
+		StartedAt: time.Now(),
 	})
 	if err != nil {
 		return
@@ -159,7 +160,8 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		"title": fmt.Sprintf("Task %d: %s", task.ID, mode),
 	})
 
-	sessionResp, err := http.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
+	client := &http.Client{Timeout: 30 * time.Minute}
+	sessionResp, err := client.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
 	if err != nil || sessionResp.StatusCode != 200 {
 		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create OpenCode session: %v", err))
 		if sessionResp != nil {
@@ -197,14 +199,35 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 
 	if agent.Model != "" {
-		msgReqBody["model"] = agent.Model
+		modelObj := map[string]interface{}{
+			"modelID": agent.Model,
+		}
+		if agent.ProviderID != nil {
+			provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
+			if err == nil {
+				// Use ProviderType as providerID (lowercase ID format like "opencode-go")
+				// Fall back to Name if ProviderType is empty
+				providerID := provider.ProviderType
+				if providerID == "" {
+					providerID = provider.Name
+				}
+				modelObj["providerID"] = providerID
+				logLine(fmt.Sprintf("Using provider: name=%s type=%s providerID=%s base_url=%s", provider.Name, provider.ProviderType, providerID, provider.BaseUrl))
+			} else {
+				logLine(fmt.Sprintf("Failed to get provider %d: %v", *agent.ProviderID, err))
+			}
+		} else {
+			logLine("No provider ID set on agent")
+		}
+		msgReqBody["model"] = modelObj
 	}
 
 	msgReqBytes, _ := json.Marshal(msgReqBody)
 
+	logLine(fmt.Sprintf("Request body: %s", string(msgReqBytes)))
 	logLine(fmt.Sprintf("Sending message to OpenCode session using model %s...", agent.Model))
 
-	msgResp, err := http.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
+	msgResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
 
 	status := "completed"
 	taskNextStatus := "in-progress"
@@ -219,31 +242,50 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	defer msgResp.Body.Close()
 
 	respBodyBytes, _ := io.ReadAll(msgResp.Body)
+	logLine(fmt.Sprintf("Response status: %d", msgResp.StatusCode))
+	if len(respBodyBytes) > 0 {
+		logLine(fmt.Sprintf("Response body: %s", string(respBodyBytes)))
+	} else {
+		logLine("Response body: (empty)")
+	}
 
 	if msgResp.StatusCode != http.StatusOK {
 		status = "failed"
 		taskNextStatus = "blocked"
 		logLine(fmt.Sprintf("ERROR: OpenCode Server returned %d: %s", msgResp.StatusCode, string(respBodyBytes)))
+	} else if len(respBodyBytes) == 0 {
+		// Empty 200 response usually means invalid model/provider combination
+		status = "failed"
+		taskNextStatus = "blocked"
+		providerID := ""
+		if agent.ProviderID != nil {
+			if p, err := e.q.GetLLMProvider(ctx, *agent.ProviderID); err == nil {
+				providerID = p.ProviderType
+			}
+		}
+		logLine(fmt.Sprintf("ERROR: OpenCode returned empty response. Model '%s' may not exist on provider '%s'. Check agent configuration.", agent.Model, providerID))
 	} else {
 		// OpenCode returns { info: Message, parts: Part[] }
-		var msgResponse struct {
-			Parts []struct {
-				Type string `json:"type"`
-				Text string `json:"text"`
-			} `json:"parts"`
+		// Extract text from any part that has a "text" field (text, reasoning, etc.)
+		var rawMsg map[string]interface{}
+		agentResponse := ""
+
+		if err := json.Unmarshal(respBodyBytes, &rawMsg); err == nil {
+			if parts, ok := rawMsg["parts"].([]interface{}); ok {
+				var text strings.Builder
+				for _, p := range parts {
+					if part, ok := p.(map[string]interface{}); ok {
+						if t, ok := part["text"].(string); ok && t != "" {
+							text.WriteString(t)
+							text.WriteString("\n")
+						}
+					}
+				}
+				agentResponse = strings.TrimSpace(text.String())
+			}
 		}
 
-		agentResponse := ""
-		if err := json.Unmarshal(respBodyBytes, &msgResponse); err == nil && len(msgResponse.Parts) > 0 {
-			var text strings.Builder
-			for _, p := range msgResponse.Parts {
-				if p.Type == "text" {
-					text.WriteString(p.Text)
-				}
-			}
-			agentResponse = text.String()
-		} else {
-			// If we couldn't parse it exactly, let's just use the raw body to be safe
+		if agentResponse == "" {
 			agentResponse = string(respBodyBytes)
 		}
 

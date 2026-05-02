@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -29,8 +30,15 @@ func (rw *responseRecorder) Write(b []byte) (int, error) {
 }
 
 // E2EMockMiddleware intercepts specific requests to mock backend processes for E2E tests.
+// Only active when E2E_MODE=true environment variable is set.
 func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Safety check: only run in E2E mode
+		if os.Getenv("E2E_MODE") != "true" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		// 1. Mock Provider Test Endpoint
 		if strings.HasSuffix(r.URL.Path, "/providers/test") && r.Method == "POST" {
 			bodyBytes, _ := io.ReadAll(r.Body)
@@ -124,10 +132,25 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 
 			var req struct {
 				Status string `json:"status"`
+				Title  string `json:"title"`
 			}
 			json.Unmarshal(bodyBytes, &req)
 
-			if req.Status == "to-do" || req.Status == "in-progress" {
+			// Only mock E2E test tasks, not real tasks
+			isE2ETask := req.Title == "E2E Task" || req.Title == "Write E2E Tests"
+			if !isE2ETask {
+				// Check existing task title from DB
+				parts := strings.Split(r.URL.Path, "/")
+				if len(parts) > 0 {
+					taskIDStr := parts[len(parts)-1]
+					var existingTask db.Task
+					if err := s.db.First(&existingTask, taskIDStr).Error; err == nil {
+						isE2ETask = existingTask.Title == "E2E Task" || existingTask.Title == "Write E2E Tests"
+					}
+				}
+			}
+
+			if (req.Status == "to-do" || req.Status == "in-progress") && isE2ETask {
 				// Let the handler run (it will trigger the engine)
 				recorder := &responseRecorder{
 					ResponseWriter: w,

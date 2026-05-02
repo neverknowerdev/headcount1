@@ -17,4 +17,10 @@ export default defineConfig({
       use: { ...devices['Desktop Chrome'] },
     },
   ],
+  webServer: {
+    command: 'cd .. && E2E_MODE=true go run .',
+    port: 8080,
+    reuseExistingServer: !process.env.CI,
+    timeout: 30000,
+  },
 });
