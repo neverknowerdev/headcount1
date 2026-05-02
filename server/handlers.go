@@ -17,10 +17,10 @@ type Server struct {
 	db     *gorm.DB
 	q      db.Querier
 	hub    *eventhub.Hub
-	engine *engine.ForgeEngine
+	engine *engine.OpenCodeEngine
 }
 
-func NewServer(database *gorm.DB, eng *engine.ForgeEngine) *Server {
+func NewServer(database *gorm.DB, eng *engine.OpenCodeEngine) *Server {
 	return &Server{
 		db:     database,
 		q:      db.New(database),

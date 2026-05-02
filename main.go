@@ -66,7 +66,7 @@ func main() {
 	}
 
 	hub := eventhub.NewHub()
-	eng := engine.NewForgeEngine(database, hub)
+	eng := engine.NewOpenCodeEngine(database, hub)
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
@@ -75,7 +75,10 @@ func main() {
 	r.Use(middleware.Recoverer)
 
 	r.Route("/api", func(r chi.Router) {
-		r.Use(srv.E2EMockMiddleware)
+		if os.Getenv("E2E_MODE") == "true" {
+			log.Println("E2E mode enabled - mock middleware active")
+			r.Use(srv.E2EMockMiddleware)
+		}
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("pong"))
 		})

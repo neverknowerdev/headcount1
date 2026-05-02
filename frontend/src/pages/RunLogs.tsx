@@ -63,7 +63,7 @@ export const RunLogs: React.FC = () => {
                         {runs.map((r: any) => (
                             <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
                                 <summary className="font-semibold cursor-pointer text-indigo-700 flex justify-between items-center">
-                                    <span>Run #{r.id} for Task #{r.task_id} by {r.agent?.name} ({r.status}) - {new Date(r.created_at).toLocaleString()}</span>
+                                    <span>Run #{r.id} for Task #{r.task_id} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}</span>
                                     <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded hover:bg-indigo-200 ml-4">
                                         View Details
                                     </Link>
