@@ -5,14 +5,13 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"github.com/go-chi/chi/v5"
 )
-
-import "strings"
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 	compIDStr := r.URL.Query().Get("company_id")
@@ -71,6 +70,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID    int32   `json:"sprint_id"`
 		ParentID    *int32  `json:"parent_id"`
 		Title       string  `json:"title"`
+		TaskType    string  `json:"task_type"`
 		Description string  `json:"description"`
 		Priority    string  `json:"priority"`
 		DueDate     *string `json:"due_date"`
@@ -91,6 +91,11 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		priority = "Normal"
 	}
 
+	taskType := req.TaskType
+	if taskType == "" {
+		taskType = "plan and implement"
+	}
+
 	if req.CompanyID == 0 {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
@@ -100,6 +105,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		CompanyID:   req.CompanyID,
 		ProjectID:   req.ProjectID,
 		Title:       req.Title,
+		TaskType:    taskType,
 		Status:      "backlog",
 		AgentID:     req.AgentID,
 		SprintID:    req.SprintID,
@@ -158,6 +164,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID    *int32  `json:"sprint_id"`
 		ParentID    *int32  `json:"parent_id"`
 		Title       string  `json:"title"`
+		TaskType    string  `json:"task_type"`
 		Description string  `json:"description"`
 		Priority    string  `json:"priority"`
 		DueDate     *string `json:"due_date"`
@@ -180,6 +187,10 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.Status = req.Status
 		statusChanged = true
 	}
+	if req.TaskType != "" {
+		task.TaskType = req.TaskType
+	}
+
 	if req.Title != "" {
 		task.Title = req.Title
 	}
