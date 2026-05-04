@@ -93,7 +93,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	taskType := req.TaskType
 	if taskType == "" {
-		taskType = "plan and implement"
+		taskType = db.TaskTypePlanAndImplement
 	}
 
 	if req.CompanyID == 0 {

@@ -75,6 +75,11 @@ type Skill struct {
 	UpdatedAt   time.Time `json:"updated_at"`
 }
 
+const (
+	TaskTypePlanAndImplement = "plan and implement"
+	TaskTypeImplement        = "implement"
+)
+
 type Task struct {
 	ID          int32      `json:"id" gorm:"primaryKey"`
 	CompanyID   int32      `json:"company_id" gorm:"not null"`
@@ -128,7 +133,6 @@ type Run struct {
 	AgentID     int32      `json:"agent_id" gorm:"not null"`
 	Agent       Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
 	Status      string     `json:"status" gorm:"not null"`
-	Mode        string     `json:"mode" gorm:"not null;default:'implement'"`
 	SessionID   string     `json:"session_id"`
 	LogFilePath string     `json:"log_file_path"`
 	LogContent  string     `json:"log_content"`
