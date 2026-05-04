@@ -97,7 +97,6 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)
 		r.Get("/{id}", api.GetRun)
-		r.Post("/{id}/rerun", api.RerunRun)
 	})
 
 	r.Route("/providers", func(r chi.Router) {

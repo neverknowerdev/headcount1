@@ -100,13 +100,13 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 							s.db.Create(&comment)
 							s.hub.BroadcastEvent("comment_created", comment)
 
-						// Create mock Run
-						run := db.Run{
-							TaskID:  taskID,
-							AgentID: 1, // Assume first agent for mock
-							Status:  "completed",
-							LogContent: `[{"id":"mock-1","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"info","content":"Connecting to OpenCode Server..."},{"id":"mock-2","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"info","content":"Created mock session"},{"id":"mock-3","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"response","content":"📥 Response from Model","fullContent":"I have analyzed the E2E task and completed it successfully! 🚀","metadata":{"responseLen":58}}]`,
-						}
+							// Create mock Run
+							run := db.Run{
+								TaskID:     taskID,
+								AgentID:    1, // Assume first agent for mock
+								Status:     "completed",
+								LogContent: "Mock execution started...\nMock execution completed successfully.",
+							}
 							s.db.Create(&run)
 
 							// Move task to done
@@ -205,7 +205,7 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 
 								// Update the run to completed
 								existingRun.Status = "completed"
-								existingRun.LogContent = `[{"id":"mock-1","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"info","content":"Connecting to OpenCode Server..."},{"id":"mock-2","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"info","content":"Created mock session"},{"id":"mock-3","timestamp":"` + time.Now().UTC().Format(time.RFC3339) + `","type":"response","content":"📥 Response from Model","fullContent":"I have analyzed the E2E task and completed it successfully! 🚀","metadata":{"responseLen":58}}]`
+								existingRun.LogContent = "Mock execution started...\nI have analyzed the E2E task and completed it successfully! 🚀\nMock execution completed successfully."
 								s.db.Save(&existingRun)
 								s.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": existingRun.ID, "status": "completed"})
 
