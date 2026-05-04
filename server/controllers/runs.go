@@ -63,6 +63,14 @@ func (api *API) RerunRun(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
+
+	// Deduplication: check if there's already a running task for this task ID
+	var existingRun db.Run
+	if err := api.db.Where("task_id = ? AND status = ?", run.TaskID, "running").First(&existingRun).Error; err == nil {
+		api.respondError(w, http.StatusConflict, "a run is already in progress for this task")
+		return
+	}
+
 	mode := run.Mode
 	if mode == "" {
 		mode = "implement"
