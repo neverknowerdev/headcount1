@@ -13,8 +13,18 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
+	"github.com/google/uuid"
 	"gorm.io/gorm"
 )
+
+type LogEntry struct {
+	ID          string                 `json:"id"`
+	Timestamp   string                 `json:"timestamp"`
+	Type        string                 `json:"type"`
+	Content     string                 `json:"content"`
+	FullContent string                 `json:"fullContent,omitempty"`
+	Metadata    map[string]interface{} `json:"metadata,omitempty"`
+}
 
 type OpenCodeEngine struct {
 	q   *db.Queries
@@ -106,8 +116,31 @@ func (e *OpenCodeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 }
 
 func (e *OpenCodeEngine) failRun(ctx context.Context, runID int32, errorMsg string) {
-	e.q.UpdateRunLog(ctx, runID, errorMsg, "failed")
+	// Fetch existing run to get current log entries
+	run, err := e.q.GetRun(ctx, runID)
+	var logEntries []LogEntry
+	if err == nil && run.LogContent != "" {
+		json.Unmarshal([]byte(run.LogContent), &logEntries)
+	}
+	// Append error entry
+	logEntries = append(logEntries, LogEntry{
+		ID:        uuid.New().String(),
+		Timestamp: time.Now().UTC().Format(time.RFC3339),
+		Type:      "error",
+		Content:   fmt.Sprintf("❌ Run failed: %s", errorMsg),
+	})
+	logJSON, _ := json.Marshal(logEntries)
+	e.q.UpdateRunLog(ctx, runID, string(logJSON), "failed")
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+}
+
+func (e *OpenCodeEngine) ReRunTask(ctx context.Context, taskID int32, mode string) error {
+	task, err := e.q.GetTask(ctx, taskID)
+	if err != nil {
+		return fmt.Errorf("failed to get task: %w", err)
+	}
+	go e.runOpenCode(context.Background(), task, mode)
+	return nil
 }
 
 func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode string) {
@@ -124,6 +157,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		TaskID:    task.ID,
 		AgentID:   agent.ID,
 		Status:    "running",
+		Mode:      mode,
 		StartedAt: time.Now(),
 	})
 	if err != nil {
@@ -155,13 +189,31 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 	}
 
-	var fullLog strings.Builder
-	logLine := func(line string) {
-		fullLog.WriteString(line + "\n")
-		e.hub.BroadcastEvent("run_log", map[string]interface{}{"run_id": run.ID, "line": line})
+	var logEntries []LogEntry
+	logEntry := func(entryType, content string, fullContent string, metadata map[string]interface{}) {
+		entry := LogEntry{
+			ID:        uuid.New().String(),
+			Timestamp: time.Now().UTC().Format(time.RFC3339),
+			Type:      entryType,
+			Content:   content,
+		}
+		if fullContent != "" && fullContent != content {
+			entry.FullContent = fullContent
+		}
+		if metadata != nil {
+			entry.Metadata = metadata
+		}
+		logEntries = append(logEntries, entry)
+		e.hub.BroadcastEvent("run_log_entry", map[string]interface{}{
+			"run_id": run.ID,
+			"entry":  entry,
+		})
+		// Persist to DB after every entry so logs survive crashes/timeouts
+		logJSON, _ := json.Marshal(logEntries)
+		e.q.UpdateRunLog(ctx, run.ID, string(logJSON), "running")
 	}
 
-	logLine("Connecting to OpenCode Server...")
+	logEntry("info", "Connecting to OpenCode Server...", "", nil)
 
 	baseURL := "http://127.0.0.1:36000"
 
@@ -170,7 +222,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		"title": fmt.Sprintf("Task %d: %s", task.ID, mode),
 	})
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := &http.Client{Timeout: 5 * time.Minute}
 	sessionResp, err := client.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
 	if err != nil || sessionResp.StatusCode != 200 {
 		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create OpenCode session: %v", err))
@@ -190,13 +242,9 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 	sessionResp.Body.Close()
 
-	// Update run with session id using direct save query since we don't have UpdateRunSession func
-	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "running") // Force save log
-	// Better yet, update the run directly from DB since engine has access to DB? Wait, engine only has e.q which is a *db.Queries
-	// Let's see if we can use gorm directly inside opencode? No, gorm is in db package.
-	// Oh, I can just update the run and use gorm from within db.querier.
+	// Update run with session id
 	e.q.UpdateRunSession(ctx, run.ID, sessionData.ID)
-	logLine(fmt.Sprintf("Created session %s", sessionData.ID))
+	logEntry("info", fmt.Sprintf("Created session %s", sessionData.ID), "", nil)
 
 	// Ensure the Provider auth is set correctly on the OpenCode server if needed.
 	// Since we only know we need to send the model and the payload, let's prepare the message request.
@@ -231,20 +279,30 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 					providerID = provider.Name
 				}
 				modelObj["providerID"] = providerID
-				logLine(fmt.Sprintf("Using provider: name=%s type=%s providerID=%s base_url=%s", provider.Name, provider.ProviderType, providerID, provider.BaseUrl))
+				logEntry("info", fmt.Sprintf("Using provider: %s (%s)", provider.Name, providerID), "", map[string]interface{}{
+					"provider":   provider.Name,
+					"providerID": providerID,
+					"base_url":   provider.BaseUrl,
+				})
 			} else {
-				logLine(fmt.Sprintf("Failed to get provider %d: %v", *agent.ProviderID, err))
+				logEntry("error", fmt.Sprintf("Failed to get provider %d: %v", *agent.ProviderID, err), "", nil)
 			}
 		} else {
-			logLine("No provider ID set on agent")
+			logEntry("warning", "No provider ID set on agent", "", nil)
 		}
 		msgReqBody["model"] = modelObj
 	}
 
 	msgReqBytes, _ := json.Marshal(msgReqBody)
 
-	logLine(fmt.Sprintf("Request body: %s", string(msgReqBytes)))
-	logLine(fmt.Sprintf("Sending message to OpenCode session using model %s...", agent.Model))
+	// Log the model request with trimmed content
+	logEntry("request", fmt.Sprintf("📤 Request to Model (%s)", agent.Model), string(msgReqBytes), map[string]interface{}{
+		"model":      agent.Model,
+		"provider":   agent.Model,
+		"requestLen": len(msgReqBytes),
+	})
+
+	logEntry("info", fmt.Sprintf("⏳ Waiting for model %s to respond...", agent.Model), "", nil)
 
 	msgResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
 
@@ -257,16 +315,13 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	defer msgResp.Body.Close()
 
 	respBodyBytes, _ := io.ReadAll(msgResp.Body)
-	logLine(fmt.Sprintf("Response status: %d", msgResp.StatusCode))
-	if len(respBodyBytes) > 0 {
-		logLine(fmt.Sprintf("Response body: %s", string(respBodyBytes)))
-	} else {
-		logLine("Response body: (empty)")
-	}
 
 	if msgResp.StatusCode != http.StatusOK {
 		status = "failed"
-		logLine(fmt.Sprintf("ERROR: OpenCode Server returned %d: %s", msgResp.StatusCode, string(respBodyBytes)))
+		logEntry("error", fmt.Sprintf("❌ OpenCode Server returned %d", msgResp.StatusCode), string(respBodyBytes), map[string]interface{}{
+			"statusCode": msgResp.StatusCode,
+			"model":      agent.Model,
+		})
 	} else if len(respBodyBytes) == 0 {
 		// Empty 200 response usually means invalid model/provider combination
 		status = "failed"
@@ -276,21 +331,55 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 				providerID = p.ProviderType
 			}
 		}
-		logLine(fmt.Sprintf("ERROR: OpenCode returned empty response. Model '%s' may not exist on provider '%s'. Check agent configuration.", agent.Model, providerID))
+		logEntry("error", fmt.Sprintf("❌ Empty response from model '%s' on provider '%s'", agent.Model, providerID), "", map[string]interface{}{
+			"model":    agent.Model,
+			"provider": providerID,
+		})
 	} else {
 		// OpenCode returns { info: Message, parts: Part[] }
-		// Extract text from any part that has a "text" field (text, reasoning, etc.)
+		// Parse to extract tool calls and text responses separately
 		var rawMsg map[string]interface{}
 		agentResponse := ""
+		var toolCalls []map[string]interface{}
 
 		if err := json.Unmarshal(respBodyBytes, &rawMsg); err == nil {
 			if parts, ok := rawMsg["parts"].([]interface{}); ok {
 				var text strings.Builder
 				for _, p := range parts {
 					if part, ok := p.(map[string]interface{}); ok {
-						if t, ok := part["text"].(string); ok && t != "" {
-							text.WriteString(t)
-							text.WriteString("\n")
+						partType, _ := part["type"].(string)
+
+						switch partType {
+						case "tool-invocation":
+							// Extract tool call information
+							toolName, _ := part["toolName"].(string)
+							toolArgs, _ := part["args"].(map[string]interface{})
+							toolResult, _ := part["result"].(string)
+							
+							toolCall := map[string]interface{}{
+								"toolName": toolName,
+								"args":     toolArgs,
+							}
+							if toolResult != "" {
+								toolCall["resultSize"] = len(toolResult)
+							}
+							toolCalls = append(toolCalls, toolCall)
+
+							// Log tool call as structured entry
+							logEntry("tool_call", 
+								fmt.Sprintf("🔧 Tool Call: %s", toolName),
+								fmt.Sprintf("Args: %v\nResult: %s", toolArgs, toolResult),
+								map[string]interface{}{
+									"toolName":     toolName,
+									"toolParams":   toolArgs,
+									"responseSize": len(toolResult),
+								})
+
+						default:
+							if t, ok := part["text"].(string); ok && t != "" {
+								text.WriteString(t)
+								text.WriteString("\n")
+							}
 						}
 					}
 				}
@@ -298,13 +387,21 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			}
 		}
 
+		// Log the model response
+		logEntry("response", 
+			fmt.Sprintf("📥 Response from Model (%d chars)", len(agentResponse)),
+			agentResponse,
+			map[string]interface{}{
+				"model":       agent.Model,
+				"responseLen": len(agentResponse),
+				"toolCalls":   len(toolCalls),
+			})
+
 		if agentResponse == "" {
 			agentResponse = string(respBodyBytes)
 		}
 
 		if agentResponse != "" {
-			logLine(agentResponse)
-
 			comment, _ := e.q.CreateComment(ctx, db.Comment{
 				TaskID:     task.ID,
 				AuthorType: "agent",
@@ -312,7 +409,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			})
 			e.hub.BroadcastEvent("comment_created", comment)
 		} else {
-			logLine("WARNING: OpenCode returned empty response")
+			logEntry("warning", "⚠️ OpenCode returned empty response", "", nil)
 		}
 	}
 
@@ -320,7 +417,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	taskAgain, _ := e.q.GetTask(ctx, task.ID)
 	if taskAgain.Status == task.Status && status == "completed" {
 		// LLM did not update status, force it to call update_task_status
-		logLine("Task status not updated by agent. Forcing update_task_status call...")
+		logEntry("info", "Task status not updated by agent. Forcing update_task_status call...", "", nil)
 
 		forceMsgBody := map[string]interface{}{
 			"parts": []map[string]interface{}{
@@ -349,6 +446,13 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 
 		forceMsgBytes, _ := json.Marshal(forceMsgBody)
+		
+		// Log force request
+		logEntry("request", "📤 Forcing update_task_status call", string(forceMsgBytes), map[string]interface{}{
+			"model":      agent.Model,
+			"requestLen": len(forceMsgBytes),
+		})
+
 		forceResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(forceMsgBytes))
 
 		if err == nil {
@@ -357,15 +461,40 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 			var rawForceMsg map[string]interface{}
 			forceAgentResponse := ""
+			var forceToolCalls []map[string]interface{}
 
 			if err := json.Unmarshal(forceRespBytes, &rawForceMsg); err == nil {
 				if parts, ok := rawForceMsg["parts"].([]interface{}); ok {
 					var text strings.Builder
 					for _, p := range parts {
 						if part, ok := p.(map[string]interface{}); ok {
-							if t, ok := part["text"].(string); ok && t != "" {
-								text.WriteString(t)
-								text.WriteString("\n")
+							partType, _ := part["type"].(string)
+
+							switch partType {
+							case "tool-invocation":
+								toolName, _ := part["toolName"].(string)
+								toolArgs, _ := part["args"].(map[string]interface{})
+								toolResult, _ := part["result"].(string)
+								
+								forceToolCalls = append(forceToolCalls, map[string]interface{}{
+									"toolName": toolName,
+									"args":     toolArgs,
+								})
+
+								logEntry("tool_call",
+									fmt.Sprintf("🔧 Tool Call: %s", toolName),
+									fmt.Sprintf("Args: %v\nResult: %s", toolArgs, toolResult),
+									map[string]interface{}{
+										"toolName":     toolName,
+										"toolParams":   toolArgs,
+										"responseSize": len(toolResult),
+									})
+
+							default:
+								if t, ok := part["text"].(string); ok && t != "" {
+									text.WriteString(t)
+									text.WriteString("\n")
+								}
 							}
 						}
 					}
@@ -373,12 +502,21 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 				}
 			}
 
+			// Log force response
+			logEntry("response",
+				fmt.Sprintf("📥 Response from Model (%d chars)", len(forceAgentResponse)),
+				forceAgentResponse,
+				map[string]interface{}{
+					"model":       agent.Model,
+					"responseLen": len(forceAgentResponse),
+					"toolCalls":   len(forceToolCalls),
+				})
+
 			if forceAgentResponse == "" {
 				forceAgentResponse = string(forceRespBytes)
 			}
 
 			if forceAgentResponse != "" {
-				logLine(forceAgentResponse)
 				comment, _ := e.q.CreateComment(ctx, db.Comment{
 					TaskID:     task.ID,
 					AuthorType: "agent",
@@ -387,11 +525,20 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 				e.hub.BroadcastEvent("comment_created", comment)
 			}
 		} else {
-			logLine(fmt.Sprintf("Failed to send force message: %v", err))
+			logEntry("error", fmt.Sprintf("❌ Failed to send force message: %v", err), "", nil)
 		}
 	}
 
-	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)
+	// Add final status entry
+	if status == "failed" {
+		logEntry("error", fmt.Sprintf("❌ Run failed. Check logs above for details."), "", nil)
+	} else {
+		logEntry("info", "✅ Run completed successfully.", "", nil)
+	}
+
+	// Update final status
+	logJSON, _ := json.Marshal(logEntries)
+	e.q.UpdateRunLog(ctx, run.ID, string(logJSON), status)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 }

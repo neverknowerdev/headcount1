@@ -3,6 +3,34 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save } from 'lucide-react';
+import { LogEntry, LegacyLogBlock } from '../components/LogEntry';
+
+interface LogEntryData {
+    id: string;
+    timestamp: string;
+    type: 'info' | 'error' | 'warning' | 'request' | 'response' | 'tool_call' | 'tool_result';
+    content: string;
+    fullContent?: string;
+    metadata?: Record<string, any>;
+}
+
+function parseLogContent(logContent: string | undefined): { entries: LogEntryData[]; isLegacy: boolean } {
+    if (!logContent) return { entries: [], isLegacy: false };
+    
+    try {
+        const parsed = JSON.parse(logContent);
+        if (Array.isArray(parsed)) {
+            return { entries: parsed, isLegacy: false };
+        }
+        if (typeof parsed === 'object' && parsed.id) {
+            return { entries: [parsed], isLegacy: false };
+        }
+    } catch {
+        return { entries: [], isLegacy: true };
+    }
+    
+    return { entries: [], isLegacy: false };
+}
 
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
@@ -134,14 +162,27 @@ export const AgentDetails: React.FC = () => {
                         {runs.length === 0 ? (
                             <p className="text-sm text-gray-500 italic">No runs yet.</p>
                         ) : (
-                            runs.map((r: any) => (
-                                <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
-                                    <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} for Task #{r.task_id} ({r.status})</summary>
-                                    <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
-                                        {r.log_content}
-                                    </pre>
-                                </details>
-                            ))
+                            runs.map((r: any) => {
+                                const { entries, isLegacy } = parseLogContent(r.log_content);
+                                return (
+                                    <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
+                                        <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} for Task #{r.task_id} ({r.status})</summary>
+                                        <div className="mt-2 max-h-[400px] overflow-y-auto">
+                                            {isLegacy ? (
+                                                <LegacyLogBlock content={r.log_content || 'Waiting for logs...'} />
+                                            ) : entries.length > 0 ? (
+                                                entries.map((entry) => (
+                                                    <LogEntry key={entry.id} entry={entry} />
+                                                ))
+                                            ) : (
+                                                <pre className="text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+                                                    {r.log_content || 'Waiting for logs...'}
+                                                </pre>
+                                            )}
+                                        </div>
+                                    </details>
+                                );
+                            })
                         )}
                     </div>
                 )}
