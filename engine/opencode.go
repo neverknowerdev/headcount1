@@ -387,15 +387,72 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			}
 		}
 
-		// Log the model response
-		logEntry("response", 
-			fmt.Sprintf("📥 Response from Model (%d chars)", len(agentResponse)),
-			agentResponse,
-			map[string]interface{}{
-				"model":       agent.Model,
-				"responseLen": len(agentResponse),
-				"toolCalls":   len(toolCalls),
-			})
+	// Log the model response
+	logEntry("response", 
+		fmt.Sprintf("📥 Response from Model (%d chars)", len(agentResponse)),
+		agentResponse,
+		map[string]interface{}{
+			"model":       agent.Model,
+			"responseLen": len(agentResponse),
+			"toolCalls":   len(toolCalls),
+		})
+
+	// Fetch all session messages to get intermediate tool calls
+	sessionMsgsResp, err := client.Get(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID))
+	if err == nil {
+		defer sessionMsgsResp.Body.Close()
+		sessionMsgsBytes, _ := io.ReadAll(sessionMsgsResp.Body)
+		
+		var sessionMsgs []map[string]interface{}
+		if err := json.Unmarshal(sessionMsgsBytes, &sessionMsgs); err == nil {
+			for _, msg := range sessionMsgs {
+				info, _ := msg["info"].(map[string]interface{})
+				role, _ := info["role"].(string)
+				if role != "assistant" {
+					continue
+				}
+				
+				parts, _ := msg["parts"].([]interface{})
+				for _, p := range parts {
+					part, ok := p.(map[string]interface{})
+					if !ok {
+						continue
+					}
+					partType, _ := part["type"].(string)
+					
+					switch partType {
+					case "tool":
+						toolName, _ := part["tool"].(string)
+						state, _ := part["state"].(map[string]interface{})
+						toolStatus, _ := state["status"].(string)
+						input, _ := state["input"].(map[string]interface{})
+						output, _ := state["output"].(string)
+						title, _ := state["title"].(string)
+						
+						preview := output
+						if len(preview) > 200 {
+							preview = preview[:200] + "..."
+						}
+						
+						displayName := toolName
+						if title != "" {
+							displayName = fmt.Sprintf("%s (%s)", toolName, title)
+						}
+						
+						logEntry("tool_call",
+							fmt.Sprintf("🔧 Tool: %s [%s]", displayName, toolStatus),
+							preview,
+							map[string]interface{}{
+								"toolName":     toolName,
+								"toolParams":   input,
+								"responseSize": len(output),
+								"status":       toolStatus,
+							})
+					}
+				}
+			}
+		}
+	}
 
 		if agentResponse == "" {
 			agentResponse = string(respBodyBytes)
@@ -511,6 +568,63 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 					"responseLen": len(forceAgentResponse),
 					"toolCalls":   len(forceToolCalls),
 				})
+
+			// Fetch all session messages to get intermediate tool calls after force update
+			forceSessionMsgsResp, err := client.Get(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID))
+			if err == nil {
+				defer forceSessionMsgsResp.Body.Close()
+				forceSessionMsgsBytes, _ := io.ReadAll(forceSessionMsgsResp.Body)
+				
+				var forceSessionMsgs []map[string]interface{}
+				if err := json.Unmarshal(forceSessionMsgsBytes, &forceSessionMsgs); err == nil {
+					for _, msg := range forceSessionMsgs {
+						info, _ := msg["info"].(map[string]interface{})
+						role, _ := info["role"].(string)
+						if role != "assistant" {
+							continue
+						}
+						
+						parts, _ := msg["parts"].([]interface{})
+						for _, p := range parts {
+							part, ok := p.(map[string]interface{})
+							if !ok {
+								continue
+							}
+							partType, _ := part["type"].(string)
+							
+							switch partType {
+							case "tool":
+								toolName, _ := part["tool"].(string)
+								state, _ := part["state"].(map[string]interface{})
+								toolStatus, _ := state["status"].(string)
+								input, _ := state["input"].(map[string]interface{})
+								output, _ := state["output"].(string)
+								title, _ := state["title"].(string)
+								
+								preview := output
+								if len(preview) > 200 {
+									preview = preview[:200] + "..."
+								}
+								
+								displayName := toolName
+								if title != "" {
+									displayName = fmt.Sprintf("%s (%s)", toolName, title)
+								}
+								
+								logEntry("tool_call",
+									fmt.Sprintf("🔧 Tool: %s [%s]", displayName, toolStatus),
+									preview,
+									map[string]interface{}{
+										"toolName":     toolName,
+										"toolParams":   input,
+										"responseSize": len(output),
+										"status":       toolStatus,
+									})
+							}
+						}
+					}
+				}
+			}
 
 			if forceAgentResponse == "" {
 				forceAgentResponse = string(forceRespBytes)
