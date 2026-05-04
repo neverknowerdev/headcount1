@@ -2,10 +2,38 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams } from 'react-router-dom';
-import { X, Send, Save, Archive } from 'lucide-react';
+import { X, Send, Save, Archive, RefreshCw } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { LogEntry, LegacyLogBlock } from './LogEntry';
+
+interface LogEntryData {
+    id: string;
+    timestamp: string;
+    type: 'info' | 'error' | 'warning' | 'request' | 'response' | 'tool_call' | 'tool_result';
+    content: string;
+    fullContent?: string;
+    metadata?: Record<string, any>;
+}
+
+function parseLogContent(logContent: string | undefined): { entries: LogEntryData[]; isLegacy: boolean } {
+    if (!logContent) return { entries: [], isLegacy: false };
+    
+    try {
+        const parsed = JSON.parse(logContent);
+        if (Array.isArray(parsed)) {
+            return { entries: parsed, isLegacy: false };
+        }
+        if (typeof parsed === 'object' && parsed.id) {
+            return { entries: [parsed], isLegacy: false };
+        }
+    } catch {
+        return { entries: [], isLegacy: true };
+    }
+    
+    return { entries: [], isLegacy: false };
+}
 
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
@@ -47,6 +75,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [allTasks, setAllTasks] = useState<any[]>([]);
     const [parentSearch, setParentSearch] = useState('');
     const [showParentDropdown, setShowParentDropdown] = useState(false);
+    const [rerunning, setRerunning] = useState<Record<number, boolean>>({});
+
+    const handleRerun = async (runId: number) => {
+        setRerunning(prev => ({ ...prev, [runId]: true }));
+        try {
+            await axios.post(`/api/runs/${runId}/rerun`);
+        } catch (e) {
+            console.error(e);
+        } finally {
+            setRerunning(prev => ({ ...prev, [runId]: false }));
+        }
+    };
 
     useEffect(() => {
         if (!selectedCompanyId) return;
@@ -121,8 +161,33 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             if (msg.type === 'run_ended') {
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r));
             }
+            if (msg.type === 'run_log_entry') {
+                // New structured log entry
+                setRuns(prev => prev.map((r: any) => {
+                    if (r.id !== msg.payload.run_id) return r;
+                    const { entries } = parseLogContent(r.log_content);
+                    return { ...r, log_content: JSON.stringify([...entries, msg.payload.entry]) };
+                }));
+            }
             if (msg.type === 'run_log') {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+                // Legacy plain text log (backward compatibility)
+                setRuns(prev => prev.map((r: any) => {
+                    if (r.id !== msg.payload.run_id) return r;
+                    const { entries, isLegacy } = parseLogContent(r.log_content);
+                    const line = msg.payload.line;
+                    if (isLegacy) {
+                        return { ...r, log_content: (r.log_content || '') + line + '\n' };
+                    } else {
+                        const newEntry: LogEntryData = {
+                            id: `ws-${Date.now()}`,
+                            timestamp: new Date().toISOString(),
+                            type: line.startsWith('ERROR') || line.startsWith('❌') ? 'error' : 
+                                  line.startsWith('WARNING') || line.startsWith('️') ? 'warning' : 'info',
+                            content: line,
+                        };
+                        return { ...r, log_content: JSON.stringify([...entries, newEntry]) };
+                    }
+                }));
             }
         };
         return () => ws.close();
@@ -283,19 +348,40 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     failed: 'bg-red-100 text-red-800 border-red-200',
                                                 };
                                                 const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
+                                                const { entries, isLegacy } = parseLogContent(r.log_content);
                                                 return (
                                                     <div key={`r-${r.id}`} className="flex justify-center">
                                                         <details className="w-full max-w-[90%] border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
                                                                 <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
                                                                 <div className="flex items-center gap-2">
+                                                                    {r.status === 'failed' && (
+                                                                        <button
+                                                                            onClick={(e) => { e.preventDefault(); handleRerun(r.id); }}
+                                                                            disabled={rerunning[r.id]}
+                                                                            className="text-xs bg-green-100 text-green-700 px-2 py-0.5 rounded hover:bg-green-200 flex items-center gap-1 disabled:opacity-50"
+                                                                        >
+                                                                            <RefreshCw size={10} className={rerunning[r.id] ? 'animate-spin' : ''} />
+                                                                            Re-run
+                                                                        </button>
+                                                                    )}
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
                                                                     <span className="text-gray-400">{timeStr}</span>
                                                                 </div>
                                                             </summary>
-                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t">
-                                                                {r.log_content}
-                                                            </pre>
+                                                            <div className="p-3 max-h-[400px] overflow-y-auto border-t">
+                                                                {isLegacy ? (
+                                                                    <LegacyLogBlock content={r.log_content || 'Waiting for logs...'} />
+                                                                ) : entries.length > 0 ? (
+                                                                    entries.map((entry) => (
+                                                                        <LogEntry key={entry.id} entry={entry} />
+                                                                    ))
+                                                                ) : (
+                                                                    <pre className="text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
+                                                                        {r.log_content || 'Waiting for logs...'}
+                                                                    </pre>
+                                                                )}
+                                                            </div>
                                                         </details>
                                                     </div>
                                                 );
