@@ -2,12 +2,14 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
 	"text/template"
-    "os"
-    "path/filepath"
-    "gopkg.in/yaml.v3"
 
 	"agent-orchestrator/db"
+	"gopkg.in/yaml.v3"
 )
 
 type SystemPromptBuilder interface {
@@ -86,15 +88,15 @@ type PromptData struct {
 
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
-		AgentPrompt:      agent.SystemPrompt,
-		TaskName:         task.Title,
-		TaskStatus:       task.Status,
-		TaskDescription:  task.Description,
+		AgentPrompt:     agent.SystemPrompt,
+		TaskName:        task.Title,
+		TaskStatus:      task.Status,
+		TaskDescription: task.Description,
 	}
 
 	if task.CompanyID != 0 {
 		data.CompanyName = task.Company.Name
-		data.CompanyDescription = task.Company.ShortName // or description if we have it
+		data.CompanyDescription = task.Company.ShortName
 	}
 
 	if task.ProjectID != nil && task.Project != nil {
@@ -102,7 +104,9 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		data.ProjectDescription = task.Project.Description
 
 		settings := loadSettings()
-		data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		if task.Company.ShortName != "" && task.Project.WorkspaceFolder != "" {
+			data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		}
 	}
 
 	if task.SprintID != 0 {
@@ -112,14 +116,18 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 
 	tmpl, err := template.New("prompt").Parse(promptTemplate)
 	if err != nil {
-		return agent.SystemPrompt // Fallback
+		log.Printf("Failed to parse system prompt template: %v", err)
+		return agent.SystemPrompt
 	}
 
 	var buf bytes.Buffer
 	err = tmpl.Execute(&buf, data)
 	if err != nil {
-		return agent.SystemPrompt // Fallback
+		log.Printf("Failed to execute system prompt template: %v", err)
+		return agent.SystemPrompt
 	}
 
-	return buf.String()
+	result := buf.String()
+	fmt.Printf("System prompt built successfully (%d chars)\n", len(result))
+	return result
 }

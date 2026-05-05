@@ -98,7 +98,7 @@ func (q *Queries) UpdateTask(ctx context.Context, t Task) (Task, error) {
 
 func (q *Queries) GetTask(ctx context.Context, id int32) (Task, error) {
 	var t Task
-	err := q.db.WithContext(ctx).First(&t, id).Error
+	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
 	return t, err
 }
 
