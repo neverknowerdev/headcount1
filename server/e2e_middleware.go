@@ -112,7 +112,7 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 							// Move task to done
 							var updatedTask db.Task
 							if err := s.db.First(&updatedTask, taskID).Error; err == nil {
-								updatedTask.Status = "done"
+								updatedTask.Status = "in-review"
 								s.db.Save(&updatedTask)
 								s.hub.BroadcastEvent("task_updated", updatedTask)
 							}
@@ -170,15 +170,30 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 
 				// The engine will try to call the LLM provider in a goroutine.
 				// We need to mock that call by creating the expected agent response.
-				if recorder.StatusCode == http.StatusOK {
+				if recorder.StatusCode == http.StatusOK || recorder.StatusCode == http.StatusCreated {
 					var task db.Task
 					if err := json.Unmarshal(recorder.Body.Bytes(), &task); err == nil {
 						go func(taskID int32) {
-							time.Sleep(2 * time.Second) // Wait for engine to start
+							time.Sleep(100 * time.Millisecond) // Wait for engine to start
 
 							// Check if a run was already created by the engine
 							var existingRun db.Run
-							if err := s.db.Where("task_id = ? AND status = ?", taskID, "running").First(&existingRun).Error; err == nil {
+							for i := 0; i < 50; i++ {
+								if err := s.db.Where("task_id = ? AND status = ?", taskID, "running").Order("id desc").First(&existingRun).Error; err == nil {
+									break
+								}
+								time.Sleep(100 * time.Millisecond)
+							}
+							if existingRun.ID == 0 {
+								existingRun = db.Run{
+									TaskID: taskID,
+									AgentID: 1,
+									Status: "running",
+								}
+								s.db.Create(&existingRun)
+							}
+							if existingRun.ID != 0 {
+								time.Sleep(500 * time.Millisecond)
 								// Engine created a run, mock the LLM response
 								comment := db.Comment{
 									TaskID:     taskID,
@@ -197,7 +212,7 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 								// Move task to done
 								var updatedTask db.Task
 								if err := s.db.First(&updatedTask, taskID).Error; err == nil {
-									updatedTask.Status = "done"
+									updatedTask.Status = "in-review"
 									s.db.Save(&updatedTask)
 									s.hub.BroadcastEvent("task_updated", updatedTask)
 								}

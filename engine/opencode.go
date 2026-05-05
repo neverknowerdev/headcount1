@@ -80,13 +80,23 @@ func (e *OpenCodeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 
 	switch task.Status {
 	case "to-do":
-		task.Status = "refinement"
-		_, err = e.q.UpdateTask(ctx, task)
-		if err != nil {
-			return err
+		if task.TaskType == db.TaskTypeImplement {
+			task.Status = "in-progress"
+			_, err = e.q.UpdateTask(ctx, task)
+			if err != nil {
+				return err
+			}
+			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+			go e.runOpenCode(context.Background(), task, "implement")
+		} else {
+			task.Status = "refinement"
+			_, err = e.q.UpdateTask(ctx, task)
+			if err != nil {
+				return err
+			}
+			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
+			go e.runOpenCode(context.Background(), task, "plan")
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
-		go e.runOpenCode(context.Background(), task, "plan")
 
 	case "in-progress":
 		go e.runOpenCode(context.Background(), task, "implement")
@@ -180,6 +190,12 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 	sessionResp.Body.Close()
 
+	// Update run with session id using direct save query since we don't have UpdateRunSession func
+	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "running") // Force save log
+	// Better yet, update the run directly from DB since engine has access to DB? Wait, engine only has e.q which is a *db.Queries
+	// Let's see if we can use gorm directly inside opencode? No, gorm is in db package.
+	// Oh, I can just update the run and use gorm from within db.querier.
+	e.q.UpdateRunSession(ctx, run.ID, sessionData.ID)
 	logLine(fmt.Sprintf("Created session %s", sessionData.ID))
 
 	// Ensure the Provider auth is set correctly on the OpenCode server if needed.
@@ -194,8 +210,11 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		},
 	}
 
-	if agent.SystemPrompt != "" {
-		msgReqBody["system"] = agent.SystemPrompt
+	// Use SystemPromptBuilder
+	promptBuilder := NewSystemPromptBuilder(e.q)
+	systemPrompt := promptBuilder.Build(agent, task)
+	if systemPrompt != "" {
+		msgReqBody["system"] = systemPrompt
 	}
 
 	if agent.Model != "" {
@@ -230,10 +249,6 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	msgResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
 
 	status := "completed"
-	taskNextStatus := "in-progress"
-	if mode == "implement" {
-		taskNextStatus = "in-review"
-	}
 
 	if err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to send message: %v", err))
@@ -251,12 +266,10 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	if msgResp.StatusCode != http.StatusOK {
 		status = "failed"
-		taskNextStatus = "blocked"
 		logLine(fmt.Sprintf("ERROR: OpenCode Server returned %d: %s", msgResp.StatusCode, string(respBodyBytes)))
 	} else if len(respBodyBytes) == 0 {
 		// Empty 200 response usually means invalid model/provider combination
 		status = "failed"
-		taskNextStatus = "blocked"
 		providerID := ""
 		if agent.ProviderID != nil {
 			if p, err := e.q.GetLLMProvider(ctx, *agent.ProviderID); err == nil {
@@ -303,11 +316,82 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 	}
 
+	// Fetch task again to check if status was updated by tool
+	taskAgain, _ := e.q.GetTask(ctx, task.ID)
+	if taskAgain.Status == task.Status && status == "completed" {
+		// LLM did not update status, force it to call update_task_status
+		logLine("Task status not updated by agent. Forcing update_task_status call...")
+
+		forceMsgBody := map[string]interface{}{
+			"parts": []map[string]interface{}{
+				{
+					"type": "text",
+					"text": "Please use the update_task_status tool to set the task status to in-progress, blocked, or in-review as appropriate.",
+				},
+			},
+		}
+
+		if agent.Model != "" {
+			modelObj := map[string]interface{}{
+				"modelID": agent.Model,
+			}
+			if agent.ProviderID != nil {
+				provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
+				if err == nil {
+					providerID := provider.ProviderType
+					if providerID == "" {
+						providerID = provider.Name
+					}
+					modelObj["providerID"] = providerID
+				}
+			}
+			forceMsgBody["model"] = modelObj
+		}
+
+		forceMsgBytes, _ := json.Marshal(forceMsgBody)
+		forceResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(forceMsgBytes))
+
+		if err == nil {
+			defer forceResp.Body.Close()
+			forceRespBytes, _ := io.ReadAll(forceResp.Body)
+
+			var rawForceMsg map[string]interface{}
+			forceAgentResponse := ""
+
+			if err := json.Unmarshal(forceRespBytes, &rawForceMsg); err == nil {
+				if parts, ok := rawForceMsg["parts"].([]interface{}); ok {
+					var text strings.Builder
+					for _, p := range parts {
+						if part, ok := p.(map[string]interface{}); ok {
+							if t, ok := part["text"].(string); ok && t != "" {
+								text.WriteString(t)
+								text.WriteString("\n")
+							}
+						}
+					}
+					forceAgentResponse = strings.TrimSpace(text.String())
+				}
+			}
+
+			if forceAgentResponse == "" {
+				forceAgentResponse = string(forceRespBytes)
+			}
+
+			if forceAgentResponse != "" {
+				logLine(forceAgentResponse)
+				comment, _ := e.q.CreateComment(ctx, db.Comment{
+					TaskID:     task.ID,
+					AuthorType: "agent",
+					Content:    forceAgentResponse,
+				})
+				e.hub.BroadcastEvent("comment_created", comment)
+			}
+		} else {
+			logLine(fmt.Sprintf("Failed to send force message: %v", err))
+		}
+	}
+
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
-
-	task.Status = taskNextStatus
-	e.q.UpdateTask(ctx, task)
-	e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": taskNextStatus})
 }
