@@ -1,6 +1,11 @@
 package main
 
 import (
+	"path/filepath"
+	"fmt"
+
+	"runtime"
+
 	"embed"
 	"io/fs"
 	"log"
@@ -26,6 +31,11 @@ import (
 var frontendDist embed.FS
 
 func main() {
+	// Deploy Custom Tool Script for OpenCode
+	if err := deployOpenCodeCustomTool(); err != nil {
+		log.Fatalf("Failed to deploy OpenCode custom tool: %v", err)
+	}
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -123,4 +133,49 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+func deployOpenCodeCustomTool() error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("Failed to get home dir for custom tool: %w", err)
+	}
+
+	paperclipDir := filepath.Join(homeDir, ".paperclip2")
+	if err := os.MkdirAll(paperclipDir, 0755); err != nil {
+		log.Printf("Failed to create paperclip2 dir: %v", err)
+	}
+
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	serverUrl := "http://127.0.0.1:" + port
+	err = os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
+	if err != nil {
+		log.Printf("Failed to write server_url.txt: %v", err)
+	}
+
+	scriptContentBytes, err := os.ReadFile("templates/opencode_custom_tools/update_task_status.ts")
+	if err != nil {
+		return fmt.Errorf("Failed to read templates/opencode_custom_tools/update_task_status.ts: %w", err)
+	}
+	scriptContent := string(scriptContentBytes)
+
+	opencodeToolsDir := filepath.Join(homeDir, ".config", "opencode", "tools")
+	if runtime.GOOS == "windows" {
+		opencodeToolsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
+	}
+
+	if err := os.MkdirAll(opencodeToolsDir, 0755); err != nil {
+		return fmt.Errorf("Failed to create opencode tools dir: %w", err)
+	}
+
+	destPath := filepath.Join(opencodeToolsDir, "update_task_status.ts")
+	if err := os.WriteFile(destPath, []byte(scriptContent), 0644); err != nil {
+		return fmt.Errorf("Failed to write opencode custom tool: %w", err)
+	} else {
+		log.Printf("Successfully deployed opencode custom tool to %s", destPath)
+		return nil
+	}
 }

@@ -11,6 +11,7 @@ import (
 )
 
 func TestOpenCodeServerDirect(t *testing.T) {
+    t.Skip("Skipping direct integration test since it requires running OpenCode server locally")
 	baseURL := "http://127.0.0.1:36000"
 
 	// 1. Create session

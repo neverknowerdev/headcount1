@@ -23,6 +23,9 @@ type Querier interface {
 	ListAttachmentsByTask(ctx context.Context, taskID int32) ([]Attachment, error)
 	CreateRun(ctx context.Context, r Run) (Run, error)
 	UpdateRunLog(ctx context.Context, id int32, content string, status string) error
+	UpdateRunSession(ctx context.Context, id int32, sessionID string) error
+	GetRun(ctx context.Context, id int32) (Run, error)
+	GetRunBySessionID(ctx context.Context, sessionID string) (Run, error)
 	CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error)
 	CreateSkill(ctx context.Context, s Skill) (Skill, error)
 	GetLLMProvider(ctx context.Context, id int32) (LLMProvider, error)
@@ -95,7 +98,7 @@ func (q *Queries) UpdateTask(ctx context.Context, t Task) (Task, error) {
 
 func (q *Queries) GetTask(ctx context.Context, id int32) (Task, error) {
 	var t Task
-	err := q.db.WithContext(ctx).First(&t, id).Error
+	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
 	return t, err
 }
 
@@ -139,6 +142,22 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 		return q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
 	}
 	return q.db.WithContext(ctx).Save(&r).Error
+}
+
+func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
+}
+
+func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).First(&r, id).Error
+	return r, err
+}
+
+func (q *Queries) GetRunBySessionID(ctx context.Context, sessionID string) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).Where("session_id = ?", sessionID).First(&r).Error
+	return r, err
 }
 
 func (q *Queries) CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {

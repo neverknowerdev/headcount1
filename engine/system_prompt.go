@@ -1,0 +1,133 @@
+package engine
+
+import (
+	"bytes"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"text/template"
+
+	"agent-orchestrator/db"
+	"gopkg.in/yaml.v3"
+)
+
+type SystemPromptBuilder interface {
+	Build(agent db.Agent, task db.Task) string
+}
+
+type defaultSystemPromptBuilder struct {
+	q *db.Queries
+}
+
+func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
+	return &defaultSystemPromptBuilder{q: q}
+}
+
+type Settings struct {
+	BasePath         string   `yaml:"base_path"`
+	WorkspaceFolders []string `yaml:"workspace_folders"`
+}
+
+func loadSettings() Settings {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return Settings{BasePath: "/tmp/.paperclip2"}
+	}
+	settingsPath := filepath.Join(homeDir, ".paperclip2_settings.yaml")
+	data, err := os.ReadFile(settingsPath)
+	if err != nil {
+		return Settings{BasePath: filepath.Join(homeDir, ".paperclip2")}
+	}
+
+	var settings Settings
+	if err := yaml.Unmarshal(data, &settings); err != nil {
+		return Settings{BasePath: filepath.Join(homeDir, ".paperclip2")}
+	}
+
+	if settings.BasePath == "" {
+		settings.BasePath = "/tmp/.paperclip2"
+	}
+	return settings
+}
+
+const promptTemplate = `you're an agent that works on a task. Your goal is to implement the task by itself, asking for help only when you're stuck with smth.
+
+{{.AgentPrompt}}
+
+You should call update_task_status when it's needed:
+- when you start works on it - in-progress
+- when you're done - in-review
+- when you stuck - blocked
+- when you have clarification questions in the beginning of the work - refinement
+
+Context of your work:
+{{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}
+{{if .ProjectName}}Project: {{.ProjectName}}. {{.ProjectDescription}}{{end}}
+{{if .SprintName}}Sprint: {{.SprintName}}. {{.SprintDescription}}{{end}}
+Working directory: {{.WorkingDirectory}}
+
+Task name: {{.TaskName}}
+Task status: {{.TaskStatus}}
+Task: {{.TaskDescription}}
+`
+
+type PromptData struct {
+	AgentPrompt        string
+	CompanyName        string
+	CompanyDescription string
+	ProjectName        string
+	ProjectDescription string
+	SprintName         string
+	SprintDescription  string
+	WorkingDirectory   string
+	TaskName           string
+	TaskStatus         string
+	TaskDescription    string
+}
+
+func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
+	data := PromptData{
+		AgentPrompt:     agent.SystemPrompt,
+		TaskName:        task.Title,
+		TaskStatus:      task.Status,
+		TaskDescription: task.Description,
+	}
+
+	if task.CompanyID != 0 {
+		data.CompanyName = task.Company.Name
+		data.CompanyDescription = task.Company.ShortName
+	}
+
+	if task.ProjectID != nil && task.Project != nil {
+		data.ProjectName = task.Project.Name
+		data.ProjectDescription = task.Project.Description
+
+		settings := loadSettings()
+		if task.Company.ShortName != "" && task.Project.WorkspaceFolder != "" {
+			data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		}
+	}
+
+	if task.SprintID != 0 {
+		data.SprintName = task.Sprint.Name
+		data.SprintDescription = task.Sprint.Goal
+	}
+
+	tmpl, err := template.New("prompt").Parse(promptTemplate)
+	if err != nil {
+		log.Printf("Failed to parse system prompt template: %v", err)
+		return agent.SystemPrompt
+	}
+
+	var buf bytes.Buffer
+	err = tmpl.Execute(&buf, data)
+	if err != nil {
+		log.Printf("Failed to execute system prompt template: %v", err)
+		return agent.SystemPrompt
+	}
+
+	result := buf.String()
+	fmt.Printf("System prompt built successfully (%d chars)\n", len(result))
+	return result
+}
