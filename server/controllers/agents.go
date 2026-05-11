@@ -26,7 +26,8 @@ mode: {{.Mode}}
 {{.SystemPrompt}}
 `
 
-func saveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
+// Exported for main.go to use
+func SaveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
 		return fmt.Errorf("failed to get home directory: %w", err)
@@ -196,7 +197,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_ = saveOpenCodeAgentConfig(agent, providerType)
+	_ = SaveOpenCodeAgentConfig(agent, providerType)
 
 	api.respondJSON(w, http.StatusOK, agent)
 }
@@ -265,7 +266,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 	}
-	_ = saveOpenCodeAgentConfig(agent, providerType)
+	_ = SaveOpenCodeAgentConfig(agent, providerType)
 
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
 

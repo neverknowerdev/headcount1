@@ -3,6 +3,7 @@ package main
 import (
 	"path/filepath"
 	"fmt"
+	"context"
 
 	"runtime"
 
@@ -21,6 +22,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/server"
+	"agent-orchestrator/server/controllers"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
@@ -73,6 +75,11 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
+	}
+
+	// Initialize OpenCode agent configs for existing agents
+	if err := initOpenCodeAgentConfigs(database); err != nil {
+		log.Printf("Failed to initialize OpenCode agent configs: %v", err)
 	}
 
 	hub := eventhub.NewHub()
@@ -133,6 +140,49 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+func initOpenCodeAgentConfigs(database *gorm.DB) error {
+	q := db.New(database)
+
+	// Fetch all companies to iterate over their agents
+	companies, err := q.ListCompanies(context.Background())
+	if err != nil {
+		return err
+	}
+
+	for _, comp := range companies {
+		agents, err := q.ListAgentsByCompany(context.Background(), comp.ID)
+		if err != nil {
+			continue
+		}
+
+		for _, agent := range agents {
+			// Get provider type if exists
+			providerType := ""
+			if agent.ProviderID != nil {
+				if p, err := q.GetLLMProvider(context.Background(), *agent.ProviderID); err == nil {
+					providerType = p.ProviderType
+					if providerType == "" {
+						providerType = p.Name
+					}
+				}
+			}
+
+			// Check if file exists, if not create it
+			homeDir, err := os.UserHomeDir()
+			if err != nil {
+				continue
+			}
+
+			agentPath := filepath.Join(homeDir, ".config", "opencode", "agents", fmt.Sprintf("%s.md", agent.Name))
+			if _, err := os.Stat(agentPath); os.IsNotExist(err) {
+				log.Printf("Agent config file missing for %s, creating...", agent.Name)
+				_ = endpoints.SaveOpenCodeAgentConfig(agent, providerType)
+			}
+		}
+	}
+	return nil
 }
 
 func deployOpenCodeCustomTool() error {
