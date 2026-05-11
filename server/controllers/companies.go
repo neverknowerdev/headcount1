@@ -1,13 +1,13 @@
 package endpoints
 
 import (
-	"github.com/go-chi/chi/v5"
 	"encoding/json"
 	"net/http"
 	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
