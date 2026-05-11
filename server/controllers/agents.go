@@ -1,6 +1,7 @@
 package endpoints
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -8,10 +9,22 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"text/template"
 
 	"agent-orchestrator/db"
 	"github.com/go-chi/chi/v5"
 )
+
+const agentConfigTemplate = `---
+description: {{.Description}}
+mode: {{.Mode}}
+{{if .Model}}model: {{.Model}}
+{{end}}permission:
+{{range $key, $value := .Permissions}}  {{$key}}: {{$value}}
+{{end}}---
+
+{{.SystemPrompt}}
+`
 
 func saveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
 	homeDir, err := os.UserHomeDir()
@@ -37,32 +50,45 @@ func saveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
 	}
 	perms["update_task_status"] = "allow"
 
-	var sb strings.Builder
-	sb.WriteString("---\n")
-	sb.WriteString(fmt.Sprintf("description: %s\n", agent.Description))
 	mode := agent.Mode
 	if mode == "" {
 		mode = "primary"
 	}
-	sb.WriteString(fmt.Sprintf("mode: %s\n", mode))
 
+	modelStr := ""
 	if agent.Model != "" {
 		if providerType != "" && !strings.Contains(agent.Model, "/") {
-			sb.WriteString(fmt.Sprintf("model: %s/%s\n", providerType, agent.Model))
+			modelStr = fmt.Sprintf("%s/%s", providerType, agent.Model)
 		} else {
-			sb.WriteString(fmt.Sprintf("model: %s\n", agent.Model))
+			modelStr = agent.Model
 		}
 	}
 
-	sb.WriteString("permission:\n")
-	for k, v := range perms {
-		sb.WriteString(fmt.Sprintf("  %s: %s\n", k, v))
+	data := struct {
+		Description  string
+		Mode         string
+		Model        string
+		Permissions  map[string]string
+		SystemPrompt string
+	}{
+		Description:  agent.Description,
+		Mode:         mode,
+		Model:        modelStr,
+		Permissions:  perms,
+		SystemPrompt: agent.SystemPrompt,
 	}
-	sb.WriteString("---\n\n")
-	sb.WriteString(agent.SystemPrompt)
-	sb.WriteString("\n")
 
-	return os.WriteFile(agentPath, []byte(sb.String()), 0644)
+	tmpl, err := template.New("agentConfig").Parse(agentConfigTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return os.WriteFile(agentPath, buf.Bytes(), 0644)
 }
 
 func deleteOpenCodeAgentConfig(agentName string) {
