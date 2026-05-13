@@ -12,7 +12,7 @@ export const AgentDetails: React.FC = () => {
     const [activeTab, setActiveTab] = useState('overview');
     const [runs, setRuns] = useState<any[]>([]);
 
-    const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '' });
+    const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
 
     const fetchData = useCallback(async () => {
         try {
@@ -29,7 +29,7 @@ export const AgentDetails: React.FC = () => {
                 description: agentRes.data.description || '',
                 system_prompt: agentRes.data.system_prompt,
                 model: agentRes.data.model || '',
-                provider_id: agentRes.data.provider_id?.toString() || ''
+                provider_id: agentRes.data.provider_id?.toString() || '', mode: agentRes.data.mode || 'primary', permissions: agentRes.data.permissions || '{}'
             });
         } catch (e) {
             console.error(e);
@@ -73,7 +73,7 @@ export const AgentDetails: React.FC = () => {
 
             <div className="border-b mb-6">
                 <nav className="-mb-px flex space-x-8">
-                    {['overview', 'logs', 'settings'].map(tab => (
+                    {['overview', 'logs', 'settings', 'tools'].map(tab => (
                         <button
                             key={tab}
                             onClick={() => setActiveTab(tab)}
@@ -144,6 +144,57 @@ export const AgentDetails: React.FC = () => {
                             ))
                         )}
                     </div>
+                )}
+
+
+                {activeTab === 'tools' && (
+                    <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border max-w-2xl space-y-4">
+                        <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
+                            <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
+                                <option value="primary">Primary</option>
+                                <option value="subagent">Subagent</option>
+                            </select>
+                        </div>
+                        <div className="pt-4">
+                            <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+                            <div className="space-y-2">
+                                {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill', 'update_task_status'].map(tool => {
+                                    const perms = JSON.parse(formData.permissions || '{}');
+                                    const isEnabled = tool === 'update_task_status' ? true : (perms[tool] !== 'deny');
+                                    return (
+                                        <div key={tool} className="flex items-center">
+                                            <input
+                                                type="checkbox"
+                                                id={`tool-${tool}`}
+                                                checked={isEnabled}
+                                                disabled={tool === 'update_task_status'}
+                                                onChange={(e) => {
+                                                    const newPerms = { ...perms };
+                                                    if (e.target.checked) {
+                                                        newPerms[tool] = 'allow';
+                                                    } else {
+                                                        newPerms[tool] = 'deny';
+                                                    }
+                                                    setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
+                                                }}
+                                                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded disabled:opacity-50"
+                                            />
+                                            <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
+                                                {tool}
+                                            </label>
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        </div>
+                        <div className="pt-4 border-t mt-6">
+                            <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
+                                <Save size={16} className="mr-2" /> Save Changes
+                            </button>
+                        </div>
+                    </form>
                 )}
 
                 {activeTab === 'settings' && (

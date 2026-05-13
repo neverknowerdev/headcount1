@@ -53,8 +53,6 @@ func loadSettings() Settings {
 
 const promptTemplate = `you're an agent that works on a task. Your goal is to implement the task by itself, asking for help only when you're stuck with smth.
 
-{{.AgentPrompt}}
-
 You should call update_task_status when it's needed:
 - when you start works on it - in-progress
 - when you're done - in-review
@@ -73,7 +71,6 @@ Task: {{.TaskDescription}}
 `
 
 type PromptData struct {
-	AgentPrompt        string
 	CompanyName        string
 	CompanyDescription string
 	ProjectName        string
@@ -88,7 +85,6 @@ type PromptData struct {
 
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
-		AgentPrompt:     agent.SystemPrompt,
 		TaskName:        task.Title,
 		TaskStatus:      task.Status,
 		TaskDescription: task.Description,
@@ -117,17 +113,17 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 	tmpl, err := template.New("prompt").Parse(promptTemplate)
 	if err != nil {
 		log.Printf("Failed to parse system prompt template: %v", err)
-		return agent.SystemPrompt
+		return ""
 	}
 
 	var buf bytes.Buffer
 	err = tmpl.Execute(&buf, data)
 	if err != nil {
 		log.Printf("Failed to execute system prompt template: %v", err)
-		return agent.SystemPrompt
+		return ""
 	}
 
 	result := buf.String()
-	fmt.Printf("System prompt built successfully (%d chars)\n", len(result))
+	fmt.Printf("Task context built successfully (%d chars)\n", len(result))
 	return result
 }
