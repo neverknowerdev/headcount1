@@ -20,6 +20,7 @@ type Project struct {
 	Name            string    `json:"name" gorm:"not null"`
 	Description     string    `json:"description"`
 	WorkspaceFolder string    `json:"workspace_folder"`
+	RepositoryUrl   string    `json:"repository_url"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
