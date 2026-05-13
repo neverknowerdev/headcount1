@@ -160,7 +160,23 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	logLine("Connecting to OpenCode Server...")
 
-	baseURL := "http://127.0.0.1:36000"
+
+	port := 36000 + int(run.ID%1000)
+	sbx := &DockerSandbox{
+		ImageName:     "paperclip-agent:latest",
+		ContainerName: fmt.Sprintf("paperclip-agent-run-%d", run.ID),
+		Port:          port,
+	}
+	logLine("Starting Docker Sandbox...")
+	// Defaulting to tmp path, but would normally be injected based on settings
+	err = sbx.Run(ctx, "/tmp/.paperclip2/workspace")
+	if err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to start docker sandbox: %v", err))
+		return
+	}
+	defer sbx.Stop()
+
+	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
 
 	// Create session
 	sessionReqBody, _ := json.Marshal(map[string]interface{}{

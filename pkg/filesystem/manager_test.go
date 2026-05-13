@@ -20,16 +20,19 @@ func TestFilesystemManager(t *testing.T) {
 	manager := NewManager(tempDir)
 	company := db.Company{ID: 1, Name: "Test Company", ShortName: "test-co"}
 
-	err = manager.CreateCompanyDirectories(company)
+	err = manager.SetupBaseDirectories()
 	assert.NoError(t, err)
 
 	expectedDirs := []string{
-		"companies/test-co",
-		"companies/test-co/memory",
-		"companies/test-co/skills",
-		"companies/test-co/docs",
-		"companies/test-co/agents",
-		"companies/test-co/projects",
+		"workspace",
+		"data",
+		"data/memory",
+		"data/artifacts",
+		"data/skills",
+		"data/skills/basic",
+		"data/logs",
+		"data/docker",
+		".ssh",
 	}
 
 	for _, d := range expectedDirs {
@@ -39,36 +42,19 @@ func TestFilesystemManager(t *testing.T) {
 		assert.True(t, info.IsDir())
 	}
 
-	settingsPath := filepath.Join(tempDir, "companies/test-co/settings.yml")
-	info, err := os.Stat(settingsPath)
-	assert.NoError(t, err)
-	assert.False(t, info.IsDir())
+	project := db.Project{ID: 1, Name: "project-1", WorkspaceFolder: "workspace/test-co/project-1"}
+	task := db.Task{ID: 44, Title: "Test Task"}
 
-	project := db.Project{ID: 1, Name: "project-1", WorkspaceFolder: "companies/test-co/projects/project-1"}
-	err = manager.CreateProjectDirectories(company, project)
-	assert.NoError(t, err)
-
-	expectedProjDirs := []string{
-		"companies/test-co/projects/project-1",
-		"companies/test-co/projects/project-1/memory",
-		"companies/test-co/projects/project-1/docs",
-		"companies/test-co/projects/project-1/workspace",
-		"companies/test-co/projects/project-1/repo/docs",
-	}
-
-	for _, d := range expectedProjDirs {
-		p := filepath.Join(tempDir, d)
-		info, err := os.Stat(p)
-		assert.NoError(t, err)
-		assert.True(t, info.IsDir())
-	}
-
-	task := db.Task{ID: 44}
 	err = manager.CreateTaskWorkspace(company, project, task)
 	assert.NoError(t, err)
 
-	taskPath := filepath.Join(tempDir, "companies/test-co/projects/project-1/workspace/task-44")
-	info, err = os.Stat(taskPath)
+	taskPath := filepath.Join(tempDir, "workspace/test-co/task-44")
+	info, err := os.Stat(taskPath)
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
+
+	memoryPath := filepath.Join(taskPath, "memory.md")
+	info, err = os.Stat(memoryPath)
+	assert.NoError(t, err)
+	assert.False(t, info.IsDir())
 }
