@@ -4,6 +4,18 @@ import { test, expect } from '@playwright/test';
 test.describe.serial('Paperclip2 App', () => {
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
         await page.waitForTimeout(2000);
+
+        await page.route('**/api/settings', async route => {
+            await route.fulfill({
+                status: 200,
+                contentType: 'application/json',
+                body: JSON.stringify({
+                    base_path: '/tmp/.paperclip2',
+                    workspace_folders: []
+                })
+            });
+        });
+
         await page.goto('/');
 
         // Step 1: Create Company (Now on /add-company)
