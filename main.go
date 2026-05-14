@@ -1,17 +1,15 @@
 package main
 
 import (
-	"path/filepath"
-	"fmt"
-
-	"runtime"
-
-	"embed"
-	"io/fs"
 	"context"
+	"embed"
+	"fmt"
+	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
