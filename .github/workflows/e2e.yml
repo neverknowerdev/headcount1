@@ -1,0 +1,57 @@
+name: E2E Tests
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  test:
+    timeout-minutes: 60
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        go-version: '1.24.3'
+        
+    - name: Set up Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: 20
+        
+    - name: Install Frontend Dependencies
+      run: |
+        cd frontend
+        npm install
+        
+    - name: Build Frontend
+      run: |
+        cd frontend
+        npm run build
+        
+    - name: Install E2E Dependencies
+      run: |
+        cd e2e
+        npm install
+        
+    - name: Install Playwright Browsers
+      run: |
+        cd e2e
+        npx playwright install --with-deps chromium
+        
+    - name: Run Playwright tests
+      run: |
+        cd e2e
+        npx playwright test
+      env:
+        E2E_MODE: true
+        
+    - uses: actions/upload-artifact@v4
+      if: always()
+      with:
+        name: playwright-report
+        path: e2e/playwright-report/
+        retention-days: 30

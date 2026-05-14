@@ -59,3 +59,4 @@ test.describe('Settings and Sync', () => {
         await expect(page.getByRole('button', { name: 'Syncing...' })).toBeHidden();
     });
 });
+

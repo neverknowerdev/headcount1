@@ -30,11 +30,57 @@ func (m *Manager) GetBasePath() string {
 }
 
 func (m *Manager) CreateCompanyDirectories(company db.Company) error {
-	return nil
+	compPath := filepath.Join(m.basePath, "data", company.ShortName)
+	return os.MkdirAll(compPath, 0755)
+}
+
+func (m *Manager) CompanyExists(company db.Company) bool {
+	compPath := filepath.Join(m.basePath, "data", company.ShortName)
+	info, err := os.Stat(compPath)
+	return err == nil && info.IsDir()
+}
+
+func (m *Manager) ListCompanies() ([]string, error) {
+	dataPath := filepath.Join(m.basePath, "data")
+	entries, err := os.ReadDir(dataPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	companies := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" {
+			companies = append(companies, entry.Name())
+		}
+	}
+	return companies, nil
 }
 
 func (m *Manager) CreateProjectDirectories(company db.Company, project db.Project) error {
-	return nil
+	projPath := filepath.Join(m.basePath, "data", "artifacts", company.ShortName, project.Name)
+	return os.MkdirAll(projPath, 0755)
+}
+
+func (m *Manager) ListProjects(companyShortName string) ([]string, error) {
+	projectsPath := filepath.Join(m.basePath, "data", "artifacts", companyShortName)
+	entries, err := os.ReadDir(projectsPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return []string{}, nil
+		}
+		return nil, err
+	}
+
+	projects := []string{}
+	for _, entry := range entries {
+		if entry.IsDir() {
+			projects = append(projects, entry.Name())
+		}
+	}
+	return projects, nil
 }
 
 func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project) error {

@@ -9,6 +9,7 @@ import (
 
 	"embed"
 	"io/fs"
+	"context"
 	"log"
 	"net/http"
 	"os"
@@ -86,6 +87,11 @@ func main() {
 	eng := engine.NewOpenCodeEngine(database, hub)
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
+
+	// Sync database with filesystem on startup
+	if err := srv.Sync(context.Background()); err != nil {
+		log.Printf("Warning: Initial filesystem sync failed: %v", err)
+	}
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

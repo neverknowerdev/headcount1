@@ -8,6 +8,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/server/controllers"
+	"context"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -29,6 +30,11 @@ func NewServer(database *gorm.DB, eng *engine.OpenCodeEngine) *Server {
 }
 
 func (s *Server) SetHub(h *eventhub.Hub) { s.hub = h }
+
+func (s *Server) Sync(ctx context.Context) error {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	return api.SyncDBWithFilesystem(ctx)
+}
 
 func (s *Server) Mount(r chi.Router) {
 

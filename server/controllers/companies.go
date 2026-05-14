@@ -16,7 +16,17 @@ func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, companies)
+
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+	validCompanies := []db.Company{}
+	for _, c := range companies {
+		if fsManager.CompanyExists(c) {
+			validCompanies = append(validCompanies, c)
+		}
+	}
+
+	api.respondJSON(w, http.StatusOK, validCompanies)
 }
 
 func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {

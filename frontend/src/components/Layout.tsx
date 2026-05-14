@@ -52,21 +52,25 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
     };
 
     fetchInitialData();
-  }, [setCompanies, setSelectedCompanyId]); // removed location/navigate to prevent loops on pure navigation after init
+  }, [setCompanies, setSelectedCompanyId, companies.length, location.pathname, navigate, selectedCompanyId]); 
+
+  // If there are no companies at all, force redirect to /add-company
+  useEffect(() => {
+    if (!loading && companies.length === 0 && location.pathname !== '/add-company') {
+      window.location.href = '/add-company';
+    }
+  }, [loading, companies.length, location.pathname]);
 
   if (loading) {
     return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
   }
 
-  // If there are no companies at all, force redirect to /add-company
-  if (companies.length === 0 && location.pathname !== '/add-company') {
-      window.location.href = '/add-company';
-      return null;
-  }
-
-  // Allow /add-company to render full screen, regardless of how many companies exist.
   if (location.pathname === '/add-company') {
       return <AddCompany />;
+  }
+
+  if (loading || (companies.length === 0 && location.pathname !== '/add-company')) {
+    return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
   }
 
   return (
