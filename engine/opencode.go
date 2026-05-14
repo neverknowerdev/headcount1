@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"os/exec"
 	"strings"
 	"time"
@@ -27,8 +28,8 @@ func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
 	if err != nil {
 		fmt.Println("opencode not found. Installing via npm...")
 		installCmd := exec.Command("npm", "install", "-g", "opencode-ai")
-		installCmd.Stdout = nil
-		installCmd.Stderr = nil
+		installCmd.Stdout = os.Stdout
+		installCmd.Stderr = os.Stderr
 		if err := installCmd.Run(); err != nil {
 			fmt.Printf("Failed to install opencode: %v\n", err)
 		} else {
@@ -37,16 +38,18 @@ func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
 	}
 
 	// Start the OpenCode Server if it's not already running
-	if !isServerRunning("http://127.0.0.1:36000") {
+	if _, err := http.Get("http://127.0.0.1:36000/ping"); err != nil {
 		fmt.Println("Starting OpenCode server...")
 		cmd := exec.Command("opencode", "serve", "--port", "36000")
+		cmd.Stdout = os.Stdout
+		cmd.Stderr = os.Stderr
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("Failed to start OpenCode server: %v\n", err)
 		} else {
-			// Wait for it to become ready
+			// wait a bit to ensure it started
 			for i := 0; i < 10; i++ {
-				time.Sleep(1 * time.Second)
-				if isServerRunning("http://127.0.0.1:36000") {
+				time.Sleep(500 * time.Millisecond)
+				if _, err := http.Get("http://127.0.0.1:36000/session"); err == nil {
 					fmt.Println("OpenCode server is ready.")
 					break
 				}
@@ -60,16 +63,6 @@ func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
 		q:   db.New(database),
 		hub: hub,
 	}
-}
-
-func isServerRunning(baseURL string) bool {
-	client := http.Client{Timeout: 2 * time.Second}
-	resp, err := client.Get(baseURL + "/doc") // hitting the docs endpoint
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
-	return resp.StatusCode == http.StatusOK
 }
 
 func (e *OpenCodeEngine) ProcessTask(ctx context.Context, taskID int32) error {
@@ -134,7 +127,11 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
 
-	contextStr := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s\n\n", task.Title, task.Description, mode)
+	// Use SystemPromptBuilder to inject contextStr into user request
+	promptBuilder := NewSystemPromptBuilder(e.q)
+	systemPromptContext := promptBuilder.Build(agent, task)
+
+	contextStr := fmt.Sprintf("%s\nTask: %s\nDescription: %s\nMode: %s\n\n", systemPromptContext, task.Title, task.Description, mode)
 
 	if len(attachments) > 0 {
 		contextStr += "Attachments:\n"
@@ -206,31 +203,18 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 	sessionResp.Body.Close()
 
-	// Update run with session id using direct save query since we don't have UpdateRunSession func
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "running") // Force save log
-	// Better yet, update the run directly from DB since engine has access to DB? Wait, engine only has e.q which is a *db.Queries
-	// Let's see if we can use gorm directly inside opencode? No, gorm is in db package.
-	// Oh, I can just update the run and use gorm from within db.querier.
 	e.q.UpdateRunSession(ctx, run.ID, sessionData.ID)
 	logLine(fmt.Sprintf("Created session %s", sessionData.ID))
 
-	// Ensure the Provider auth is set correctly on the OpenCode server if needed.
-	// Since we only know we need to send the model and the payload, let's prepare the message request.
-
 	msgReqBody := map[string]interface{}{
+		"agent": agent.Name,
 		"parts": []map[string]interface{}{
 			{
 				"type": "text",
 				"text": contextStr,
 			},
 		},
-	}
-
-	// Use SystemPromptBuilder
-	promptBuilder := NewSystemPromptBuilder(e.q)
-	systemPrompt := promptBuilder.Build(agent, task)
-	if systemPrompt != "" {
-		msgReqBody["system"] = systemPrompt
 	}
 
 	if agent.Model != "" {
@@ -240,8 +224,6 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		if agent.ProviderID != nil {
 			provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
 			if err == nil {
-				// Use ProviderType as providerID (lowercase ID format like "opencode-go")
-				// Fall back to Name if ProviderType is empty
 				providerID := provider.ProviderType
 				if providerID == "" {
 					providerID = provider.Name
@@ -260,7 +242,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	msgReqBytes, _ := json.Marshal(msgReqBody)
 
 	logLine(fmt.Sprintf("Request body: %s", string(msgReqBytes)))
-	logLine(fmt.Sprintf("Sending message to OpenCode session using model %s...", agent.Model))
+	logLine(fmt.Sprintf("Sending message to OpenCode session using model %s and agent %s...", agent.Model, agent.Name))
 
 	msgResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
 
@@ -284,7 +266,6 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		status = "failed"
 		logLine(fmt.Sprintf("ERROR: OpenCode Server returned %d: %s", msgResp.StatusCode, string(respBodyBytes)))
 	} else if len(respBodyBytes) == 0 {
-		// Empty 200 response usually means invalid model/provider combination
 		status = "failed"
 		providerID := ""
 		if agent.ProviderID != nil {
@@ -294,8 +275,6 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 		logLine(fmt.Sprintf("ERROR: OpenCode returned empty response. Model '%s' may not exist on provider '%s'. Check agent configuration.", agent.Model, providerID))
 	} else {
-		// OpenCode returns { info: Message, parts: Part[] }
-		// Extract text from any part that has a "text" field (text, reasoning, etc.)
 		var rawMsg map[string]interface{}
 		agentResponse := ""
 
@@ -332,13 +311,12 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 	}
 
-	// Fetch task again to check if status was updated by tool
 	taskAgain, _ := e.q.GetTask(ctx, task.ID)
 	if taskAgain.Status == task.Status && status == "completed" {
-		// LLM did not update status, force it to call update_task_status
 		logLine("Task status not updated by agent. Forcing update_task_status call...")
 
 		forceMsgBody := map[string]interface{}{
+			"agent": agent.Name,
 			"parts": []map[string]interface{}{
 				{
 					"type": "text",

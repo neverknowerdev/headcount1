@@ -1,13 +1,104 @@
 package endpoints
 
 import (
+	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
+	"text/template"
 
 	"agent-orchestrator/db"
 	"github.com/go-chi/chi/v5"
 )
+
+const agentConfigTemplate = `---
+description: {{.Description}}
+mode: {{.Mode}}
+{{if .Model}}model: {{.Model}}
+{{end}}permission:
+{{range $key, $value := .Permissions}}  {{$key}}: {{$value}}
+{{end}}---
+
+{{.SystemPrompt}}
+`
+
+// Exported for main.go to use
+func SaveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return fmt.Errorf("failed to get home directory: %w", err)
+	}
+
+	agentsDir := filepath.Join(homeDir, ".config", "opencode", "agents")
+	if err := os.MkdirAll(agentsDir, 0755); err != nil {
+		return fmt.Errorf("failed to create agents directory: %w", err)
+	}
+
+	agentPath := filepath.Join(agentsDir, fmt.Sprintf("%s.md", agent.Name))
+
+	permissions := agent.Permissions
+	if permissions == "" {
+		permissions = "{}"
+	}
+
+	var perms map[string]string
+	if err := json.Unmarshal([]byte(permissions), &perms); err != nil {
+		perms = make(map[string]string)
+	}
+	perms["update_task_status"] = "allow"
+
+	mode := agent.Mode
+	if mode == "" {
+		mode = "primary"
+	}
+
+	modelStr := ""
+	if agent.Model != "" {
+		if providerType != "" && !strings.Contains(agent.Model, "/") {
+			modelStr = fmt.Sprintf("%s/%s", providerType, agent.Model)
+		} else {
+			modelStr = agent.Model
+		}
+	}
+
+	data := struct {
+		Description  string
+		Mode         string
+		Model        string
+		Permissions  map[string]string
+		SystemPrompt string
+	}{
+		Description:  agent.Description,
+		Mode:         mode,
+		Model:        modelStr,
+		Permissions:  perms,
+		SystemPrompt: agent.SystemPrompt,
+	}
+
+	tmpl, err := template.New("agentConfig").Parse(agentConfigTemplate)
+	if err != nil {
+		return fmt.Errorf("failed to parse template: %w", err)
+	}
+
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return fmt.Errorf("failed to execute template: %w", err)
+	}
+
+	return os.WriteFile(agentPath, buf.Bytes(), 0644)
+}
+
+func deleteOpenCodeAgentConfig(agentName string) {
+	homeDir, err := os.UserHomeDir()
+	if err == nil {
+		agentPath := filepath.Join(homeDir, ".config", "opencode", "agents", fmt.Sprintf("%s.md", agentName))
+		os.Remove(agentPath)
+	}
+}
 
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
@@ -52,6 +143,8 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		Description  string `json:"description"`
 		SystemPrompt string `json:"system_prompt"`
 		Model        string `json:"model"`
+		Mode         string `json:"mode"`
+		Permissions  string `json:"permissions"`
 		ProviderID   *int32 `json:"provider_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -65,6 +158,8 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldName := agent.Name
+
 	if req.Name != "" {
 		agent.Name = req.Name
 	}
@@ -75,6 +170,12 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		agent.Model = req.Model
 	}
+	if req.Mode != "" {
+		agent.Mode = req.Mode
+	}
+	if req.Permissions != "" {
+		agent.Permissions = req.Permissions
+	}
 	agent.ProviderID = req.ProviderID
 
 	agent, err = api.q.UpdateAgent(r.Context(), agent)
@@ -82,6 +183,21 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	if oldName != agent.Name {
+		deleteOpenCodeAgentConfig(oldName)
+	}
+
+	providerType := ""
+	if agent.ProviderID != nil {
+		if p, err := api.q.GetLLMProvider(r.Context(), *agent.ProviderID); err == nil {
+			providerType = p.ProviderType
+			if providerType == "" {
+				providerType = p.Name
+			}
+		}
+	}
+	_ = SaveOpenCodeAgentConfig(agent, providerType)
 
 	api.respondJSON(w, http.StatusOK, agent)
 }
@@ -116,6 +232,8 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Description  string `json:"description"`
 		SystemPrompt string `json:"system_prompt"`
 		Model        string `json:"model"`
+		Mode         string `json:"mode"`
+		Permissions  string `json:"permissions"`
 		ProviderID   *int32 `json:"provider_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -128,6 +246,8 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt: req.SystemPrompt,
 		Description:  req.Description,
 		Model:        req.Model,
+		Mode:         req.Mode,
+		Permissions:  req.Permissions,
 		ProviderID:   req.ProviderID,
 	}
 
@@ -136,6 +256,17 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	providerType := ""
+	if agent.ProviderID != nil {
+		if prov, err := api.q.GetLLMProvider(r.Context(), *agent.ProviderID); err == nil {
+			providerType = prov.ProviderType
+			if providerType == "" {
+				providerType = prov.Name
+			}
+		}
+	}
+	_ = SaveOpenCodeAgentConfig(agent, providerType)
 
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
 

@@ -59,6 +59,8 @@ type Agent struct {
 	ProviderID   *int32       `json:"provider_id"`
 	Provider     *LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
 	Model        string       `json:"model"`
+	Mode         string       `json:"mode" gorm:"not null;default:'primary'"`
+	Permissions  string       `json:"permissions"`
 	CreatedAt    time.Time    `json:"created_at"`
 	UpdatedAt    time.Time    `json:"updated_at"`
 	Skills       []Skill      `json:"skills" gorm:"many2many:agent_skills;"`
