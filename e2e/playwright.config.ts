@@ -8,6 +8,7 @@ export default defineConfig({
   retries: process.env.CI ? 2 : 0,
   workers: 1,
   reporter: 'html',
+  globalSetup: './globalSetup',
   use: {
     baseURL: 'http://localhost:8080',
     trace: 'on-first-retry',

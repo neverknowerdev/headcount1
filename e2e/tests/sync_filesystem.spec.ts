@@ -14,6 +14,9 @@ test.describe('Filesystem as Source of Truth', () => {
         if (fs.existsSync(companyPath)) {
             fs.rmSync(companyPath, { recursive: true, force: true });
         }
+        // Wipe DB: this test runs after agent_settings and app tests,
+        // which leave companies behind that break the filesystem redirect logic.
+        await request.post('/api/e2e/wipe-db');
         // Create company via API — folder gets created automatically
         const res = await request.post('/api/companies', {
             data: { name: 'Filesystem Sync Inc', short_name: companyShortName, color: '#4f46e5' }

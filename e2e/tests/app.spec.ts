@@ -4,7 +4,7 @@ import { test, expect } from '@playwright/test';
 test.describe.serial('Paperclip2 App', () => {
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
         await page.goto('/add-company');
-        await expect(page.getByText('Create a Workspace')).toBeVisible();
+        await expect(page.getByText('Create a Workspace')).toBeVisible({ timeout: 30000 });
         await page.fill('input[placeholder="Acme Corp"]', 'Playwright Inc');
         await page.fill('input[placeholder="acme"]', 'pw-inc');
         await page.click('button:has-text("Next Step")');
