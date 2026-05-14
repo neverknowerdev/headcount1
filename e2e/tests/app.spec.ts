@@ -2,11 +2,6 @@ import { test, expect } from '@playwright/test';
 
 // Use serial mode because the second test depends on the state created by the first
 test.describe.serial('Paperclip2 App', () => {
-    test.beforeAll(async ({ request }) => {
-        // Wipe database to ensure clean onboarding state
-        await request.post('/api/e2e/wipe-db');
-    });
-
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
         await page.goto('/add-company');
         await expect(page.getByText('Create a Workspace')).toBeVisible();
