@@ -2,7 +2,10 @@ package endpoints
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"agent-orchestrator/db"
@@ -84,10 +87,24 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
 	if err := api.db.Save(&comp).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Rename company directory on disk if shortname changed
+	if oldShortName != req.ShortName {
+		settings := LoadSettings()
+		fsManager := filesystem.NewManager(settings.BasePath)
+		oldPath := filepath.Join(fsManager.GetBasePath(), "data", oldShortName)
+		newPath := filepath.Join(fsManager.GetBasePath(), "data", req.ShortName)
+		if _, err := os.Stat(oldPath); err == nil {
+			if err := os.Rename(oldPath, newPath); err != nil {
+				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldPath, newPath, err)
+			}
+		}
 	}
 
 	api.respondJSON(w, http.StatusOK, comp)
