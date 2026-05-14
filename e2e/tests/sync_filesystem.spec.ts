@@ -82,7 +82,7 @@ test.describe('Filesystem as Source of Truth', () => {
         // Should eventually navigate to a company dashboard
         await expect(page).toHaveURL(/.*\/companies\/fs-sync-test/, { timeout: 15000 });
         // The company switcher shows initials
-        await expect(page.getByText('FS')).toBeVisible({ timeout: 10000 });
+        await expect(page.getByText('FS').first()).toBeVisible({ timeout: 10000 });
         
         // 10. Test Sync from Filesystem button
         // We'll manually delete the project from DB but keep it on disk
@@ -98,7 +98,7 @@ test.describe('Filesystem as Source of Truth', () => {
         
         // Verify project is still there
         await page.goto(`/companies/${companyShortName}/projects`);
-        await expect(page.getByText('Test Project')).toBeVisible();
+        await expect(page.getByText('Test Project').first()).toBeVisible();
     });
 
     test.afterAll(async () => {
