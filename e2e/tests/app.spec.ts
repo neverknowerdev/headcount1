@@ -3,10 +3,7 @@ import { test, expect } from '@playwright/test';
 // Use serial mode because the second test depends on the state created by the first
 test.describe.serial('Paperclip2 App', () => {
     test('can go through onboarding, create project, and test full task flow', async ({ page }) => {
-        await page.waitForTimeout(2000);
-        await page.goto('/');
-
-        // Step 1: Create Company (Now on /add-company)
+        await page.goto('/add-company');
         await expect(page.getByText('Create a Workspace')).toBeVisible();
         await page.fill('input[placeholder="Acme Corp"]', 'Playwright Inc');
         await page.fill('input[placeholder="acme"]', 'pw-inc');

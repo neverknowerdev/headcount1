@@ -39,6 +39,20 @@ func (s *Server) E2EMockMiddleware(next http.Handler) http.Handler {
 			return
 		}
 
+		// 0. Wipe Database Endpoint
+		if strings.HasSuffix(r.URL.Path, "/e2e/wipe-db") && r.Method == "POST" {
+			tables := []string{"activity_logs", "proxy_request_logs", "runs", "comments", "attachments", "tasks", "skills", "agents", "llm_providers", "sprints", "projects", "companies"}
+			for _, table := range tables {
+				s.db.Exec("DELETE FROM " + table)
+			}
+			// Reset SQLite autoincrement
+			s.db.Exec("DELETE FROM sqlite_sequence")
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+			return
+		}
+
 		// 1. Mock Provider Test Endpoint
 		if strings.HasSuffix(r.URL.Path, "/providers/test") && r.Method == "POST" {
 			bodyBytes, _ := io.ReadAll(r.Body)

@@ -11,14 +11,20 @@ test.describe('Filesystem as Source of Truth', () => {
     const companyPath = path.join(paperclipBase, 'data', companyShortName);
     const backupPath = path.join(os.tmpdir(), `paperclip-backup-${Date.now()}`);
 
-    test.beforeAll(async () => {
+    test.beforeAll(async ({ request }) => {
         // Clean up any previous test data
         if (fs.existsSync(companyPath)) {
             fs.rmSync(companyPath, { recursive: true, force: true });
         }
+        // Wipe database to ensure clean onboarding state
+        await request.post('/api/e2e/wipe-db');
     });
 
     test('should maintain filesystem as source of truth and sync back', async ({ page }) => {
+        // Clear any leftover localStorage state
+        await page.context().clearCookies();
+        await page.evaluate(() => localStorage.clear());
+
         // 1. Create Company
         await page.goto('/add-company');
         
@@ -67,7 +73,7 @@ test.describe('Filesystem as Source of Truth', () => {
 
         // 7. Reload UI -> Should see onboarding (because ListCompanies filters by filesystem)
         await page.reload();
-        await page.goto('/');
+        await page.waitForURL(/\/add-company/, { timeout: 10000 });
         await expect(page.getByText('Create a Workspace')).toBeVisible({ timeout: 10000 });
 
         // 8. Move the folder back
