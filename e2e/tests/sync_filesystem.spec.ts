@@ -21,10 +21,6 @@ test.describe('Filesystem as Source of Truth', () => {
     });
 
     test('should maintain filesystem as source of truth and sync back', async ({ page }) => {
-        // Clear any leftover localStorage state
-        await page.context().clearCookies();
-        await page.evaluate(() => localStorage.clear());
-
         // 1. Create Company
         await page.goto('/add-company');
         
