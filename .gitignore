@@ -1,6 +1,7 @@
 orchestrator
 migrate.log
 orchestrator.db
+paperclip.db
 server.log
 node_modules/
 e2e/node_modules/
