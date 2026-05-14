@@ -1,18 +1,15 @@
 package main
 
 import (
-	"path/filepath"
-	"fmt"
 	"context"
-
-	"runtime"
-
 	"embed"
+	"fmt"
 	"io/fs"
-	"context"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
@@ -23,7 +20,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/server"
-	"agent-orchestrator/server/controllers"
+	endpoints "agent-orchestrator/server/controllers"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
