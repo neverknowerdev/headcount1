@@ -30,6 +30,9 @@ import (
 //go:embed all:frontend/dist
 var frontendDist embed.FS
 
+//go:embed templates/opencode_custom_tools/update_task_status.ts
+var updateTaskStatusScript []byte
+
 func main() {
 	// Deploy Custom Tool Script for OpenCode
 	if err := deployOpenCodeCustomTool(); err != nil {
@@ -209,11 +212,7 @@ func deployOpenCodeCustomTool() error {
 		log.Printf("Failed to write server_url.txt: %v", err)
 	}
 
-	scriptContentBytes, err := os.ReadFile("templates/opencode_custom_tools/update_task_status.ts")
-	if err != nil {
-		return fmt.Errorf("Failed to read templates/opencode_custom_tools/update_task_status.ts: %w", err)
-	}
-	scriptContent := string(scriptContentBytes)
+	scriptContent := string(updateTaskStatusScript)
 
 	opencodeToolsDir := filepath.Join(homeDir, ".config", "opencode", "tools")
 	if runtime.GOOS == "windows" {
