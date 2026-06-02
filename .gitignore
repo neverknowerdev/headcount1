@@ -2,9 +2,12 @@ orchestrator
 migrate.log
 orchestrator.db
 paperclip.db
+paperclip-e2e.db
 server.log
 node_modules/
 e2e/node_modules/
 e2e/playwright-report/
 e2e/test-results/
+e2e/.e2e-env.json
+e2e/.e2e-server.pid
 package-lock.json

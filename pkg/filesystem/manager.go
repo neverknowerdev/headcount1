@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/git"
 )
 
 type Manager struct {
@@ -83,20 +84,27 @@ func (m *Manager) ListProjects(companyShortName string) ([]string, error) {
 	return projects, nil
 }
 
+func (m *Manager) GetProjectRepoPath(company db.Company, project db.Project) string {
+	return filepath.Join(m.basePath, "data", "artifacts", company.ShortName, project.Name)
+}
+
 func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project) error {
 	if project.RepositoryUrl == "" {
 		return nil
 	}
 
-	repoDir := filepath.Join(m.basePath, "data", "artifacts", company.ShortName, project.Name)
+	repoDir := m.GetProjectRepoPath(company, project)
 	if err := os.MkdirAll(filepath.Dir(repoDir), 0755); err != nil {
 		return err
 	}
-	return nil
+
+	sshDir := filepath.Join(m.basePath, ".ssh")
+	gitMgr := git.NewGitManager(repoDir, sshDir)
+	return gitMgr.CloneOrFetchProject(ctx, project.RepositoryUrl, repoDir)
 }
 
 func (m *Manager) CreateTaskWorkspace(company db.Company, project db.Project, task db.Task) error {
-	taskPath := filepath.Join(m.basePath, "workspace", company.ShortName, fmt.Sprintf("task-%d", task.ID))
+	taskPath := m.GetTaskWorktreePath(company, task)
 	if err := os.MkdirAll(taskPath, 0755); err != nil {
 		return fmt.Errorf("failed to create task workspace: %w", err)
 	}
@@ -109,6 +117,10 @@ func (m *Manager) CreateTaskWorkspace(company db.Company, project db.Project, ta
 	}
 
 	return nil
+}
+
+func (m *Manager) GetTaskWorktreePath(company db.Company, task db.Task) string {
+	return filepath.Join(m.basePath, "workspace", company.ShortName, fmt.Sprintf("task-%d", task.ID))
 }
 
 func (m *Manager) CreateSkillDirectory(company db.Company, skill db.Skill) error {

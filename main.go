@@ -50,7 +50,11 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
-			dbConnStr = "orchestrator.db"
+			if os.Getenv("E2E_MODE") == "true" {
+				dbConnStr = "paperclip-e2e.db"
+			} else {
+				dbConnStr = "orchestrator.db"
+			}
 		}
 		database, err = gorm.Open(sqlite.Open(dbConnStr), &gorm.Config{})
 	}
@@ -98,13 +102,18 @@ func main() {
 	r.Use(middleware.Recoverer)
 
 	r.Route("/api", func(r chi.Router) {
-		if os.Getenv("E2E_MODE") == "true" {
-			log.Println("E2E mode enabled - mock middleware active")
-			r.Use(srv.E2EMockMiddleware)
-		}
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("pong"))
 		})
+
+		if os.Getenv("E2E_MODE") == "true" {
+			log.Println("E2E mode enabled - e2e routes active")
+			r.Route("/e2e", func(r chi.Router) {
+				api := endpoints.NewAPI(database, eng, hub)
+				r.Post("/wipe-db", api.WipeDB)
+			})
+		}
+
 		srv.Mount(r)
 
 		gw := integration.NewLLMGateway(database)

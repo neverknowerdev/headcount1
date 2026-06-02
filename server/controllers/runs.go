@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"agent-orchestrator/db"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -24,10 +26,8 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var runs []map[string]interface{}
-	err := api.db.Table("runs").
-		Preload("Task").
-		Preload("Agent").
+	var runs []db.Run
+	err := api.db.
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error

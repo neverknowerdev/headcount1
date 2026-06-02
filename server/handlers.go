@@ -18,10 +18,10 @@ type Server struct {
 	db     *gorm.DB
 	q      db.Querier
 	hub    *eventhub.Hub
-	engine *engine.OpenCodeEngine
+	engine engine.Engine
 }
 
-func NewServer(database *gorm.DB, eng *engine.OpenCodeEngine) *Server {
+func NewServer(database *gorm.DB, eng engine.Engine) *Server {
 	return &Server{
 		db:     database,
 		q:      db.New(database),
@@ -67,6 +67,8 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/projects", func(r chi.Router) {
 		r.Get("/", api.ListProjects)
 		r.Post("/", api.CreateProject)
+		r.Get("/{id}", api.GetProject)
+		r.Put("/{id}", api.UpdateProject)
 	})
 
 	r.Route("/tasks", func(r chi.Router) {

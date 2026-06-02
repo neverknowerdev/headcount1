@@ -3,17 +3,21 @@ package engine
 import (
 	"bytes"
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/git"
 	"gorm.io/gorm"
 )
 
@@ -37,30 +41,16 @@ func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
 		}
 	}
 
-	// Start the OpenCode Server if it's not already running
-	if _, err := http.Get("http://127.0.0.1:36000/ping"); err != nil {
-		fmt.Println("Starting OpenCode server...")
-		cmd := exec.Command("opencode", "serve", "--port", "36000")
-		cmd.Stdout = os.Stdout
-		cmd.Stderr = os.Stderr
-		if err := cmd.Start(); err != nil {
-			fmt.Printf("Failed to start OpenCode server: %v\n", err)
-		} else {
-			// wait a bit to ensure it started
-			for i := 0; i < 10; i++ {
-				time.Sleep(500 * time.Millisecond)
-				if _, err := http.Get("http://127.0.0.1:36000/session"); err == nil {
-					fmt.Println("OpenCode server is ready.")
-					break
-				}
-			}
-		}
-	} else {
-		fmt.Println("OpenCode server is already running.")
-	}
+	q := db.New(database)
+
+	// Start the OpenCode Server. The first call to runOpenCode will sync the
+	// provider config and restart the server if needed, since the opencode
+	// server doesn't hot-reload config.
+	e2eMode := os.Getenv("E2E_MODE") == "true"
+	startOpenCodeServer(e2eMode)
 
 	return &OpenCodeEngine{
-		q:   db.New(database),
+		q:   q,
 		hub: hub,
 	}
 }
@@ -124,6 +114,17 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 	e.hub.BroadcastEvent("run_started", run)
 
+	// In E2E mode, sync the opencode provider config and restart the host
+	// opencode server so it picks up the new config. The opencode server
+	// doesn't hot-reload config files, so a restart is the only reliable way
+	// to apply the mock provider's baseURL.
+	if os.Getenv("E2E_MODE") == "true" {
+		if syncErr := syncOpenCodeProviderConfig(e.q); syncErr != nil {
+			fmt.Printf("Warning: failed to sync opencode config: %v\n", syncErr)
+		}
+		startOpenCodeServer(true)
+	}
+
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
 
@@ -160,36 +161,97 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	logLine("Connecting to OpenCode Server...")
 
+	// Git worktree setup for git projects
+	var gitProject bool
+	var worktreeDir string
+	var gitMgr *git.GitManager
+	var projectRepoDir string
 
-	port := 36000 + int(run.ID%1000)
-	sbx := &DockerSandbox{
-		ImageName:     "paperclip-agent:latest",
-		ContainerName: fmt.Sprintf("paperclip-agent-run-%d", run.ID),
-		Port:          port,
-	}
-	logLine("Starting Docker Sandbox...")
-	// Defaulting to tmp path, but would normally be injected based on settings
-	err = sbx.Run(ctx, "/tmp/.paperclip2/workspace")
-	if err != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to start docker sandbox: %v", err))
-		return
-	}
-	defer sbx.Stop()
+	if task.ProjectID != nil {
+		project, projErr := e.q.GetProject(ctx, *task.ProjectID)
+		if projErr == nil && project.RepositoryUrl != "" {
+			gitProject = true
+			settings := loadEngineSettings()
+			company, compErr := e.q.GetCompany(ctx, task.CompanyID)
+			if compErr == nil {
+				fsMgr := filesystem.NewManager(settings.BasePath)
+				projectRepoDir = fsMgr.GetProjectRepoPath(company, project)
+				worktreeDir = fsMgr.GetTaskWorktreePath(company, task)
+				sshDir := filepath.Join(settings.BasePath, ".ssh")
+				gitMgr = git.NewGitManager(projectRepoDir, sshDir)
 
-	baseURL := fmt.Sprintf("http://127.0.0.1:%d", port)
+				// Pull latest in main repo
+				if pullErr := gitMgr.Pull(ctx); pullErr != nil {
+					logLine(fmt.Sprintf("Warning: git pull failed: %v", pullErr))
+				}
+
+				// Create worktree if it doesn't exist
+				if _, statErr := os.Stat(worktreeDir); os.IsNotExist(statErr) {
+					branchName := fmt.Sprintf("task-%d", task.ID)
+					if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
+						logLine(fmt.Sprintf("Failed to create worktree: %v", wtErr))
+						gitProject = false
+					} else {
+						logLine(fmt.Sprintf("Created worktree for branch %s", branchName))
+					}
+				} else {
+					logLine("Worktree already exists, reusing")
+				}
+			}
+		}
+	}
+
+	// Determine workspace path for Docker
+	workspacePath := "/tmp/.paperclip2/workspace"
+	if gitProject && worktreeDir != "" {
+		workspacePath = worktreeDir
+		logLine(fmt.Sprintf("Using git worktree as workspace: %s", worktreeDir))
+	}
+
+	// In E2E mode we skip Docker entirely and talk to the host's OpenCode
+	// server (port 36000) directly. This avoids the overhead of building a
+	// custom agent image, mounting volumes for custom tools, and translating
+	// 127.0.0.1 into host.docker.internal for the mock provider. The E2E
+	// globalSetup already starts the host server and the mock provider.
+	e2eMode := os.Getenv("E2E_MODE") == "true"
+
+	var baseURL string
+	if e2eMode {
+		baseURL = "http://127.0.0.1:36000"
+		logLine("E2E mode: using host OpenCode server (no Docker sandbox)")
+	} else {
+		port := 36000 + int(run.ID%1000)
+		sbx := &DockerSandbox{
+			ImageName:     "paperclip-agent:latest",
+			ContainerName: fmt.Sprintf("paperclip-agent-run-%d", run.ID),
+			Port:          port,
+		}
+		logLine("Starting Docker Sandbox...")
+		err = sbx.Run(ctx, workspacePath)
+		if err != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("Failed to start docker sandbox: %v", err))
+			return
+		}
+		defer sbx.Stop()
+
+		baseURL = fmt.Sprintf("http://127.0.0.1:%d", port)
+	}
 
 	// Create session
 	sessionReqBody, _ := json.Marshal(map[string]interface{}{
 		"title": fmt.Sprintf("Task %d: %s", task.ID, mode),
 	})
 
-	client := &http.Client{Timeout: 30 * time.Minute}
+	client := newOpenCodeHTTPClient(30 * time.Minute)
 	sessionResp, err := client.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
 	if err != nil || sessionResp.StatusCode != 200 {
-		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create OpenCode session: %v", err))
+		var bodySnippet string
 		if sessionResp != nil {
+			bodyBytes, _ := io.ReadAll(sessionResp.Body)
+			bodySnippet = string(bodyBytes)
 			sessionResp.Body.Close()
 		}
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create OpenCode session at %s: %v (status=%d body=%s)", baseURL, err, sessionRespOrStatus(sessionResp), bodySnippet))
 		return
 	}
 
@@ -202,6 +264,9 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		return
 	}
 	sessionResp.Body.Close()
+
+	// Helper to keep the failure log readable even if sessionResp is nil
+	// (Go's nil-interface quirk).
 
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "running") // Force save log
 	e.q.UpdateRunSession(ctx, run.ID, sessionData.ID)
@@ -385,7 +450,172 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 	}
 
+	// Git commit after agent run
+	if gitProject && gitMgr != nil && worktreeDir != "" && status == "completed" {
+		logLine("Checking for changes to commit in worktree...")
+		diff, diffErr := gitMgr.GetDiffInDir(ctx, worktreeDir)
+		if diffErr != nil {
+			logLine(fmt.Sprintf("Warning: failed to get diff: %v", diffErr))
+		} else if strings.TrimSpace(diff) != "" {
+			commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task)
+			if msgErr != nil {
+				logLine(fmt.Sprintf("Warning: failed to generate commit message: %v, using fallback", msgErr))
+				commitMsg = fmt.Sprintf("Agent run for task %d: %s", task.ID, mode)
+			}
+			if commitErr := gitMgr.CommitInWorktree(ctx, worktreeDir, commitMsg); commitErr != nil {
+				logLine(fmt.Sprintf("Warning: failed to commit: %v", commitErr))
+			} else {
+				logLine(fmt.Sprintf("Committed changes: %s", commitMsg))
+			}
+		} else {
+			logLine("No changes to commit")
+		}
+	}
+
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
+}
+
+func (e *OpenCodeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task) (string, error) {
+	var providerBaseURL, apiKey, providerType, model string
+
+	if agent.ProviderID != nil {
+		provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
+		if err != nil {
+			return "", fmt.Errorf("failed to get provider: %w", err)
+		}
+		providerBaseURL = provider.BaseUrl
+		apiKey = provider.ApiKey
+		providerType = provider.ProviderType
+		if providerType == "" {
+			providerType = provider.Name
+		}
+		model = agent.Model
+		if model == "" {
+			model = provider.DefaultModel
+		}
+	} else {
+		return "", fmt.Errorf("no provider configured for agent")
+	}
+
+	// Truncate diff if too long
+	truncatedDiff := diff
+	if len(diff) > 8000 {
+		truncatedDiff = diff[:8000] + "\n... (truncated)"
+	}
+
+	prompt := fmt.Sprintf(`Summarize these code changes into a concise git commit message.
+Subject line max 72 chars. Optional body separated by blank line.
+Respond with ONLY the commit message, no quotes or explanation.
+
+Task: %s
+Changes:
+%s`, task.Title, truncatedDiff)
+
+	reqBody := map[string]interface{}{
+		"model": model,
+		"messages": []map[string]string{
+			{"role": "user", "content": prompt},
+		},
+		"max_tokens":  200,
+		"temperature": 0.3,
+	}
+
+	reqBytes, _ := json.Marshal(reqBody)
+
+	chatURL := fmt.Sprintf("%s/v1/chat/completions", providerBaseURL)
+	req, err := http.NewRequestWithContext(ctx, "POST", chatURL, bytes.NewBuffer(reqBytes))
+	if err != nil {
+		return "", err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
+
+	client := &http.Client{Timeout: 30 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return "", fmt.Errorf("LLM request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	bodyBytes, _ := io.ReadAll(resp.Body)
+	if resp.StatusCode != http.StatusOK {
+		return "", fmt.Errorf("LLM returned status %d: %s", resp.StatusCode, string(bodyBytes))
+	}
+
+	var result struct {
+		Choices []struct {
+			Message struct {
+				Content string `json:"content"`
+			} `json:"message"`
+		} `json:"choices"`
+	}
+	if err := json.Unmarshal(bodyBytes, &result); err != nil {
+		return "", fmt.Errorf("failed to parse LLM response: %w", err)
+	}
+
+	if len(result.Choices) == 0 {
+		return "", fmt.Errorf("LLM returned no choices")
+	}
+
+	msg := strings.TrimSpace(result.Choices[0].Message.Content)
+	// Remove surrounding quotes if present
+	msg = strings.Trim(msg, "\"'`")
+	return msg, nil
+}
+
+func loadEngineSettings() struct{ BasePath string } {
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		return struct{ BasePath string }{BasePath: "/tmp/.paperclip2"}
+	}
+	return struct{ BasePath string }{BasePath: filepath.Join(homeDir, ".paperclip2")}
+}
+
+// sessionRespOrStatus returns the StatusCode of a possibly-nil *http.Response
+// without panicking. Used to format session-creation failure messages.
+func sessionRespOrStatus(r *http.Response) int {
+	if r == nil {
+		return 0
+	}
+	return r.StatusCode
+}
+
+// newOpenCodeHTTPClient returns an *http.Client configured to authenticate
+// against the OpenCode server. When OPENCODE_SERVER_USERNAME and
+// OPENCODE_SERVER_PASSWORD are set in the environment, the client sends an
+// HTTP Basic auth header on every request.
+func newOpenCodeHTTPClient(timeout time.Duration) *http.Client {
+	username := os.Getenv("OPENCODE_SERVER_USERNAME")
+	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	if username == "" && password == "" {
+		return &http.Client{Timeout: timeout}
+	}
+	return &http.Client{
+		Timeout: timeout,
+		Transport: &basicAuthTransport{
+			username: username,
+			password: password,
+			base:     http.DefaultTransport,
+		},
+	}
+}
+
+type basicAuthTransport struct {
+	username string
+	password string
+	base     http.RoundTripper
+}
+
+func (t *basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	cloned := req.Clone(req.Context())
+	cloned.Header.Set("Authorization", "Basic "+basicAuth(t.username, t.password))
+	return t.base.RoundTrip(cloned)
+}
+
+func basicAuth(user, pass string) string {
+	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
 }

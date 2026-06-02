@@ -1,0 +1,40 @@
+package endpoints
+
+import (
+	"encoding/json"
+	"net/http"
+	"os"
+)
+
+// WipeDB clears all data from the database. Only available when E2E_MODE=true.
+// Route registration is guarded by the env var in main.go.
+func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
+	if os.Getenv("E2E_MODE") != "true" {
+		http.Error(w, "WipeDB is only available in E2E mode", http.StatusForbidden)
+		return
+	}
+
+	tables := []string{
+		"activity_logs",
+		"proxy_request_logs",
+		"runs",
+		"comments",
+		"attachments",
+		"tasks",
+		"skills",
+		"agents",
+		"llm_providers",
+		"sprints",
+		"projects",
+		"companies",
+	}
+	for _, table := range tables {
+		api.db.Exec("DELETE FROM " + table)
+	}
+	// Reset SQLite autoincrement so test IDs start at 1
+	api.db.Exec("DELETE FROM sqlite_sequence")
+
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(http.StatusOK)
+	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}

@@ -12,6 +12,7 @@ import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { Settings } from './pages/Settings';
 import { AddCompany } from './pages/AddCompany';
+import { ProjectSettings } from './pages/ProjectSettings';
 
 function App() {
   return (
@@ -23,6 +24,7 @@ function App() {
           <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
           <Route path="/companies/:shortName/sprints" element={<SprintsManager />} />
           <Route path="/companies/:shortName/projects" element={<CompanyView />} />
+          <Route path="/companies/:shortName/projects/:id" element={<ProjectSettings />} />
           <Route path="/companies/:shortName/agents" element={<AgentManager />} />
           <Route path="/companies/:shortName/agents/:id" element={<AgentDetails />} />
           <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
