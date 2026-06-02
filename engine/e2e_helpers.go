@@ -38,21 +38,28 @@ func startOpenCodeServer(e2eMode bool) {
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
 		// Set XDG_CONFIG_HOME so opencode reads config from E2E temp dir
+		// Set OPENCODE_SERVER_PASSWORD to avoid auth issues with newer versions
+		env := os.Environ()
 		if e2eHome := os.Getenv("E2E_PAPERCLIP_HOME"); e2eHome != "" {
-			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+filepath.Join(e2eHome, ".config"))
+			env = append(env, "XDG_CONFIG_HOME="+filepath.Join(e2eHome, ".config"))
 		}
+		env = append(env, "OPENCODE_SERVER_PASSWORD=e2e-test-password")
+		cmd.Env = env
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("Failed to start OpenCode server: %v\n", err)
 			return
 		}
-		for i := 0; i < 10; i++ {
+		for i := 0; i < 20; i++ {
 			time.Sleep(500 * time.Millisecond)
-			if _, err := http.Get("http://127.0.0.1:36000/session"); err == nil {
-				fmt.Println("OpenCode server is ready.")
-				return
+			if resp, err := http.Get("http://127.0.0.1:36000/ping"); err == nil {
+				resp.Body.Close()
+				if resp.StatusCode == http.StatusOK {
+					fmt.Println("OpenCode server is ready.")
+					return
+				}
 			}
 		}
-		fmt.Println("Warning: OpenCode server didn't become reachable within 5s")
+		fmt.Println("Warning: OpenCode server didn't become reachable within 10s")
 	} else {
 		fmt.Println("OpenCode server is already running.")
 	}

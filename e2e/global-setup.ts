@@ -59,6 +59,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
     env.E2E_PAPERCLIP_HOME = e2eHome; // Use isolated home for paperclip2 data
+    env.OPENCODE_SERVER_PASSWORD = 'e2e-test-password'; // Match password set for opencode server
 
     const projectRoot = path.resolve(__dirname, '..');
     serverProcess = spawn('go', ['run', '.'], {
