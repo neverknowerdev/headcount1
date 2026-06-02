@@ -11,9 +11,12 @@ export default tool({
             const fs = require('fs');
             const path = require('path');
             const os = require('os');
-            const serverUrlPath = path.join(os.homedir(), '.paperclip2', 'server_url.txt');
+            
+            // Check for E2E_PAPERCLIP_HOME first, then fall back to real home
+            const paperclipHome = process.env.E2E_PAPERCLIP_HOME || os.homedir();
+            const serverUrlPath = path.join(paperclipHome, '.paperclip2', 'server_url.txt');
             if (!fs.existsSync(serverUrlPath)) {
-                return "Error: Cannot find Orchestrator server URL in ~/.paperclip2/server_url.txt";
+                return `Error: Cannot find Orchestrator server URL at ${serverUrlPath}`;
             }
             const serverUrl = fs.readFileSync(serverUrlPath, 'utf8').trim();
 
