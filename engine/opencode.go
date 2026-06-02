@@ -568,11 +568,7 @@ Changes:
 }
 
 func loadEngineSettings() struct{ BasePath string } {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return struct{ BasePath string }{BasePath: "/tmp/.paperclip2"}
-	}
-	return struct{ BasePath string }{BasePath: filepath.Join(homeDir, ".paperclip2")}
+	return struct{ BasePath string }{BasePath: db.PaperclipHome()}
 }
 
 // sessionRespOrStatus returns the StatusCode of a possibly-nil *http.Response

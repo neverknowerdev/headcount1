@@ -16,12 +16,7 @@ type Manager struct {
 
 func NewManager(basePath string) *Manager {
 	if basePath == "" {
-		homeDir, err := os.UserHomeDir()
-		if err != nil {
-			basePath = "/tmp/.paperclip2"
-		} else {
-			basePath = filepath.Join(homeDir, ".paperclip2")
-		}
+		basePath = db.PaperclipHome()
 	}
 	return &Manager{basePath: basePath}
 }

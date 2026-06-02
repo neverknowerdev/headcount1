@@ -37,6 +37,10 @@ func startOpenCodeServer(e2eMode bool) {
 		cmd := exec.Command("opencode", "serve", "--port", "36000")
 		cmd.Stdout = os.Stdout
 		cmd.Stderr = os.Stderr
+		// Set XDG_CONFIG_HOME so opencode reads config from E2E temp dir
+		if e2eHome := os.Getenv("E2E_PAPERCLIP_HOME"); e2eHome != "" {
+			cmd.Env = append(os.Environ(), "XDG_CONFIG_HOME="+filepath.Join(e2eHome, ".config"))
+		}
 		if err := cmd.Start(); err != nil {
 			fmt.Printf("Failed to start OpenCode server: %v\n", err)
 			return
@@ -58,11 +62,7 @@ func startOpenCodeServer(e2eMode bool) {
 // provider configurations from the database. Used in E2E mode to configure
 // the host OpenCode server to use the mock provider.
 func syncOpenCodeProviderConfig(q *db.Queries) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("home dir: %w", err)
-	}
-	configDir := filepath.Join(homeDir, ".config", "opencode")
+	configDir := filepath.Join(db.OpencodeConfigDir())
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", configDir, err)
 	}

@@ -185,12 +185,7 @@ func initOpenCodeAgentConfigs(database *gorm.DB) error {
 			}
 
 			// Check if file exists, if not create it
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				continue
-			}
-
-			agentPath := filepath.Join(homeDir, ".config", "opencode", "agents", fmt.Sprintf("%s.md", agent.Name))
+			agentPath := filepath.Join(db.OpencodeConfigDir(), "agents", fmt.Sprintf("%s.md", agent.Name))
 			if _, err := os.Stat(agentPath); os.IsNotExist(err) {
 				log.Printf("Agent config file missing for %s, creating...", agent.Name)
 				_ = endpoints.SaveOpenCodeAgentConfig(agent, providerType)
@@ -201,12 +196,7 @@ func initOpenCodeAgentConfigs(database *gorm.DB) error {
 }
 
 func deployOpenCodeCustomTool() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("Failed to get home dir for custom tool: %w", err)
-	}
-
-	paperclipDir := filepath.Join(homeDir, ".paperclip2")
+	paperclipDir := db.PaperclipHome()
 	if err := os.MkdirAll(paperclipDir, 0755); err != nil {
 		log.Printf("Failed to create paperclip2 dir: %v", err)
 	}
@@ -216,14 +206,14 @@ func deployOpenCodeCustomTool() error {
 		port = "8080"
 	}
 	serverUrl := "http://127.0.0.1:" + port
-	err = os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
+	err := os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
 	if err != nil {
 		log.Printf("Failed to write server_url.txt: %v", err)
 	}
 
 	scriptContent := string(updateTaskStatusScript)
 
-	opencodeToolsDir := filepath.Join(homeDir, ".config", "opencode", "tools")
+	opencodeToolsDir := filepath.Join(db.OpencodeConfigDir(), "tools")
 	if runtime.GOOS == "windows" {
 		opencodeToolsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
 	}

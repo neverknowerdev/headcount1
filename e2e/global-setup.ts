@@ -47,7 +47,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const envData = {
         E2E_MOCK_PROVIDER_URL: mock.baseUrl,
         E2E_TEST_REPO_URL: repoUrl,
-        E2E_HOME: e2eHome,
+        E2E_PAPERCLIP_HOME: e2eHome,
     };
     fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
     process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
@@ -58,13 +58,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const env: Record<string, string> = { ...process.env as Record<string, string> };
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
-    env.HOME = e2eHome; // Use isolated home for paperclip2
-
-    // Preserve original Go paths so `go run` reuses the existing module cache
-    // instead of re-downloading everything into the new HOME.
-    const realHome = os.homedir();
-    env.GOPATH = path.join(realHome, 'go');
-    env.GOMODCACHE = path.join(realHome, 'go', 'pkg', 'mod');
+    env.E2E_PAPERCLIP_HOME = e2eHome; // Use isolated home for paperclip2 data
 
     const projectRoot = path.resolve(__dirname, '..');
     serverProcess = spawn('go', ['run', '.'], {

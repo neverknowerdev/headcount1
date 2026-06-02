@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 
+	"agent-orchestrator/db"
 	"gopkg.in/yaml.v3"
 )
 
@@ -22,34 +23,24 @@ type SSHKeyPayload struct {
 }
 
 func getSettingsFilePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/.paperclip2/settings.yaml"
-	}
-	return filepath.Join(homeDir, ".paperclip2", "settings.yaml")
+	return db.SettingsFilePath()
 }
 
 func LoadSettings() Settings {
 	settingsPath := getSettingsFilePath()
 	data, err := os.ReadFile(settingsPath)
 
-	defaultBasePath := "/tmp/.paperclip2"
-	homeDir, errHome := os.UserHomeDir()
-	if errHome == nil {
-		defaultBasePath = filepath.Join(homeDir, ".paperclip2")
-	}
-
 	if err != nil {
-		return Settings{BasePath: defaultBasePath, WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
 	}
 
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: defaultBasePath, WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
 	}
 
 	if settings.BasePath == "" {
-		settings.BasePath = defaultBasePath
+		settings.BasePath = db.PaperclipHome()
 	}
 	return settings
 }

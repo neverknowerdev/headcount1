@@ -37,9 +37,9 @@ export default async function globalTeardown(): Promise<void> {
     try {
         if (fs.existsSync(envFile)) {
             const data = JSON.parse(fs.readFileSync(envFile, 'utf8'));
-            if (data.E2E_HOME) {
-                cleanupE2EHome(data.E2E_HOME);
-                console.log(`[globalTeardown] cleaned up E2E home: ${data.E2E_HOME}`);
+            if (data.E2E_PAPERCLIP_HOME) {
+                cleanupE2EHome(data.E2E_PAPERCLIP_HOME);
+                console.log(`[globalTeardown] cleaned up E2E home: ${data.E2E_PAPERCLIP_HOME}`);
             }
         }
     } catch (err: any) {

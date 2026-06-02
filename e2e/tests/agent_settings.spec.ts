@@ -51,8 +51,8 @@ test.describe('Agent Settings', () => {
     // Wait for save logic to complete
     await page.waitForTimeout(2000);
 
-    // Verify that the file was created in E2E_HOME/.config/opencode/agents/
-    const agentFilePath = path.join(env.E2E_HOME, '.config', 'opencode', 'agents', 'e2e-agent.md');
+    // Verify that the file was created in E2E_PAPERCLIP_HOME/.config/opencode/agents/
+    const agentFilePath = path.join(env.E2E_PAPERCLIP_HOME, '.config', 'opencode', 'agents', 'e2e-agent.md');
     expect(fs.existsSync(agentFilePath)).toBe(true);
 
     const fileContent = fs.readFileSync(agentFilePath, 'utf8');

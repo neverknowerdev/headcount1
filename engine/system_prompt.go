@@ -32,21 +32,21 @@ type Settings struct {
 func loadSettings() Settings {
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return Settings{BasePath: "/tmp/.paperclip2"}
+		return Settings{BasePath: db.PaperclipHome()}
 	}
 	settingsPath := filepath.Join(homeDir, ".paperclip2_settings.yaml")
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
-		return Settings{BasePath: filepath.Join(homeDir, ".paperclip2")}
+		return Settings{BasePath: db.PaperclipHome()}
 	}
 
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: filepath.Join(homeDir, ".paperclip2")}
+		return Settings{BasePath: db.PaperclipHome()}
 	}
 
 	if settings.BasePath == "" {
-		settings.BasePath = "/tmp/.paperclip2"
+		settings.BasePath = db.PaperclipHome()
 	}
 	return settings
 }

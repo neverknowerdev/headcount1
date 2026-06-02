@@ -7,7 +7,7 @@ import { loadE2EEnv } from '../helpers/env';
 test.describe('Filesystem as Source of Truth', () => {
     const env = loadE2EEnv();
     const companyShortName = 'fs-sync-test';
-    const paperclipBase = path.join(env.E2E_HOME, '.paperclip2');
+    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
     const companyPath = path.join(paperclipBase, 'data', companyShortName);
     const backupPath = path.join(os.tmpdir(), `paperclip-backup-${Date.now()}`);
 
