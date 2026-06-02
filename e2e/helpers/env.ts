@@ -6,6 +6,7 @@ const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '..', '.e2e-env
 interface E2EEnv {
     E2E_MOCK_PROVIDER_URL: string;
     E2E_TEST_REPO_URL: string;
+    E2E_HOME: string;
 }
 
 let cached: E2EEnv | null = null;
@@ -23,12 +24,12 @@ export function loadE2EEnv(): E2EEnv {
         );
     }
     const data = JSON.parse(fs.readFileSync(envFile, 'utf8'));
-    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_TEST_REPO_URL) {
+    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_TEST_REPO_URL || !data.E2E_HOME) {
         throw new Error(
-            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL or E2E_TEST_REPO_URL. ` +
+            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL, or E2E_HOME. ` +
             `Got: ${JSON.stringify(data)}`,
         );
     }
-    cached = { E2E_MOCK_PROVIDER_URL: data.E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL: data.E2E_TEST_REPO_URL };
+    cached = { E2E_MOCK_PROVIDER_URL: data.E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL: data.E2E_TEST_REPO_URL, E2E_HOME: data.E2E_HOME };
     return cached;
 }

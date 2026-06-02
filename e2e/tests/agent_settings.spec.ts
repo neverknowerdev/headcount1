@@ -2,9 +2,11 @@ import { test, expect } from '@playwright/test';
 import fs from 'fs';
 import path from 'path';
 import os from 'os';
+import { loadE2EEnv } from '../helpers/env';
 
 test.describe('Agent Settings', () => {
   test('should allow modifying agent tools and save them to the global config', async ({ page, request }) => {
+    const env = loadE2EEnv();
 
     // Create company using API
     const companyRes = await request.post('/api/companies', {
@@ -49,8 +51,8 @@ test.describe('Agent Settings', () => {
     // Wait for save logic to complete
     await page.waitForTimeout(2000);
 
-    // Verify that the file was created in ~/.config/opencode/agents/
-    const agentFilePath = path.join(os.homedir(), '.config', 'opencode', 'agents', 'e2e-agent.md');
+    // Verify that the file was created in E2E_HOME/.config/opencode/agents/
+    const agentFilePath = path.join(env.E2E_HOME, '.config', 'opencode', 'agents', 'e2e-agent.md');
     expect(fs.existsSync(agentFilePath)).toBe(true);
 
     const fileContent = fs.readFileSync(agentFilePath, 'utf8');

@@ -1,9 +1,11 @@
 import { FullConfig } from '@playwright/test';
 import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { assertOpenCodeInstalled } from './fixtures/assert-opencode';
 import { assertDockerAvailable } from './fixtures/assert-docker';
+import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
 
@@ -29,18 +31,23 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     assertOpenCodeInstalled();
     assertDockerAvailable();
 
-    // 2. Local bare git repo
+    // 2. Create isolated home directory for E2E tests
+    const e2eHome = createE2EHome();
+    console.log(`[globalSetup] E2E home: ${e2eHome}`);
+
+    // 3. Local bare git repo
     const repoUrl = setupBareRepo();
     console.log(`[globalSetup] bare repo URL: ${repoUrl}`);
 
-    // 3. Mock LLM provider server
+    // 4. Mock LLM provider server
     const mock = await startMockProviderServer();
     console.log(`[globalSetup] mock provider: ${mock.baseUrl}`);
 
-    // 4. Persist env for tests
+    // 5. Persist env for tests
     const envData = {
         E2E_MOCK_PROVIDER_URL: mock.baseUrl,
         E2E_TEST_REPO_URL: repoUrl,
+        E2E_HOME: e2eHome,
     };
     fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
     process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
@@ -51,6 +58,13 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const env: Record<string, string> = { ...process.env as Record<string, string> };
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
+    env.HOME = e2eHome; // Use isolated home for paperclip2
+
+    // Preserve original Go paths so `go run` reuses the existing module cache
+    // instead of re-downloading everything into the new HOME.
+    const realHome = os.homedir();
+    env.GOPATH = path.join(realHome, 'go');
+    env.GOMODCACHE = path.join(realHome, 'go', 'pkg', 'mod');
 
     const projectRoot = path.resolve(__dirname, '..');
     serverProcess = spawn('go', ['run', '.'], {

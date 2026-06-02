@@ -2,11 +2,12 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
+import { loadE2EEnv } from '../helpers/env';
 
 test.describe('Filesystem as Source of Truth', () => {
+    const env = loadE2EEnv();
     const companyShortName = 'fs-sync-test';
-    const homeDir = os.homedir();
-    const paperclipBase = path.join(homeDir, '.paperclip2');
+    const paperclipBase = path.join(env.E2E_HOME, '.paperclip2');
     const companyPath = path.join(paperclipBase, 'data', companyShortName);
     const backupPath = path.join(os.tmpdir(), `paperclip-backup-${Date.now()}`);
 
