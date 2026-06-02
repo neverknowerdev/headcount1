@@ -11,3 +11,4 @@ e2e/test-results/
 e2e/.e2e-env.json
 e2e/.e2e-server.pid
 package-lock.json
+agent-orchestrator
