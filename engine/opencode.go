@@ -587,6 +587,10 @@ func sessionRespOrStatus(r *http.Response) int {
 func newOpenCodeHTTPClient(timeout time.Duration) *http.Client {
 	username := os.Getenv("OPENCODE_SERVER_USERNAME")
 	password := os.Getenv("OPENCODE_SERVER_PASSWORD")
+	// If only password is set, use default username
+	if username == "" && password != "" {
+		username = "opencode"
+	}
 	fmt.Printf("newOpenCodeHTTPClient: username=%q, password=%q\n", username, password)
 	if username == "" && password == "" {
 		return &http.Client{Timeout: timeout}
