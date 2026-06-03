@@ -8,6 +8,9 @@ export const Settings: React.FC = () => {
     const { selectedCompanyId, companies, setCompanies } = useStore();
 
     const [companyShortName, setCompanyShortName] = useState('');
+    const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+    const [deleteConfirmText, setDeleteConfirmText] = useState('');
+    const [deleting, setDeleting] = useState(false);
 
     useEffect(() => {
         const comp = companies.find(c => c.id === selectedCompanyId);
@@ -87,6 +90,33 @@ export const Settings: React.FC = () => {
             alert('Failed to sync settings from filesystem');
         } finally {
             setSyncing(false);
+        }
+    };
+
+    const handleDeleteCompany = async () => {
+        const currentCompany = companies.find(c => c.id === selectedCompanyId);
+        if (!currentCompany || deleteConfirmText !== currentCompany.short_name) {
+            return;
+        }
+
+        setDeleting(true);
+        try {
+            await axios.delete(`/api/companies/${currentCompany.id}`);
+            const updatedCompanies = companies.filter(c => c.id !== selectedCompanyId);
+            setCompanies(updatedCompanies);
+
+            if (updatedCompanies.length > 0) {
+                navigate(`/companies/${updatedCompanies[0].short_name}`, { replace: true });
+            } else {
+                navigate('/add-company', { replace: true });
+            }
+        } catch (e) {
+            console.error(e);
+            alert('Failed to delete company');
+        } finally {
+            setDeleting(false);
+            setShowDeleteConfirm(false);
+            setDeleteConfirmText('');
         }
     };
 
@@ -199,6 +229,80 @@ export const Settings: React.FC = () => {
                     </div>
                 </form>
             </div>
+
+            <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
+                <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>
+                <div className="flex items-center justify-between">
+                    <div>
+                        <h3 className="text-sm font-medium text-gray-900">Delete this company</h3>
+                        <p className="text-xs text-gray-500 mt-1">
+                            Once deleted, it will be gone forever. All data will be archived before deletion.
+                        </p>
+                    </div>
+                    <button
+                        type="button"
+                        onClick={() => setShowDeleteConfirm(true)}
+                        className="bg-red-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-red-700"
+                    >
+                        Delete Company
+                    </button>
+                </div>
+            </div>
+
+            {showDeleteConfirm && (
+                <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
+                    <div className="bg-white rounded-lg p-6 max-w-md w-full mx-4">
+                        <h3 className="text-lg font-bold text-red-600 mb-4">Delete Company</h3>
+                        <div className="bg-red-50 border border-red-200 rounded-md p-4 mb-4">
+                            <p className="text-sm text-red-800 font-medium mb-2">
+                                Warning: This action cannot be undone!
+                            </p>
+                            <p className="text-sm text-red-700">
+                                This will permanently delete the company and all associated data including:
+                            </p>
+                            <ul className="text-sm text-red-700 list-disc list-inside mt-2">
+                                <li>All projects and tasks</li>
+                                <li>All agents and their configurations</li>
+                                <li>All comments and run logs</li>
+                                <li>All workspace files</li>
+                            </ul>
+                            <p className="text-sm text-red-700 mt-2">
+                                Your files will be archived before deletion, but the company data cannot be restored.
+                            </p>
+                        </div>
+                        <p className="text-sm text-gray-700 mb-2">
+                            To confirm, type the company short name: <span className="font-mono font-bold">{companyShortName}</span>
+                        </p>
+                        <input
+                            type="text"
+                            value={deleteConfirmText}
+                            onChange={e => setDeleteConfirmText(e.target.value)}
+                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-red-500 focus:border-red-500 sm:text-sm p-2 border mb-4"
+                            placeholder={companyShortName}
+                        />
+                        <div className="flex gap-3 justify-end">
+                            <button
+                                type="button"
+                                onClick={() => {
+                                    setShowDeleteConfirm(false);
+                                    setDeleteConfirmText('');
+                                }}
+                                className="px-4 py-2 border border-gray-300 rounded-md text-gray-700 hover:bg-gray-50"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                type="button"
+                                onClick={handleDeleteCompany}
+                                disabled={deleteConfirmText !== companyShortName || deleting}
+                                className="bg-red-600 text-white px-4 py-2 rounded-md hover:bg-red-700 disabled:bg-red-300 disabled:cursor-not-allowed"
+                            >
+                                {deleting ? 'Deleting...' : 'Delete Company'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

@@ -1,10 +1,14 @@
 package filesystem
 
 import (
+	"archive/tar"
+	"compress/gzip"
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/git"
@@ -159,4 +163,81 @@ func (m *Manager) SetupBaseDirectories() error {
 	}
 
 	return nil
+}
+
+func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
+	companyPath := m.GetCompanyPath(company)
+	if _, err := os.Stat(companyPath); os.IsNotExist(err) {
+		return "", nil
+	}
+
+	archiveDir := filepath.Join(m.basePath, "archive")
+	if err := os.MkdirAll(archiveDir, 0755); err != nil {
+		return "", fmt.Errorf("failed to create archive directory: %w", err)
+	}
+
+	timestamp := time.Now().Format("20060102_150405")
+	archiveName := fmt.Sprintf("%s_%s.tar.gz", company.ShortName, timestamp)
+	archivePath := filepath.Join(archiveDir, archiveName)
+
+	archiveFile, err := os.Create(archivePath)
+	if err != nil {
+		return "", fmt.Errorf("failed to create archive file: %w", err)
+	}
+	defer archiveFile.Close()
+
+	gzipWriter := gzip.NewWriter(archiveFile)
+	defer gzipWriter.Close()
+
+	tarWriter := tar.NewWriter(gzipWriter)
+	defer tarWriter.Close()
+
+	err = filepath.Walk(companyPath, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+
+		header, err := tar.FileInfoHeader(info, "")
+		if err != nil {
+			return err
+		}
+
+		relPath, err := filepath.Rel(companyPath, path)
+		if err != nil {
+			return err
+		}
+		header.Name = relPath
+
+		if err := tarWriter.WriteHeader(header); err != nil {
+			return err
+		}
+
+		if !info.IsDir() {
+			file, err := os.Open(path)
+			if err != nil {
+				return err
+			}
+			defer file.Close()
+
+			if _, err := io.Copy(tarWriter, file); err != nil {
+				return err
+			}
+		}
+
+		return nil
+	})
+
+	if err != nil {
+		return "", fmt.Errorf("failed to create archive: %w", err)
+	}
+
+	return archivePath, nil
+}
+
+func (m *Manager) DeleteCompanyFiles(company db.Company) error {
+	companyPath := m.GetCompanyPath(company)
+	if _, err := os.Stat(companyPath); os.IsNotExist(err) {
+		return nil
+	}
+	return os.RemoveAll(companyPath)
 }

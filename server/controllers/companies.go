@@ -109,3 +109,46 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 
 	api.respondJSON(w, http.StatusOK, comp)
 }
+
+func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	var comp db.Company
+	if err := api.db.First(&comp, id).Error; err != nil {
+		api.respondError(w, http.StatusNotFound, "Company not found")
+		return
+	}
+
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+
+	archivePath, err := fsManager.ArchiveCompany(comp)
+	if err != nil {
+		log.Printf("Warning: failed to archive company files: %v", err)
+	}
+
+	if err := fsManager.DeleteCompanyFiles(comp); err != nil {
+		log.Printf("Warning: failed to delete company files: %v", err)
+	}
+
+	// Delete related records first
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Project{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Agent{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Sprint{})
+
+	if err := api.db.Delete(&comp).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	api.logActivity(comp.ID, "company_deleted", int32(comp.ID), "company", "")
+
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "Company deleted successfully",
+		"archive_path": archivePath,
+	})
+}
