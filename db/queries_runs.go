@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -30,6 +31,11 @@ func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID stri
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }
 
+func (q *Queries) TouchRunLastMessageTime(ctx context.Context, id int32) error {
+	now := time.Now()
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("last_message_time", now).Error
+}
+
 func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 	var r Run
 	err := q.db.WithContext(ctx).First(&r, id).Error
@@ -40,4 +46,32 @@ func (q *Queries) GetRunBySessionID(ctx context.Context, sessionID string) (Run,
 	var r Run
 	err := q.db.WithContext(ctx).Where("session_id = ?", sessionID).First(&r).Error
 	return r, err
+}
+
+func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Where("task_id = ? AND status = ?", taskID, "running").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) GetStaleRunningRuns(ctx context.Context, threshold time.Duration) ([]Run, error) {
+	cutoff := time.Now().Add(-threshold)
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("status = ? AND (last_message_time IS NULL OR last_message_time < ?)", "running", cutoff).
+		Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) IsRunStale(ctx context.Context, runID int32, threshold time.Duration) (bool, error) {
+	cutoff := time.Now().Add(-threshold)
+	var count int64
+	err := q.db.WithContext(ctx).
+		Model(&Run{}).
+		Where("id = ? AND status = ? AND (last_message_time IS NULL OR last_message_time < ?)", runID, "running", cutoff).
+		Count(&count).Error
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

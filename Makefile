@@ -7,7 +7,7 @@ build-frontend:
 	cd frontend && npm run build
 
 build: setup build-frontend
-	go build -o orchestrator main.go
+	go build -o agent-orchestrator main.go
 
 dev:
 	@echo "Run 'cd frontend && npm run dev' in one terminal"

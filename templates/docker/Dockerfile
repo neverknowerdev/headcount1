@@ -22,4 +22,4 @@ RUN npm install -g opencode-ai
 EXPOSE 36000
 
 # Entrypoint runs the OpenCode server
-ENTRYPOINT ["opencode", "serve", "--port", "36000", "--host", "0.0.0.0"]
+ENTRYPOINT ["opencode", "serve", "--port", "36000", "--hostname", "0.0.0.0"]

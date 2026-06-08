@@ -171,6 +171,10 @@ func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
 		return "", nil
 	}
 
+	if !hasFiles(companyPath) {
+		return "", nil
+	}
+
 	archiveDir := filepath.Join(m.basePath, "archive")
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create archive directory: %w", err)
@@ -240,4 +244,19 @@ func (m *Manager) DeleteCompanyFiles(company db.Company) error {
 		return nil
 	}
 	return os.RemoveAll(companyPath)
+}
+
+func hasFiles(dir string) bool {
+	found := false
+	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		if !info.IsDir() {
+			found = true
+			return filepath.SkipAll
+		}
+		return nil
+	})
+	return found
 }

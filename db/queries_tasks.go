@@ -17,3 +17,11 @@ func (q *Queries) GetTask(ctx context.Context, id int32) (Task, error) {
 	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
 	return t, err
 }
+
+func (q *Queries) LockTaskRun(ctx context.Context, taskID int32, runID int32) error {
+	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND run_id IS NULL", taskID).Update("run_id", runID).Error
+}
+
+func (q *Queries) UnlockTaskRun(ctx context.Context, taskID int32) error {
+	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).Update("run_id", nil).Error
+}

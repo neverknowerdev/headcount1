@@ -135,17 +135,19 @@ func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Warning: failed to delete company files: %v", err)
 	}
 
-	// Delete related records first
+	// Delete related records first (in order to respect FK dependencies)
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.ActivityLog{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Skill{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Task{})
 	api.db.Where("company_id = ?", comp.ID).Delete(&db.Project{})
 	api.db.Where("company_id = ?", comp.ID).Delete(&db.Agent{})
 	api.db.Where("company_id = ?", comp.ID).Delete(&db.Sprint{})
 
-	if err := api.db.Delete(&comp).Error; err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
+	result := api.db.Delete(&comp)
+	if result.Error != nil {
+		api.respondError(w, http.StatusInternalServerError, result.Error.Error())
 		return
 	}
-
-	api.logActivity(comp.ID, "company_deleted", int32(comp.ID), "company", "")
 
 	api.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"message":      "Company deleted successfully",

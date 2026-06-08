@@ -3,13 +3,14 @@ package endpoints
 import (
 	"encoding/json"
 	"net/http"
-	"os"
+
+	"agent-orchestrator/pkg/utils"
 )
 
 // WipeDB clears all data from the database. Only available when E2E_MODE=true.
 // Route registration is guarded by the env var in main.go.
 func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
-	if os.Getenv("E2E_MODE") != "true" {
+	if !utils.IsE2E() {
 		http.Error(w, "WipeDB is only available in E2E mode", http.StatusForbidden)
 		return
 	}

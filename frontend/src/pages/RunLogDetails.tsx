@@ -1,11 +1,12 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft } from 'lucide-react';
+import { ArrowLeft, Square } from 'lucide-react';
 
 export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
     const [run, setRun] = useState<any>(null);
+    const [isStopping, setIsStopping] = useState(false);
 
     useEffect(() => {
         const fetchRun = async () => {
@@ -31,15 +32,40 @@ export const RunLogDetails: React.FC = () => {
         return () => ws.close();
     }, [id]);
 
+    const handleStopRun = async () => {
+        if (!id || !window.confirm('Are you sure you want to stop this run?')) return;
+        setIsStopping(true);
+        try {
+            await axios.post(`/api/runs/${id}/stop`);
+        } catch (e) {
+            console.error(e);
+            alert('Failed to stop run');
+        } finally {
+            setIsStopping(false);
+        }
+    };
+
     if (!run) return <div>Loading...</div>;
 
     return (
         <div className="h-full flex flex-col">
-            <div className="mb-6 flex items-center space-x-4">
-                <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
-                    <ArrowLeft size={20} />
-                </Link>
-                <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
+            <div className="mb-6 flex items-center justify-between">
+                <div className="flex items-center space-x-4">
+                    <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
+                        <ArrowLeft size={20} />
+                    </Link>
+                    <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
+                </div>
+                {run.status === 'running' && (
+                    <button
+                        onClick={handleStopRun}
+                        disabled={isStopping}
+                        className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                    >
+                        <Square size={16} />
+                        {isStopping ? 'Stopping...' : 'Stop Run'}
+                    </button>
+                )}
             </div>
 
             <div className="grid grid-cols-3 gap-6 flex-1 min-h-0">

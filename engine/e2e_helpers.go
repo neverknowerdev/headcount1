@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -69,7 +70,7 @@ func startOpenCodeServer(e2eMode bool) {
 // syncOpenCodeProviderConfig writes ~/.config/opencode/opencode.jsonc with
 // provider configurations from the database. Used in E2E mode to configure
 // the host OpenCode server to use the mock provider.
-func syncOpenCodeProviderConfig(q *db.Queries) error {
+func syncOpenCodeProviderConfig(q *db.Queries, runID int32) error {
 	configDir := filepath.Join(db.OpencodeConfigDir())
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", configDir, err)
@@ -81,13 +82,15 @@ func syncOpenCodeProviderConfig(q *db.Queries) error {
 		return fmt.Errorf("list providers: %w", err)
 	}
 
-	type providerConfig struct {
-		NPM     string            `json:"npm"`
+	type modelConfig struct {
 		Name    string            `json:"name"`
-		Options map[string]string `json:"options"`
-		Models  map[string]struct {
-			Name string `json:"name"`
-		} `json:"models"`
+		Headers map[string]string `json:"headers,omitempty"`
+	}
+	type providerConfig struct {
+		NPM     string                `json:"npm"`
+		Name    string                `json:"name"`
+		Options map[string]string     `json:"options"`
+		Models  map[string]modelConfig `json:"models"`
 	}
 	type configFile struct {
 		Schema   string                    `json:"$schema"`
@@ -114,10 +117,13 @@ func syncOpenCodeProviderConfig(q *db.Queries) error {
 			npm = "@ai-sdk/anthropic"
 		}
 
-		baseURL := strings.TrimRight(p.BaseUrl, "/")
-		if strings.HasSuffix(baseURL, "/chat/completions") {
-			baseURL = strings.TrimSuffix(baseURL, "/chat/completions")
+		// Route LLM traffic through the paperclip2 proxy so we can
+		// track per-response activity via TouchRunLastMessageTime.
+		proxyURL := os.Getenv("PAPERCLIP_SERVER_URL")
+		if proxyURL == "" {
+			proxyURL = "http://127.0.0.1:8080"
 		}
+		baseURL := strings.TrimRight(proxyURL, "/") + "/api/v1"
 
 		cfg.Provider[key] = providerConfig{
 			NPM:  npm,
@@ -126,10 +132,14 @@ func syncOpenCodeProviderConfig(q *db.Queries) error {
 				"baseURL": baseURL,
 				"apiKey":  p.ApiKey,
 			},
-			Models: map[string]struct {
-				Name string `json:"name"`
-			}{
-				p.DefaultModel: {Name: p.DefaultModel},
+			Models: map[string]modelConfig{
+				p.DefaultModel: {
+					Name: p.DefaultModel,
+					Headers: map[string]string{
+						"X-Provider-ID": strconv.Itoa(int(p.ID)),
+						"X-Run-ID":      strconv.Itoa(int(runID)),
+					},
+				},
 			},
 		}
 	}

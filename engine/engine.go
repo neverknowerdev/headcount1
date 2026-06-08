@@ -7,4 +7,5 @@ import "context"
 // avoids the opencode server entirely.
 type Engine interface {
 	ProcessTask(ctx context.Context, taskID int32) error
+	StopRun(ctx context.Context, runID int32)
 }

@@ -12,18 +12,21 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/utils"
 	"gorm.io/gorm"
 )
 
 type OpenCodeEngine struct {
-	q   *db.Queries
-	hub *eventhub.Hub
+	q           *db.Queries
+	hub         *eventhub.Hub
+	cancelFuncs sync.Map // runID -> context.CancelFunc
 }
 
 func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
@@ -46,8 +49,7 @@ func NewOpenCodeEngine(database *gorm.DB, hub *eventhub.Hub) *OpenCodeEngine {
 	// Start the OpenCode Server. The first call to runOpenCode will sync the
 	// provider config and restart the server if needed, since the opencode
 	// server doesn't hot-reload config.
-	e2eMode := os.Getenv("E2E_MODE") == "true"
-	startOpenCodeServer(e2eMode)
+	startOpenCodeServer(utils.IsE2E())
 
 	return &OpenCodeEngine{
 		q:   q,
@@ -59,6 +61,18 @@ func (e *OpenCodeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
+	}
+
+	if task.RunID != nil {
+		isStale, err := e.q.IsRunStale(ctx, *task.RunID, 10*time.Minute)
+		if err != nil {
+			return fmt.Errorf("failed to check run staleness: %w", err)
+		}
+		if !isStale {
+			return nil
+		}
+		fmt.Printf("Task %d has stale run %d, resolving...\n", taskID, *task.RunID)
+		e.resolveStaleRun(ctx, *task.RunID)
 	}
 
 	switch task.Status {
@@ -93,6 +107,16 @@ func (e *OpenCodeEngine) failRun(ctx context.Context, runID int32, errorMsg stri
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 }
 
+func (e *OpenCodeEngine) resolveStaleRun(ctx context.Context, runID int32) {
+	run, err := e.q.GetRun(ctx, runID)
+	if err != nil {
+		return
+	}
+	e.q.UpdateRunLog(ctx, runID, "Run marked as failed: server restarted while run was in progress", "failed")
+	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+	e.q.UnlockTaskRun(ctx, run.TaskID)
+}
+
 func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode string) {
 	if task.AgentID == nil {
 		return
@@ -112,16 +136,36 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	if err != nil {
 		return
 	}
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	e.cancelFuncs.Store(run.ID, cancel)
+	defer func() {
+		cancel()
+		e.cancelFuncs.Delete(run.ID)
+	}()
+
+	if lockErr := e.q.LockTaskRun(ctx, task.ID, run.ID); lockErr != nil {
+		fmt.Printf("Warning: failed to lock task %d for run %d: %v\n", task.ID, run.ID, lockErr)
+	}
+
+	defer func() {
+		if clearErr := e.q.UnlockTaskRun(context.Background(), task.ID); clearErr != nil {
+			fmt.Printf("Warning: failed to unlock task %d: %v\n", task.ID, clearErr)
+		}
+	}()
+
 	e.hub.BroadcastEvent("run_started", run)
 
-	// In E2E mode, sync the opencode provider config and restart the host
-	// opencode server so it picks up the new config. The opencode server
-	// doesn't hot-reload config files, so a restart is the only reliable way
-	// to apply the mock provider's baseURL.
-	if os.Getenv("E2E_MODE") == "true" {
-		if syncErr := syncOpenCodeProviderConfig(e.q); syncErr != nil {
-			fmt.Printf("Warning: failed to sync opencode config: %v\n", syncErr)
-		}
+	// Sync the opencode provider config so the server (host in E2E mode,
+	// Docker container in production mode) has the correct provider configuration.
+	if syncErr := syncOpenCodeProviderConfig(e.q, run.ID); syncErr != nil {
+		fmt.Printf("Warning: failed to sync opencode config: %v\n", syncErr)
+	}
+
+	// In E2E mode, restart the host opencode server so it picks up the new config.
+	// The opencode server doesn't hot-reload config files, so a restart is the
+	// only reliable way to apply config changes.
+	if utils.IsE2E() {
 		startOpenCodeServer(true)
 	}
 
@@ -161,9 +205,32 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	logLine("Connecting to OpenCode Server...")
 
+	settings := loadEngineSettings()
+	fsMgr := filesystem.NewManager(settings.BasePath)
+
+	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
+	if compErr != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to get company: %v", compErr))
+		return
+	}
+
+	// Determine workspace path: always use task-specific directory
+	workspacePath := fsMgr.GetTaskWorktreePath(company, task)
+
+	// Create task workspace directory if it doesn't exist
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to create task workspace: %v", err))
+		return
+	}
+
+	if err := initTaskMemory(workspacePath, task, company); err != nil {
+		logLine(fmt.Sprintf("Warning: failed to init memory.md: %v", err))
+	}
+
+	logLine(fmt.Sprintf("Using workspace: %s", workspacePath))
+
 	// Git worktree setup for git projects
 	var gitProject bool
-	var worktreeDir string
 	var gitMgr *git.GitManager
 	var projectRepoDir string
 
@@ -171,49 +238,33 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		project, projErr := e.q.GetProject(ctx, *task.ProjectID)
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
-			settings := loadEngineSettings()
-			company, compErr := e.q.GetCompany(ctx, task.CompanyID)
-			if compErr == nil {
-				fsMgr := filesystem.NewManager(settings.BasePath)
-				projectRepoDir = fsMgr.GetProjectRepoPath(company, project)
-				worktreeDir = fsMgr.GetTaskWorktreePath(company, task)
-				sshDir := filepath.Join(settings.BasePath, ".ssh")
-				gitMgr = git.NewGitManager(projectRepoDir, sshDir)
+			projectRepoDir = fsMgr.GetProjectRepoPath(company, project)
+			sshDir := filepath.Join(settings.BasePath, ".ssh")
+			gitMgr = git.NewGitManager(projectRepoDir, sshDir)
 
-				// Pull latest in main repo
-				if pullErr := gitMgr.Pull(ctx); pullErr != nil {
-					logLine(fmt.Sprintf("Warning: git pull failed: %v", pullErr))
-				}
+			// Pull latest in main repo
+			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
+				logLine(fmt.Sprintf("Warning: git pull failed: %v", pullErr))
+			}
 
-				// Create worktree if it doesn't exist
-				if _, statErr := os.Stat(worktreeDir); os.IsNotExist(statErr) {
-					branchName := fmt.Sprintf("task-%d", task.ID)
-					if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
-						logLine(fmt.Sprintf("Failed to create worktree: %v", wtErr))
-						gitProject = false
-					} else {
-						logLine(fmt.Sprintf("Created worktree for branch %s", branchName))
-					}
+			// Create worktree if it doesn't exist
+			if _, statErr := os.Stat(workspacePath); os.IsNotExist(statErr) {
+				branchName := fmt.Sprintf("task-%d", task.ID)
+				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/main"); wtErr != nil {
+					logLine(fmt.Sprintf("Failed to create worktree: %v", wtErr))
+					gitProject = false
 				} else {
-					logLine("Worktree already exists, reusing")
+					logLine(fmt.Sprintf("Created worktree for branch %s", branchName))
 				}
+			} else {
+				logLine("Worktree already exists, reusing")
 			}
 		}
 	}
 
-	// Determine workspace path for Docker
-	workspacePath := "/tmp/.paperclip2/workspace"
-	if gitProject && worktreeDir != "" {
-		workspacePath = worktreeDir
-		logLine(fmt.Sprintf("Using git worktree as workspace: %s", worktreeDir))
-	}
-
 	// In E2E mode we skip Docker entirely and talk to the host's OpenCode
-	// server (port 36000) directly. This avoids the overhead of building a
-	// custom agent image, mounting volumes for custom tools, and translating
-	// 127.0.0.1 into host.docker.internal for the mock provider. The E2E
-	// globalSetup already starts the host server and the mock provider.
-	e2eMode := os.Getenv("E2E_MODE") == "true"
+	// server (port 36000) directly.
+	e2eMode := utils.IsE2E()
 
 	var baseURL string
 	if e2eMode {
@@ -242,8 +293,15 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		"title": fmt.Sprintf("Task %d: %s", task.ID, mode),
 	})
 
-	client := newOpenCodeHTTPClient(30 * time.Minute)
-	sessionResp, err := client.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
+	// Docker sandbox server is unsecured (no OPENCODE_SERVER_PASSWORD), so use plain client
+	// E2E mode uses the host server which may require auth
+	var sessionClient *http.Client
+	if e2eMode {
+		sessionClient = newOpenCodeHTTPClient(30 * time.Second)
+	} else {
+		sessionClient = &http.Client{Timeout: 30 * time.Second}
+	}
+	sessionResp, err := sessionClient.Post(baseURL+"/session", "application/json", bytes.NewBuffer(sessionReqBody))
 	if err != nil || sessionResp.StatusCode != 200 {
 		var bodySnippet string
 		if sessionResp != nil {
@@ -272,6 +330,9 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	e.q.UpdateRunSession(ctx, run.ID, sessionData.ID)
 	logLine(fmt.Sprintf("Created session %s", sessionData.ID))
 
+	// Give the server a moment to fully initialize the session
+	time.Sleep(2 * time.Second)
+
 	msgReqBody := map[string]interface{}{
 		"agent": agent.Name,
 		"parts": []map[string]interface{}{
@@ -287,7 +348,8 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			"modelID": agent.Model,
 		}
 		if agent.ProviderID != nil {
-			provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
+			// Use background context to avoid any parent context cancellation issues
+			provider, err := e.q.GetLLMProvider(context.Background(), *agent.ProviderID)
 			if err == nil {
 				providerID := provider.ProviderType
 				if providerID == "" {
@@ -309,17 +371,28 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	logLine(fmt.Sprintf("Request body: %s", string(msgReqBytes)))
 	logLine(fmt.Sprintf("Sending message to OpenCode session using model %s and agent %s...", agent.Model, agent.Name))
 
-	msgResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(msgReqBytes))
+	msgReq, _ := http.NewRequestWithContext(runCtx, "POST", fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), bytes.NewBuffer(msgReqBytes))
+	msgReq.Header.Set("Content-Type", "application/json")
+
+	client := newOpenCodeHTTPClient(10 * time.Minute)
+	msgResp, err := client.Do(msgReq)
 
 	status := "completed"
 
 	if err != nil {
+		if runCtx.Err() == context.Canceled {
+			logLine("Run canceled by user request")
+			e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "canceled")
+			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
+			return
+		}
 		e.failRun(ctx, run.ID, fmt.Sprintf("Failed to send message: %v", err))
 		return
 	}
 	defer msgResp.Body.Close()
 
 	respBodyBytes, _ := io.ReadAll(msgResp.Body)
+	e.q.TouchRunLastMessageTime(ctx, run.ID)
 	logLine(fmt.Sprintf("Response status: %d", msgResp.StatusCode))
 	if len(respBodyBytes) > 0 {
 		logLine(fmt.Sprintf("Response body: %s", string(respBodyBytes)))
@@ -408,11 +481,22 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		}
 
 		forceMsgBytes, _ := json.Marshal(forceMsgBody)
-		forceResp, err := client.Post(fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), "application/json", bytes.NewBuffer(forceMsgBytes))
+		forceReq, _ := http.NewRequestWithContext(runCtx, "POST", fmt.Sprintf("%s/session/%s/message", baseURL, sessionData.ID), bytes.NewBuffer(forceMsgBytes))
+		forceReq.Header.Set("Content-Type", "application/json")
+		forceResp, err := client.Do(forceReq)
 
-		if err == nil {
+		if err != nil {
+			if runCtx.Err() == context.Canceled {
+				logLine("Run canceled by user request")
+				e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), "canceled")
+				e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
+				return
+			}
+			logLine(fmt.Sprintf("Failed to send force message: %v", err))
+		} else {
 			defer forceResp.Body.Close()
 			forceRespBytes, _ := io.ReadAll(forceResp.Body)
+			e.q.TouchRunLastMessageTime(ctx, run.ID)
 
 			var rawForceMsg map[string]interface{}
 			forceAgentResponse := ""
@@ -445,15 +529,13 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 				})
 				e.hub.BroadcastEvent("comment_created", comment)
 			}
-		} else {
-			logLine(fmt.Sprintf("Failed to send force message: %v", err))
 		}
 	}
 
 	// Git commit after agent run
-	if gitProject && gitMgr != nil && worktreeDir != "" && status == "completed" {
+	if gitProject && gitMgr != nil && status == "completed" {
 		logLine("Checking for changes to commit in worktree...")
-		diff, diffErr := gitMgr.GetDiffInDir(ctx, worktreeDir)
+		diff, diffErr := gitMgr.GetDiffInDir(ctx, workspacePath)
 		if diffErr != nil {
 			logLine(fmt.Sprintf("Warning: failed to get diff: %v", diffErr))
 		} else if strings.TrimSpace(diff) != "" {
@@ -462,7 +544,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 				logLine(fmt.Sprintf("Warning: failed to generate commit message: %v, using fallback", msgErr))
 				commitMsg = fmt.Sprintf("Agent run for task %d: %s", task.ID, mode)
 			}
-			if commitErr := gitMgr.CommitInWorktree(ctx, worktreeDir, commitMsg); commitErr != nil {
+			if commitErr := gitMgr.CommitInWorktree(ctx, workspacePath, commitMsg); commitErr != nil {
 				logLine(fmt.Sprintf("Warning: failed to commit: %v", commitErr))
 			} else {
 				logLine(fmt.Sprintf("Committed changes: %s", commitMsg))
@@ -619,4 +701,12 @@ func (t *basicAuthTransport) RoundTrip(req *http.Request) (*http.Response, error
 
 func basicAuth(user, pass string) string {
 	return base64.StdEncoding.EncodeToString([]byte(user + ":" + pass))
+}
+
+func (e *OpenCodeEngine) StopRun(ctx context.Context, runID int32) {
+	if val, loaded := e.cancelFuncs.LoadAndDelete(runID); loaded {
+		if cancel, ok := val.(context.CancelFunc); ok {
+			cancel()
+		}
+	}
 }

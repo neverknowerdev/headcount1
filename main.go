@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -19,6 +20,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
 
@@ -50,8 +52,8 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
-			if os.Getenv("E2E_MODE") == "true" {
-				dbConnStr = "paperclip-e2e.db"
+		if utils.IsE2E() {
+			dbConnStr = "paperclip-e2e.db"
 			} else {
 				dbConnStr = "orchestrator.db"
 			}
@@ -62,6 +64,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
+	// SQLite needs single connection to avoid WAL visibility issues
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
@@ -81,6 +87,8 @@ func main() {
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
+
+	recoverStaleRuns(database)
 
 	// Initialize OpenCode agent configs for existing agents
 	if err := initOpenCodeAgentConfigs(database); err != nil {
@@ -106,7 +114,7 @@ func main() {
 			w.Write([]byte("pong"))
 		})
 
-		if os.Getenv("E2E_MODE") == "true" {
+		if utils.IsE2E() {
 			log.Println("E2E mode enabled - e2e routes active")
 			r.Route("/e2e", func(r chi.Router) {
 				api := endpoints.NewAPI(database, eng, hub)
@@ -205,10 +213,21 @@ func deployOpenCodeCustomTool() error {
 	if port == "" {
 		port = "8080"
 	}
-	serverUrl := "http://127.0.0.1:" + port
+	
+	// Detect if running in Docker and use appropriate hostname
+	serverHost := "127.0.0.1"
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		serverHost = "host.docker.internal"
+	} else if os.Getenv("PAPERCLIP_SERVER_HOST") != "" {
+		serverHost = os.Getenv("PAPERCLIP_SERVER_HOST")
+	}
+	
+	serverUrl := "http://" + serverHost + ":" + port
 	err := os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
 	if err != nil {
 		log.Printf("Failed to write server_url.txt: %v", err)
+	} else {
+		log.Printf("Wrote server URL to %s: %s", filepath.Join(paperclipDir, "server_url.txt"), serverUrl)
 	}
 
 	scriptContent := string(updateTaskStatusScript)
@@ -228,5 +247,27 @@ func deployOpenCodeCustomTool() error {
 	} else {
 		log.Printf("Successfully deployed opencode custom tool to %s", destPath)
 		return nil
+	}
+}
+
+func recoverStaleRuns(database *gorm.DB) {
+	q := db.New(database)
+	ctx := context.Background()
+
+	staleRuns, err := q.GetStaleRunningRuns(ctx, 10*time.Minute)
+	if err != nil {
+		log.Printf("Warning: failed to check for stale runs: %v", err)
+		return
+	}
+
+	if len(staleRuns) == 0 {
+		return
+	}
+
+	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
+	for _, run := range staleRuns {
+		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
+		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
+		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
 }

@@ -67,3 +67,26 @@ func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
 	}
 	api.respondJSON(w, http.StatusOK, run)
 }
+
+func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	run, err := api.q.GetRun(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "Run not found")
+		return
+	}
+
+	if run.Status != "running" {
+		api.respondError(w, http.StatusBadRequest, "Run is not in progress")
+		return
+	}
+
+	api.engine.StopRun(r.Context(), int32(id))
+
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+}

@@ -3,15 +3,16 @@ package integration
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strconv"
 	"strings"
-	"agent-orchestrator/pkg/utils"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
@@ -43,13 +44,17 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
 	providerIDStr := r.Header.Get("X-Provider-ID")
-	if providerIDStr == "" {
+	var providerID int
+	if providerIDStr != "" {
+		fmt.Sscanf(providerIDStr, "%d", &providerID)
+	}
+
+	// Resolve provider: use X-Provider-ID header if present, otherwise
+	// require it (the header is set by opencode config model headers).
+	if providerID == 0 {
 		http.Error(w, "X-Provider-ID header missing", http.StatusBadRequest)
 		return
 	}
-
-	var providerID int
-	fmt.Sscanf(providerIDStr, "%d", &providerID)
 
 	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
 	if err != nil {
@@ -64,6 +69,10 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 	}
 
 	for k, vv := range r.Header {
+		lk := strings.ToLower(k)
+		if lk == "x-provider-id" || lk == "x-run-id" {
+			continue // don't forward internal headers to provider
+		}
 		for _, v := range vv {
 			proxyReq.Header.Add(k, v)
 		}
@@ -77,6 +86,16 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 	defer resp.Body.Close()
+
+	// Heartbeat: touch the run's last_message_time so stale-run
+	// detection knows the LLM is still working.
+	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
+		var runID int
+		fmt.Sscanf(runIDStr, "%d", &runID)
+		if runID > 0 {
+			go g.q.TouchRunLastMessageTime(context.Background(), int32(runID))
+		}
+	}
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -142,6 +161,16 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		return
 	}
 	defer resp.Body.Close()
+
+	// Heartbeat: touch the run's last_message_time so stale-run
+	// detection knows the LLM is still working.
+	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
+		var runID int
+		fmt.Sscanf(runIDStr, "%d", &runID)
+		if runID > 0 {
+			go g.q.TouchRunLastMessageTime(context.Background(), int32(runID))
+		}
+	}
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
