@@ -28,12 +28,7 @@ mode: {{.Mode}}
 
 // Exported for main.go to use
 func SaveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("failed to get home directory: %w", err)
-	}
-
-	agentsDir := filepath.Join(homeDir, ".config", "opencode", "agents")
+	agentsDir := filepath.Join(db.OpencodeConfigDir(), "agents")
 	if err := os.MkdirAll(agentsDir, 0755); err != nil {
 		return fmt.Errorf("failed to create agents directory: %w", err)
 	}
@@ -93,11 +88,8 @@ func SaveOpenCodeAgentConfig(agent db.Agent, providerType string) error {
 }
 
 func deleteOpenCodeAgentConfig(agentName string) {
-	homeDir, err := os.UserHomeDir()
-	if err == nil {
-		agentPath := filepath.Join(homeDir, ".config", "opencode", "agents", fmt.Sprintf("%s.md", agentName))
-		os.Remove(agentPath)
-	}
+	agentPath := filepath.Join(db.OpencodeConfigDir(), "agents", fmt.Sprintf("%s.md", agentName))
+	os.Remove(agentPath)
 }
 
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {

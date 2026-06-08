@@ -2,7 +2,10 @@ package endpoints
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 
 	"agent-orchestrator/db"
@@ -16,7 +19,17 @@ func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, companies)
+
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+	validCompanies := []db.Company{}
+	for _, c := range companies {
+		if fsManager.CompanyExists(c) {
+			validCompanies = append(validCompanies, c)
+		}
+	}
+
+	api.respondJSON(w, http.StatusOK, validCompanies)
 }
 
 func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
@@ -74,11 +87,70 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
 	if err := api.db.Save(&comp).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
+	// Rename company directory on disk if shortname changed
+	if oldShortName != req.ShortName {
+		settings := LoadSettings()
+		fsManager := filesystem.NewManager(settings.BasePath)
+		oldPath := filepath.Join(fsManager.GetBasePath(), "data", oldShortName)
+		newPath := filepath.Join(fsManager.GetBasePath(), "data", req.ShortName)
+		if _, err := os.Stat(oldPath); err == nil {
+			if err := os.Rename(oldPath, newPath); err != nil {
+				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldPath, newPath, err)
+			}
+		}
+	}
+
 	api.respondJSON(w, http.StatusOK, comp)
+}
+
+func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid ID")
+		return
+	}
+
+	var comp db.Company
+	if err := api.db.First(&comp, id).Error; err != nil {
+		api.respondError(w, http.StatusNotFound, "Company not found")
+		return
+	}
+
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+
+	archivePath, err := fsManager.ArchiveCompany(comp)
+	if err != nil {
+		log.Printf("Warning: failed to archive company files: %v", err)
+	}
+
+	if err := fsManager.DeleteCompanyFiles(comp); err != nil {
+		log.Printf("Warning: failed to delete company files: %v", err)
+	}
+
+	// Delete related records first (in order to respect FK dependencies)
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.ActivityLog{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Skill{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Task{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Project{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Agent{})
+	api.db.Where("company_id = ?", comp.ID).Delete(&db.Sprint{})
+
+	result := api.db.Delete(&comp)
+	if result.Error != nil {
+		api.respondError(w, http.StatusInternalServerError, result.Error.Error())
+		return
+	}
+
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message":      "Company deleted successfully",
+		"archive_path": archivePath,
+	})
 }

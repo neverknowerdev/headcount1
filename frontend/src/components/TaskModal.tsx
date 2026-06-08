@@ -1,8 +1,8 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
-import { X, Send, Save, Archive } from 'lucide-react';
+import { useParams, Link } from 'react-router-dom';
+import { X, Send, Save, Archive, ExternalLink } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -117,9 +117,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             }
             if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
                 setRuns(prev => [...prev, msg.payload]);
+                setTask((prev: any) => prev ? { ...prev, run_id: msg.payload.id } : prev);
             }
-            if (msg.type === 'run_ended') {
+            if (msg.type === 'run_ended' && runs.some((r: any) => r.id === msg.payload.run_id)) {
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r));
+                setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
             }
             if (msg.type === 'run_log') {
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
@@ -281,6 +283,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     running: 'bg-yellow-100 text-yellow-800 border-yellow-200',
                                                     completed: 'bg-green-100 text-green-800 border-green-200',
                                                     failed: 'bg-red-100 text-red-800 border-red-200',
+                                                    canceled: 'bg-orange-100 text-orange-800 border-orange-200',
                                                 };
                                                 const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
                                                 return (
@@ -291,6 +294,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
                                                                     <span className="text-gray-400">{timeStr}</span>
+                                                                    <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-gray-400 hover:text-indigo-600" title="View full log">
+                                                                        <ExternalLink size={14} />
+                                                                    </Link>
                                                                 </div>
                                                             </summary>
                                                             <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t">
@@ -304,27 +310,42 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     })()}
                                 </div>
                                 <div className="mt-4">
-                                    <form onSubmit={handleAddComment} className="flex gap-2">
-                                        <input
-                                            type="text"
-                                            value={newComment}
-                                            onChange={(e) => setNewComment(e.target.value)}
-                                            placeholder="Add a comment..."
-                                            className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
-                                        />
-                                        <div className="flex items-center px-2">
+                                    {task?.run_id ? (
+                                        <div className="group relative">
                                             <input
-                                                type="checkbox"
-                                                id="runAgentCheckbox"
-                                                checked={runAgent}
-                                                onChange={(e) => setRunAgent(e.target.checked)}
+                                                type="text"
+                                                disabled
+                                                placeholder="Agent is running... Comments are disabled until it finishes"
+                                                className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed"
                                             />
-                                            <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
+                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded px-3 py-1.5 whitespace-nowrap z-50">
+                                                Comments are disabled while an agent run is in progress
+                                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
+                                            </div>
                                         </div>
-                                        <button type="submit" className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700">
-                                            <Send size={18} />
-                                        </button>
-                                    </form>
+                                    ) : (
+                                        <form onSubmit={handleAddComment} className="flex gap-2">
+                                            <input
+                                                type="text"
+                                                value={newComment}
+                                                onChange={(e) => setNewComment(e.target.value)}
+                                                placeholder="Add a comment..."
+                                                className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+                                            />
+                                            <div className="flex items-center px-2">
+                                                <input
+                                                    type="checkbox"
+                                                    id="runAgentCheckbox"
+                                                    checked={runAgent}
+                                                    onChange={(e) => setRunAgent(e.target.checked)}
+                                                />
+                                                <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
+                                            </div>
+                                            <button type="submit" className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700">
+                                                <Send size={18} />
+                                            </button>
+                                        </form>
+                                    )}
                                 </div>
                             </div>
                         )}

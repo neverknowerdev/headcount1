@@ -1,18 +1,17 @@
 package main
 
 import (
-	"path/filepath"
-	"fmt"
 	"context"
-
-	"runtime"
-
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"runtime"
 	"strings"
+	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
@@ -21,8 +20,9 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
-	"agent-orchestrator/server/controllers"
+	endpoints "agent-orchestrator/server/controllers"
 
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
@@ -31,6 +31,9 @@ import (
 
 //go:embed all:frontend/dist
 var frontendDist embed.FS
+
+//go:embed templates/opencode_custom_tools/update_task_status.ts
+var updateTaskStatusScript []byte
 
 func main() {
 	// Deploy Custom Tool Script for OpenCode
@@ -49,7 +52,11 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
-			dbConnStr = "orchestrator.db"
+		if utils.IsE2E() {
+			dbConnStr = "paperclip-e2e.db"
+			} else {
+				dbConnStr = "orchestrator.db"
+			}
 		}
 		database, err = gorm.Open(sqlite.Open(dbConnStr), &gorm.Config{})
 	}
@@ -57,6 +64,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
+
+	// SQLite needs single connection to avoid WAL visibility issues
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
@@ -77,6 +88,8 @@ func main() {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
+	recoverStaleRuns(database)
+
 	// Initialize OpenCode agent configs for existing agents
 	if err := initOpenCodeAgentConfigs(database); err != nil {
 		log.Printf("Failed to initialize OpenCode agent configs: %v", err)
@@ -87,18 +100,28 @@ func main() {
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
+	// Sync database with filesystem on startup
+	if err := srv.Sync(context.Background()); err != nil {
+		log.Printf("Warning: Initial filesystem sync failed: %v", err)
+	}
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
 
 	r.Route("/api", func(r chi.Router) {
-		if os.Getenv("E2E_MODE") == "true" {
-			log.Println("E2E mode enabled - mock middleware active")
-			r.Use(srv.E2EMockMiddleware)
-		}
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
 			w.Write([]byte("pong"))
 		})
+
+		if utils.IsE2E() {
+			log.Println("E2E mode enabled - e2e routes active")
+			r.Route("/e2e", func(r chi.Router) {
+				api := endpoints.NewAPI(database, eng, hub)
+				r.Post("/wipe-db", api.WipeDB)
+			})
+		}
+
 		srv.Mount(r)
 
 		gw := integration.NewLLMGateway(database)
@@ -170,12 +193,7 @@ func initOpenCodeAgentConfigs(database *gorm.DB) error {
 			}
 
 			// Check if file exists, if not create it
-			homeDir, err := os.UserHomeDir()
-			if err != nil {
-				continue
-			}
-
-			agentPath := filepath.Join(homeDir, ".config", "opencode", "agents", fmt.Sprintf("%s.md", agent.Name))
+			agentPath := filepath.Join(db.OpencodeConfigDir(), "agents", fmt.Sprintf("%s.md", agent.Name))
 			if _, err := os.Stat(agentPath); os.IsNotExist(err) {
 				log.Printf("Agent config file missing for %s, creating...", agent.Name)
 				_ = endpoints.SaveOpenCodeAgentConfig(agent, providerType)
@@ -186,12 +204,7 @@ func initOpenCodeAgentConfigs(database *gorm.DB) error {
 }
 
 func deployOpenCodeCustomTool() error {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return fmt.Errorf("Failed to get home dir for custom tool: %w", err)
-	}
-
-	paperclipDir := filepath.Join(homeDir, ".paperclip2")
+	paperclipDir := db.PaperclipHome()
 	if err := os.MkdirAll(paperclipDir, 0755); err != nil {
 		log.Printf("Failed to create paperclip2 dir: %v", err)
 	}
@@ -200,19 +213,26 @@ func deployOpenCodeCustomTool() error {
 	if port == "" {
 		port = "8080"
 	}
-	serverUrl := "http://127.0.0.1:" + port
-	err = os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
+	
+	// Detect if running in Docker and use appropriate hostname
+	serverHost := "127.0.0.1"
+	if _, err := os.Stat("/.dockerenv"); err == nil {
+		serverHost = "host.docker.internal"
+	} else if os.Getenv("PAPERCLIP_SERVER_HOST") != "" {
+		serverHost = os.Getenv("PAPERCLIP_SERVER_HOST")
+	}
+	
+	serverUrl := "http://" + serverHost + ":" + port
+	err := os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
 	if err != nil {
 		log.Printf("Failed to write server_url.txt: %v", err)
+	} else {
+		log.Printf("Wrote server URL to %s: %s", filepath.Join(paperclipDir, "server_url.txt"), serverUrl)
 	}
 
-	scriptContentBytes, err := os.ReadFile("templates/opencode_custom_tools/update_task_status.ts")
-	if err != nil {
-		return fmt.Errorf("Failed to read templates/opencode_custom_tools/update_task_status.ts: %w", err)
-	}
-	scriptContent := string(scriptContentBytes)
+	scriptContent := string(updateTaskStatusScript)
 
-	opencodeToolsDir := filepath.Join(homeDir, ".config", "opencode", "tools")
+	opencodeToolsDir := filepath.Join(db.OpencodeConfigDir(), "tools")
 	if runtime.GOOS == "windows" {
 		opencodeToolsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
 	}
@@ -227,5 +247,27 @@ func deployOpenCodeCustomTool() error {
 	} else {
 		log.Printf("Successfully deployed opencode custom tool to %s", destPath)
 		return nil
+	}
+}
+
+func recoverStaleRuns(database *gorm.DB) {
+	q := db.New(database)
+	ctx := context.Background()
+
+	staleRuns, err := q.GetStaleRunningRuns(ctx, 10*time.Minute)
+	if err != nil {
+		log.Printf("Warning: failed to check for stale runs: %v", err)
+		return
+	}
+
+	if len(staleRuns) == 0 {
+		return
+	}
+
+	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
+	for _, run := range staleRuns {
+		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
+		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
+		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
 }

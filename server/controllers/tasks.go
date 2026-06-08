@@ -3,13 +3,17 @@ package endpoints
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/git"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -231,6 +235,17 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 
+	// Git lifecycle: handle worktree merge/reopen on status change
+	// Executed async to avoid blocking HTTP response. Errors are logged and
+	// broadcast via event hub. Tests use polling (waitForTaskStatus) to handle
+	// async execution.
+	if statusChanged && task.ProjectID != nil {
+		go api.handleGitLifecycle(task, req.Status)
+	}
+
+	// ProcessTask runs the LLM agent. Executed async because LLM calls can
+	// take minutes. The agent updates task status via tool calls, and tests
+	// poll for status changes.
 	if statusChanged {
 		go api.engine.ProcessTask(context.Background(), int32(id))
 	}
@@ -250,4 +265,56 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, runs)
+}
+
+func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
+	ctx := context.Background()
+
+	project, err := api.q.GetProject(ctx, *task.ProjectID)
+	if err != nil || project.RepositoryUrl == "" {
+		return
+	}
+
+	company, err := api.q.GetCompany(ctx, task.CompanyID)
+	if err != nil {
+		return
+	}
+
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+	repoDir := fsManager.GetProjectRepoPath(company, project)
+	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
+	sshDir := filepath.Join(settings.BasePath, ".ssh")
+	gitMgr := git.NewGitManager(repoDir, sshDir)
+
+	branchName := fmt.Sprintf("task-%d", task.ID)
+
+	if newStatus == "done" {
+		// Merge worktree branch into main
+		if _, statErr := os.Stat(worktreeDir); statErr == nil {
+			if mergeErr := gitMgr.MergeBranch(ctx, repoDir, branchName); mergeErr != nil {
+				fmt.Printf("Warning: failed to merge branch %s: %v\n", branchName, mergeErr)
+				return
+			}
+			if removeErr := gitMgr.RemoveWorktree(ctx, worktreeDir); removeErr != nil {
+				fmt.Printf("Warning: failed to remove worktree: %v\n", removeErr)
+			}
+			// Clean up the task workspace directory
+			os.RemoveAll(worktreeDir)
+			fmt.Printf("Merged and cleaned up worktree for task %d\n", task.ID)
+		}
+	} else if task.Status == "done" && newStatus != "done" {
+		// Task reopened: remove old worktree and recreate
+		if _, statErr := os.Stat(worktreeDir); statErr == nil {
+			gitMgr.RemoveWorktree(ctx, worktreeDir)
+			os.RemoveAll(worktreeDir)
+		}
+		// Pull latest and recreate worktree
+		gitMgr.Pull(ctx)
+		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
+			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
+		} else {
+			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)
+		}
+	}
 }

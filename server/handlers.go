@@ -8,6 +8,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/server/controllers"
+	"context"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -17,10 +18,10 @@ type Server struct {
 	db     *gorm.DB
 	q      db.Querier
 	hub    *eventhub.Hub
-	engine *engine.OpenCodeEngine
+	engine engine.Engine
 }
 
-func NewServer(database *gorm.DB, eng *engine.OpenCodeEngine) *Server {
+func NewServer(database *gorm.DB, eng engine.Engine) *Server {
 	return &Server{
 		db:     database,
 		q:      db.New(database),
@@ -29,6 +30,11 @@ func NewServer(database *gorm.DB, eng *engine.OpenCodeEngine) *Server {
 }
 
 func (s *Server) SetHub(h *eventhub.Hub) { s.hub = h }
+
+func (s *Server) Sync(ctx context.Context) error {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	return api.SyncDBWithFilesystem(ctx)
+}
 
 func (s *Server) Mount(r chi.Router) {
 
@@ -42,10 +48,13 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/", api.ListCompanies)
 		r.Post("/", api.CreateCompany)
 		r.Put("/{id}", api.UpdateCompany)
+		r.Delete("/{id}", api.DeleteCompany)
 	})
 
 	r.Get("/settings", api.GetSettings)
 	r.Post("/settings", api.UpdateSettings)
+	r.Post("/settings/ssh", api.UploadSSHKey)
+	r.Post("/settings/sync", api.SyncSettings)
 	r.Get("/activities", api.ListActivities)
 
 	r.Route("/skills", func(r chi.Router) {
@@ -59,6 +68,8 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/projects", func(r chi.Router) {
 		r.Get("/", api.ListProjects)
 		r.Post("/", api.CreateProject)
+		r.Get("/{id}", api.GetProject)
+		r.Put("/{id}", api.UpdateProject)
 	})
 
 	r.Route("/tasks", func(r chi.Router) {
@@ -97,6 +108,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)
 		r.Get("/{id}", api.GetRun)
+		r.Post("/{id}/stop", api.StopRun)
 	})
 
 	r.Route("/providers", func(r chi.Router) {

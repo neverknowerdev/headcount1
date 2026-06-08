@@ -20,6 +20,7 @@ type Project struct {
 	Name            string    `json:"name" gorm:"not null"`
 	Description     string    `json:"description"`
 	WorkspaceFolder string    `json:"workspace_folder"`
+	RepositoryUrl   string    `json:"repository_url"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -101,6 +102,7 @@ type Task struct {
 	Status      string     `json:"status" gorm:"not null;default:'backlog'"`
 	DueDate     *time.Time `json:"due_date"`
 	IsArchived  bool       `json:"is_archived" gorm:"not null;default:false"`
+	RunID       *int32     `json:"run_id"`
 	CreatedAt   time.Time  `json:"created_at"`
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
@@ -129,17 +131,18 @@ type Attachment struct {
 }
 
 type Run struct {
-	ID          int32      `json:"id" gorm:"primaryKey"`
-	TaskID      int32      `json:"task_id" gorm:"not null"`
-	Task        Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
-	AgentID     int32      `json:"agent_id" gorm:"not null"`
-	Agent       Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
-	Status      string     `json:"status" gorm:"not null"`
-	SessionID   string     `json:"session_id"`
-	LogFilePath string     `json:"log_file_path"`
-	LogContent  string     `json:"log_content"`
-	StartedAt   time.Time  `json:"started_at"`
-	EndedAt     *time.Time `json:"ended_at"`
+	ID              int32      `json:"id" gorm:"primaryKey"`
+	TaskID          int32      `json:"task_id" gorm:"not null"`
+	Task            Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	AgentID         int32      `json:"agent_id" gorm:"not null"`
+	Agent           Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	Status          string     `json:"status" gorm:"not null"`
+	SessionID       string     `json:"session_id"`
+	LogFilePath     string     `json:"log_file_path"`
+	LogContent      string     `json:"log_content"`
+	StartedAt       time.Time  `json:"started_at"`
+	EndedAt         *time.Time `json:"ended_at"`
+	LastMessageTime *time.Time `json:"last_message_time"`
 }
 
 type ActivityLog struct {

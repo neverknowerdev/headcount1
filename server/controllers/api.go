@@ -13,11 +13,11 @@ import (
 type API struct {
 	db     *gorm.DB
 	q      *db.Queries
-	engine *engine.OpenCodeEngine
+	engine engine.Engine
 	hub    *eventhub.Hub
 }
 
-func NewAPI(database *gorm.DB, eng *engine.OpenCodeEngine, h *eventhub.Hub) *API {
+func NewAPI(database *gorm.DB, eng engine.Engine, h *eventhub.Hub) *API {
 	return &API{
 		db:     database,
 		q:      db.New(database),

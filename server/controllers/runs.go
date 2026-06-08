@@ -4,6 +4,8 @@ import (
 	"net/http"
 	"strconv"
 
+	"agent-orchestrator/db"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -24,10 +26,8 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var runs []map[string]interface{}
-	err := api.db.Table("runs").
-		Preload("Task").
-		Preload("Agent").
+	var runs []db.Run
+	err := api.db.
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error
@@ -66,4 +66,27 @@ func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, run)
+}
+
+func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	run, err := api.q.GetRun(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "Run not found")
+		return
+	}
+
+	if run.Status != "running" {
+		api.respondError(w, http.StatusBadRequest, "Run is not in progress")
+		return
+	}
+
+	api.engine.StopRun(r.Context(), int32(id))
+
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 }

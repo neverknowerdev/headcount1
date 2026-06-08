@@ -6,52 +6,50 @@ import (
 	"os"
 	"path/filepath"
 
+	"agent-orchestrator/db"
 	"gopkg.in/yaml.v3"
 )
 
 type Settings struct {
 	BasePath         string   `json:"base_path" yaml:"base_path"`
 	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
+	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
+	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
+	SystemLLMModel   string   `json:"system_llm_model" yaml:"system_llm_model"`
+}
+
+type SSHKeyPayload struct {
+	Key string `json:"key"`
 }
 
 func getSettingsFilePath() string {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/.paperclip2_settings.yaml"
-	}
-	return filepath.Join(homeDir, ".paperclip2_settings.yaml")
+	return db.SettingsFilePath()
 }
 
 func LoadSettings() Settings {
 	settingsPath := getSettingsFilePath()
 	data, err := os.ReadFile(settingsPath)
+
 	if err != nil {
-		homeDir, err := os.UserHomeDir()
-		basePath := "/tmp/.paperclip2"
-		if err == nil {
-			basePath = filepath.Join(homeDir, ".paperclip2")
-		}
-		return Settings{BasePath: basePath, WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
 	}
 
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		homeDir, err := os.UserHomeDir()
-		basePath := "/tmp/.paperclip2"
-		if err == nil {
-			basePath = filepath.Join(homeDir, ".paperclip2")
-		}
-		return Settings{BasePath: basePath, WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
 	}
 
 	if settings.BasePath == "" {
-		settings.BasePath = "/tmp/.paperclip2"
+		settings.BasePath = db.PaperclipHome()
 	}
 	return settings
 }
 
 func SaveSettings(settings Settings) error {
 	settingsPath := getSettingsFilePath()
+	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
+		return err
+	}
 	data, err := yaml.Marshal(&settings)
 	if err != nil {
 		return err
@@ -79,4 +77,27 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
+}
+
+func (api *API) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
+	var payload SSHKeyPayload
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
+	}
+
+	settings := LoadSettings()
+	sshDir := filepath.Join(settings.BasePath, ".ssh")
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	keyPath := filepath.Join(sshDir, "id_rsa")
+	if err := os.WriteFile(keyPath, []byte(payload.Key), 0600); err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+
+	w.WriteHeader(http.StatusOK)
 }
