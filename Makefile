@@ -1,4 +1,4 @@
-.PHONY: build dev setup e2e
+.PHONY: build dev setup e2e run run-dev
 
 setup:
 	cd frontend && npm install
@@ -8,6 +8,14 @@ build-frontend:
 
 build: setup build-frontend
 	go build -o agent-orchestrator main.go
+
+run: build-frontend
+	go run .
+
+run-dev:
+	@trap 'kill 0' EXIT; \
+	go run . & \
+	cd frontend && npm run dev
 
 dev:
 	@echo "Run 'cd frontend && npm run dev' in one terminal"
