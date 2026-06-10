@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -104,6 +105,19 @@ func main() {
 	if err := srv.Sync(context.Background()); err != nil {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
+
+	// Check if backup is needed on startup
+	paperclipHome := db.PaperclipHome()
+	if backup.ShouldBackupOnStartup(paperclipHome) {
+		log.Println("Latest backup is older than 24h, running backup on startup...")
+		go func() {
+			_, err := backup.CreateBackup(paperclipHome)
+			if err != nil {
+				log.Printf("Startup backup failed: %v", err)
+			}
+		}()
+	}
+	go backup.StartDailyScheduler(paperclipHome)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

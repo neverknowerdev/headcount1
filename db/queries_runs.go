@@ -42,6 +42,15 @@ func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 	return r, err
 }
 
+func (q *Queries) GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error) {
+	var r Run
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").First(&r, runID).Error
+	if err != nil {
+		return Run{}, Task{}, err
+	}
+	return r, r.Task, nil
+}
+
 func (q *Queries) GetRunBySessionID(ctx context.Context, sessionID string) (Run, error) {
 	var r Run
 	err := q.db.WithContext(ctx).Where("session_id = ?", sessionID).First(&r).Error

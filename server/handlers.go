@@ -118,6 +118,13 @@ func (s *Server) Mount(r chi.Router) {
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
 	})
+
+	r.Route("/backup", func(r chi.Router) {
+		r.Post("/", api.CreateBackup)
+		r.Get("/status", api.GetBackupStatus)
+		r.Get("/list", api.ListBackups)
+		r.Post("/restore", api.RestoreBackup)
+	})
 }
 
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {

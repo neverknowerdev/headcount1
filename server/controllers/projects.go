@@ -3,6 +3,7 @@ package endpoints
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"path/filepath"
 	"strconv"
@@ -97,6 +98,12 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
+
+	// Write project metadata to filesystem
+	storage := filesystem.NewStorage(settings.BasePath)
+	if err := storage.WriteProject(comp, proj); err != nil {
+		log.Printf("Warning: failed to write project metadata: %v", err)
+	}
 
 	if req.RepositoryUrl != "" {
 		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {

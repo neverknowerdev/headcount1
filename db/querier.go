@@ -23,6 +23,7 @@ type AgentQuerier interface {
 	CreateAgent(ctx context.Context, a Agent) (Agent, error)
 	ListAgentsByCompany(ctx context.Context, companyID int32) ([]Agent, error)
 	GetAgent(ctx context.Context, id int32) (Agent, error)
+	GetAgentWithCompany(ctx context.Context, id int32) (Agent, Company, error)
 	UpdateAgent(ctx context.Context, a Agent) (Agent, error)
 }
 
@@ -47,6 +48,7 @@ type RunQuerier interface {
 	UpdateRunLog(ctx context.Context, id int32, content string, status string) error
 	UpdateRunSession(ctx context.Context, id int32, sessionID string) error
 	GetRun(ctx context.Context, id int32) (Run, error)
+	GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error)
 	GetRunBySessionID(ctx context.Context, sessionID string) (Run, error)
 }
 

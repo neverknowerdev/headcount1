@@ -2,11 +2,13 @@ package endpoints
 
 import (
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) ListSprints(w http.ResponseWriter, r *http.Request) {
@@ -65,6 +67,15 @@ func (api *API) CreateSprint(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Write sprint metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	var comp db.Company
+	api.db.First(&comp, req.CompanyID)
+	if err := storage.WriteSprint(sprint, comp.ShortName); err != nil {
+		log.Printf("Warning: failed to write sprint metadata: %v", err)
 	}
 
 	api.logActivity(req.CompanyID, "sprint_created", int32(sprint.ID), "sprint", "")

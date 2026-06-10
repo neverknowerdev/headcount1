@@ -13,5 +13,5 @@ dev:
 	@echo "Run 'cd frontend && npm run dev' in one terminal"
 	@echo "Run 'go run main.go' in another terminal"
 
-e2e:
+e2e: build-frontend
 	cd e2e && npm run test

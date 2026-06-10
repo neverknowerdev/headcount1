@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -135,6 +136,12 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		settings := LoadSettings()
 		fsManager := filesystem.NewManager(settings.BasePath)
 		fsManager.CreateTaskWorkspace(comp, proj, task)
+
+		// Write task metadata to filesystem
+		storage := filesystem.NewStorage(settings.BasePath)
+		if err := storage.WriteTask(task, comp.ShortName); err != nil {
+			log.Printf("Warning: failed to write task metadata: %v", err)
+		}
 	}
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
@@ -232,6 +239,15 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("task_updated", task)
+
+	// Write task metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	var comp db.Company
+	api.db.First(&comp, task.CompanyID)
+	if err := storage.WriteTask(task, comp.ShortName); err != nil {
+		log.Printf("Warning: failed to write task metadata: %v", err)
+	}
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 

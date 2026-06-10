@@ -7,23 +7,27 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
 
 type LLMGateway struct {
-	q *db.Queries
+	q        *db.Queries
+	basePath string
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
 	return &LLMGateway{
-		q: db.New(database),
+		q:        db.New(database),
+		basePath: db.PaperclipHome(),
 	}
 }
 
@@ -138,6 +142,31 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	}
 	json.Unmarshal(bodyBytes, &reqPayload)
 
+	// Initialize logger if we have a run ID
+	var proxyLogger *logging.ProxyLogger
+	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
+		var runID int
+		fmt.Sscanf(runIDStr, "%d", &runID)
+		if runID > 0 {
+			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
+			if err == nil && run.Task.Company.ID > 0 {
+				var loggerErr error
+				proxyLogger, loggerErr = logging.NewProxyLogger(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+				)
+				if loggerErr != nil {
+					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
+				} else {
+					defer proxyLogger.Close()
+					proxyLogger.LogRequest(reqPayload.Model, agent.Name, provider.Name, bodyBytes)
+				}
+			}
+		}
+	}
+
 	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
@@ -157,6 +186,9 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
+		if proxyLogger != nil {
+			proxyLogger.LogError(reqPayload.Model, agent.Name, provider.Name, err)
+		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
 	}
@@ -199,6 +231,18 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 			TotalTokens:      resPayload.Usage.TotalTokens,
 		})
 
+		if proxyLogger != nil {
+			proxyLogger.LogResponse(
+				reqPayload.Model,
+				provider.Name,
+				resp.StatusCode,
+				respBodyBytes,
+				resPayload.Usage.PromptTokens,
+				resPayload.Usage.CompletionTokens,
+				resPayload.Usage.TotalTokens,
+			)
+		}
+
 		w.Write(respBodyBytes)
 		return
 	}
@@ -209,6 +253,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		return
 	}
 
+	var streamChunks [][]byte
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -233,7 +278,19 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 					CompletionTokens: chunk.Usage.CompletionTokens,
 					TotalTokens:      chunk.Usage.TotalTokens,
 				})
+
+				if proxyLogger != nil {
+					proxyLogger.LogStreamResponse(
+						reqPayload.Model,
+						provider.Name,
+						streamChunks,
+						chunk.Usage.PromptTokens,
+						chunk.Usage.CompletionTokens,
+						chunk.Usage.TotalTokens,
+					)
+				}
 			}
+			streamChunks = append(streamChunks, []byte(data))
 		}
 	}
 }

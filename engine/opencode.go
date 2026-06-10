@@ -137,6 +137,16 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		return
 	}
 
+	// Write run metadata to filesystem
+	settings := loadEngineSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	companyShortName, _ := storage.GetCompanyShortNameForTask(task.ID)
+	if companyShortName != "" {
+		if err := storage.WriteRun(run, companyShortName); err != nil {
+			fmt.Printf("Warning: failed to write run metadata: %v\n", err)
+		}
+	}
+
 	runCtx, cancel := context.WithCancel(context.Background())
 	e.cancelFuncs.Store(run.ID, cancel)
 	defer func() {
@@ -205,7 +215,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	logLine("Connecting to OpenCode Server...")
 
-	settings := loadEngineSettings()
+	settings = loadEngineSettings()
 	fsMgr := filesystem.NewManager(settings.BasePath)
 
 	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
@@ -555,6 +565,18 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 	}
 
 	e.q.UpdateRunLog(ctx, run.ID, fullLog.String(), status)
+
+	// Update run metadata in filesystem
+	settings = loadEngineSettings()
+	storage = filesystem.NewStorage(settings.BasePath)
+	companyShortName, _ = storage.GetCompanyShortNameForTask(task.ID)
+	if companyShortName != "" {
+		// Re-read the run to get updated fields
+		updatedRun, err := e.q.GetRun(ctx, run.ID)
+		if err == nil {
+			storage.WriteRun(updatedRun, companyShortName)
+		}
+	}
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 }

@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"io"
 	"context"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) ListComments(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +54,16 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("comment_created", comment)
+
+	// Write comment metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	companyShortName, err := storage.GetCompanyShortNameForTask(req.TaskID)
+	if err == nil {
+		if err := storage.WriteComment(comment, companyShortName); err != nil {
+			log.Printf("Warning: failed to write comment metadata: %v", err)
+		}
+	}
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
@@ -115,6 +127,16 @@ func (api *API) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Write attachment metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	companyShortName, err := storage.GetCompanyShortNameForTask(int32(taskID))
+	if err == nil {
+		if err := storage.WriteAttachment(attachment, companyShortName); err != nil {
+			log.Printf("Warning: failed to write attachment metadata: %v", err)
+		}
 	}
 
 	api.respondJSON(w, http.StatusCreated, attachment)

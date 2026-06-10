@@ -61,6 +61,12 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		println("Error creating company directories:", err.Error())
 	}
 
+	// Write company metadata to filesystem
+	storage := filesystem.NewStorage(settings.BasePath)
+	if err := storage.WriteCompany(comp); err != nil {
+		log.Printf("Warning: failed to write company metadata: %v", err)
+	}
+
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
 
 	api.respondJSON(w, http.StatusCreated, comp)

@@ -4,12 +4,14 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 )
@@ -109,6 +111,14 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+
+	// Write provider metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	if err := storage.WriteProvider(p); err != nil {
+		log.Printf("Warning: failed to write provider metadata: %v", err)
+	}
+
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
