@@ -14,7 +14,7 @@ run: build-frontend
 
 run-dev:
 	@trap 'kill 0' EXIT; \
-	go run . & \
+	go tool air & \
 	cd frontend && npm run dev
 
 dev:
