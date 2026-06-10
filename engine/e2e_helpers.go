@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/utils"
 )
 
 // E2E-specific helper functions for the OpenCode engine.
@@ -119,9 +120,16 @@ func syncOpenCodeProviderConfig(q *db.Queries, runID int32) error {
 
 		// Route LLM traffic through the paperclip2 proxy so we can
 		// track per-response activity via TouchRunLastMessageTime.
+		// In Docker mode, 127.0.0.1 inside the container points to the
+		// container itself, so we must use host.docker.internal to reach
+		// the host's Paperclip2 proxy.
 		proxyURL := os.Getenv("PAPERCLIP_SERVER_URL")
 		if proxyURL == "" {
-			proxyURL = "http://127.0.0.1:8080"
+			if utils.IsE2E() {
+				proxyURL = "http://127.0.0.1:8080"
+			} else {
+				proxyURL = "http://host.docker.internal:8080"
+			}
 		}
 		baseURL := strings.TrimRight(proxyURL, "/") + "/api/v1"
 

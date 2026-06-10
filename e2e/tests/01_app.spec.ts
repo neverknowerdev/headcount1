@@ -1,4 +1,6 @@
 import { test, expect } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus, waitForComment } from '../helpers/wait-for';
 
@@ -95,6 +97,19 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Wait for the comment created by the agent run
         await waitForComment('http://localhost:8080', taskId, 60_000);
+
+        // Verify run log file exists on filesystem
+        const runsRes = await request.get(`/api/tasks/${taskId}/runs`);
+        expect(runsRes.ok()).toBeTruthy();
+        const runs = await runsRes.json();
+        expect(runs.length).toBeGreaterThan(0);
+        const run = runs[0];
+        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}.log`);
+        expect(fs.existsSync(logFile)).toBeTruthy();
+        const logContent = fs.readFileSync(logFile, 'utf8');
+        expect(logContent).toContain('LLM Request');
+        expect(logContent).toContain('LLM Response');
 
         // Re-open the task to verify both the user comment and the agent comment are visible
         await page.goto('/companies/pw-inc/tasks');

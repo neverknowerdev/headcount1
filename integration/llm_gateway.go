@@ -66,6 +66,37 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
+	// Initialize logger if we have a run ID
+	var proxyLogger *logging.ProxyLogger
+	var reqPayload struct {
+		Model  string `json:"model"`
+		Stream bool   `json:"stream"`
+	}
+	json.Unmarshal(bodyBytes, &reqPayload)
+
+	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
+		var runID int
+		fmt.Sscanf(runIDStr, "%d", &runID)
+		if runID > 0 {
+			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
+			if err == nil && run.Task.Company.ID > 0 {
+				var loggerErr error
+				proxyLogger, loggerErr = logging.NewProxyLogger(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+				)
+				if loggerErr != nil {
+					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
+				} else {
+					defer proxyLogger.Close()
+					proxyLogger.LogRequest(reqPayload.Model, "opencode", provider.Name, bodyBytes)
+				}
+			}
+		}
+	}
+
 	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
 	if err != nil {
 		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
@@ -86,6 +117,9 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 	client := &http.Client{}
 	resp, err := client.Do(proxyReq)
 	if err != nil {
+		if proxyLogger != nil {
+			proxyLogger.LogError(reqPayload.Model, "opencode", provider.Name, err)
+		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
 	}
@@ -107,7 +141,53 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		}
 	}
 	w.WriteHeader(resp.StatusCode)
-	io.Copy(w, resp.Body)
+
+	// Buffer the response so we can log it and still forward to the client
+	respBodyBytes, _ := io.ReadAll(resp.Body)
+	w.Write(respBodyBytes)
+
+	if proxyLogger != nil {
+		if reqPayload.Stream {
+			var resPayload struct {
+				Choices []struct {
+					Delta struct {
+						Content          string `json:"content"`
+						ReasoningContent string `json:"reasoning_content"`
+					} `json:"delta"`
+				} `json:"choices"`
+				Usage struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+					TotalTokens      int `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			json.Unmarshal(respBodyBytes, &resPayload)
+			var content, reasoning string
+			for _, c := range resPayload.Choices {
+				content += c.Delta.Content
+				reasoning += c.Delta.ReasoningContent
+			}
+			proxyLogger.LogStreamResponse(reqPayload.Model, provider.Name, content, reasoning, resPayload.Usage.PromptTokens, resPayload.Usage.CompletionTokens, resPayload.Usage.TotalTokens)
+		} else {
+			var resPayload struct {
+				Usage struct {
+					PromptTokens     int `json:"prompt_tokens"`
+					CompletionTokens int `json:"completion_tokens"`
+					TotalTokens      int `json:"total_tokens"`
+				} `json:"usage"`
+			}
+			json.Unmarshal(respBodyBytes, &resPayload)
+			proxyLogger.LogResponse(
+				reqPayload.Model,
+				provider.Name,
+				resp.StatusCode,
+				respBodyBytes,
+				resPayload.Usage.PromptTokens,
+				resPayload.Usage.CompletionTokens,
+				resPayload.Usage.TotalTokens,
+			)
+		}
+	}
 }
 
 func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http.Request) {
@@ -253,7 +333,30 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		return
 	}
 
-	var streamChunks [][]byte
+	type chunkChoice struct {
+		Index int `json:"index"`
+		Delta struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			ReasoningContent string `json:"reasoning_content"`
+		} `json:"delta"`
+	}
+	type chunkData struct {
+		Choices []chunkChoice `json:"choices"`
+		Usage   *struct {
+			PromptTokens     int `json:"prompt_tokens"`
+			CompletionTokens int `json:"completion_tokens"`
+			TotalTokens      int `json:"total_tokens"`
+		} `json:"usage"`
+	}
+
+	var fullContent string
+	var fullReasoning string
+	var lastUsage *struct {
+		PromptTokens     int `json:"prompt_tokens"`
+		CompletionTokens int `json:"completion_tokens"`
+		TotalTokens      int `json:"total_tokens"`
+	}
 	scanner := bufio.NewScanner(resp.Body)
 	for scanner.Scan() {
 		line := scanner.Text()
@@ -262,36 +365,29 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 
 		if strings.HasPrefix(line, "data: ") && line != "data: [DONE]" {
 			data := strings.TrimPrefix(line, "data: ")
-			var chunk struct {
-				Usage struct {
-					PromptTokens     int `json:"prompt_tokens"`
-					CompletionTokens int `json:"completion_tokens"`
-					TotalTokens      int `json:"total_tokens"`
-				} `json:"usage"`
-			}
-			if err := json.Unmarshal([]byte(data), &chunk); err == nil && chunk.Usage.TotalTokens > 0 {
-				g.q.CreateProxyRequestLog(r.Context(), db.ProxyRequestLog{
-					AgentID:          int32(agentID),
-					ProviderID:       provider.ID,
-					Model:            reqPayload.Model,
-					PromptTokens:     chunk.Usage.PromptTokens,
-					CompletionTokens: chunk.Usage.CompletionTokens,
-					TotalTokens:      chunk.Usage.TotalTokens,
-				})
-
-				if proxyLogger != nil {
-					proxyLogger.LogStreamResponse(
-						reqPayload.Model,
-						provider.Name,
-						streamChunks,
-						chunk.Usage.PromptTokens,
-						chunk.Usage.CompletionTokens,
-						chunk.Usage.TotalTokens,
-					)
+			var cd chunkData
+			if err := json.Unmarshal([]byte(data), &cd); err == nil {
+				for _, c := range cd.Choices {
+					fullContent += c.Delta.Content
+					fullReasoning += c.Delta.ReasoningContent
+				}
+				if cd.Usage != nil && cd.Usage.TotalTokens > 0 {
+					lastUsage = cd.Usage
 				}
 			}
-			streamChunks = append(streamChunks, []byte(data))
 		}
+	}
+
+	if proxyLogger != nil && lastUsage != nil {
+		proxyLogger.LogStreamResponse(
+			reqPayload.Model,
+			provider.Name,
+			fullContent,
+			fullReasoning,
+			lastUsage.PromptTokens,
+			lastUsage.CompletionTokens,
+			lastUsage.TotalTokens,
+		)
 	}
 }
 

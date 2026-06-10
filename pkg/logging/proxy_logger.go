@@ -61,21 +61,25 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 	l.file.WriteString("\n")
 }
 
-func (l *ProxyLogger) LogStreamResponse(model, providerName string, chunks [][]byte, promptTokens, completionTokens, totalTokens int) {
+func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, reasoningContent string, promptTokens, completionTokens, totalTokens int) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
-	l.file.WriteString(fmt.Sprintf("\n=== LLM Stream Response [%s] ===\n", ts))
+	l.file.WriteString(fmt.Sprintf("\n=== LLM Response [%s] ===\n", ts))
 	l.file.WriteString(fmt.Sprintf("Model: %s\n", model))
 	l.file.WriteString(fmt.Sprintf("Provider: %s\n", providerName))
 	l.file.WriteString(fmt.Sprintf("Tokens: prompt=%d completion=%d total=%d\n", promptTokens, completionTokens, totalTokens))
-	l.file.WriteString(fmt.Sprintf("Chunks: %d\n", len(chunks)))
 	l.file.WriteString("---\n")
-	for i, chunk := range chunks {
-		l.file.WriteString(fmt.Sprintf("[chunk %d] %s\n", i, chunk))
+	if reasoningContent != "" {
+		l.file.WriteString(fmt.Sprintf("[Reasoning]\n%s\n", reasoningContent))
 	}
-	l.file.WriteString("\n")
+	if content != "" {
+		l.file.WriteString(fmt.Sprintf("[Content]\n%s\n", content))
+	}
+	if reasoningContent == "" && content == "" {
+		l.file.WriteString("(no content)\n")
+	}
 }
 
 func (l *ProxyLogger) LogError(model, agentName, providerName string, err error) {
