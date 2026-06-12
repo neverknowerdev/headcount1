@@ -280,7 +280,11 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, runs)
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
 }
 
 func (api *API) handleGitLifecycle(task db.Task, newStatus string) {

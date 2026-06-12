@@ -124,7 +124,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
             }
             if (msg.type === 'run_log') {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+                if (msg.payload.entry) {
+                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
+                } else if (msg.payload.line) {
+                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+                }
             }
         };
         return () => ws.close();
@@ -299,8 +303,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     </Link>
                                                                 </div>
                                                             </summary>
-                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t">
-                                                                {r.log_content}
+                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t max-h-48 overflow-y-auto">
+                                                                {r.log_entries && r.log_entries.length > 0
+                                                                    ? r.log_entries.slice(-5).map((e: any, i: number) => {
+                                                                        if (e.type === 'info') return <div key={i} className="text-gray-400">{e.content}</div>;
+                                                                        if (e.type === 'error') return <div key={i} className="text-red-400">ERROR: {e.content}</div>;
+                                                                        if (e.type === 'request') return <div key={i} className="text-indigo-300">[Request] {e.model || ''}</div>;
+                                                                        if (e.type === 'response') return <div key={i} className="text-green-300">[Response] {e.status_code || 200}</div>;
+                                                                        if (e.type === 'tool_call') return <div key={i} className="text-amber-300">[Tool] {e.tool_name || '...'}</div>;
+                                                                        return null;
+                                                                    })
+                                                                    : r.log_content
+                                                                }
                                                             </pre>
                                                         </details>
                                                     </div>

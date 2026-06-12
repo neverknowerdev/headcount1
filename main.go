@@ -138,7 +138,7 @@ func main() {
 
 		srv.Mount(r)
 
-		gw := integration.NewLLMGateway(database)
+		gw := integration.NewLLMGatewayWithHub(database, hub)
 		gw.Mount(r)
 	})
 
@@ -147,7 +147,14 @@ func main() {
 		log.Fatalf("Failed to create sub filesystem: %v", err)
 	}
 
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		// Disable caching for JS and CSS files
+		if strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		}
+		
 		fsHandler := http.FileServer(http.FS(distFS))
 
 		path := r.URL.Path
