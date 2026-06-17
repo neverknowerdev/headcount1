@@ -169,10 +169,10 @@ test.describe.serial('Backup & Restore', () => {
         await page.click('button:has-text("Backup Now")');
 
         // Wait for the backup to complete and the status to refresh.
-        // Note: getByRole('list') is avoided here — Tailwind Preflight resets list-style
-        // on <ul>, which Chrome uses to infer the implicit ARIA list role, so the locator
-        // fails in CI even when the element is visible.
-        await expect(page.getByText(/backup_.*\.tar\.gz/).first()).toBeVisible({ timeout: 30000 });
+        // page.getByText() is avoided: it resolves to <option> elements inside the
+        // restore <select> dropdown first, and <option> elements in a closed select
+        // are always hidden in Playwright. Target <li> elements in the backup list.
+        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).first()).toBeVisible({ timeout: 30000 });
     });
 
     test.afterAll(async () => {

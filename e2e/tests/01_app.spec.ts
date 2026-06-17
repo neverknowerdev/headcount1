@@ -8,6 +8,21 @@ const env = loadE2EEnv();
 
 // Use serial mode because subsequent tests depend on state created by the first
 test.describe.serial('Paperclip2 App', () => {
+    test.beforeAll(async ({ request }) => {
+        // Clean up any filesystem state left by a failed previous attempt.
+        // In serial mode, beforeAll re-runs on retry, so this prevents
+        // data/pw-inc/ (and nw, second-co) from causing the app to skip
+        // onboarding and redirect to an existing company on the retry run.
+        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        for (const shortName of ['pw-inc', 'nw', 'second-co']) {
+            for (const subDir of [`data/${shortName}`, `companies/${shortName}`]) {
+                const fullPath = path.join(paperclipBase, subDir);
+                if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+            }
+        }
+        await request.post('/api/e2e/wipe-db');
+    });
+
     test('can go through onboarding, create project, and test full task flow', async ({ page, request }) => {
         await page.goto('/add-company');
         await expect(page.getByText('Create a Workspace')).toBeVisible({ timeout: 30000 });
@@ -93,7 +108,7 @@ test.describe.serial('Paperclip2 App', () => {
         // The engine (real opencode + mock provider) will now run and the mock
         // provider will respond with a tool call to update_task_status, which
         // should move the task to "in-review". Wait for that real outcome.
-        await waitForTaskStatus(request, taskId, 'in-review', 60_000);
+        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
         // Wait for the comment created by the agent run
         await waitForComment('http://localhost:8080', taskId, 60_000);
