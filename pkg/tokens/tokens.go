@@ -27,4 +27,5 @@ type Usage struct {
 	TotalTokens      int `json:"total_tokens"`
 	ReasoningTokens  int `json:"reasoning_tokens"`
 	ToolInputTokens  int `json:"tool_input_tokens"`
+	CachedTokens     int `json:"cached_tokens"` // subset of PromptTokens, provider-reported
 }

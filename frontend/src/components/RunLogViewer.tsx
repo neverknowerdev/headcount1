@@ -3,7 +3,7 @@ import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp
+  Wrench, Brain, ChevronUp, MessageSquare
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -16,6 +16,7 @@ interface TokenUsage {
   total?: number;
   reasoning?: number;
   tool_input?: number;
+  cached?: number; // subset of prompt, provider-reported cache hits
 }
 
 // Per-run aggregates persisted in Run.token_stats on the backend.
@@ -25,6 +26,7 @@ interface RunTokenStats {
   reasoning_tokens?: number;
   tool_input_tokens?: number;
   tool_output_tokens?: number;
+  cached_tokens?: number; // subset of prompt_tokens
   total_tokens?: number;
 }
 
@@ -65,29 +67,115 @@ function JsonBlock({ data }: { data: string }) {
   );
 }
 
-// Extract the user-facing content from a request entry.
-function getUserMessage(content: string): string | null {
+// Parsed content of a request entry.
+interface ParsedRequestContent {
+  latestText: string | null;         // last user message text for preview
+  messageCount: number;              // total messages in the array
+  toolResultCount: number;           // tool results in the latest turn
+  toolResults: { name: string; content: string; preview: string }[];
+  historyMessageCount: number;       // messages before current turn
+  estimatedTotalTokens: number;      // rough estimate of full context
+}
+
+function stringifyMessageContent(content: unknown): string {
+  if (!content) return '';
+  if (typeof content === 'string') return content;
+  if (Array.isArray(content)) {
+    return (content as any[])
+      .filter((b: any) => b.type === 'text')
+      .map((b: any) => b.text || '')
+      .join('\n');
+  }
+  return JSON.stringify(content);
+}
+
+// Parse an LLM request entry into structured content for display.
+function parseRequestContent(content: string): ParsedRequestContent {
+  const empty: ParsedRequestContent = {
+    latestText: null,
+    messageCount: 0,
+    toolResultCount: 0,
+    toolResults: [],
+    historyMessageCount: 0,
+    estimatedTotalTokens: 0,
+  };
   try {
     const parsed = JSON.parse(content);
-    if (parsed.parts && Array.isArray(parsed.parts)) {
+
+    // OpenCode internal format (parts array, no messages)
+    if (parsed.parts && Array.isArray(parsed.parts) && !parsed.messages) {
       const textParts = parsed.parts
         .filter((p: any) => p.type === 'text' && p.text)
-        .map((p: any) => p.text);
-      if (textParts.length > 0) return textParts.join('\n\n');
+        .map((p: any) => p.text as string);
+      const last = textParts[textParts.length - 1] || null;
+      return { ...empty, latestText: last };
     }
+
+    // Standard OpenAI messages format
     if (parsed.messages && Array.isArray(parsed.messages)) {
-      const userMsgs = parsed.messages
-        .filter((m: any) => m.role === 'user' && m.content)
-        .map((m: any) => m.content);
-      if (userMsgs.length > 0) return userMsgs.join('\n\n');
+      const msgs: any[] = parsed.messages;
+      const messageCount = msgs.length;
+      const estimatedTotalTokens = Math.ceil(JSON.stringify(msgs).length / 4);
+
+      // Find last assistant message to split history from current turn
+      let lastAssistantIdx = -1;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'assistant') { lastAssistantIdx = i; break; }
+      }
+
+      const historyMessageCount = lastAssistantIdx + 1; // everything up to and including last assistant
+      const currentTurnMsgs = msgs.slice(lastAssistantIdx + 1);
+
+      // Extract tool results from current turn
+      const toolResults: { name: string; content: string; preview: string }[] = [];
+      for (const m of currentTurnMsgs) {
+        if (m.role === 'tool') {
+          const raw = stringifyMessageContent(m.content);
+          const preview = raw.length > 120 ? raw.slice(0, 120) + '…' : raw;
+          toolResults.push({ name: m.name || 'tool', content: raw, preview });
+        }
+        // Anthropic-style tool_result inside user messages
+        if (m.role === 'user' && Array.isArray(m.content)) {
+          for (const block of m.content) {
+            if (block.type === 'tool_result') {
+              const raw = stringifyMessageContent(block.content);
+              const preview = raw.length > 120 ? raw.slice(0, 120) + '…' : raw;
+              toolResults.push({ name: 'tool', content: raw, preview });
+            }
+          }
+        }
+      }
+
+      // Latest text for preview: the last non-empty user message
+      let latestText: string | null = null;
+      for (let i = msgs.length - 1; i >= 0; i--) {
+        if (msgs[i].role === 'user') {
+          const t = stringifyMessageContent(msgs[i].content);
+          if (t) { latestText = t; break; }
+        }
+      }
+      // Fallback: use first tool result preview
+      if (!latestText && toolResults.length > 0) {
+        latestText = toolResults[0].preview;
+      }
+
+      return {
+        latestText,
+        messageCount,
+        toolResultCount: toolResults.length,
+        toolResults,
+        historyMessageCount,
+        estimatedTotalTokens,
+      };
     }
-    return null;
+
+    return empty;
   } catch {
-    return null;
+    return empty;
   }
 }
 
-// Extract agent text, reasoning, and tool calls from a response entry.
+// Extract agent text, reasoning, tool calls, and token usage from a response entry.
 function getAgentMessage(content: string): {
   text: string | null;
   reasoning: string | null;
@@ -119,14 +207,9 @@ function getAgentMessage(content: string): {
         return { text: textParts.join('\n\n') || null, reasoning: null, toolCalls, tokens: null };
       }
     }
-    // Proxy streaming response shape: { content, reasoning, tool_calls, tokens, raw }
-    // The raw field carries the original provider response body; if it parses
-    // as one of the above shapes we still want the proxy-side metadata to
-    // take priority (so reasoning text and token breakdown show up).
+    // Proxy streaming/non-streaming response shape: { content, reasoning, tool_calls, tokens, raw }
     if (parsed.reasoning || parsed.content || parsed.tool_calls || parsed.tokens) {
       const tokens: TokenUsage = parsed.tokens || null;
-      // If the response came from the non-streaming path, the body is
-      // under .raw; try to extract the assistant text from it.
       let text = parsed.content || null;
       if (!text && typeof parsed.raw === 'string') {
         try {
@@ -249,13 +332,15 @@ function getPreview(entry: LogEntry): string {
   if (entry.type === 'error') return entry.content;
   if (entry.type === 'tool_call') return getToolCallPreview(entry);
   if (entry.type === 'tool_response') {
-    // For tool_response, show the first non-empty line of the response
     const firstLine = entry.content.split('\n').find((l: string) => l.trim().length > 0) || '';
     return firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine;
   }
   if (entry.type === 'request') {
-    const msg = getUserMessage(entry.content);
-    if (msg) return msg.split('\n').find((l: string) => l.trim().length > 0) || msg;
+    const { latestText } = parseRequestContent(entry.content);
+    if (latestText) {
+      const firstLine = latestText.split('\n').find((l: string) => l.trim().length > 0) || latestText;
+      return firstLine.length > 80 ? firstLine.slice(0, 80) + '…' : firstLine;
+    }
     return entry.content;
   }
   if (entry.type === 'response') {
@@ -277,13 +362,7 @@ function getPreview(entry: LogEntry): string {
   return entry.content;
 }
 
-// Get token count to display on a row. For tool_call we prefer the
-// input_tokens field (the args size) since that's what the LLM "spent".
-// For tool_response we show the response size. For responses we sum
-// prompt + completion + reasoning (NOT the provider's reported total,
-// which excludes reasoning for o-series models). The request row shows
-// the prompt size (which on subsequent turns is auto-injected by the
-// proxy once the response comes back).
+// Get token count to display on a row.
 function getRowTokens(entry: LogEntry): number | null {
   if (entry.type === 'response') {
     const { tokens } = getAgentMessage(entry.content);
@@ -304,17 +383,12 @@ function getRowTokens(entry: LogEntry): number | null {
   return null;
 }
 
-// Per-row token breakdown, used by the expanded-view footer. For a
-// request row this includes the request itself plus any tool responses
-// that follow it up to the next request/response. For a response row it
-// returns the provider-reported prompt/completion/reasoning split and
-// computes the visible total as the sum of those (NOT the provider's
-// reported total, which is just prompt+completion and excludes reasoning
-// for o-series models).
+// Per-row token breakdown used in the expanded footer.
 function getRowTokenBreakdown(entry: LogEntry, allEntries: LogMessage[], index: number): {
   prompt?: number;
   completion?: number;
   reasoning?: number;
+  cached?: number;
   tool_input?: number;
   tool_output?: number;
   total?: number;
@@ -327,12 +401,11 @@ function getRowTokenBreakdown(entry: LogEntry, allEntries: LogMessage[], index: 
       prompt: tokens.prompt,
       completion: tokens.completion,
       reasoning: tokens.reasoning,
+      cached: tokens.cached,
       total: sum,
     };
   }
   if (entry.type === 'request') {
-    // Walk forward and tally tool responses that follow this request
-    // (the LLM will see all of them in its next prompt).
     const reqTokens = entry.prompt_tokens || 0;
     let toolIn = 0;
     let toolOut = 0;
@@ -371,7 +444,6 @@ interface CollapsibleRowProps {
   index: number;
 }
 
-// Single row in the list - can be expanded to show details.
 function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowProps) {
   const [expanded, setExpanded] = useState(false);
   const time = formatTime(entry.ts);
@@ -380,9 +452,7 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
   const tokens = getRowTokens(entry);
   const isError = entry.type === 'error';
 
-  // For response entries, also collect tool call entries that follow this
-  // response but precede the next request - these are the tool calls that
-  // were made as a result of this response.
+  // For response entries, collect related tool_call entries that follow
   const relatedToolCalls = useMemo(() => {
     if (entry.type !== 'response') return [];
     const result: LogEntry[] = [];
@@ -394,11 +464,20 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
     return result;
   }, [entry, allEntries, index]);
 
-  // For tool_call entries, find the following tool_response (if any) so
-  // we can show input→output token sizes side by side on the tool block.
-  // We look across the entire rest of the run for a matching tool_response
-  // by name (the proxy-side tool result logging may emit it after the
-  // next request/response, not directly after the tool_call).
+  // For request entries, parse the request content for badge/stats
+  const parsedRequest = useMemo(() => {
+    if (entry.type !== 'request') return null;
+    return parseRequestContent(entry.content);
+  }, [entry]);
+
+  // For response entries, get cached token count for badge
+  const cachedTokens = useMemo(() => {
+    if (entry.type !== 'response') return 0;
+    const { tokens: t } = getAgentMessage(entry.content);
+    return t?.cached || 0;
+  }, [entry]);
+
+  // For tool_call entries, find the following tool_response for token display
   const pairedToolResponse = useMemo(() => {
     if (entry.type !== 'tool_call') return null;
     let best: LogEntry | null = null;
@@ -406,9 +485,6 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
       const e = allEntries[i].entry;
       if (e.type === 'tool_response' && e.tool_name === entry.tool_name) {
         if (!best) best = e;
-        // Stop once we hit a tool_response for a different tool — that
-        // means we've moved past the matched pair (don't keep walking
-        // through the whole run).
         break;
       }
     }
@@ -434,11 +510,28 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
         <span className="flex-1 truncate text-gray-600 text-xs" title={preview}>
           {previewTruncated}
         </span>
-        {relatedToolCalls.length > 0 && (
-          <span className="shrink-0 text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
-            {relatedToolCalls.length} tool
+
+        {/* Tool results badge on request entries */}
+        {parsedRequest && parsedRequest.toolResultCount > 0 && (
+          <span className="shrink-0 text-xs text-green-700 bg-green-50 px-1.5 py-0.5 rounded">
+            {parsedRequest.toolResultCount} tool result{parsedRequest.toolResultCount !== 1 ? 's' : ''}
           </span>
         )}
+
+        {/* Tool calls badge on response entries */}
+        {relatedToolCalls.length > 0 && (
+          <span className="shrink-0 text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded">
+            {relatedToolCalls.length} tool call{relatedToolCalls.length !== 1 ? 's' : ''}
+          </span>
+        )}
+
+        {/* Cached tokens badge on response entries */}
+        {cachedTokens > 0 && (
+          <span className="shrink-0 text-xs text-emerald-700 bg-emerald-50 px-1.5 py-0.5 rounded font-mono">
+            {formatTokens(cachedTokens)} cached
+          </span>
+        )}
+
         {pairedToolResponse && (pairedToolResponse.output_tokens || 0) > 0 && (
           <span className="shrink-0 text-xs text-amber-600 bg-amber-50 px-1.5 py-0.5 rounded font-mono">
             ← {formatTokens(pairedToolResponse.output_tokens || 0)} tok
@@ -459,6 +552,7 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
             entry={entry}
             rawMode={rawMode}
             relatedToolCalls={relatedToolCalls}
+            parsedRequest={parsedRequest}
             allEntries={allEntries}
             index={index}
           />
@@ -469,10 +563,11 @@ function CollapsibleRow({ entry, rawMode, allEntries, index }: CollapsibleRowPro
 }
 
 // Expanded view for any entry type.
-function ExpandedContent({ entry, rawMode, relatedToolCalls, allEntries, index }: {
+function ExpandedContent({ entry, rawMode, relatedToolCalls, parsedRequest, allEntries, index }: {
   entry: LogEntry;
   rawMode: boolean;
   relatedToolCalls: LogEntry[];
+  parsedRequest: ParsedRequestContent | null;
   allEntries: LogMessage[];
   index: number;
 }) {
@@ -489,17 +584,49 @@ function ExpandedContent({ entry, rawMode, relatedToolCalls, allEntries, index }
     return <ToolResponseExpanded entry={entry} />;
   }
   if (entry.type === 'request') {
-    const msg = getUserMessage(entry.content);
     const breakdown = getRowTokenBreakdown(entry, allEntries, index);
+    const pr = parsedRequest || parseRequestContent(entry.content);
     return (
       <div className="pl-7 space-y-2">
-        {msg && !rawMode && (
+        {/* Context history stats — shown when this is a mid-conversation request */}
+        {pr.historyMessageCount > 0 && (
+          <div className="flex items-center gap-2 text-xs flex-wrap">
+            <span className="flex items-center gap-1 bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">
+              <MessageSquare size={10} />
+              {pr.historyMessageCount} msgs in context
+            </span>
+            <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded font-mono">
+              ~{formatTokens(pr.estimatedTotalTokens)} estimated ctx
+            </span>
+          </div>
+        )}
+
+        {/* Latest user message */}
+        {pr.latestText && !rawMode && (
           <div className="bg-white border border-blue-100 rounded-lg px-3 py-2">
             <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
-              <ReactMarkdown remarkPlugins={[remarkGfm]}>{msg}</ReactMarkdown>
+              <ReactMarkdown remarkPlugins={[remarkGfm]}>{pr.latestText}</ReactMarkdown>
             </div>
           </div>
         )}
+
+        {/* Tool results in current turn */}
+        {pr.toolResults.length > 0 && (
+          <div className="border border-green-100 rounded-lg overflow-hidden">
+            <div className="px-3 py-1.5 bg-green-50 text-xs text-green-700 font-medium uppercase tracking-wide flex items-center gap-2">
+              <Wrench size={12} />
+              Tool Results
+              <span className="text-green-500 normal-case">({pr.toolResults.length})</span>
+            </div>
+            <div className="divide-y divide-green-50">
+              {pr.toolResults.map((tr, i) => (
+                <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} />
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Token breakdown for the request */}
         {breakdown && (
           <div className="flex items-center gap-2 text-xs text-gray-500 px-1 flex-wrap">
             {breakdown.prompt !== undefined && breakdown.prompt > 0 && (
@@ -516,7 +643,7 @@ function ExpandedContent({ entry, rawMode, relatedToolCalls, allEntries, index }
             )}
           </div>
         )}
-        {(rawMode || !msg) && <JsonBlock data={entry.content} />}
+        {(rawMode || (!pr.latestText && pr.toolResults.length === 0)) && <JsonBlock data={entry.content} />}
       </div>
     );
   }
@@ -530,6 +657,34 @@ function ExpandedContent({ entry, rawMode, relatedToolCalls, allEntries, index }
     );
   }
   return <div className="pl-7 text-xs text-gray-600">{entry.content}</div>;
+}
+
+// A tool result row inside the request expanded view.
+function ToolResultRow({ name, content, preview }: { name: string; content: string; preview: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const { Icon, color, bg } = getToolIcon(name);
+  return (
+    <div>
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-1.5 hover:bg-green-50 text-left text-xs"
+      >
+        {expanded ? <ChevronDown size={10} /> : <ChevronRight size={10} />}
+        <div className={`shrink-0 w-5 h-5 rounded-full ${bg} flex items-center justify-center`}>
+          <Icon size={11} className={color} />
+        </div>
+        <span className={`font-mono font-medium ${color}`}>{name}</span>
+        <span className="text-gray-500 truncate flex-1">{preview}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-2">
+          <pre className="text-xs font-mono text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
 }
 
 // Single tool call expanded view.
@@ -554,8 +709,7 @@ function ToolCallExpanded({ entry }: { entry: LogEntry }) {
   );
 }
 
-// Single tool response expanded view. Shows the (possibly truncated)
-// response content with the response-side token badge.
+// Single tool response expanded view.
 function ToolResponseExpanded({ entry }: { entry: LogEntry }) {
   const { Icon, color, bg } = getToolIcon(entry.tool_name || '');
   const outTok = entry.output_tokens;
@@ -598,7 +752,7 @@ function ResponseExpanded({ entry, rawMode, relatedToolCalls }: {
         </div>
       )}
 
-      {/* Reasoning — folded by default, expands to show full chain */}
+      {/* Reasoning — folded by default */}
       {reasoning && (
         <div className="border border-purple-100 rounded-lg overflow-hidden">
           <button
@@ -622,7 +776,7 @@ function ResponseExpanded({ entry, rawMode, relatedToolCalls }: {
         </div>
       )}
 
-      {/* Tool calls section - first from parsed response content */}
+      {/* Tool calls from parsed response content */}
       {toolCalls.length > 0 && (
         <div className="border border-amber-100 rounded-lg overflow-hidden">
           <div className="px-3 py-1.5 bg-amber-50 text-xs text-amber-700 font-medium uppercase tracking-wide flex items-center gap-2">
@@ -638,7 +792,7 @@ function ResponseExpanded({ entry, rawMode, relatedToolCalls }: {
         </div>
       )}
 
-      {/* Tool calls from separate tool_call entries (engine-logged) */}
+      {/* Tool calls from separate engine-logged tool_call entries */}
       {relatedToolCalls.length > 0 && (
         <div className="border border-amber-100 rounded-lg overflow-hidden">
           <div className="px-3 py-1.5 bg-amber-50 text-xs text-amber-700 font-medium uppercase tracking-wide flex items-center gap-2">
@@ -658,6 +812,9 @@ function ResponseExpanded({ entry, rawMode, relatedToolCalls }: {
       {tokens && (tokens.prompt || tokens.completion || tokens.reasoning) && (
         <div className="flex items-center gap-2 text-xs text-gray-500 px-1 flex-wrap">
           {tokens.prompt !== undefined && <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono">↑ {formatTokens(tokens.prompt)} prompt</span>}
+          {tokens.cached !== undefined && tokens.cached > 0 && (
+            <span className="bg-emerald-50 text-emerald-700 px-1.5 py-0.5 rounded font-mono">⚡ {formatTokens(tokens.cached)} cached</span>
+          )}
           {tokens.reasoning !== undefined && tokens.reasoning > 0 && (
             <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded font-mono">⊕ {formatTokens(tokens.reasoning)} reasoning</span>
           )}
@@ -747,16 +904,9 @@ function ToolCallRowFromEntry({ entry }: { entry: LogEntry }) {
   );
 }
 
-// TokenStatsBar: the compact + expandable token breakdown shown in the
-// Run Logs header. Renders a single-line horizontal stacked bar with
-// colored segments proportional to each category (prompt/completion/
-// reasoning/tool_in/tool_out). Hovering shows a tooltip with the exact
-// counts. Clicking the bar expands a more detailed table below.
+// TokenStatsBar: compact + expandable breakdown shown in the Run Logs header.
 interface TokenStatsBarProps {
   stats: RunTokenStats | null;
-  // messages is used to compute a fallback aggregate when the persisted
-  // RunTokenStats hasn't been written yet (e.g. mid-run, before the
-  // engine's final log line has flushed).
   messages: LogMessage[];
 }
 
@@ -764,16 +914,14 @@ interface TokenSegment {
   key: string;
   label: string;
   value: number;
-  color: string;     // bg class for the bar segment
-  chip: string;      // full chip class (bg + text) for the expanded legend
+  color: string;
+  chip: string;
+  isSub?: boolean; // subset of another segment, don't add to total bar
 }
 
 function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
   const [expanded, setExpanded] = useState(false);
 
-  // Prefer the persisted run-level aggregate; fall back to summing
-  // messages on the fly so the bar still renders something useful while
-  // the run is in progress and the final log line hasn't been written.
   const aggregate: RunTokenStats = useMemo(() => {
     if (stats && (stats.prompt_tokens || 0) + (stats.completion_tokens || 0) +
         (stats.reasoning_tokens || 0) + (stats.tool_input_tokens || 0) +
@@ -786,6 +934,7 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
       reasoning_tokens: 0,
       tool_input_tokens: 0,
       tool_output_tokens: 0,
+      cached_tokens: 0,
       total_tokens: 0,
     };
     messages?.forEach(m => {
@@ -795,14 +944,13 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
         if (tokens?.prompt) agg.prompt_tokens = (agg.prompt_tokens || 0) + tokens.prompt;
         if (tokens?.completion) agg.completion_tokens = (agg.completion_tokens || 0) + tokens.completion;
         if (tokens?.reasoning) agg.reasoning_tokens = (agg.reasoning_tokens || 0) + tokens.reasoning;
+        if (tokens?.cached) agg.cached_tokens = (agg.cached_tokens || 0) + tokens.cached;
       } else if (e.type === 'tool_call') {
         const inT = e.input_tokens ?? e.output_tokens ?? 0;
         agg.tool_input_tokens = (agg.tool_input_tokens || 0) + inT;
       } else if (e.type === 'tool_response') {
         agg.tool_output_tokens = (agg.tool_output_tokens || 0) + (e.output_tokens || 0);
       } else if (e.type === 'request' && e.prompt_tokens) {
-        // The proxy overwrites this with the real count once the
-        // response comes back, so just track the largest one we see.
         agg.prompt_tokens = Math.max(agg.prompt_tokens || 0, e.prompt_tokens);
       }
     });
@@ -812,14 +960,21 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
     return agg;
   }, [stats, messages]);
 
-  const segments: TokenSegment[] = [
-    { key: 'prompt',     label: 'prompt',     value: aggregate.prompt_tokens || 0,     color: 'bg-blue-500',   chip: 'bg-blue-50 text-blue-700' },
-    { key: 'reasoning',  label: 'reasoning',  value: aggregate.reasoning_tokens || 0,  color: 'bg-purple-500', chip: 'bg-purple-50 text-purple-700' },
-    { key: 'completion', label: 'completion', value: aggregate.completion_tokens || 0, color: 'bg-indigo-500', chip: 'bg-indigo-50 text-indigo-700' },
-    { key: 'tool_in',    label: 'tool args',  value: aggregate.tool_input_tokens || 0, color: 'bg-amber-500',  chip: 'bg-amber-50 text-amber-700' },
-    { key: 'tool_out',   label: 'tool result',value: aggregate.tool_output_tokens || 0, color: 'bg-amber-300',  chip: 'bg-amber-50 text-amber-600' },
+  // Bar segments (cached is a subset of prompt, shown only in the legend)
+  const barSegments: TokenSegment[] = [
+    { key: 'prompt',     label: 'prompt',      value: aggregate.prompt_tokens || 0,     color: 'bg-blue-500',   chip: 'bg-blue-50 text-blue-700' },
+    { key: 'reasoning',  label: 'reasoning',   value: aggregate.reasoning_tokens || 0,  color: 'bg-purple-500', chip: 'bg-purple-50 text-purple-700' },
+    { key: 'completion', label: 'completion',  value: aggregate.completion_tokens || 0, color: 'bg-indigo-500', chip: 'bg-indigo-50 text-indigo-700' },
+    { key: 'tool_in',    label: 'tool args',   value: aggregate.tool_input_tokens || 0, color: 'bg-amber-500',  chip: 'bg-amber-50 text-amber-700' },
+    { key: 'tool_out',   label: 'tool result', value: aggregate.tool_output_tokens || 0,color: 'bg-amber-300',  chip: 'bg-amber-50 text-amber-600' },
   ];
-  const total = segments.reduce((s, x) => s + x.value, 0);
+  // Cached is shown in the legend only (it's a subset of prompt, not additional)
+  const cachedSegment: TokenSegment = {
+    key: 'cached', label: 'cached (of prompt)', value: aggregate.cached_tokens || 0,
+    color: 'bg-emerald-500', chip: 'bg-emerald-50 text-emerald-700', isSub: true,
+  };
+
+  const total = barSegments.reduce((s, x) => s + x.value, 0);
   if (total === 0) return null;
 
   return (
@@ -830,7 +985,7 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
         title="Click for detailed breakdown"
       >
         <div className="flex h-2 w-40 rounded-full overflow-hidden bg-gray-200 shrink-0">
-          {segments.map((seg) => {
+          {barSegments.map((seg) => {
             const pct = (seg.value / total) * 100;
             if (pct < 0.5) return null;
             return (
@@ -850,15 +1005,18 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
       </button>
       {expanded && (
         <div className="flex flex-wrap gap-1 text-xs">
-          {segments.filter(s => s.value > 0).map((seg) => (
-            <span
-              key={seg.key}
-              className={`${seg.chip} px-1.5 py-0.5 rounded font-mono flex items-center gap-1`}
-            >
+          {barSegments.filter(s => s.value > 0).map((seg) => (
+            <span key={seg.key} className={`${seg.chip} px-1.5 py-0.5 rounded font-mono flex items-center gap-1`}>
               <span className={`w-2 h-2 rounded-full ${seg.color}`}></span>
               {formatTokens(seg.value)} {seg.label}
             </span>
           ))}
+          {cachedSegment.value > 0 && (
+            <span className={`${cachedSegment.chip} px-1.5 py-0.5 rounded font-mono flex items-center gap-1`}>
+              <span className={`w-2 h-2 rounded-full ${cachedSegment.color}`}></span>
+              ⚡ {formatTokens(cachedSegment.value)} {cachedSegment.label}
+            </span>
+          )}
         </div>
       )}
     </div>
@@ -871,7 +1029,6 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
-  // Counters for the header
   const counts = useMemo(() => {
     const c = { request: 0, response: 0, tool_call: 0, tool_response: 0, info: 0, error: 0 };
     messages?.forEach(m => {
@@ -894,7 +1051,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
 
   return (
     <div className="flex flex-col h-full">
-      {/* Header with status, counters and token stats bar */}
+      {/* Header */}
       <div className="flex items-center justify-between px-3 py-2 border-b bg-gray-50 shrink-0 gap-2 flex-wrap">
         <div className="flex items-center gap-2 flex-wrap min-w-0">
           <h3 className="font-bold text-sm text-gray-700">Execution Log</h3>

@@ -184,6 +184,7 @@ func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTo
 		cur.ReasoningTokens += delta.ReasoningTokens
 		cur.ToolInputTokens += delta.ToolInputTokens
 		cur.ToolOutputTokens += delta.ToolOutputTokens
+		cur.CachedTokens += delta.CachedTokens
 		cur.TotalTokens = cur.PromptTokens + cur.CompletionTokens + cur.ReasoningTokens + cur.ToolInputTokens + cur.ToolOutputTokens
 		b, _ := json.Marshal(cur)
 		return tx.Model(&Run{}).Where("id = ?", runID).Update("token_stats", string(b)).Error

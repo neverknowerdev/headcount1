@@ -156,7 +156,8 @@ type RunTokenStats struct {
 	ReasoningTokens  int `json:"reasoning_tokens"`  // sum of reasoning tokens (provider-reported, or estimated)
 	ToolInputTokens  int `json:"tool_input_tokens"` // sum of tool call argument sizes (estimated, chars/4)
 	ToolOutputTokens int `json:"tool_output_tokens"` // sum of tool response sizes (estimated, chars/4)
-	TotalTokens      int `json:"total_tokens"`      // sum of everything above
+	CachedTokens     int `json:"cached_tokens"`     // sum of cached prompt tokens (subset of PromptTokens)
+	TotalTokens      int `json:"total_tokens"`      // sum of everything above (excludes CachedTokens)
 }
 
 type ActivityLog struct {

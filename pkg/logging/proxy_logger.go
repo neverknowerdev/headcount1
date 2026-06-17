@@ -166,6 +166,7 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 			"completion": usage.CompletionTokens,
 			"total":      usage.TotalTokens,
 			"reasoning":  usage.ReasoningTokens,
+			"cached":     usage.CachedTokens,
 		}
 	}
 	respBytes, _ := json.Marshal(respData)
@@ -233,6 +234,7 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 			"completion": usage.CompletionTokens,
 			"total":      usage.TotalTokens,
 			"reasoning":  usage.ReasoningTokens,
+			"cached":     usage.CachedTokens,
 		}
 	}
 	if len(rawBody) > 0 {
@@ -300,6 +302,7 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 			CompletionTokens: usage.CompletionTokens,
 			ReasoningTokens:  usage.ReasoningTokens,
 			ToolInputTokens:  usage.ToolInputTokens,
+			CachedTokens:     usage.CachedTokens,
 		}
 		go func() {
 			for i := 0; i < 3; i++ {

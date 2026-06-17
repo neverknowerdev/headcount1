@@ -190,6 +190,9 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 				TotalTokens      int `json:"total_tokens"`
+				PromptTokensDetails struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
 				CompletionTokensDetails struct {
 					ReasoningTokens int `json:"reasoning_tokens"`
 				} `json:"completion_tokens_details"`
@@ -201,6 +204,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 			PromptTokens:     resPayload.Usage.PromptTokens,
 			CompletionTokens: resPayload.Usage.CompletionTokens,
 			TotalTokens:      resPayload.Usage.TotalTokens,
+			CachedTokens:     resPayload.Usage.PromptTokensDetails.CachedTokens,
 		}
 		var nonStreamReasoning string
 		for _, c := range resPayload.Choices {
@@ -235,6 +239,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 					PromptTokens:     usage.PromptTokens,
 					CompletionTokens: usage.CompletionTokens,
 					ReasoningTokens:  usage.ReasoningTokens,
+					CachedTokens:     usage.CachedTokens,
 				})
 			}
 		}
@@ -289,6 +294,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 					CompletionTokens: lastUsage.CompletionTokens,
 					ReasoningTokens:  lastUsage.ReasoningTokens,
 					ToolInputTokens:  lastUsage.ToolInputTokens,
+					CachedTokens:     lastUsage.CachedTokens,
 				})
 			}
 		}
@@ -424,6 +430,9 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 				PromptTokens     int `json:"prompt_tokens"`
 				CompletionTokens int `json:"completion_tokens"`
 				TotalTokens      int `json:"total_tokens"`
+				PromptTokensDetails struct {
+					CachedTokens int `json:"cached_tokens"`
+				} `json:"prompt_tokens_details"`
 				CompletionTokensDetails struct {
 					ReasoningTokens int `json:"reasoning_tokens"`
 				} `json:"completion_tokens_details"`
@@ -435,6 +444,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 			PromptTokens:     resPayload.Usage.PromptTokens,
 			CompletionTokens: resPayload.Usage.CompletionTokens,
 			TotalTokens:      resPayload.Usage.TotalTokens,
+			CachedTokens:     resPayload.Usage.PromptTokensDetails.CachedTokens,
 		}
 		var nonStreamReasoning string
 		for _, c := range resPayload.Choices {
@@ -472,6 +482,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 				PromptTokens:     usage.PromptTokens,
 				CompletionTokens: usage.CompletionTokens,
 				ReasoningTokens:  usage.ReasoningTokens,
+				CachedTokens:     usage.CachedTokens,
 			})
 		}
 
@@ -539,6 +550,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 				CompletionTokens: lastUsage.CompletionTokens,
 				ReasoningTokens:  lastUsage.ReasoningTokens,
 				ToolInputTokens:  lastUsage.ToolInputTokens,
+				CachedTokens:     lastUsage.CachedTokens,
 			})
 		}
 	}
@@ -683,6 +695,9 @@ func proxySSEStream(
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
+			PromptTokensDetails struct {
+				CachedTokens int `json:"cached_tokens"`
+			} `json:"prompt_tokens_details"`
 			CompletionTokensDetails struct {
 				ReasoningTokens int `json:"reasoning_tokens"`
 			} `json:"completion_tokens_details"`
@@ -764,6 +779,7 @@ func proxySSEStream(
 						CompletionTokens: cd.Usage.CompletionTokens,
 						TotalTokens:      cd.Usage.TotalTokens,
 						ReasoningTokens:  resolveReasoningTokens(cd.Usage.CompletionTokensDetails.ReasoningTokens, fullReasoning),
+						CachedTokens:     cd.Usage.PromptTokensDetails.CachedTokens,
 					}
 				}
 			}
