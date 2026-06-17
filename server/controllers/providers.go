@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 )
@@ -36,6 +37,8 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	settings := LoadSettings()
+	filesystem.NewManager(settings.BasePath).DeleteLLMProviderFile(int32(id))
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -81,6 +84,8 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings := LoadSettings()
+	filesystem.NewManager(settings.BasePath).SaveLLMProvider(provider)
 	api.respondJSON(w, http.StatusOK, provider)
 }
 
@@ -109,6 +114,8 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	settings := LoadSettings()
+	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
