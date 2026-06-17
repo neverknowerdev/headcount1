@@ -54,21 +54,16 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	api.hub.BroadcastEvent("comment_created", comment)
 
-	// Persist all comments for this task to disk
-	go func() {
-		var task db.Task
-		if api.db.First(&task, req.TaskID).Error != nil {
-			return
-		}
+	var task db.Task
+	if api.db.First(&task, req.TaskID).Error == nil {
 		var comp db.Company
-		if api.db.First(&comp, task.CompanyID).Error != nil {
-			return
+		if api.db.First(&comp, task.CompanyID).Error == nil {
+			var allComments []db.Comment
+			api.db.Where("task_id = ?", req.TaskID).Order("created_at asc").Find(&allComments)
+			settings := LoadSettings()
+			filesystem.NewManager(settings.BasePath).SaveTaskComments(comp, req.TaskID, allComments)
 		}
-		var allComments []db.Comment
-		api.db.Where("task_id = ?", req.TaskID).Order("created_at asc").Find(&allComments)
-		settings := LoadSettings()
-		filesystem.NewManager(settings.BasePath).SaveTaskComments(comp, req.TaskID, allComments)
-	}()
+	}
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
