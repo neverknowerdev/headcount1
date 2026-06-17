@@ -60,6 +60,9 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		// Log error but don't fail the request completely
 		println("Error creating company directories:", err.Error())
 	}
+	if err := fsManager.WriteCompanySettings(comp); err != nil {
+		println("Error writing company settings:", err.Error())
+	}
 
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
 

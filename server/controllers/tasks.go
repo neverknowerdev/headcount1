@@ -129,13 +129,16 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
 
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+
 	if req.ProjectID != nil {
 		var proj db.Project
 		api.db.First(&proj, *req.ProjectID)
-		settings := LoadSettings()
-		fsManager := filesystem.NewManager(settings.BasePath)
 		fsManager.CreateTaskWorkspace(comp, proj, task)
 	}
+
+	fsManager.SaveTask(comp, task)
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
@@ -232,6 +235,12 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("task_updated", task)
+
+	var taskComp db.Company
+	if api.db.First(&taskComp, task.CompanyID).Error == nil {
+		taskSettings := LoadSettings()
+		filesystem.NewManager(taskSettings.BasePath).SaveTask(taskComp, task)
+	}
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 
