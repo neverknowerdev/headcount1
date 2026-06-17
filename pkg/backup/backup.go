@@ -95,6 +95,11 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		log.Printf("Warning: failed to backup workspace directory: %v", err)
 	}
 
+	// Backup companies directory (Manager format: settings, sprints, tasks, comments)
+	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "companies"), "companies", &itemCount); err != nil {
+		log.Printf("Warning: failed to backup companies directory: %v", err)
+	}
+
 	// Update manifest with item count
 	manifest.Items = itemCount
 	manifestBytes, _ = json.MarshalIndent(manifest, "", "  ")

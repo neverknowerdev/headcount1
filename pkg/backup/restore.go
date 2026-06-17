@@ -111,6 +111,15 @@ func restoreFilesystem(tempDir, basePath string) error {
 		}
 	}
 
+	// Restore companies directory (Manager format: settings, sprints, tasks, comments)
+	srcCompanies := filepath.Join(tempDir, "companies")
+	if _, err := os.Stat(srcCompanies); err == nil {
+		dstCompanies := filepath.Join(basePath, "companies")
+		if err := copyDir(srcCompanies, dstCompanies); err != nil {
+			return fmt.Errorf("failed to restore companies directory: %w", err)
+		}
+	}
+
 	// Restore settings.yaml
 	srcSettings := filepath.Join(tempDir, "settings.yaml")
 	if _, err := os.Stat(srcSettings); err == nil {
@@ -176,6 +185,7 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 	database.WithContext(ctx).Exec("DELETE FROM sqlite_sequence")
 
 	storage := filesystem.NewStorage(basePath)
+	fm := filesystem.NewManager(basePath)
 
 	// 1. Restore LLM Providers
 	providers, err := storage.ReadProviders()
@@ -256,28 +266,22 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				projectIDMap[oldProjID] = project.ID
 			}
 
-			// 4. Restore Sprints for this company
-			sprints, err := storage.ReadSprints(shortName)
+			// 4. Restore Sprints for this company (read from companies/ Manager path)
+			sprintRecords, err := fm.ListSprintsFromDisk(shortName)
 			if err != nil {
 				log.Printf("Warning: failed to read sprints for %s: %v", shortName, err)
 				continue
 			}
 
 			sprintIDMap := map[int32]int32{}
-			for _, s := range sprints {
+			for _, s := range sprintRecords {
 				oldSprintID := s.ID
 				sprint := db.Sprint{
 					CompanyID: company.ID,
 					Name:      s.Name,
 					Goal:      s.Goal,
-				}
-				if s.StartDate != nil {
-					t, _ := parseTime(*s.StartDate)
-					sprint.StartDate = &t
-				}
-				if s.EndDate != nil {
-					t, _ := parseTime(*s.EndDate)
-					sprint.EndDate = &t
+					StartDate: s.StartDate,
+					EndDate:   s.EndDate,
 				}
 				if err := database.WithContext(ctx).Create(&sprint).Error; err != nil {
 					log.Printf("Warning: failed to restore sprint %s: %v", s.Name, err)
@@ -317,15 +321,15 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				agentIDMap[oldAgentID] = agent.ID
 			}
 
-			// 6. Restore Tasks for this company
-			tasks, err := storage.ReadTasks(shortName)
+			// 6. Restore Tasks for this company (read from companies/ Manager path)
+			taskRecords, err := fm.ListTasksFromDisk(shortName)
 			if err != nil {
 				log.Printf("Warning: failed to read tasks for %s: %v", shortName, err)
 				continue
 			}
 
 			taskIDMap := map[int32]int32{}
-			for _, t := range tasks {
+			for _, t := range taskRecords {
 				oldTaskID := t.ID
 				task := db.Task{
 					CompanyID:   company.ID,
@@ -336,6 +340,7 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 					Priority:    t.Priority,
 					IsArchived:  t.IsArchived,
 					SprintID:    sprintIDMap[t.SprintID],
+					DueDate:     t.DueDate,
 				}
 				if t.ProjectID != nil {
 					if newProjectID, ok := projectIDMap[*t.ProjectID]; ok {
@@ -352,27 +357,21 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 						task.ParentID = &newParentID
 					}
 				}
-				if t.DueDate != nil {
-					d, _ := parseTime(*t.DueDate)
-					task.DueDate = &d
-				}
 				if err := database.WithContext(ctx).Create(&task).Error; err != nil {
 					log.Printf("Warning: failed to restore task %s: %v", t.Title, err)
 					continue
 				}
 				taskIDMap[oldTaskID] = task.ID
 
-				// 7. Restore Comments for this task
-				comments, err := storage.ReadComments(shortName, t.ID)
+				// 7. Restore Comments for this task (read from companies/ Manager path)
+				commentRecs, err := fm.ListTaskCommentsFromDisk(shortName, t.ID)
 				if err == nil {
-					for _, c := range comments {
+					for _, c := range commentRecs {
 						comment := db.Comment{
 							TaskID:     task.ID,
 							AuthorType: c.AuthorType,
 							Content:    c.Content,
-						}
-						if c.AuthorID != nil {
-							comment.AuthorID = c.AuthorID
+							AuthorID:   c.AuthorID,
 						}
 						database.WithContext(ctx).Create(&comment)
 					}
