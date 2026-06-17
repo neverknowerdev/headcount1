@@ -189,8 +189,34 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 
 				if err := api.db.Omit("Company", "Project", "Sprint", "Agent", "Parent").Create(&task).Error; err != nil {
 					log.Printf("Failed to create task %d: %v", rec.ID, err)
-				} else {
-					log.Printf("Restored task %d (%s) for %s", rec.ID, rec.Title, shortName)
+					continue
+				}
+				log.Printf("Restored task %d (%s) for %s", rec.ID, rec.Title, shortName)
+			}
+
+			// Import comments for this task (whether the task was just created or already existed)
+			commentRecs, err := fm.ListTaskCommentsFromDisk(shortName, rec.ID)
+			if err != nil {
+				log.Printf("Error listing comments for task %d: %v", rec.ID, err)
+				continue
+			}
+			for _, cRec := range commentRecs {
+				var existingComment db.Comment
+				if api.db.First(&existingComment, cRec.ID).Error != nil {
+					comment := db.Comment{
+						ID:         cRec.ID,
+						TaskID:     cRec.TaskID,
+						AuthorType: cRec.AuthorType,
+						AuthorID:   cRec.AuthorID,
+						Content:    cRec.Content,
+						CreatedAt:  cRec.CreatedAt,
+						UpdatedAt:  cRec.UpdatedAt,
+					}
+					if err := api.db.Omit("Task").Create(&comment).Error; err != nil {
+						log.Printf("Failed to create comment %d for task %d: %v", cRec.ID, rec.ID, err)
+					} else {
+						log.Printf("Restored comment %d for task %d", cRec.ID, rec.ID)
+					}
 				}
 			}
 		}
@@ -248,7 +274,7 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
 		}
 	}
 
-	// Export tasks
+	// Export tasks and their comments
 	var tasks []db.Task
 	api.db.Find(&tasks)
 	for _, t := range tasks {
@@ -256,10 +282,18 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
 		if !ok {
 			continue
 		}
-		taskPath := filepath.Join(basePath, "companies", comp.ShortName, "tasks", formatID(t.ID)+".json")
-		if _, err := os.Stat(taskPath); os.IsNotExist(err) {
+		taskJsonPath := filepath.Join(basePath, "companies", comp.ShortName, "tasks", formatID(t.ID), "task.json")
+		if _, err := os.Stat(taskJsonPath); os.IsNotExist(err) {
 			if err := fm.SaveTask(comp, t); err != nil {
 				log.Printf("Export: failed to write task %d: %v", t.ID, err)
+			}
+		}
+		commentsPath := filepath.Join(basePath, "companies", comp.ShortName, "tasks", formatID(t.ID), "comments.json")
+		if _, err := os.Stat(commentsPath); os.IsNotExist(err) {
+			var comments []db.Comment
+			api.db.Where("task_id = ?", t.ID).Order("created_at asc").Find(&comments)
+			if err := fm.SaveTaskComments(comp, t.ID, comments); err != nil {
+				log.Printf("Export: failed to write comments for task %d: %v", t.ID, err)
 			}
 		}
 	}

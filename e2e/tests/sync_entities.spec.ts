@@ -1,12 +1,20 @@
 /**
  * E2E tests for cross-worktree filesystem sync.
  *
- * Verifies three properties introduced by the entity sync feature:
+ * Verifies four properties introduced by the entity sync feature:
  *  1. Write-through — creating/updating entities immediately persists files to disk.
- *  2. Import — after a DB wipe, POST /api/settings/sync restores all entities from disk
- *              with IDs preserved so FK chains remain intact.
- *  3. Delete propagation — deleting an LLM provider also removes its disk file so it is
+ *  2. Comment write-through — creating a comment rewrites the task's comments.json.
+ *  3. Import — after a DB wipe, POST /api/settings/sync restores all entities from disk
+ *              with IDs preserved so FK chains remain intact (including comments).
+ *  4. Delete propagation — deleting an LLM provider removes its disk file so it is
  *                          not restored on the next sync.
+ *
+ * Filesystem layout verified here:
+ *   ~/.paperclip2/companies/{shortName}/settings.yml
+ *   ~/.paperclip2/companies/{shortName}/sprints/{id}.json
+ *   ~/.paperclip2/companies/{shortName}/tasks/{id}/task.json
+ *   ~/.paperclip2/companies/{shortName}/tasks/{id}/comments.json
+ *   ~/.paperclip2/data/llm-providers/{id}.json
  */
 
 import { test, expect } from '@playwright/test';
@@ -25,6 +33,7 @@ test.describe('Entity filesystem sync (export / import)', () => {
     let providerId: number;
     let sprintId: number;
     let taskId: number;
+    let commentId: number;
 
     test.beforeAll(async ({ request }) => {
         // Remove any leftover files from a previously failed run
@@ -81,10 +90,24 @@ test.describe('Entity filesystem sync (export / import)', () => {
         });
         expect(taskRes.ok()).toBeTruthy();
         taskId = (await taskRes.json()).id;
+
+        // Comment on the task
+        const commentRes = await request.post('/api/comments', {
+            data: {
+                task_id: taskId,
+                author_type: 'user',
+                content: 'Test sync comment',
+            },
+        });
+        expect(commentRes.ok()).toBeTruthy();
+        commentId = (await commentRes.json()).id;
+
+        // comments.json is written by a goroutine; give it a moment to flush
+        await new Promise(r => setTimeout(r, 400));
     });
 
     // ────────────────────────────────────────────────────────────────────────
-    // Test 1: write-through
+    // Test 1: write-through (create + update)
     // ────────────────────────────────────────────────────────────────────────
 
     test('writes entity files to filesystem on create and update', async ({ request }) => {
@@ -111,16 +134,26 @@ test.describe('Entity filesystem sync (export / import)', () => {
         expect(sprintFile.name).toBe('Sync Sprint');
         expect(sprintFile.company_id).toBe(companyId);
 
-        // -- Task JSON --
-        const taskPath = path.join(compSettingsDir, 'tasks', `${taskId}.json`);
-        expect(fs.existsSync(taskPath), `expected task file at ${taskPath}`).toBe(true);
+        // -- Task directory + task.json --
+        const taskDir = path.join(compSettingsDir, 'tasks', String(taskId));
+        const taskPath = path.join(taskDir, 'task.json');
+        expect(fs.existsSync(taskPath), `expected task.json at ${taskPath}`).toBe(true);
         const taskFile = JSON.parse(fs.readFileSync(taskPath, 'utf8'));
         expect(taskFile.id).toBe(taskId);
         expect(taskFile.title).toBe('Sync Task');
         expect(taskFile.sprint_id).toBe(sprintId);
         expect(taskFile.company_id).toBe(companyId);
 
-        // -- Update propagation --
+        // -- comments.json --
+        const commentsPath = path.join(taskDir, 'comments.json');
+        expect(fs.existsSync(commentsPath), `expected comments.json at ${commentsPath}`).toBe(true);
+        const commentsFile: any[] = JSON.parse(fs.readFileSync(commentsPath, 'utf8'));
+        expect(commentsFile).toHaveLength(1);
+        expect(commentsFile[0].id).toBe(commentId);
+        expect(commentsFile[0].task_id).toBe(taskId);
+        expect(commentsFile[0].content).toBe('Test sync comment');
+
+        // -- Update propagation: task update rewrites task.json --
         const updateRes = await request.put(`/api/tasks/${taskId}`, {
             data: { title: 'Sync Task Updated', status: 'todo' },
         });
@@ -129,14 +162,25 @@ test.describe('Entity filesystem sync (export / import)', () => {
         const updatedFile = JSON.parse(fs.readFileSync(taskPath, 'utf8'));
         expect(updatedFile.title).toBe('Sync Task Updated');
         expect(updatedFile.status).toBe('todo');
+
+        // -- Comment append: adding a second comment rewrites comments.json --
+        const secondCommentRes = await request.post('/api/comments', {
+            data: { task_id: taskId, author_type: 'user', content: 'Second comment' },
+        });
+        expect(secondCommentRes.ok()).toBeTruthy();
+        await new Promise(r => setTimeout(r, 400));
+
+        const commentsAfterSecond: any[] = JSON.parse(fs.readFileSync(commentsPath, 'utf8'));
+        expect(commentsAfterSecond).toHaveLength(2);
+        expect(commentsAfterSecond[1].content).toBe('Second comment');
     });
 
     // ────────────────────────────────────────────────────────────────────────
-    // Test 2: full import after DB wipe
+    // Test 2: full import after DB wipe (including comments)
     // ────────────────────────────────────────────────────────────────────────
 
-    test('restores all entities from filesystem after DB wipe', async ({ request }) => {
-        // Wipe the database — every table is cleared, autoincrement resets
+    test('restores all entities and comments from filesystem after DB wipe', async ({ request }) => {
+        // Wipe the database — every table cleared, autoincrement resets
         const wipeRes = await request.post('/api/e2e/wipe-db');
         expect(wipeRes.ok()).toBeTruthy();
 
@@ -169,8 +213,7 @@ test.describe('Entity filesystem sync (export / import)', () => {
         expect(restoredSprint.name).toBe('Sync Sprint');
         expect(restoredSprint.company_id).toBe(restoredCompany.id);
 
-        // Task restored with preserved ID and correct sprint FK
-        // (title reflects the update made in test 1)
+        // Task restored with preserved ID, correct sprint FK, and updated title
         const tasksAfterSync = await (await request.get(
             `/api/tasks?company_id=${restoredCompany.id}`
         )).json();
@@ -179,6 +222,17 @@ test.describe('Entity filesystem sync (export / import)', () => {
         expect(restoredTask.title).toBe('Sync Task Updated');
         expect(restoredTask.sprint_id).toBe(sprintId);
         expect(restoredTask.company_id).toBe(restoredCompany.id);
+
+        // Comments restored with preserved IDs and content
+        const commentsAfterSync = await (await request.get(
+            `/api/comments?task_id=${restoredTask.id}`
+        )).json();
+        expect(commentsAfterSync).toHaveLength(2);
+        const restoredComment = commentsAfterSync.find((c: any) => c.id === commentId);
+        expect(restoredComment, 'first comment should be restored after sync').toBeDefined();
+        expect(restoredComment.content).toBe('Test sync comment');
+        const secondComment = commentsAfterSync.find((c: any) => c.content === 'Second comment');
+        expect(secondComment, 'second comment should be restored after sync').toBeDefined();
     });
 
     // ────────────────────────────────────────────────────────────────────────

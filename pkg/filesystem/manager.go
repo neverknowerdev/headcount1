@@ -432,8 +432,25 @@ type TaskRecord struct {
 	UpdatedAt   time.Time  `json:"updated_at"`
 }
 
+// CommentRecord is a flat Comment for filesystem storage (no nested GORM associations).
+type CommentRecord struct {
+	ID         int32     `json:"id"`
+	TaskID     int32     `json:"task_id"`
+	AuthorType string    `json:"author_type"`
+	AuthorID   *int32    `json:"author_id"`
+	Content    string    `json:"content"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
+// taskDir returns the per-task directory: companies/{shortName}/tasks/{id}/
+func (m *Manager) taskDir(companyShortName string, taskID int32) string {
+	return filepath.Join(m.basePath, "companies", companyShortName, "tasks", fmt.Sprintf("%d", taskID))
+}
+
+// SaveTask writes task metadata to companies/{shortName}/tasks/{id}/task.json
 func (m *Manager) SaveTask(company db.Company, task db.Task) error {
-	dir := filepath.Join(m.basePath, "companies", company.ShortName, "tasks")
+	dir := m.taskDir(company.ShortName, task.ID)
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -458,9 +475,35 @@ func (m *Manager) SaveTask(company db.Company, task db.Task) error {
 	if err != nil {
 		return err
 	}
-	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", task.ID)), data, 0644)
+	return os.WriteFile(filepath.Join(dir, "task.json"), data, 0644)
 }
 
+// SaveTaskComments writes all comments for a task to companies/{shortName}/tasks/{id}/comments.json
+func (m *Manager) SaveTaskComments(company db.Company, taskID int32, comments []db.Comment) error {
+	dir := m.taskDir(company.ShortName, taskID)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	recs := make([]CommentRecord, 0, len(comments))
+	for _, c := range comments {
+		recs = append(recs, CommentRecord{
+			ID:         c.ID,
+			TaskID:     c.TaskID,
+			AuthorType: c.AuthorType,
+			AuthorID:   c.AuthorID,
+			Content:    c.Content,
+			CreatedAt:  c.CreatedAt,
+			UpdatedAt:  c.UpdatedAt,
+		})
+	}
+	data, err := json.MarshalIndent(recs, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, "comments.json"), data, 0644)
+}
+
+// ListTasksFromDisk reads all task directories under companies/{shortName}/tasks/
 func (m *Manager) ListTasksFromDisk(companyShortName string) ([]TaskRecord, error) {
 	dir := filepath.Join(m.basePath, "companies", companyShortName, "tasks")
 	entries, err := os.ReadDir(dir)
@@ -472,20 +515,37 @@ func (m *Manager) ListTasksFromDisk(companyShortName string) ([]TaskRecord, erro
 	}
 	var result []TaskRecord
 	for _, e := range entries {
-		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+		if !e.IsDir() {
 			continue
 		}
-		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		taskFile := filepath.Join(dir, e.Name(), "task.json")
+		data, err := os.ReadFile(taskFile)
 		if err != nil {
-			log.Printf("Skipping unreadable task file %s: %v", e.Name(), err)
+			log.Printf("Skipping task dir %s (no task.json): %v", e.Name(), err)
 			continue
 		}
 		var t TaskRecord
 		if err := json.Unmarshal(data, &t); err != nil {
-			log.Printf("Skipping invalid task file %s: %v", e.Name(), err)
+			log.Printf("Skipping invalid task.json in %s: %v", e.Name(), err)
 			continue
 		}
 		result = append(result, t)
 	}
 	return result, nil
+}
+
+// ListTaskCommentsFromDisk reads companies/{shortName}/tasks/{id}/comments.json
+func (m *Manager) ListTaskCommentsFromDisk(companyShortName string, taskID int32) ([]CommentRecord, error) {
+	data, err := os.ReadFile(filepath.Join(m.taskDir(companyShortName, taskID), "comments.json"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var recs []CommentRecord
+	if err := json.Unmarshal(data, &recs); err != nil {
+		return nil, err
+	}
+	return recs, nil
 }

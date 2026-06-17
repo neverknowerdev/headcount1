@@ -1,9 +1,9 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"io"
-	"context"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) ListComments(w http.ResponseWriter, r *http.Request) {
@@ -52,6 +53,22 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("comment_created", comment)
+
+	// Persist all comments for this task to disk
+	go func() {
+		var task db.Task
+		if api.db.First(&task, req.TaskID).Error != nil {
+			return
+		}
+		var comp db.Company
+		if api.db.First(&comp, task.CompanyID).Error != nil {
+			return
+		}
+		var allComments []db.Comment
+		api.db.Where("task_id = ?", req.TaskID).Order("created_at asc").Find(&allComments)
+		settings := LoadSettings()
+		filesystem.NewManager(settings.BasePath).SaveTaskComments(comp, req.TaskID, allComments)
+	}()
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
