@@ -2,7 +2,6 @@ package endpoints
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
 	"time"
@@ -69,13 +68,10 @@ func (api *API) CreateSprint(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write sprint metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
 	var comp db.Company
-	api.db.First(&comp, req.CompanyID)
-	if err := storage.WriteSprint(sprint, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write sprint metadata: %v", err)
+	if api.db.First(&comp, req.CompanyID).Error == nil {
+		settings := LoadSettings()
+		filesystem.NewManager(settings.BasePath).SaveSprint(comp, sprint)
 	}
 
 	api.logActivity(req.CompanyID, "sprint_created", int32(sprint.ID), "sprint", "")

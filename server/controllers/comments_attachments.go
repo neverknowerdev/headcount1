@@ -1,9 +1,9 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"io"
-	"context"
 	"log"
 	"net/http"
 	"os"
@@ -55,13 +55,14 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	api.hub.BroadcastEvent("comment_created", comment)
 
-	// Write comment metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	companyShortName, err := storage.GetCompanyShortNameForTask(req.TaskID)
-	if err == nil {
-		if err := storage.WriteComment(comment, companyShortName); err != nil {
-			log.Printf("Warning: failed to write comment metadata: %v", err)
+	var task db.Task
+	if api.db.First(&task, req.TaskID).Error == nil {
+		var comp db.Company
+		if api.db.First(&comp, task.CompanyID).Error == nil {
+			var allComments []db.Comment
+			api.db.Where("task_id = ?", req.TaskID).Order("created_at asc").Find(&allComments)
+			settings := LoadSettings()
+			filesystem.NewManager(settings.BasePath).SaveTaskComments(comp, req.TaskID, allComments)
 		}
 	}
 

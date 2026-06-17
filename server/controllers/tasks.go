@@ -130,11 +130,12 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
 
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+
 	if req.ProjectID != nil {
 		var proj db.Project
 		api.db.First(&proj, *req.ProjectID)
-		settings := LoadSettings()
-		fsManager := filesystem.NewManager(settings.BasePath)
 		fsManager.CreateTaskWorkspace(comp, proj, task)
 
 		// Write task metadata to filesystem
@@ -143,6 +144,8 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 			log.Printf("Warning: failed to write task metadata: %v", err)
 		}
 	}
+
+	fsManager.SaveTask(comp, task)
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
@@ -240,13 +243,10 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	api.hub.BroadcastEvent("task_updated", task)
 
-	// Write task metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	var comp db.Company
-	api.db.First(&comp, task.CompanyID)
-	if err := storage.WriteTask(task, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write task metadata: %v", err)
+	var taskComp db.Company
+	if api.db.First(&taskComp, task.CompanyID).Error == nil {
+		taskSettings := LoadSettings()
+		filesystem.NewManager(taskSettings.BasePath).SaveTask(taskComp, task)
 	}
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
