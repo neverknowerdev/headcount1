@@ -1,5 +1,7 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
+import * as path from 'path';
+import { loadE2EEnv } from '../helpers/env';
 
 test.describe.serial('Backup & Restore', () => {
     test('can create backup via API', async ({ request }) => {
@@ -166,7 +168,22 @@ test.describe.serial('Backup & Restore', () => {
         // Click Backup Now button
         await page.click('button:has-text("Backup Now")');
 
-        // Wait for the backup to complete and the status to refresh
-        await expect(page.getByRole('list').getByText(/backup_.*\.tar\.gz/).first()).toBeVisible({ timeout: 30000 });
+        // Wait for the backup to complete and the status to refresh.
+        // Note: getByRole('list') is avoided here — Tailwind Preflight resets list-style
+        // on <ul>, which Chrome uses to infer the implicit ARIA list role, so the locator
+        // fails in CI even when the element is visible.
+        await expect(page.getByText(/backup_.*\.tar\.gz/).first()).toBeVisible({ timeout: 30000 });
+    });
+
+    test.afterAll(async () => {
+        // Remove bt's filesystem data so its comment IDs (written before the roundtrip
+        // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
+        // when sync_filesystem.spec.ts calls POST /api/settings/sync.
+        const env = loadE2EEnv();
+        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        for (const subDir of ['data/bt', 'companies/bt']) {
+            const fullPath = path.join(paperclipBase, subDir);
+            if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+        }
     });
 });
