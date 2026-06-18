@@ -178,7 +178,11 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	// Sync the opencode provider config so the server (host in E2E mode,
 	// Docker container in production mode) has the correct provider configuration.
-	if syncErr := syncOpenCodeProviderConfig(e.q, run.ID, agent.Model); syncErr != nil {
+	agentProviderID := int32(0)
+	if agent.ProviderID != nil {
+		agentProviderID = *agent.ProviderID
+	}
+	if syncErr := syncOpenCodeProviderConfig(e.q, run.ID, agent.Model, agentProviderID); syncErr != nil {
 		fmt.Printf("Warning: failed to sync opencode config: %v\n", syncErr)
 	}
 
@@ -463,10 +467,12 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			// Use background context to avoid any parent context cancellation issues
 			provider, err := e.q.GetLLMProvider(context.Background(), *agent.ProviderID)
 			if err == nil {
-				providerID := provider.ProviderType
-				if providerID == "" {
-					providerID = provider.Name
+				providerType := provider.ProviderType
+				if providerType == "" {
+					providerType = provider.Name
 				}
+				// Must match the key format used in syncOpenCodeProviderConfig.
+				providerID := fmt.Sprintf("%s-%d", providerType, provider.ID)
 				modelObj["providerID"] = providerID
 				logInfo(fmt.Sprintf("Using provider: name=%s type=%s providerID=%s base_url=%s", provider.Name, provider.ProviderType, providerID, provider.BaseUrl))
 			} else {
@@ -524,6 +530,30 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 		agentResponse := ""
 
 		if err := json.Unmarshal(respBodyBytes, &rawMsg); err == nil {
+			// OpenCode returns HTTP 200 even when the underlying LLM call fails.
+			// Detect errors in the response body. The error can appear as:
+			//   {"type":"error","error":{...}}           — top-level error object
+			//   {"raw":"{\"type\":\"error\",...}"}       — error serialized into "raw" string field
+			if rawMsg["type"] == "error" {
+				status = "failed"
+				errObj, _ := rawMsg["error"].(map[string]interface{})
+				errMsg, _ := errObj["message"].(string)
+				if errMsg == "" {
+					errMsg = string(respBodyBytes)
+				}
+				logError(fmt.Sprintf("OpenCode LLM error: %s", errMsg))
+			} else if rawStr, ok := rawMsg["raw"].(string); ok {
+				var inner map[string]interface{}
+				if json.Unmarshal([]byte(rawStr), &inner) == nil && inner["type"] == "error" {
+					status = "failed"
+					errObj, _ := inner["error"].(map[string]interface{})
+					errMsg, _ := errObj["message"].(string)
+					if errMsg == "" {
+						errMsg = rawStr
+					}
+					logError(fmt.Sprintf("OpenCode LLM error: %s", errMsg))
+				}
+			}
 			if parts, ok := rawMsg["parts"].([]interface{}); ok {
 				var text strings.Builder
 				// Track which tool names have had their results logged so
@@ -628,11 +658,11 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			if agent.ProviderID != nil {
 				provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
 				if err == nil {
-					providerID := provider.ProviderType
-					if providerID == "" {
-						providerID = provider.Name
+					providerType := provider.ProviderType
+					if providerType == "" {
+						providerType = provider.Name
 					}
-					modelObj["providerID"] = providerID
+					modelObj["providerID"] = fmt.Sprintf("%s-%d", providerType, provider.ID)
 				}
 			}
 			forceMsgBody["model"] = modelObj
