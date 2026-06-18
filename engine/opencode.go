@@ -178,7 +178,7 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 
 	// Sync the opencode provider config so the server (host in E2E mode,
 	// Docker container in production mode) has the correct provider configuration.
-	if syncErr := syncOpenCodeProviderConfig(e.q, run.ID); syncErr != nil {
+	if syncErr := syncOpenCodeProviderConfig(e.q, run.ID, agent.Model); syncErr != nil {
 		fmt.Printf("Warning: failed to sync opencode config: %v\n", syncErr)
 	}
 
