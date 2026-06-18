@@ -71,7 +71,7 @@ func startOpenCodeServer(e2eMode bool) {
 // syncOpenCodeProviderConfig writes ~/.config/opencode/opencode.jsonc with
 // provider configurations from the database. Used in E2E mode to configure
 // the host OpenCode server to use the mock provider.
-func syncOpenCodeProviderConfig(q *db.Queries, runID int32, agentModel string) error {
+func syncOpenCodeProviderConfig(q *db.Queries, runID int32, agentModel string, agentProviderID int32) error {
 	configDir := filepath.Join(db.OpencodeConfigDir())
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", configDir, err)
@@ -141,7 +141,10 @@ func syncOpenCodeProviderConfig(q *db.Queries, runID int32, agentModel string) e
 		if p.DefaultModel != "" {
 			models[p.DefaultModel] = modelConfig{Name: p.DefaultModel, Headers: modelHeaders}
 		}
-		if agentModel != "" && agentModel != p.DefaultModel {
+		// Only register agentModel on the provider the agent actually uses.
+		// Registering it on all providers causes OpenCode to route the model
+		// to the wrong provider (e.g. Anthropic instead of openai-compatible).
+		if agentModel != "" && agentModel != p.DefaultModel && (agentProviderID == 0 || p.ID == agentProviderID) {
 			models[agentModel] = modelConfig{Name: agentModel, Headers: modelHeaders}
 		}
 		cfg.Provider[key] = providerConfig{
