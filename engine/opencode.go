@@ -467,10 +467,12 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			// Use background context to avoid any parent context cancellation issues
 			provider, err := e.q.GetLLMProvider(context.Background(), *agent.ProviderID)
 			if err == nil {
-				providerID := provider.ProviderType
-				if providerID == "" {
-					providerID = provider.Name
+				providerType := provider.ProviderType
+				if providerType == "" {
+					providerType = provider.Name
 				}
+				// Must match the key format used in syncOpenCodeProviderConfig.
+				providerID := fmt.Sprintf("%s-%d", providerType, provider.ID)
 				modelObj["providerID"] = providerID
 				logInfo(fmt.Sprintf("Using provider: name=%s type=%s providerID=%s base_url=%s", provider.Name, provider.ProviderType, providerID, provider.BaseUrl))
 			} else {
@@ -656,11 +658,11 @@ func (e *OpenCodeEngine) runOpenCode(ctx context.Context, task db.Task, mode str
 			if agent.ProviderID != nil {
 				provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
 				if err == nil {
-					providerID := provider.ProviderType
-					if providerID == "" {
-						providerID = provider.Name
+					providerType := provider.ProviderType
+					if providerType == "" {
+						providerType = provider.Name
 					}
-					modelObj["providerID"] = providerID
+					modelObj["providerID"] = fmt.Sprintf("%s-%d", providerType, provider.ID)
 				}
 			}
 			forceMsgBody["model"] = modelObj

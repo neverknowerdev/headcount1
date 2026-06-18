@@ -104,16 +104,20 @@ func syncOpenCodeProviderConfig(q *db.Queries, runID int32, agentModel string, a
 	}
 
 	for _, p := range providers {
-		key := p.ProviderType
-		if key == "" {
-			key = p.Name
+		providerType := p.ProviderType
+		if providerType == "" {
+			providerType = p.Name
 		}
-		if key == "" {
+		if providerType == "" {
 			continue
 		}
+		// Use a per-provider unique config key so that multiple providers
+		// with the same ProviderType (e.g. two "openai" providers) don't
+		// overwrite each other in the config file.
+		key := fmt.Sprintf("%s-%d", providerType, p.ID)
 
 		npm := "@ai-sdk/openai-compatible"
-		switch key {
+		switch providerType {
 		case "anthropic":
 			npm = "@ai-sdk/anthropic"
 		}
