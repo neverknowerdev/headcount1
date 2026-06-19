@@ -12,3 +12,4 @@ package-lock.json
 agent-orchestrator
 agent-orchestratror.db
 test-results/
+tmp/

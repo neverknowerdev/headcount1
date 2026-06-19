@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -105,6 +106,19 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
+	// Check if backup is needed on startup
+	paperclipHome := db.PaperclipHome()
+	if backup.ShouldBackupOnStartup(paperclipHome) {
+		log.Println("Latest backup is older than 24h, running backup on startup...")
+		go func() {
+			_, err := backup.CreateBackup(paperclipHome)
+			if err != nil {
+				log.Printf("Startup backup failed: %v", err)
+			}
+		}()
+	}
+	go backup.StartDailyScheduler(paperclipHome)
+
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
@@ -124,7 +138,7 @@ func main() {
 
 		srv.Mount(r)
 
-		gw := integration.NewLLMGateway(database)
+		gw := integration.NewLLMGatewayWithHub(database, hub)
 		gw.Mount(r)
 	})
 
@@ -133,7 +147,14 @@ func main() {
 		log.Fatalf("Failed to create sub filesystem: %v", err)
 	}
 
-	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+		// Disable caching for JS and CSS files
+		if strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
+			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
+			w.Header().Set("Pragma", "no-cache")
+			w.Header().Set("Expires", "0")
+		}
+		
 		fsHandler := http.FileServer(http.FS(distFS))
 
 		path := r.URL.Path

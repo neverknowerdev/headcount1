@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -127,6 +128,16 @@ func (api *API) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+
+	// Write attachment metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	companyShortName, err := storage.GetCompanyShortNameForTask(int32(taskID))
+	if err == nil {
+		if err := storage.WriteAttachment(attachment, companyShortName); err != nil {
+			log.Printf("Warning: failed to write attachment metadata: %v", err)
+		}
 	}
 
 	api.respondJSON(w, http.StatusCreated, attachment)

@@ -56,7 +56,7 @@ func (m *Manager) ListCompanies() ([]string, error) {
 
 	companies := []string{}
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
 			companies = append(companies, entry.Name())
 		}
 	}
@@ -252,13 +252,19 @@ func (m *Manager) DeleteCompanyFiles(company db.Company) error {
 
 func hasFiles(dir string) bool {
 	found := false
+	metadataFiles := map[string]bool{
+		"company.json": true,
+		"project.json": true,
+	}
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() {
-			found = true
-			return filepath.SkipAll
+			if !metadataFiles[info.Name()] {
+				found = true
+				return filepath.SkipAll
+			}
 		}
 		return nil
 	})

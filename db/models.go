@@ -140,9 +140,24 @@ type Run struct {
 	SessionID       string     `json:"session_id"`
 	LogFilePath     string     `json:"log_file_path"`
 	LogContent      string     `json:"log_content"`
+	LogEntries      string     `json:"log_entries" gorm:"type:text"` // JSON array of structured log entries
+	TokenStats      string     `json:"token_stats" gorm:"type:text"`  // JSON object with aggregated token counts
 	StartedAt       time.Time  `json:"started_at"`
 	EndedAt         *time.Time `json:"ended_at"`
 	LastMessageTime *time.Time `json:"last_message_time"`
+}
+
+// RunTokenStats holds aggregated token counts for a run. Persisted to
+// Run.TokenStats as JSON so the Run Logs UI can render an overall
+// breakdown without re-iterating LogEntries on every read.
+type RunTokenStats struct {
+	PromptTokens     int `json:"prompt_tokens"`     // sum of all LLM request input tokens (provider-reported)
+	CompletionTokens int `json:"completion_tokens"` // sum of all LLM response output tokens (provider-reported)
+	ReasoningTokens  int `json:"reasoning_tokens"`  // sum of reasoning tokens (provider-reported, or estimated)
+	ToolInputTokens  int `json:"tool_input_tokens"` // sum of tool call argument sizes (estimated, chars/4)
+	ToolOutputTokens int `json:"tool_output_tokens"` // sum of tool response sizes (estimated, chars/4)
+	CachedTokens     int `json:"cached_tokens"`     // sum of cached prompt tokens (subset of PromptTokens)
+	TotalTokens      int `json:"total_tokens"`      // sum of everything above (excludes CachedTokens)
 }
 
 type ActivityLog struct {

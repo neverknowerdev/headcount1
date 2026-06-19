@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/utils"
 )
 
 // E2E-specific helper functions for the OpenCode engine.
@@ -70,7 +71,7 @@ func startOpenCodeServer(e2eMode bool) {
 // syncOpenCodeProviderConfig writes ~/.config/opencode/opencode.jsonc with
 // provider configurations from the database. Used in E2E mode to configure
 // the host OpenCode server to use the mock provider.
-func syncOpenCodeProviderConfig(q *db.Queries, runID int32) error {
+func syncOpenCodeProviderConfig(q *db.Queries, runID int32, agentModel string, agentProviderID int32) error {
 	configDir := filepath.Join(db.OpencodeConfigDir())
 	if err := os.MkdirAll(configDir, 0755); err != nil {
 		return fmt.Errorf("mkdir %s: %w", configDir, err)
@@ -103,28 +104,53 @@ func syncOpenCodeProviderConfig(q *db.Queries, runID int32) error {
 	}
 
 	for _, p := range providers {
-		key := p.ProviderType
-		if key == "" {
-			key = p.Name
+		providerType := p.ProviderType
+		if providerType == "" {
+			providerType = p.Name
 		}
-		if key == "" {
+		if providerType == "" {
 			continue
 		}
+		// Use a per-provider unique config key so that multiple providers
+		// with the same ProviderType (e.g. two "openai" providers) don't
+		// overwrite each other in the config file.
+		key := fmt.Sprintf("%s-%d", providerType, p.ID)
 
 		npm := "@ai-sdk/openai-compatible"
-		switch key {
+		switch providerType {
 		case "anthropic":
 			npm = "@ai-sdk/anthropic"
 		}
 
 		// Route LLM traffic through the paperclip2 proxy so we can
 		// track per-response activity via TouchRunLastMessageTime.
+		// In Docker mode, 127.0.0.1 inside the container points to the
+		// container itself, so we must use host.docker.internal to reach
+		// the host's Paperclip2 proxy.
 		proxyURL := os.Getenv("PAPERCLIP_SERVER_URL")
 		if proxyURL == "" {
-			proxyURL = "http://127.0.0.1:8080"
+			if utils.IsE2E() {
+				proxyURL = "http://127.0.0.1:8080"
+			} else {
+				proxyURL = "http://host.docker.internal:8080"
+			}
 		}
 		baseURL := strings.TrimRight(proxyURL, "/") + "/api/v1"
 
+		modelHeaders := map[string]string{
+			"X-Provider-ID": strconv.Itoa(int(p.ID)),
+			"X-Run-ID":      strconv.Itoa(int(runID)),
+		}
+		models := map[string]modelConfig{}
+		if p.DefaultModel != "" {
+			models[p.DefaultModel] = modelConfig{Name: p.DefaultModel, Headers: modelHeaders}
+		}
+		// Only register agentModel on the provider the agent actually uses.
+		// Registering it on all providers causes OpenCode to route the model
+		// to the wrong provider (e.g. Anthropic instead of openai-compatible).
+		if agentModel != "" && agentModel != p.DefaultModel && (agentProviderID == 0 || p.ID == agentProviderID) {
+			models[agentModel] = modelConfig{Name: agentModel, Headers: modelHeaders}
+		}
 		cfg.Provider[key] = providerConfig{
 			NPM:  npm,
 			Name: p.Name,
@@ -132,15 +158,7 @@ func syncOpenCodeProviderConfig(q *db.Queries, runID int32) error {
 				"baseURL": baseURL,
 				"apiKey":  p.ApiKey,
 			},
-			Models: map[string]modelConfig{
-				p.DefaultModel: {
-					Name: p.DefaultModel,
-					Headers: map[string]string{
-						"X-Provider-ID": strconv.Itoa(int(p.ID)),
-						"X-Run-ID":      strconv.Itoa(int(runID)),
-					},
-				},
-			},
+			Models: models,
 		}
 	}
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -136,6 +137,12 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		var proj db.Project
 		api.db.First(&proj, *req.ProjectID)
 		fsManager.CreateTaskWorkspace(comp, proj, task)
+
+		// Write task metadata to filesystem
+		storage := filesystem.NewStorage(settings.BasePath)
+		if err := storage.WriteTask(task, comp.ShortName); err != nil {
+			log.Printf("Warning: failed to write task metadata: %v", err)
+		}
 	}
 
 	fsManager.SaveTask(comp, task)
@@ -273,7 +280,11 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, runs)
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
 }
 
 func (api *API) handleGitLifecycle(task db.Task, newStatus string) {

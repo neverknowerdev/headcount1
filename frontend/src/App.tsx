@@ -11,6 +11,7 @@ import { ProvidersManager } from './pages/ProvidersManager';
 import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { Settings } from './pages/Settings';
+import { Backup } from './pages/Backup';
 import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 
@@ -32,6 +33,7 @@ function App() {
           <Route path="/companies/:shortName/runs" element={<RunLogs />} />
           <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
           <Route path="/companies/:shortName/settings" element={<Settings />} />
+          <Route path="/companies/:shortName/backup" element={<Backup />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

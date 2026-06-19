@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,6 +13,7 @@ import (
 	"text/template"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -260,6 +262,15 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = SaveOpenCodeAgentConfig(agent, providerType)
 
+	// Write agent metadata to filesystem
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	var comp db.Company
+	api.db.First(&comp, req.CompanyID)
+	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
+		log.Printf("Warning: failed to write agent metadata: %v", err)
+	}
+
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
 
 	api.respondJSON(w, http.StatusCreated, agent)
@@ -276,5 +287,9 @@ func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, runs)
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
 }

@@ -4,7 +4,7 @@ import * as path from 'path';
 import * as os from 'os';
 import { loadE2EEnv } from '../helpers/env';
 
-test.describe('Entity filesystem sync (export / import)', () => {
+test.describe.serial('Entity filesystem sync (export / import)', () => {
     const env = loadE2EEnv();
     const shortName = 'ent-sync-test';
     const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
