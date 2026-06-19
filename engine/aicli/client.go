@@ -165,8 +165,20 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (*ChatResponse, 
 	return nil, nil, fmt.Errorf("all retries exhausted: %w", lastErr)
 }
 
+// buildChatURL resolves the full chat/completions endpoint from a provider base
+// URL. Handles the common case where the stored URL already includes "/v1".
+func buildChatURL(baseURL string) string {
+	baseURL = strings.TrimSuffix(baseURL, "/")
+	const endpoint = "/chat/completions"
+	if strings.HasSuffix(baseURL, endpoint) {
+		return baseURL
+	}
+	baseURL = strings.TrimSuffix(baseURL, "/v1")
+	return baseURL + "/v1" + endpoint
+}
+
 func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []byte, error) {
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", c.BaseURL+"/v1/chat/completions", bytes.NewReader(body))
+	httpReq, err := http.NewRequestWithContext(ctx, "POST", buildChatURL(c.BaseURL), bytes.NewReader(body))
 	if err != nil {
 		return nil, nil, err
 	}
