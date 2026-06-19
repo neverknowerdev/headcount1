@@ -23,17 +23,3 @@ func PaperclipHome() string {
 func SettingsFilePath() string {
 	return filepath.Join(PaperclipHome(), "settings.yaml")
 }
-
-// OpencodeConfigDir returns the opencode config directory.
-// In E2E mode (E2E_PAPERCLIP_HOME is set), it returns that path + ".config/opencode".
-// Otherwise it returns ~/.config/opencode.
-func OpencodeConfigDir() string {
-	if e2eHome := os.Getenv("E2E_PAPERCLIP_HOME"); e2eHome != "" {
-		return filepath.Join(e2eHome, ".config", "opencode")
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/.config/opencode"
-	}
-	return filepath.Join(homeDir, ".config", "opencode")
-}

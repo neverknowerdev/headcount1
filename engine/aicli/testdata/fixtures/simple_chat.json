@@ -1,0 +1,26 @@
+[
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-001",
+      "object": "chat.completion",
+      "created": 1700000000,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "4"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 20,
+        "completion_tokens": 1,
+        "total_tokens": 21
+      }
+    },
+    "status": 200
+  }
+]

@@ -31,7 +31,6 @@ func TestFilesystemManager(t *testing.T) {
 		"data/skills",
 		"data/skills/basic",
 		"data/logs",
-		"data/docker",
 		".ssh",
 	}
 

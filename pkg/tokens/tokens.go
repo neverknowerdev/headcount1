@@ -1,9 +1,8 @@
 package tokens
 
 // Estimate returns a rough character/4 token estimate for the given string.
-// It intentionally matches the heuristic already used elsewhere in the
-// codebase (see engine/opencode.go:263 and pkg/logging/proxy_logger.go:204)
-// so the UI's "~N tok" labels are internally consistent.
+// The heuristic is shared across the codebase so the UI's "~N tok" labels
+// are internally consistent.
 func Estimate(s string) int {
 	if len(s) == 0 {
 		return 0

@@ -76,8 +76,7 @@ func (q *Queries) UpdateLastRequestEntryTokens(ctx context.Context, runID int32,
 		if err := json.Unmarshal([]byte(r.LogEntries), &entries); err != nil {
 			return err
 		}
-		// Find the first "request" entry — that's always the engine's
-		// OpenCode message (the proxy's LLM request logs come after).
+		// Find the first "request" entry — the proxy's LLM request logs come after.
 		for i := 0; i < len(entries); i++ {
 			if entries[i]["type"] == "request" {
 				entries[i]["prompt_tokens"] = promptTokens

@@ -582,6 +582,32 @@ func (l *ProxyLogger) LogStall(model, agentName, providerName string, stallDurat
 	}
 }
 
+// LogInfo writes a plain informational line to the log file and persists an
+// "info" entry in the run's log_entries column.
+func (l *ProxyLogger) LogInfo(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	l.file.WriteString(fmt.Sprintf("[INFO %s] %s\n", ts, msg))
+
+	l.broadcastLog("info", msg, nil)
+	l.persistLog("info", msg, nil)
+}
+
+// LogErrorMsg writes a plain error string to the log file and persists an
+// "error" entry. Used by the NativeEngine when there is no model/agent context.
+func (l *ProxyLogger) LogErrorMsg(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	l.file.WriteString(fmt.Sprintf("\n=== Error [%s] ===\n%s\n", ts, msg))
+
+	l.broadcastLog("error", msg, nil)
+	l.persistLog("error", msg, nil)
+}
+
 func (l *ProxyLogger) Close() error {
 	if l.file != nil {
 		return l.file.Close()

@@ -56,7 +56,7 @@ func (m *Manager) ListCompanies() ([]string, error) {
 
 	companies := []string{}
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
 			companies = append(companies, entry.Name())
 		}
 	}
@@ -151,7 +151,6 @@ func (m *Manager) SetupBaseDirectories() error {
 		filepath.Join(m.basePath, "data", "skills"),
 		filepath.Join(m.basePath, "data", "skills", "basic"),
 		filepath.Join(m.basePath, "data", "logs"),
-		filepath.Join(m.basePath, "data", "docker"),
 		filepath.Join(m.basePath, ".ssh"),
 	}
 

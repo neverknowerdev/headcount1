@@ -64,27 +64,6 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		itemCount++
 	}
 
-	// Backup OpenCode config files
-	configDir := filepath.Join(basePath, ".config", "opencode")
-	agentsDir := filepath.Join(configDir, "agents")
-	if entries, err := os.ReadDir(agentsDir); err == nil {
-		for _, entry := range entries {
-			if !entry.IsDir() && filepath.Ext(entry.Name()) == ".md" {
-				data, err := os.ReadFile(filepath.Join(agentsDir, entry.Name()))
-				if err == nil {
-					writeTarEntry(tarWriter, "config/agents/"+entry.Name(), data)
-					itemCount++
-				}
-			}
-		}
-	}
-
-	opencodeConfig := filepath.Join(configDir, "opencode.jsonc")
-	if data, err := os.ReadFile(opencodeConfig); err == nil {
-		writeTarEntry(tarWriter, "config/opencode.jsonc", data)
-		itemCount++
-	}
-
 	// Backup filesystem data (companies, projects, skills, logs, etc.)
 	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "data"), "data", &itemCount); err != nil {
 		log.Printf("Warning: failed to backup data directory: %v", err)

@@ -49,18 +49,11 @@ interface ChatChunk {
 
 /**
  * A small HTTP server that emulates an OpenAI-compatible LLM provider for E2E
- * tests. It is intentionally minimal and ONLY speaks the OpenAI chat-
- * completions dialect so that `TestProvider` deterministically reports
- * `provider_type: "openai"` (otherwise the race between the OpenAI and
- * Anthropic probes flips the type and the OpenCode engine ends up using
- * `@ai-sdk/anthropic` with a non-OpenAI-shaped response).
+ * tests.
  *
  * Endpoints:
- *   - POST /v1/chat/completions   -> returns a single tool call to
- *                                   `update_task_status` with `status: "in-review"`.
- *                                   This causes OpenCode to invoke the
- *                                   real `update_task_status.ts` tool, which
- *                                   calls our real `PUT /api/tasks/:id` endpoint.
+ *   - POST /v1/chat/completions   -> returns a tool call to `update_task_status`
+ *                                   on the first request, then a text completion.
  *   - GET  /v1/models             -> returns one model so `TestProvider` succeeds.
  *   - GET  /__test/requests       -> returns the log of received requests (test introspection).
  *   - POST /__test/reset          -> clears the request log.
@@ -164,12 +157,16 @@ function handleChatCompletionsRoute(
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
 
+    // Count all chat requests. The first request gets a tool call response;
+    // subsequent ones get a plain text completion.
+    state.chatRequestCount++;
+    const isFirstCall = state.chatRequestCount === 1;
+
     if (wantsStream) {
-        state.chatRequestCount++;
-        writeStreamingChatCompletion(res, state.chatRequestCount === 1);
+        writeStreamingChatCompletion(res, isFirstCall);
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(buildChatCompletionResponse(false)));
+        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall)));
     }
     return true;
 }

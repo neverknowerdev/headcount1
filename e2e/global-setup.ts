@@ -3,8 +3,6 @@ import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { assertOpenCodeInstalled } from './fixtures/assert-opencode';
-import { assertDockerAvailable } from './fixtures/assert-docker';
 import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
@@ -18,7 +16,7 @@ let serverProcess: ChildProcessWithoutNullStreams | null = null;
  * Playwright global setup. Runs once before all tests.
  *
  * Responsibilities:
- *  1. Assert that opencode + docker are installed; install opencode if missing.
+ *  1. Verify the native Go engine is ready (no external CLI dependencies).
  *  2. Create a local bare git repo and expose its file:// URL.
  *  3. Start a mock LLM provider HTTP server and capture its port.
  *  4. Spawn the Go server with the right env vars (E2E_MODE + the URLs above).
@@ -27,11 +25,7 @@ let serverProcess: ChildProcessWithoutNullStreams | null = null;
 export default async function globalSetup(config: FullConfig): Promise<void> {
     const baseURL = config.projects[0]?.use?.baseURL || 'http://localhost:8080';
 
-    // 1. Environment checks
-    assertOpenCodeInstalled();
-    assertDockerAvailable();
-
-    // 2. Create isolated home directory for E2E tests
+    // 1. Create isolated home directory for E2E tests
     const e2eHome = createE2EHome();
     console.log(`[globalSetup] E2E home: ${e2eHome}`);
 
@@ -54,12 +48,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     process.env.E2E_TEST_REPO_URL = repoUrl;
     process.env.E2E_MODE = 'true';
 
-    // 5. Spawn the Go server with the right env
+    // 6. Spawn the Go server with the right env (native engine by default).
     const env: Record<string, string> = { ...process.env as Record<string, string> };
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
-    env.E2E_PAPERCLIP_HOME = e2eHome; // Use isolated home for paperclip2 data
-    env.OPENCODE_SERVER_PASSWORD = 'e2e-test-password'; // Match password set for opencode server
+    env.E2E_PAPERCLIP_HOME = e2eHome;
 
     const projectRoot = path.resolve(__dirname, '..');
     serverProcess = spawn('go', ['run', '.'], {

@@ -164,7 +164,7 @@ func (s *Storage) ListCompanyDirs() ([]string, error) {
 	}
 	var dirs []string
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
 			dirs = append(dirs, entry.Name())
 		}
 	}

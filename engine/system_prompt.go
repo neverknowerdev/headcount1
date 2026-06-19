@@ -2,7 +2,6 @@ package engine
 
 import (
 	"bytes"
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -123,7 +122,5 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		return ""
 	}
 
-	result := buf.String()
-	fmt.Printf("Task context built successfully (%d chars)\n", len(result))
-	return result
+	return buf.String()
 }
