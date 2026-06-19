@@ -267,6 +267,10 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 		{"write_file", `{"path":"/tmp/evil.txt","content":"hack"}`},
 		// write_file: traversal outside workspace
 		{"write_file", `{"path":"../evil.txt","content":"hack"}`},
+		// exec_command: ls on absolute path outside workspace
+		{"exec_command", `{"command":"ls /etc"}`},
+		// exec_command: cat on absolute path outside workspace
+		{"exec_command", `{"command":"cat /etc/passwd"}`},
 	}
 
 	for _, tc := range cases {

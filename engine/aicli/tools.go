@@ -186,11 +186,11 @@ func execCommandTool(workspacePath string) Tool {
 			Type: "function",
 			Function: FuncMeta{
 				Name:        "exec_command",
-				Description: "Execute a shell command inside the workspace. Runs with the workspace as the working directory; use relative paths to stay within the workspace.",
+				Description: "Execute a shell command inside the workspace. Runs with the workspace as the working directory. Only use relative paths — absolute paths outside the workspace are rejected.",
 				Parameters: json.RawMessage(`{
 					"type":"object",
 					"properties":{
-						"command":{"type":"string","description":"Shell command to run"}
+						"command":{"type":"string","description":"Shell command to run using relative paths (e.g. \"go test ./...\", \"ls src/\")"}
 					},
 					"required":["command"]
 				}`),
@@ -201,6 +201,9 @@ func execCommandTool(workspacePath string) Tool {
 				Command string `json:"command"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
+				return "", err
+			}
+			if err := validateCommandPaths(workspacePath, p.Command); err != nil {
 				return "", err
 			}
 			// 60-second hard cap so a misbehaving command can't stall the run forever.
@@ -220,6 +223,27 @@ func execCommandTool(workspacePath string) Tool {
 			return result, nil
 		},
 	}
+}
+
+// validateCommandPaths rejects shell commands that reference absolute paths
+// outside the workspace. It scans whitespace-separated tokens for absolute
+// paths (starting with /) and checks each against the workspace boundary.
+// This handles common cases like "ls /etc" or "cat /etc/passwd"; it does
+// not prevent every possible bypass but keeps the agent within the workspace
+// for straightforward file-navigation commands.
+func validateCommandPaths(workspacePath, command string) error {
+	workspace := filepath.Clean(workspacePath)
+	for _, token := range strings.Fields(command) {
+		token = strings.Trim(token, `"'`)
+		if !filepath.IsAbs(token) {
+			continue
+		}
+		clean := filepath.Clean(token)
+		if clean != workspace && !strings.HasPrefix(clean, workspace+string(filepath.Separator)) {
+			return fmt.Errorf("path %q escapes the workspace", token)
+		}
+	}
+	return nil
 }
 
 // ---- grep --------------------------------------------------------------------
