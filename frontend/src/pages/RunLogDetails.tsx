@@ -4,6 +4,47 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle } from 'lucide-react';
 import { RunLogViewer } from '../components/RunLogViewer';
 
+function parseLogContent(logContent: string): any[] {
+    if (!logContent) return [];
+    const lines = logContent.split('\n').filter((l: string) => l.trim());
+    const messages: any[] = [];
+    let i = 0;
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{')) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
+                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model } });
+                    continue;
+                }
+                if (parsed.info && parsed.parts && Array.isArray(parsed.parts)) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+                if (parsed.messages && Array.isArray(parsed.messages)) {
+                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model } });
+                    continue;
+                }
+                if (parsed.choices && Array.isArray(parsed.choices)) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+                if (parsed.reasoning || parsed.tokens || parsed.raw) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
+                    messages.push({ id: i++, entry: { type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name, output_tokens: parsed.output_tokens } });
+                    continue;
+                }
+            } catch { /* treat as info */ }
+        }
+        messages.push({ id: i++, entry: { type: 'info', content: trimmed } });
+    }
+    return messages;
+}
+
 export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
     const [run, setRun] = useState<any>(null);
@@ -20,98 +61,43 @@ export const RunLogDetails: React.FC = () => {
                 setRun(res.data);
                 setTokenStats(res.data?.token_stats || null);
 
-                // log_entries is already a parsed array from the backend
+                let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
-                    setLogMessages(res.data.log_entries.map((entry: any, i: number) => ({
-                        id: i,
-                        entry: entry
-                    })));
+                    messages = res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
                 } else {
-                    parseLogContent(res.data?.log_content || '');
+                    messages = parseLogContent(res.data?.log_content || '');
                 }
+
+                // For failed runs with no error entries, extract errors from log_content
+                if (res.data?.status === 'failed') {
+                    const hasError = messages.some((m: any) => m.entry.type === 'error');
+                    if (!hasError) {
+                        const logContent: string = res.data?.log_content || '';
+                        if (logContent) {
+                            const lines = logContent.split('\n').filter((l: string) => l.trim());
+                            const errorLines = lines.filter((l: string) =>
+                                /\b(error|Error|FAIL|failed|panic|exception|fatal)\b/.test(l)
+                            );
+                            const contextLines = errorLines.length > 0 ? errorLines : lines.slice(-15);
+                            if (contextLines.length > 0) {
+                                messages = [...messages, {
+                                    id: messages.length,
+                                    entry: {
+                                        type: 'error',
+                                        content: errorLines.length > 0
+                                            ? contextLines.join('\n')
+                                            : `Run failed. Last log output:\n${contextLines.join('\n')}`,
+                                    },
+                                }];
+                            }
+                        }
+                    }
+                }
+
+                setLogMessages(messages);
             } catch (e) {
                 console.error(e);
             }
-        };
-        
-        const parseLogContent = (logContent: string) => {
-            if (!logContent) return;
-            const lines = logContent.split('\n').filter((l: string) => l.trim());
-            const messages = [];
-            let i = 0;
-            for (const line of lines) {
-                const trimmed = line.trim();
-                // Try to detect JSON lines that are requests or responses
-                if (trimmed.startsWith('{')) {
-                    try {
-                        const parsed = JSON.parse(trimmed);
-                        // OpenCode request format: has "agent" and "parts"
-                        if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model }
-                            });
-                            continue;
-                        }
-                        // OpenCode response format: has "info" and "parts"
-                        if (parsed.info && parsed.parts && Array.isArray(parsed.parts)) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'response', content: trimmed, status_code: 200 }
-                            });
-                            continue;
-                        }
-                        // LLM provider request format: has "messages" array
-                        if (parsed.messages && Array.isArray(parsed.messages)) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'request', content: trimmed, model: parsed.model }
-                            });
-                            continue;
-                        }
-                        // LLM provider response format: has "choices" array
-                        if (parsed.choices && Array.isArray(parsed.choices)) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'response', content: trimmed, status_code: 200 }
-                            });
-                            continue;
-                        }
-                        // Streaming response format: has "reasoning" or "tokens"
-                        if (parsed.reasoning || parsed.tokens) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'response', content: trimmed, status_code: 200 }
-                            });
-                            continue;
-                        }
-                        // Non-streaming response format: { raw, reasoning, tokens }
-                        if (parsed.raw || parsed.reasoning) {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'response', content: trimmed, status_code: 200 }
-                            });
-                            continue;
-                        }
-                        // Tool response entry (engine-side: tool_result, tool, tool_response)
-                        if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
-                            messages.push({
-                                id: i++,
-                                entry: { type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name, output_tokens: parsed.output_tokens }
-                            });
-                            continue;
-                        }
-                    } catch {
-                        // Not valid JSON, treat as info
-                    }
-                }
-                // Regular info line
-                messages.push({
-                    id: i++,
-                    entry: { type: 'info', content: trimmed }
-                });
-            }
-            setLogMessages(messages);
         };
 
         fetchRun();
