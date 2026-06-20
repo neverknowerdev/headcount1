@@ -84,27 +84,28 @@ const (
 )
 
 type Task struct {
-	ID          int32      `json:"id" gorm:"primaryKey"`
-	CompanyID   int32      `json:"company_id" gorm:"not null"`
-	Company     Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	ProjectID   *int32     `json:"project_id"`
-	Project     *Project   `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
-	SprintID    int32      `json:"sprint_id" gorm:"not null"`
-	Sprint      Sprint     `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
-	AgentID     *int32     `json:"agent_id"`
-	Agent       *Agent     `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
-	ParentID    *int32     `json:"parent_id"`
-	Parent      *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
-	Title       string     `json:"title" gorm:"not null"`
-	TaskType    string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
-	Description string     `json:"description"`
-	Priority    string     `json:"priority" gorm:"not null;default:'Normal'"`
-	Status      string     `json:"status" gorm:"not null;default:'backlog'"`
-	DueDate     *time.Time `json:"due_date"`
-	IsArchived  bool       `json:"is_archived" gorm:"not null;default:false"`
-	RunID       *int32     `json:"run_id"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID              int32      `json:"id" gorm:"primaryKey"`
+	CompanyID       int32      `json:"company_id" gorm:"not null"`
+	Company         Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID       *int32     `json:"project_id"`
+	Project         *Project   `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
+	SprintID        int32      `json:"sprint_id" gorm:"not null"`
+	Sprint          Sprint     `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
+	AgentID         *int32     `json:"agent_id"`
+	Agent           *Agent     `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
+	ParentID        *int32     `json:"parent_id"`
+	Parent          *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
+	Title           string     `json:"title" gorm:"not null"`
+	TaskType        string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
+	Description     string     `json:"description"`
+	Priority        string     `json:"priority" gorm:"not null;default:'Normal'"`
+	Status          string     `json:"status" gorm:"not null;default:'backlog'"`
+	DueDate         *time.Time `json:"due_date"`
+	IsArchived      bool       `json:"is_archived" gorm:"not null;default:false"`
+	RunID           *int32     `json:"run_id"`
+	AgentConfigName string     `json:"agent_config_name" gorm:"default:''"`
+	CreatedAt       time.Time  `json:"created_at"`
+	UpdatedAt       time.Time  `json:"updated_at"`
 }
 
 type Comment struct {

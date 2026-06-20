@@ -1,0 +1,84 @@
+package agentconfig
+
+import (
+	_ "embed"
+	"strings"
+)
+
+//go:embed prompts/ceo.md
+var ceoPrompt string
+
+//go:embed prompts/cto.md
+var ctoPrompt string
+
+//go:embed prompts/programmer.md
+var programmerPrompt string
+
+//go:embed prompts/qa.md
+var qaPrompt string
+
+//go:embed prompts/writer.md
+var writerPrompt string
+
+//go:embed prompts/researcher.md
+var researcherPrompt string
+
+// builtinConfigs returns the set of predefined agent configurations.
+func builtinConfigs() []*AgentConfig {
+	return []*AgentConfig{
+		{
+			Name:           "CEO",
+			Description:    "Chief Executive Officer — strategic oversight and decision making",
+			Prompt:         strings.TrimSpace(ceoPrompt),
+			ChatType:       ChatTypeCompactThinking,
+			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
+			ReasoningLevel: ReasoningLevelMax,
+			Subagents:      []string{"CTO", "Writer", "Researcher"},
+		},
+		{
+			Name:           "CTO",
+			Description:    "Chief Technology Officer — technical architecture and engineering leadership",
+			Prompt:         strings.TrimSpace(ctoPrompt),
+			ChatType:       ChatTypeCompactThinking,
+			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
+			ReasoningLevel: ReasoningLevelMax,
+			Subagents:      []string{"Programmer", "QA", "Researcher"},
+			ParentAgent:    "CEO",
+		},
+		{
+			Name:           "Programmer",
+			Description:    "Software developer — implements features and fixes bugs",
+			Prompt:         strings.TrimSpace(programmerPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CTO",
+		},
+		{
+			Name:           "QA",
+			Description:    "Quality assurance — tests, validates, and reports defects",
+			Prompt:         strings.TrimSpace(qaPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CTO",
+		},
+		{
+			Name:           "Writer",
+			Description:    "Technical writer — creates documentation, reports, and summaries",
+			Prompt:         strings.TrimSpace(writerPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
+		},
+		{
+			Name:           "Researcher",
+			Description:    "Researcher — investigates topics and synthesises findings",
+			Prompt:         strings.TrimSpace(researcherPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
+			ReasoningLevel: ReasoningLevelMedium,
+		},
+	}
+}

@@ -1,0 +1,76 @@
+// Package agentconfig defines agent configuration types and a factory for
+// creating and managing named agent configurations. Configs can be loaded from
+// TOML files or constructed programmatically.
+package agentconfig
+
+// ReasoningLevel controls how much reasoning budget the LLM applies.
+type ReasoningLevel string
+
+const (
+	ReasoningLevelLow    ReasoningLevel = "low"
+	ReasoningLevelMedium ReasoningLevel = "medium"
+	ReasoningLevelMax    ReasoningLevel = "max"
+)
+
+// ChatType controls how the agent manages its conversation state.
+type ChatType string
+
+const (
+	// ChatTypeMessageHistory accumulates the full conversation history and
+	// sends it on every LLM call (the default).
+	ChatTypeMessageHistory ChatType = "message_history"
+
+	// ChatTypeCompactThinking enables extended reasoning on every call.
+	// The reasoning_effort is derived from ReasoningLevel.
+	ChatTypeCompactThinking ChatType = "compact_thinking"
+)
+
+// AgentConfig defines the complete runtime configuration for an agent.
+// It can be loaded from a TOML file or built in code.
+type AgentConfig struct {
+	// Name is the unique identifier used to look up this config.
+	Name string `toml:"name"`
+	// Description is a human-readable summary of the agent's role.
+	Description string `toml:"description"`
+	// Prompt is the system prompt text. Takes precedence over PromptFile.
+	Prompt string `toml:"prompt"`
+	// PromptFile is a path to a .md file containing the system prompt.
+	// Relative paths are resolved from the config file's directory.
+	PromptFile string `toml:"prompt_file"`
+	// ChatType controls conversation management strategy.
+	ChatType ChatType `toml:"chat_type"`
+	// AllowedModels lists accepted model identifiers. First entry is default.
+	AllowedModels []string `toml:"allowed_models"`
+	// ReasoningLevel controls how much reasoning the model applies.
+	ReasoningLevel ReasoningLevel `toml:"reasoning_level"`
+	// MemoryTags are labels used by the memory bank (future feature).
+	MemoryTags []string `toml:"memory_tags"`
+	// Subagents lists config names that this agent may delegate to.
+	Subagents []string `toml:"subagents"`
+	// ParentAgent is the config name of this agent's parent, if any.
+	ParentAgent string `toml:"parent_agent"`
+	// AllowedTools lists tool names the agent may invoke. Empty = all tools.
+	AllowedTools []string `toml:"allowed_tools"`
+}
+
+// DefaultModel returns the first entry in AllowedModels, or empty string.
+func (c *AgentConfig) DefaultModel() string {
+	if len(c.AllowedModels) == 0 {
+		return ""
+	}
+	return c.AllowedModels[0]
+}
+
+// IsToolAllowed reports whether the named tool may be used by this agent.
+// An empty AllowedTools list (or one containing "*") allows all tools.
+func (c *AgentConfig) IsToolAllowed(name string) bool {
+	if len(c.AllowedTools) == 0 {
+		return true
+	}
+	for _, t := range c.AllowedTools {
+		if t == "*" || t == name {
+			return true
+		}
+	}
+	return false
+}

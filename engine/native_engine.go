@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
@@ -21,16 +22,19 @@ import (
 
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
-	q           *db.Queries
-	hub         *eventhub.Hub
-	cancelFuncs sync.Map // runID -> context.CancelFunc
+	q            *db.Queries
+	hub          *eventhub.Hub
+	agentFactory agentconfig.Factory
+	cancelFuncs  sync.Map // runID -> context.CancelFunc
 }
 
-// NewNativeEngine creates a NativeEngine. No external process setup is required.
+// NewNativeEngine creates a NativeEngine pre-loaded with the default agent
+// config factory.
 func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 	return &NativeEngine{
-		q:   db.New(database),
-		hub: hub,
+		q:            db.New(database),
+		hub:          hub,
+		agentFactory: agentconfig.NewDefaultFactory(),
 	}
 }
 
@@ -223,9 +227,30 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		}
 	}
 
-	// Build system prompt and user context.
-	promptBuilder := NewSystemPromptBuilder(e.q)
-	systemPrompt := promptBuilder.Build(agent, task)
+	// Load agent config override if one is set on the task.
+	var agentCfg *agentconfig.AgentConfig
+	if task.AgentConfigName != "" && e.agentFactory != nil {
+		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
+			agentCfg = cfg
+		} else {
+			e.logInfo(proxyLogger, fmt.Sprintf("Warning: agent config %q not found: %v", task.AgentConfigName, cfgErr))
+		}
+	}
+
+	// Apply model override from agent config.
+	if agentCfg != nil && agentCfg.DefaultModel() != "" {
+		model = agentCfg.DefaultModel()
+	}
+
+	// Build system prompt.
+	var systemPrompt string
+	if agentCfg != nil && agentCfg.Prompt != "" {
+		// Use config prompt as the base; append task context from the builder.
+		taskContext := NewSystemPromptBuilder(e.q).Build(agent, task)
+		systemPrompt = agentCfg.Prompt + "\n\n" + taskContext
+	} else {
+		systemPrompt = NewSystemPromptBuilder(e.q).Build(agent, task)
+	}
 
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
@@ -253,7 +278,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	userMessage := strings.Join(contextParts, "\n")
 
-	// Build tool registry: default file/shell/web tools + update_task_status.
+	// Build tool registry: default file/shell/web tools + update_task_status + create_subtask.
 	registry := tools.DefaultRegistry(workspacePath)
 	registry.Register(tools.NewUpdateTaskStatus(func(updateCtx context.Context, status string) error {
 		t, err := e.q.GetTask(updateCtx, task.ID)
@@ -267,24 +292,48 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		return nil
 	}))
+	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent)))
+
+	// Filter tools if the agent config restricts them.
+	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
+		// Always keep update_task_status and create_subtask regardless of filter.
+		allowed := agentCfg.AllowedTools
+		allowed = appendIfMissing(allowed, "update_task_status", "create_subtask")
+		registry = registry.Filter(allowed)
+	}
+
+	// Determine agent mode and reasoning level from config.
+	agentMode := aicli.ModeMessageHistory
+	reasoningLevel := ""
+	if agentCfg != nil {
+		switch agentCfg.ChatType {
+		case agentconfig.ChatTypeCompactThinking:
+			agentMode = aicli.ModeCompactThinking
+		}
+		reasoningLevel = string(agentCfg.ReasoningLevel)
+	}
 
 	// Wire the proxy logger as the agent's RunLogger so request/response entries
 	// appear in the log file and the DB (identical format to the gateway).
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
-	agentCfg := aicli.Config{
-		Client:       llmClient,
-		Registry:     registry,
-		Mode:         aicli.ModeMessageHistory,
-		ProviderName: provider.Name,
-		AgentName:    agent.Name,
-		Queries:      e.q,
-		RunID:        run.ID,
-		Logger:       proxyLogger,
+	agentCfgObj := aicli.Config{
+		Client:         llmClient,
+		Registry:       registry,
+		Mode:           agentMode,
+		ProviderName:   provider.Name,
+		AgentName:      agent.Name,
+		ReasoningLevel: reasoningLevel,
+		Queries:        e.q,
+		RunID:          run.ID,
+		Logger:         proxyLogger,
 	}
-	aiAgent := aicli.New(agentCfg)
+	aiAgent := aicli.New(agentCfgObj)
 
 	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
+	if agentCfg != nil {
+		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
+	}
 
 	finalText, agentErr := aiAgent.Run(runCtx, systemPrompt, userMessage)
 
@@ -295,6 +344,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			e.logInfo(proxyLogger, "Run canceled by user")
 			e.q.UpdateRunLog(ctx, run.ID, "", "canceled")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
+			e.notifyParentOfSubtaskCompletion(ctx, task, "canceled")
 			return
 		}
 		status = "failed"
@@ -354,6 +404,91 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
+
+	// Notify the parent task that this subtask has completed or failed.
+	e.notifyParentOfSubtaskCompletion(ctx, task, status)
+}
+
+// notifyParentOfSubtaskCompletion adds a comment to the parent task when this
+// subtask finishes, so the parent agent can react to the result.
+func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subtask db.Task, status string) {
+	if subtask.ParentID == nil {
+		return
+	}
+	msg := fmt.Sprintf("Subtask #%d %q completed with status: %s.", subtask.ID, subtask.Title, status)
+	comment, err := e.q.CreateComment(ctx, db.Comment{
+		TaskID:     *subtask.ParentID,
+		AuthorType: "system",
+		Content:    msg,
+	})
+	if err != nil {
+		fmt.Printf("Warning: failed to notify parent task %d of subtask completion: %v\n", *subtask.ParentID, err)
+		return
+	}
+	e.hub.BroadcastEvent("comment_created", comment)
+	e.hub.BroadcastEvent("subtask_completed", map[string]interface{}{
+		"subtask_id":  subtask.ID,
+		"parent_id":   *subtask.ParentID,
+		"status":      status,
+		"subtask_title": subtask.Title,
+	})
+}
+
+// makeCreateSubtaskFunc returns the callback used by the create_subtask tool.
+// It enforces the single-running-subtask constraint, creates the DB record, and
+// enqueues the subtask for processing.
+func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) tools.CreateSubtaskFunc {
+	return func(callCtx context.Context, p tools.SubtaskParams) (int32, error) {
+		// Reject if another subtask of this parent is already running.
+		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
+		if err != nil {
+			return 0, fmt.Errorf("failed to check running subtasks: %w", err)
+		}
+		if runningCount > 0 {
+			return 0, fmt.Errorf("a subtask is already running for task %d; wait for it to complete before creating another", parentTask.ID)
+		}
+
+		// Look up the requested agent config; validate it exists.
+		var configName string
+		if e.agentFactory != nil {
+			if _, cfgErr := e.agentFactory.GetConfig(p.AgentName); cfgErr != nil {
+				return 0, fmt.Errorf("unknown agent config %q: %w", p.AgentName, cfgErr)
+			}
+			configName = p.AgentName
+		}
+
+		parentID := parentTask.ID
+		agentID := parentAgent.ID
+		subtask, err := e.q.CreateTask(callCtx, db.Task{
+			CompanyID:       parentTask.CompanyID,
+			ProjectID:       parentTask.ProjectID,
+			SprintID:        parentTask.SprintID,
+			AgentID:         &agentID,
+			ParentID:        &parentID,
+			Title:           p.Title,
+			Description:     p.Description,
+			TaskType:        db.TaskTypeImplement,
+			Status:          "to-do",
+			Priority:        "Normal",
+			AgentConfigName: configName,
+		})
+		if err != nil {
+			return 0, fmt.Errorf("failed to create subtask: %w", err)
+		}
+
+		e.hub.BroadcastEvent("task_created", map[string]interface{}{
+			"id":        subtask.ID,
+			"parent_id": parentTask.ID,
+			"title":     subtask.Title,
+		})
+
+		// Enqueue the subtask for execution (non-blocking).
+		if procErr := e.ProcessTask(callCtx, subtask.ID); procErr != nil {
+			return 0, fmt.Errorf("failed to enqueue subtask %d: %w", subtask.ID, procErr)
+		}
+
+		return subtask.ID, nil
+	}
 }
 
 // failRun marks a run as failed and broadcasts the event.
@@ -449,4 +584,20 @@ Changes:
 	}
 
 	return msg, nil
+}
+
+// appendIfMissing returns a copy of slice with each of the extra values added
+// only if they are not already present.
+func appendIfMissing(slice []string, extra ...string) []string {
+	set := make(map[string]bool, len(slice))
+	for _, s := range slice {
+		set[s] = true
+	}
+	result := append([]string(nil), slice...)
+	for _, e := range extra {
+		if !set[e] {
+			result = append(result, e)
+		}
+	}
+	return result
 }

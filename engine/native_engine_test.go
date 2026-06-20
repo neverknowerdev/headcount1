@@ -54,6 +54,21 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	return database
 }
 
+// waitForSubtask polls until at least one subtask of parentTaskID exists in the DB.
+func waitForSubtask(t *testing.T, database *gorm.DB, parentTaskID int32, timeout time.Duration) db.Task {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		var tasks []db.Task
+		if err := database.Where("parent_id = ?", parentTaskID).Find(&tasks).Error; err == nil && len(tasks) > 0 {
+			return tasks[0]
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("no subtask of task %d appeared within %v", parentTaskID, timeout)
+	return db.Task{}
+}
+
 func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task db.Task) {
 	t.Helper()
 	q := db.New(database)
@@ -324,6 +339,228 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 	updatedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "in-review", updatedTask.Status, "fixture encodes an update_task_status(in-review) call")
+}
+
+// ---- subtask tests ----------------------------------------------------------
+
+// createSubtaskHandler returns a mock LLM that first calls create_subtask, then
+// acknowledges the result with a text response.
+func createSubtaskHandler(t *testing.T) http.Handler {
+	t.Helper()
+	var count atomic.Int32
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := count.Add(1)
+		switch n {
+		case 1:
+			// First turn: call create_subtask
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "chatcmpl-sub-001", "model": "test-model",
+				"choices": []map[string]interface{}{{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role": "assistant", "content": "",
+						"tool_calls": []map[string]interface{}{{
+							"id": "call_sub_001", "type": "function",
+							"function": map[string]interface{}{
+								"name": "create_subtask",
+								"arguments": `{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`,
+							},
+						}},
+					},
+					"finish_reason": "tool_calls",
+				}},
+				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+			})
+		default:
+			// Subsequent turns: plain text
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "chatcmpl-sub-002", "model": "test-model",
+				"choices": []map[string]interface{}{{
+					"index":         0,
+					"message":       map[string]interface{}{"role": "assistant", "content": "Subtask delegated."},
+					"finish_reason": "stop",
+				}},
+				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
+			})
+		}
+	})
+}
+
+// TestNativeEngineCreateSubtask verifies that when the LLM calls create_subtask
+// a child Task is created in the DB with the correct parent_id.
+func TestNativeEngineCreateSubtask(t *testing.T) {
+	mockSrv := startTestServer(t, createSubtaskHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	// Wait for the parent run to appear.
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	// A subtask should have been created with the correct parent.
+	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	assert.Equal(t, task.ID, *subtask.ParentID)
+	assert.Equal(t, "subtask A", subtask.Title)
+	assert.Equal(t, "Programmer", subtask.AgentConfigName)
+}
+
+// TestNativeEngineSubtaskBlocksDuplicate verifies that create_subtask returns an
+// error when a subtask is already running, preventing a second one from starting.
+func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
+	// The first call from the LLM will create a subtask; the second call
+	// (same turn, different tool_call) should be blocked because the first
+	// subtask is already running.
+	var callCount atomic.Int32
+	blockCh := make(chan struct{})
+
+	// Handler for the parent agent: tries to create two subtasks in one turn.
+	parentHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := callCount.Add(1)
+		if n == 1 {
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "chatcmpl-dup-001", "model": "test-model",
+				"choices": []map[string]interface{}{{
+					"message": map[string]interface{}{
+						"role": "assistant", "content": "",
+						"tool_calls": []map[string]interface{}{
+							{
+								"id": "call_d1", "type": "function",
+								"function": map[string]interface{}{
+									"name":      "create_subtask",
+									"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
+								},
+							},
+						},
+					},
+					"finish_reason": "tool_calls",
+				}},
+				"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
+			})
+			return
+		}
+		// Subsequent parent turns: text response.
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-dup-002", "model": "test-model",
+			"choices": []map[string]interface{}{{
+				"message":       map[string]interface{}{"role": "assistant", "content": "done"},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
+		})
+	})
+
+	// Handler for the subtask agent: blocks until test unblocks it.
+	subtaskHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-blockCh
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-sub", "model": "test-model",
+			"choices": []map[string]interface{}{{
+				"message": map[string]interface{}{
+					"role": "assistant", "content": "",
+					"tool_calls": []map[string]interface{}{{
+						"id": "call_uts", "type": "function",
+						"function": map[string]interface{}{
+							"name":      "update_task_status",
+							"arguments": `{"status":"in-review"}`,
+						},
+					}},
+				},
+				"finish_reason": "tool_calls",
+			}},
+			"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+		})
+	})
+
+	// Both parent and subtask hit the same mock server; route by call count.
+	combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// If the subtask's run is active, route to the subtask handler.
+		// For simplicity, route by overall call count: first two parent, rest subtask.
+		n := callCount.Load()
+		if n <= 1 {
+			parentHandler.ServeHTTP(w, r)
+		} else if n == 2 {
+			parentHandler.ServeHTTP(w, r) // second parent turn (after tool result)
+		} else {
+			subtaskHandler.ServeHTTP(w, r)
+		}
+	})
+	_ = combined // suppress unused warning
+
+	mockSrv := startTestServer(t, parentHandler)
+	t.Cleanup(func() { close(blockCh) })
+
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	// Wait for the parent run to finish.
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 15*time.Second)
+
+	// Exactly one subtask should exist.
+	subtasks, err := q.ListSubtasksByParent(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Len(t, subtasks, 1, "only one subtask should be created")
+}
+
+// TestNativeEngineSubtaskNotifiesParent verifies that when a subtask completes
+// the parent task receives a system comment.
+func TestNativeEngineSubtaskNotifiesParent(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	q := db.New(database)
+
+	// Seed a parent task and a subtask (parent → subtask relationship).
+	parentTask := seedTestData(t, database, mockSrv.URL)
+	agentID := *parentTask.AgentID
+	parentID := parentTask.ID
+	var subtask db.Task
+	require.NoError(t, database.Create(&db.Task{
+		CompanyID: parentTask.CompanyID,
+		SprintID:  parentTask.SprintID,
+		AgentID:   &agentID,
+		ParentID:  &parentID,
+		Title:     "child task",
+		TaskType:  db.TaskTypeImplement,
+		Status:    "to-do",
+	}).Error)
+	require.NoError(t, database.First(&subtask, "parent_id = ?", parentTask.ID).Error)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+
+	require.NoError(t, eng.ProcessTask(context.Background(), subtask.ID))
+
+	runID := waitForRunCreated(t, database, subtask.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	// The parent task should have received a system comment about the subtask.
+	require.Eventually(t, func() bool {
+		comments, err := q.ListCommentsByTask(context.Background(), parentTask.ID)
+		if err != nil {
+			return false
+		}
+		for _, c := range comments {
+			if c.AuthorType == "system" {
+				return true
+			}
+		}
+		return false
+	}, 5*time.Second, 100*time.Millisecond, "parent task should have received a system comment")
 }
 
 // fixtureHandler wraps a FixtureTransport as an HTTP handler.

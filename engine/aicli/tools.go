@@ -44,3 +44,27 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	}
 	return t.Execute(ctx, args)
 }
+
+// Filter returns a new Registry containing only tools whose names appear in
+// allowed. An empty allowed list or one containing "*" returns r unchanged.
+func (r *Registry) Filter(allowed []string) *Registry {
+	if len(allowed) == 0 {
+		return r
+	}
+	for _, a := range allowed {
+		if a == "*" {
+			return r
+		}
+	}
+	allowedSet := make(map[string]bool, len(allowed))
+	for _, a := range allowed {
+		allowedSet[a] = true
+	}
+	filtered := NewRegistry()
+	for name, tool := range r.tools {
+		if allowedSet[name] {
+			filtered.Register(tool)
+		}
+	}
+	return filtered
+}

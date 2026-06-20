@@ -3,6 +3,7 @@ package aicli_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -357,6 +358,98 @@ func TestUpdateTaskStatusTool(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "blocked", called)
 	assert.Contains(t, result, "blocked")
+}
+
+// ---- Registry.Filter tests --------------------------------------------------
+
+// TestRegistryFilter_EmptyAllowedReturnsOriginal verifies that an empty allowed
+// list returns the original registry unchanged.
+func TestRegistryFilter_EmptyAllowedReturnsOriginal(t *testing.T) {
+	reg := tools.DefaultRegistry(t.TempDir())
+	filtered := reg.Filter(nil)
+	assert.Same(t, reg, filtered)
+}
+
+// TestRegistryFilter_WildcardReturnsOriginal verifies that ["*"] returns
+// the original registry.
+func TestRegistryFilter_WildcardReturnsOriginal(t *testing.T) {
+	reg := tools.DefaultRegistry(t.TempDir())
+	filtered := reg.Filter([]string{"*"})
+	assert.Same(t, reg, filtered)
+}
+
+// TestRegistryFilter_Subset verifies that a filtered registry only contains
+// the listed tools.
+func TestRegistryFilter_Subset(t *testing.T) {
+	workDir := t.TempDir()
+	reg := tools.DefaultRegistry(workDir)
+
+	filtered := reg.Filter([]string{"read_file", "grep"})
+
+	// read_file and grep should work.
+	require.NoError(t, os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("hi"), 0644))
+	_, err := filtered.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"f.txt"}`))
+	require.NoError(t, err)
+
+	// exec_command should not exist in the filtered registry.
+	_, err = filtered.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo x"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown tool")
+}
+
+// ---- CreateSubtask tool tests -----------------------------------------------
+
+// TestCreateSubtaskTool_Success verifies the happy path.
+func TestCreateSubtaskTool_Success(t *testing.T) {
+	var capturedParams tools.SubtaskParams
+	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
+		capturedParams = p
+		return 42, nil
+	})
+
+	result, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"title": "Write tests",
+		"description": "Add unit tests for the new feature",
+		"agent_name": "QA"
+	}`))
+	require.NoError(t, err)
+	assert.Equal(t, "Write tests", capturedParams.Title)
+	assert.Equal(t, "QA", capturedParams.AgentName)
+	assert.Contains(t, result, "42")
+	assert.Contains(t, result, "QA")
+}
+
+// TestCreateSubtaskTool_CallbackError propagates callback errors.
+func TestCreateSubtaskTool_CallbackError(t *testing.T) {
+	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
+		return 0, fmt.Errorf("a subtask is already running")
+	})
+
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"title": "x", "description": "y", "agent_name": "QA"
+	}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "already running")
+}
+
+// TestCreateSubtaskTool_MissingTitle returns error when title is empty.
+func TestCreateSubtaskTool_MissingTitle(t *testing.T) {
+	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
+		return 1, nil
+	})
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{
+		"title": "", "description": "d", "agent_name": "QA"
+	}`))
+	require.Error(t, err)
+}
+
+// TestCreateSubtaskTool_InvalidJSON returns error on bad JSON.
+func TestCreateSubtaskTool_InvalidJSON(t *testing.T) {
+	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
+		return 1, nil
+	})
+	_, err := tool.Execute(context.Background(), json.RawMessage(`not json`))
+	require.Error(t, err)
 }
 
 // TestAgentWithLiveProvider runs against the real LLM provider and records

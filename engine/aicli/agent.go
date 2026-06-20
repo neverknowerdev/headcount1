@@ -20,6 +20,11 @@ const (
 	// sends the full history to the LLM on each call.
 	ModeMessageHistory Mode = "message_history"
 
+	// ModeCompactThinking uses extended reasoning by passing a reasoning_effort
+	// parameter on every request. History management is identical to
+	// ModeMessageHistory; the difference is in how the LLM reasons internally.
+	ModeCompactThinking Mode = "compact_thinking"
+
 	// ModePlan10k is reserved for future implementation.
 	ModePlan10k Mode = "plan-10k"
 )
@@ -37,26 +42,30 @@ type RunLogger interface {
 // LLM provider.  It supports tool calling, retry (via Client.Complete), and
 // structured logging into the existing RunLog infrastructure.
 type Agent struct {
-	Client        *Client
-	Registry      *Registry
-	Mode          Mode
-	ProviderName  string
-	AgentName     string
-	q             *db.Queries
-	runID         int32
-	logger        RunLogger
+	Client         *Client
+	Registry       *Registry
+	Mode           Mode
+	ProviderName   string
+	AgentName      string
+	ReasoningLevel string // "low", "medium", "max" → mapped to API values
+	q              *db.Queries
+	runID          int32
+	logger         RunLogger
 }
 
 // Config collects all the dependencies needed to create an Agent.
 type Config struct {
-	Client       *Client
-	Registry     *Registry
-	Mode         Mode
-	ProviderName string
-	AgentName    string
-	Queries      *db.Queries
-	RunID        int32
-	Logger       RunLogger
+	Client         *Client
+	Registry       *Registry
+	Mode           Mode
+	ProviderName   string
+	AgentName      string
+	// ReasoningLevel controls how much reasoning the LLM applies.
+	// Accepted values: "low", "medium", "max". Empty = provider default.
+	ReasoningLevel string
+	Queries        *db.Queries
+	RunID          int32
+	Logger         RunLogger
 }
 
 // New creates an Agent from a Config.
@@ -66,14 +75,15 @@ func New(cfg Config) *Agent {
 		mode = ModeMessageHistory
 	}
 	return &Agent{
-		Client:       cfg.Client,
-		Registry:     cfg.Registry,
-		Mode:         mode,
-		ProviderName: cfg.ProviderName,
-		AgentName:    cfg.AgentName,
-		q:            cfg.Queries,
-		runID:        cfg.RunID,
-		logger:       cfg.Logger,
+		Client:         cfg.Client,
+		Registry:       cfg.Registry,
+		Mode:           mode,
+		ProviderName:   cfg.ProviderName,
+		AgentName:      cfg.AgentName,
+		ReasoningLevel: cfg.ReasoningLevel,
+		q:              cfg.Queries,
+		runID:          cfg.RunID,
+		logger:         cfg.Logger,
 	}
 }
 
@@ -83,15 +93,32 @@ func New(cfg Config) *Agent {
 func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (string, error) {
 	switch a.Mode {
 	case ModeMessageHistory, "":
-		return a.runMessageHistory(ctx, systemPrompt, userMessage)
+		return a.runMessageHistory(ctx, systemPrompt, userMessage, "")
+	case ModeCompactThinking:
+		return a.runMessageHistory(ctx, systemPrompt, userMessage, a.reasoningEffort())
 	default:
 		return "", fmt.Errorf("unsupported agent mode: %s", a.Mode)
 	}
 }
 
-// runMessageHistory implements the default mode: maintain a rolling
-// conversation history and send the full history on every turn.
-func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage string) (string, error) {
+// reasoningEffort maps the agent's ReasoningLevel to the OpenAI API value.
+func (a *Agent) reasoningEffort() string {
+	switch a.ReasoningLevel {
+	case "low":
+		return "low"
+	case "medium":
+		return "medium"
+	case "max":
+		return "high"
+	default:
+		return ""
+	}
+}
+
+// runMessageHistory maintains a rolling conversation history and sends the
+// full history to the LLM on every turn. reasoningEffort is passed verbatim
+// as the request's reasoning_effort field when non-empty.
+func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage, reasoningEffort string) (string, error) {
 	history := []Message{}
 	if systemPrompt != "" {
 		history = append(history, Message{Role: "system", Content: systemPrompt})
@@ -105,8 +132,9 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage
 		}
 
 		req := ChatRequest{
-			Messages: history,
-			Tools:    a.Registry.Defs(),
+			Messages:        history,
+			Tools:           a.Registry.Defs(),
+			ReasoningEffort: reasoningEffort,
 		}
 
 		// Log the outgoing request.
