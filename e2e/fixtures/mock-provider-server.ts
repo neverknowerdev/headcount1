@@ -157,9 +157,14 @@ function handleChatCompletionsRoute(
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
 
-    // Count all chat requests. The first request gets a tool call response;
-    // subsequent ones get a plain text completion.
-    state.chatRequestCount++;
+    // Only count requests that include tool definitions — those are real agent
+    // calls. The TestProvider endpoint sends a bare "Say hello" request without
+    // tools to verify connectivity; that request should not advance the counter
+    // so it doesn't consume the first-call slot.
+    const hasTools = Array.isArray((request as any).tools) && (request as any).tools.length > 0;
+    if (hasTools) {
+        state.chatRequestCount++;
+    }
     const isFirstCall = state.chatRequestCount === 1;
 
     if (wantsStream) {
