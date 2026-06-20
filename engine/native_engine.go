@@ -11,6 +11,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
+	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
@@ -253,8 +254,8 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	userMessage := strings.Join(contextParts, "\n")
 
 	// Build tool registry: default file/shell/web tools + update_task_status.
-	registry := aicli.DefaultTools(workspacePath)
-	registry.Register(aicli.UpdateTaskStatusTool(func(updateCtx context.Context, status string) error {
+	registry := tools.DefaultRegistry(workspacePath)
+	registry.Register(tools.NewUpdateTaskStatus(func(updateCtx context.Context, status string) error {
 		t, err := e.q.GetTask(updateCtx, task.ID)
 		if err != nil {
 			return err

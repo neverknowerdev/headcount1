@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"agent-orchestrator/engine/aicli"
+	"agent-orchestrator/engine/aicli/tools"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -85,7 +86,7 @@ func TestAgentToolCall(t *testing.T) {
 	var capturedStatus string
 
 	reg := aicli.NewRegistry()
-	reg.Register(aicli.UpdateTaskStatusTool(func(ctx context.Context, status string) error {
+	reg.Register(tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
 		statusCalled.Store(true)
 		capturedStatus = status
 		return nil
@@ -116,7 +117,7 @@ func TestAgentReadFileTool(t *testing.T) {
 	workDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "hello.txt"), []byte("hello world"), 0644))
 
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 	agent := aicli.New(aicli.Config{
 		Client:       client,
 		Registry:     reg,
@@ -199,7 +200,7 @@ func TestToolReadFile(t *testing.T) {
 	content := "line1\nline2\nline3"
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "test.txt"), []byte(content), 0644))
 
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	result, err := reg.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"test.txt"}`))
 	require.NoError(t, err)
@@ -213,7 +214,7 @@ func TestToolListDir(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(workDir, "sub"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "sub", "b.txt"), []byte("b"), 0644))
 
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	result, err := reg.Execute(context.Background(), "list_dir", json.RawMessage(`{"path":".","recursive":false}`))
 	require.NoError(t, err)
@@ -225,7 +226,7 @@ func TestToolListDir(t *testing.T) {
 // TestToolExecCommand verifies the exec_command tool.
 func TestToolExecCommand(t *testing.T) {
 	workDir := t.TempDir()
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	result, err := reg.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo hello"}`))
 	require.NoError(t, err)
@@ -237,7 +238,7 @@ func TestToolGrep(t *testing.T) {
 	workDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "code.go"), []byte("package main\nfunc main() {}"), 0644))
 
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	result, err := reg.Execute(context.Background(), "grep", json.RawMessage(`{"pattern":"func"}`))
 	require.NoError(t, err)
@@ -249,7 +250,7 @@ func TestToolGrep(t *testing.T) {
 // workspace boundary — both absolute paths and ../.. traversals.
 func TestToolWorkspaceSandbox(t *testing.T) {
 	workDir := t.TempDir()
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	cases := []struct {
 		tool string
@@ -293,7 +294,7 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 // and that read_file can read them back.
 func TestToolWriteFile(t *testing.T) {
 	workDir := t.TempDir()
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 
 	// Write a top-level file.
 	result, err := reg.Execute(context.Background(), "write_file",
@@ -327,7 +328,7 @@ func TestAgentWriteFileTool(t *testing.T) {
 	client := newTestClient(t, fixturePath)
 
 	workDir := t.TempDir()
-	reg := aicli.DefaultTools(workDir)
+	reg := tools.DefaultRegistry(workDir)
 	agent := aicli.New(aicli.Config{
 		Client:       client,
 		Registry:     reg,
@@ -347,7 +348,7 @@ func TestAgentWriteFileTool(t *testing.T) {
 // TestUpdateTaskStatusTool verifies that UpdateTaskStatusTool calls the callback.
 func TestUpdateTaskStatusTool(t *testing.T) {
 	var called string
-	tool := aicli.UpdateTaskStatusTool(func(ctx context.Context, status string) error {
+	tool := tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
 		called = status
 		return nil
 	})
