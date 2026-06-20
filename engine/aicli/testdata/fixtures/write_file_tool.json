@@ -1,0 +1,60 @@
+[
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-010",
+      "object": "chat.completion",
+      "created": 1700000010,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_fixture_010",
+                "type": "function",
+                "function": {
+                  "name": "write_file",
+                  "arguments": "{\"path\":\"result.txt\",\"content\":\"task completed\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 80,
+        "completion_tokens": 15,
+        "total_tokens": 95
+      }
+    },
+    "status": 200
+  },
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-011",
+      "object": "chat.completion",
+      "created": 1700000011,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "I wrote the result to result.txt"
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 110,
+        "completion_tokens": 9,
+        "total_tokens": 119
+      }
+    },
+    "status": 200
+  }
+]

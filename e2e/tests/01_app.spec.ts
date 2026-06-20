@@ -105,9 +105,9 @@ test.describe.serial('Paperclip2 App', () => {
         await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
-        // The engine (real opencode + mock provider) will now run and the mock
-        // provider will respond with a tool call to update_task_status, which
-        // should move the task to "in-review". Wait for that real outcome.
+        // The native engine + mock provider will now run and the mock provider
+        // will respond with a tool call to update_task_status, moving the task
+        // to "in-review". Wait for that real outcome.
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
         // Wait for the comment created by the agent run

@@ -130,40 +130,6 @@ func restoreFilesystem(tempDir, basePath string) error {
 		}
 	}
 
-	// Restore OpenCode config files
-	configDir := filepath.Join(basePath, ".config", "opencode")
-	srcConfig := filepath.Join(tempDir, "config")
-	if _, err := os.Stat(srcConfig); err == nil {
-		// Restore agents
-		srcAgents := filepath.Join(srcConfig, "agents")
-		if _, err := os.Stat(srcAgents); err == nil {
-			dstAgents := filepath.Join(configDir, "agents")
-			os.MkdirAll(dstAgents, 0755)
-			entries, err := os.ReadDir(srcAgents)
-			if err == nil {
-				for _, entry := range entries {
-					if !entry.IsDir() {
-						data, err := os.ReadFile(filepath.Join(srcAgents, entry.Name()))
-						if err == nil {
-							os.WriteFile(filepath.Join(dstAgents, entry.Name()), data, 0644)
-						}
-					}
-				}
-			}
-		}
-
-		// Restore opencode.jsonc
-		srcOpencode := filepath.Join(srcConfig, "opencode.jsonc")
-		if _, err := os.Stat(srcOpencode); err == nil {
-			data, err := os.ReadFile(srcOpencode)
-			if err == nil {
-				dstOpencode := filepath.Join(configDir, "opencode.jsonc")
-				os.MkdirAll(filepath.Dir(dstOpencode), 0755)
-				os.WriteFile(dstOpencode, data, 0644)
-			}
-		}
-	}
-
 	return nil
 }
 

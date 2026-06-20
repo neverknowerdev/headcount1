@@ -16,8 +16,6 @@ export function createE2EHome(): string {
     const dirs = [
         path.join(e2eHome, '.paperclip2', 'data'),
         path.join(e2eHome, '.paperclip2', 'companies'),
-        path.join(e2eHome, '.config', 'opencode', 'agents'),
-        path.join(e2eHome, '.config', 'opencode', 'tools'),
     ];
     for (const dir of dirs) {
         fs.mkdirSync(dir, { recursive: true });

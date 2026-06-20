@@ -65,8 +65,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		fmt.Sscanf(providerIDStr, "%d", &providerID)
 	}
 
-	// Resolve provider: use X-Provider-ID header if present, otherwise
-	// require it (the header is set by opencode config model headers).
+	// Resolve provider: X-Provider-ID header is required.
 	if providerID == 0 {
 		http.Error(w, "X-Provider-ID header missing", http.StatusBadRequest)
 		return
@@ -106,7 +105,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 				} else {
 					defer proxyLogger.Close()
-					proxyLogger.LogRequest(reqPayload.Model, "opencode", provider.Name, bodyBytes)
+					proxyLogger.LogRequest(reqPayload.Model, "llm-proxy", provider.Name, bodyBytes)
 					// Save log file path on the run
 					g.q.UpdateRunLogFilePath(r.Context(), int32(runID), proxyLogger.FilePath())
 					// Extract tool results from the request body. OpenAI's
@@ -146,7 +145,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 	resp, err := client.Do(proxyReq)
 	if err != nil {
 		if proxyLogger != nil {
-			proxyLogger.LogError(reqPayload.Model, "opencode", provider.Name, err)
+			proxyLogger.LogError(reqPayload.Model, "llm-proxy", provider.Name, err)
 		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
@@ -266,7 +265,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(w, flusher, resp.Body, proxyLogger, reqPayload.Model, "opencode", provider.Name)
+	fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(w, flusher, resp.Body, proxyLogger, reqPayload.Model, "llm-proxy", provider.Name)
 	if streamErr != nil {
 		http.Error(w, streamErr.Error(), http.StatusGatewayTimeout)
 		return

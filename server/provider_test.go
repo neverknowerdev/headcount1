@@ -15,7 +15,6 @@ import (
 
 func skipTestProviderConnection(t *testing.T) {
 	alibabaKey := os.Getenv("ALIBABA_CLOUD_API_KEY")
-	opencodeKey := os.Getenv("OPENCODE_GO_API_KEY")
 
 	if alibabaKey == "" || strings.HasPrefix(alibabaKey, "dummy") {
 		t.Skip("Skipping provider test since real API keys are not provided in env")
@@ -46,5 +45,4 @@ func skipTestProviderConnection(t *testing.T) {
 	}
 
 	runTest("Alibaba DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", alibabaKey, "qwen-plus")
-	runTest("OpenCode Go", "https://opencode.ai/zen/go/v1", opencodeKey, "glm-5.1")
 }

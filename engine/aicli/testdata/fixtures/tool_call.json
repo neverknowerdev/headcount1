@@ -1,0 +1,60 @@
+[
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-002",
+      "object": "chat.completion",
+      "created": 1700000001,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_fixture_001",
+                "type": "function",
+                "function": {
+                  "name": "update_task_status",
+                  "arguments": "{\"status\":\"in-review\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 100,
+        "completion_tokens": 20,
+        "total_tokens": 120
+      }
+    },
+    "status": 200
+  },
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-003",
+      "object": "chat.completion",
+      "created": 1700000002,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "Task status has been updated to in-review. All done."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 130,
+        "completion_tokens": 12,
+        "total_tokens": 142
+      }
+    },
+    "status": 200
+  }
+]

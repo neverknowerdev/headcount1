@@ -8,12 +8,16 @@ import (
 	"github.com/gorilla/websocket"
 )
 
+// Subscriber is an in-process event handler (for testing and internal use).
+type Subscriber func(eventType string, data interface{})
+
 type Hub struct {
-	clients    map[*Client]bool
-	broadcast  chan []byte
-	Register   chan *Client
-	unregister chan *Client
-	mu         sync.Mutex
+	clients     map[*Client]bool
+	broadcast   chan []byte
+	Register    chan *Client
+	unregister  chan *Client
+	mu          sync.Mutex
+	subscribers map[string]Subscriber
 }
 
 type Client struct {
@@ -24,11 +28,27 @@ type Client struct {
 
 func NewHub() *Hub {
 	return &Hub{
-		broadcast:  make(chan []byte),
-		Register:   make(chan *Client),
-		unregister: make(chan *Client),
-		clients:    make(map[*Client]bool),
+		broadcast:   make(chan []byte, 256),
+		Register:    make(chan *Client),
+		unregister:  make(chan *Client),
+		clients:     make(map[*Client]bool),
+		subscribers: make(map[string]Subscriber),
 	}
+}
+
+// Subscribe registers an in-process callback that is invoked for every event.
+// Use unique id values; re-registering the same id replaces the prior callback.
+func (h *Hub) Subscribe(id string, fn Subscriber) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.subscribers[id] = fn
+}
+
+// Unsubscribe removes a previously registered in-process callback.
+func (h *Hub) Unsubscribe(id string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	delete(h.subscribers, id)
 }
 
 func (h *Hub) Run() {
@@ -61,6 +81,13 @@ func (h *Hub) Run() {
 }
 
 func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
+	// Invoke in-process subscribers first (used by tests and internal listeners).
+	h.mu.Lock()
+	for _, fn := range h.subscribers {
+		fn(eventType, payload)
+	}
+	h.mu.Unlock()
+
 	data, err := json.Marshal(map[string]interface{}{
 		"type":    eventType,
 		"payload": payload,
@@ -69,7 +96,12 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 		log.Printf("error marshaling event: %v", err)
 		return
 	}
-	h.broadcast <- data
+	// Non-blocking send: drop the WebSocket message if the buffer is full or
+	// hub.Run() is not active (e.g., in unit tests).
+	select {
+	case h.broadcast <- data:
+	default:
+	}
 }
 
 func (c *Client) ReadPump() {

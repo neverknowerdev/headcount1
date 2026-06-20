@@ -3,13 +3,10 @@ package main
 import (
 	"context"
 	"embed"
-	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"runtime"
 	"strings"
 	"time"
 
@@ -33,15 +30,7 @@ import (
 //go:embed all:frontend/dist
 var frontendDist embed.FS
 
-//go:embed templates/opencode_custom_tools/update_task_status.ts
-var updateTaskStatusScript []byte
-
 func main() {
-	// Deploy Custom Tool Script for OpenCode
-	if err := deployOpenCodeCustomTool(); err != nil {
-		log.Fatalf("Failed to deploy OpenCode custom tool: %v", err)
-	}
-
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -91,13 +80,11 @@ func main() {
 
 	recoverStaleRuns(database)
 
-	// Initialize OpenCode agent configs for existing agents
-	if err := initOpenCodeAgentConfigs(database); err != nil {
-		log.Printf("Failed to initialize OpenCode agent configs: %v", err)
-	}
-
 	hub := eventhub.NewHub()
-	eng := engine.NewOpenCodeEngine(database, hub)
+
+	eng := engine.NewNativeEngine(database, hub)
+	log.Println("Using native engine")
+
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
@@ -184,91 +171,6 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
-}
-
-func initOpenCodeAgentConfigs(database *gorm.DB) error {
-	q := db.New(database)
-
-	// Fetch all companies to iterate over their agents
-	companies, err := q.ListCompanies(context.Background())
-	if err != nil {
-		return err
-	}
-
-	for _, comp := range companies {
-		agents, err := q.ListAgentsByCompany(context.Background(), comp.ID)
-		if err != nil {
-			continue
-		}
-
-		for _, agent := range agents {
-			// Get provider type if exists
-			providerType := ""
-			if agent.ProviderID != nil {
-				if p, err := q.GetLLMProvider(context.Background(), *agent.ProviderID); err == nil {
-					providerType = p.ProviderType
-					if providerType == "" {
-						providerType = p.Name
-					}
-				}
-			}
-
-			// Check if file exists, if not create it
-			agentPath := filepath.Join(db.OpencodeConfigDir(), "agents", fmt.Sprintf("%s.md", agent.Name))
-			if _, err := os.Stat(agentPath); os.IsNotExist(err) {
-				log.Printf("Agent config file missing for %s, creating...", agent.Name)
-				_ = endpoints.SaveOpenCodeAgentConfig(agent, providerType)
-			}
-		}
-	}
-	return nil
-}
-
-func deployOpenCodeCustomTool() error {
-	paperclipDir := db.PaperclipHome()
-	if err := os.MkdirAll(paperclipDir, 0755); err != nil {
-		log.Printf("Failed to create paperclip2 dir: %v", err)
-	}
-
-	port := os.Getenv("PORT")
-	if port == "" {
-		port = "8080"
-	}
-	
-	// Detect if running in Docker and use appropriate hostname
-	serverHost := "127.0.0.1"
-	if _, err := os.Stat("/.dockerenv"); err == nil {
-		serverHost = "host.docker.internal"
-	} else if os.Getenv("PAPERCLIP_SERVER_HOST") != "" {
-		serverHost = os.Getenv("PAPERCLIP_SERVER_HOST")
-	}
-	
-	serverUrl := "http://" + serverHost + ":" + port
-	err := os.WriteFile(filepath.Join(paperclipDir, "server_url.txt"), []byte(serverUrl), 0644)
-	if err != nil {
-		log.Printf("Failed to write server_url.txt: %v", err)
-	} else {
-		log.Printf("Wrote server URL to %s: %s", filepath.Join(paperclipDir, "server_url.txt"), serverUrl)
-	}
-
-	scriptContent := string(updateTaskStatusScript)
-
-	opencodeToolsDir := filepath.Join(db.OpencodeConfigDir(), "tools")
-	if runtime.GOOS == "windows" {
-		opencodeToolsDir = filepath.Join(os.Getenv("APPDATA"), "opencode", "tools")
-	}
-
-	if err := os.MkdirAll(opencodeToolsDir, 0755); err != nil {
-		return fmt.Errorf("Failed to create opencode tools dir: %w", err)
-	}
-
-	destPath := filepath.Join(opencodeToolsDir, "update_task_status.ts")
-	if err := os.WriteFile(destPath, []byte(scriptContent), 0644); err != nil {
-		return fmt.Errorf("Failed to write opencode custom tool: %w", err)
-	} else {
-		log.Printf("Successfully deployed opencode custom tool to %s", destPath)
-		return nil
-	}
 }
 
 func recoverStaleRuns(database *gorm.DB) {

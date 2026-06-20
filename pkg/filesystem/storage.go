@@ -164,7 +164,7 @@ func (s *Storage) ListCompanyDirs() ([]string, error) {
 	}
 	var dirs []string
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "docker" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
 			dirs = append(dirs, entry.Name())
 		}
 	}
@@ -391,7 +391,7 @@ func (s *Storage) ReadAttachments(companyShortName string, taskID int32) ([]Atta
 // --- Runs ---
 
 func (s *Storage) WriteRun(run db.Run, companyShortName string) error {
-	dir := filepath.Join(s.basePath, "workspace", companyShortName, fmt.Sprintf("task-%d", run.TaskID), "runs")
+	dir := filepath.Join(s.basePath, "data", "runs", companyShortName, fmt.Sprintf("task-%d", run.TaskID))
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
@@ -411,7 +411,7 @@ func (s *Storage) WriteRun(run db.Run, companyShortName string) error {
 }
 
 func (s *Storage) ReadRuns(companyShortName string, taskID int32) ([]RunMeta, error) {
-	dir := filepath.Join(s.basePath, "workspace", companyShortName, fmt.Sprintf("task-%d", taskID), "runs")
+	dir := filepath.Join(s.basePath, "data", "runs", companyShortName, fmt.Sprintf("task-%d", taskID))
 	return readJSONDir[RunMeta](dir)
 }
 
