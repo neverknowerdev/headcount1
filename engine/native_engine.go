@@ -278,7 +278,9 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	userMessage := strings.Join(contextParts, "\n")
 
-	// Build tool registry: default file/shell/web tools + update_task_status + create_subtask.
+	// Build full tool registry: file/shell/web tools + task-management tools.
+	// update_task_status and create_subtask are registered like any other tool
+	// and may be excluded by the agent config's AllowedTools filter.
 	registry := tools.DefaultRegistry(workspacePath)
 	registry.Register(tools.NewUpdateTaskStatus(func(updateCtx context.Context, status string) error {
 		t, err := e.q.GetTask(updateCtx, task.ID)
@@ -294,12 +296,9 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}))
 	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent)))
 
-	// Filter tools if the agent config restricts them.
+	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
-		// Always keep update_task_status and create_subtask regardless of filter.
-		allowed := agentCfg.AllowedTools
-		allowed = appendIfMissing(allowed, "update_task_status", "create_subtask")
-		registry = registry.Filter(allowed)
+		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
 	// Determine agent mode and reasoning level from config.
@@ -586,18 +585,3 @@ Changes:
 	return msg, nil
 }
 
-// appendIfMissing returns a copy of slice with each of the extra values added
-// only if they are not already present.
-func appendIfMissing(slice []string, extra ...string) []string {
-	set := make(map[string]bool, len(slice))
-	for _, s := range slice {
-		set[s] = true
-	}
-	result := append([]string(nil), slice...)
-	for _, e := range extra {
-		if !set[e] {
-			result = append(result, e)
-		}
-	}
-	return result
-}
