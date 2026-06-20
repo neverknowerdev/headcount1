@@ -24,6 +24,10 @@ var writerPrompt string
 var researcherPrompt string
 
 // builtinConfigs returns the set of predefined agent configurations.
+// AllowedModels is intentionally left empty in all builtin configs so that
+// the engine's model resolver uses the configured LLM provider's available
+// models rather than hardcoded provider-specific names. Add models to
+// AllowedModels in a custom TOML config when you need to pin a specific model.
 func builtinConfigs() []*AgentConfig {
 	return []*AgentConfig{
 		{
@@ -31,7 +35,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Chief Executive Officer — strategic oversight and decision making",
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeCompactThinking,
-			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
 			ReasoningLevel: ReasoningLevelMax,
 			Subagents:      []string{"CTO", "Writer", "Researcher"},
 		},
@@ -40,7 +43,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Chief Technology Officer — technical architecture and engineering leadership",
 			Prompt:         strings.TrimSpace(ctoPrompt),
 			ChatType:       ChatTypeCompactThinking,
-			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
 			ReasoningLevel: ReasoningLevelMax,
 			Subagents:      []string{"Programmer", "QA", "Researcher"},
 			ParentAgent:    "CEO",
@@ -50,7 +52,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Software developer — implements features and fixes bugs",
 			Prompt:         strings.TrimSpace(programmerPrompt),
 			ChatType:       ChatTypeMessageHistory,
-			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CTO",
 		},
@@ -59,7 +60,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Quality assurance — tests, validates, and reports defects",
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
-			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CTO",
 		},
@@ -68,7 +68,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Technical writer — creates documentation, reports, and summaries",
 			Prompt:         strings.TrimSpace(writerPrompt),
 			ChatType:       ChatTypeMessageHistory,
-			AllowedModels:  []string{"claude-opus-4-8", "claude-sonnet-4-6"},
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CEO",
 		},
@@ -77,7 +76,6 @@ func builtinConfigs() []*AgentConfig {
 			Description:    "Researcher — investigates topics and synthesises findings",
 			Prompt:         strings.TrimSpace(researcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
-			AllowedModels:  []string{"claude-sonnet-4-6", "claude-haiku-4-5-20251001"},
 			ReasoningLevel: ReasoningLevelMedium,
 		},
 	}

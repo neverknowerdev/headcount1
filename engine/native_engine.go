@@ -166,9 +166,23 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		return
 	}
 
-	model := agent.Model
-	if model == "" {
-		model = provider.DefaultModel
+	// Load agent config early so model resolution can use AllowedModels.
+	// The proxy logger isn't ready yet, so fall back to stdout for this warning.
+	var agentCfg *agentconfig.AgentConfig
+	if task.AgentConfigName != "" && e.agentFactory != nil {
+		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
+			agentCfg = cfg
+		} else {
+			fmt.Printf("Warning: agent config %q not found for task %d: %v\n", task.AgentConfigName, task.ID, cfgErr)
+		}
+	}
+
+	// Resolve the model: intersect AgentConfig.AllowedModels with the
+	// provider's SupportedModels, falling back to the agent/provider default.
+	model, err := resolveModel(agentCfg, provider, agent.Model)
+	if err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("model resolution failed: %v", err))
+		return
 	}
 
 	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
@@ -225,21 +239,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 				}
 			}
 		}
-	}
-
-	// Load agent config override if one is set on the task.
-	var agentCfg *agentconfig.AgentConfig
-	if task.AgentConfigName != "" && e.agentFactory != nil {
-		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
-			agentCfg = cfg
-		} else {
-			e.logInfo(proxyLogger, fmt.Sprintf("Warning: agent config %q not found: %v", task.AgentConfigName, cfgErr))
-		}
-	}
-
-	// Apply model override from agent config.
-	if agentCfg != nil && agentCfg.DefaultModel() != "" {
-		model = agentCfg.DefaultModel()
 	}
 
 	// Build system prompt.

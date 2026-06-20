@@ -131,10 +131,14 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	assert.NotEmpty(t, cfg.Prompt)
 	assert.Equal(t, agentconfig.ChatTypeCompactThinking, cfg.ChatType)
 	assert.Equal(t, agentconfig.ReasoningLevelMax, cfg.ReasoningLevel)
+	// Builtin configs intentionally have no hardcoded models so that the
+	// runtime resolver picks from the configured provider's supported list.
+	assert.Empty(t, cfg.AllowedModels)
 
 	cfg, err = f.GetConfig("Programmer")
 	require.NoError(t, err)
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
+	assert.Empty(t, cfg.AllowedModels)
 }
 
 func TestDefaultFactory_GetConfig_NotFound(t *testing.T) {
