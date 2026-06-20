@@ -271,6 +271,12 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 		{"exec_command", `{"command":"ls /etc"}`},
 		// exec_command: cat on absolute path outside workspace
 		{"exec_command", `{"command":"cat /etc/passwd"}`},
+		// exec_command: parent directory via ".."
+		{"exec_command", `{"command":"ls .."}`},
+		// exec_command: parent traversal in relative path
+		{"exec_command", `{"command":"cat ../secret.txt"}`},
+		// exec_command: embedded traversal in relative path
+		{"exec_command", `{"command":"ls sub/../../outside"}`},
 	}
 
 	for _, tc := range cases {
