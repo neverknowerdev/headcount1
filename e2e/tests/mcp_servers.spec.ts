@@ -25,11 +25,9 @@ test.describe.serial('MCP Servers', () => {
         await expect(page.getByRole('heading', { name: 'MCP Servers' })).toBeVisible();
 
         await page.click('button:has-text("Add MCP Server")');
-        await expect(page.getByRole('dialog')).not.toBeVisible({ timeout: 100 }).catch(() => {});
         // Modal should be open — fill in the form.
-        await page.fill('input[placeholder="github"]', 'test-http');
-        await page.fill('input[placeholder="GitHub MCP"]', 'Test HTTP Server');
-        await page.fill('input[placeholder="Access GitHub repositories, issues, and pull requests"]', 'A test HTTP MCP server');
+        await page.fill('input[placeholder="my-server"]', 'test-http');
+        await page.fill('input[placeholder="My Server"]', 'Test HTTP Server');
 
         // Switch to HTTP transport.
         await page.selectOption('select', 'http');
