@@ -82,6 +82,11 @@ func main() {
 
 	recoverStaleRuns(database)
 
+	// Seed predefined MCP servers (paperclip2, github, google-docs) if not present.
+	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
+	}
+
 	hub := eventhub.NewHub()
 
 	eng := engine.NewNativeEngine(database, hub)

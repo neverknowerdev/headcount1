@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"os"
 	"os/exec"
 	"sync"
 	"sync/atomic"
@@ -20,10 +21,12 @@ type stdioClient struct {
 	nextID atomic.Int32
 }
 
-func newStdioClient(command string, args []string, env []string) (*stdioClient, error) {
+// newStdioClient spawns the MCP server subprocess. extraEnv is a list of
+// "KEY=VALUE" strings appended to the current process environment.
+func newStdioClient(command string, args []string, extraEnv []string) (*stdioClient, error) {
 	cmd := exec.Command(command, args...)
-	if len(env) > 0 {
-		cmd.Env = env
+	if len(extraEnv) > 0 {
+		cmd.Env = append(os.Environ(), extraEnv...)
 	}
 
 	stdin, err := cmd.StdinPipe()

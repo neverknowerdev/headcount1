@@ -68,24 +68,52 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 	})
 }
 
-// EnsureBuiltinMCPServer creates the paperclip2 built-in MCP server if it
-// does not yet exist. It is global (not company-scoped).
-func (q *Queries) EnsureBuiltinMCPServer(ctx context.Context) (MCPServer, error) {
-	var existing MCPServer
-	err := q.db.WithContext(ctx).
-		Where("name = ? AND builtin = ?", "paperclip2", true).
-		First(&existing).Error
-	if err == nil {
-		return existing, nil
+// EnsureBuiltinMCPServers creates all predefined MCP servers if they don't
+// already exist. Safe to call on every startup.
+func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
+	predefined := []MCPServer{
+		{
+			Name:        "paperclip2",
+			DisplayName: "Paperclip2",
+			Description: "Built-in tools: update task status and create subtasks for agents.",
+			Transport:   "builtin",
+			Enabled:     true,
+			Builtin:     true,
+		},
+		{
+			Name:        "github",
+			DisplayName: "GitHub",
+			Description: "Access GitHub repos, issues, pull requests, and code search. Requires github-mcp-server (brew install github/tap/github-mcp-server).",
+			Transport:   "stdio",
+			Command:     "github-mcp-server",
+			Args:        `["stdio"]`,
+			AuthType:    "bearer",
+			AuthEnvVar:  "GITHUB_PERSONAL_ACCESS_TOKEN",
+			Enabled:     false,
+			Builtin:     true,
+		},
+		{
+			Name:        "google-docs",
+			DisplayName: "Google Docs",
+			Description: "Read and write Google Docs, Sheets, and Drive files. Requires a Google service account credentials JSON file.",
+			Transport:   "stdio",
+			Command:     "npx",
+			Args:        `["-y", "@modelcontextprotocol/server-gdrive"]`,
+			AuthType:    "credentials-file",
+			AuthEnvVar:  "GOOGLE_APPLICATION_CREDENTIALS",
+			Enabled:     false,
+			Builtin:     true,
+		},
 	}
-	s := MCPServer{
-		Name:        "paperclip2",
-		DisplayName: "Paperclip2",
-		Description: "Built-in Paperclip2 tools: update task status and create subtasks.",
-		Transport:   "builtin",
-		Enabled:     true,
-		Builtin:     true,
+
+	for _, s := range predefined {
+		var existing MCPServer
+		if q.db.WithContext(ctx).Where("name = ?", s.Name).First(&existing).Error == nil {
+			continue // already exists — don't overwrite user's config
+		}
+		if err := q.db.WithContext(ctx).Create(&s).Error; err != nil {
+			return err
+		}
 	}
-	err = q.db.WithContext(ctx).Create(&s).Error
-	return s, err
+	return nil
 }

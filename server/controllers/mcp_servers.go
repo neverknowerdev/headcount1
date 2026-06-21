@@ -80,6 +80,15 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	if req.AuthToken == "" {
 		req.AuthToken = existing.AuthToken
 	}
+	// Predefined (builtin) servers have immutable transport config.
+	if existing.Builtin {
+		req.Name = existing.Name
+		req.Transport = existing.Transport
+		req.Command = existing.Command
+		req.Args = existing.Args
+		req.AuthType = existing.AuthType
+		req.AuthEnvVar = existing.AuthEnvVar
+	}
 
 	s, err := api.q.UpdateMCPServer(r.Context(), req)
 	if err != nil {

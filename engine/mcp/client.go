@@ -9,6 +9,8 @@ import (
 	"agent-orchestrator/db"
 )
 
+
+
 // Client is the interface all MCP transport implementations must satisfy.
 type Client interface {
 	// Initialize performs the MCP handshake. Must be called before any other method.
@@ -34,7 +36,11 @@ func NewClient(s db.MCPServer) (Client, error) {
 				return nil, fmt.Errorf("mcp server %q: invalid args JSON: %w", s.Name, err)
 			}
 		}
-		return newStdioClient(s.Command, args, nil)
+		var extraEnv []string
+		if s.AuthEnvVar != "" && s.AuthToken != "" {
+			extraEnv = []string{s.AuthEnvVar + "=" + s.AuthToken}
+		}
+		return newStdioClient(s.Command, args, extraEnv)
 	case "http":
 		if s.URL == "" {
 			return nil, fmt.Errorf("mcp server %q: http transport requires a URL", s.Name)

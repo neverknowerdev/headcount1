@@ -568,6 +568,7 @@ type MCPServerRecord struct {
 	URL         string `json:"url,omitempty"`
 	Headers     string `json:"headers,omitempty"`
 	AuthType    string `json:"auth_type,omitempty"`
+	AuthEnvVar  string `json:"auth_env_var,omitempty"` // env var name; token itself is never stored
 	Enabled     bool   `json:"enabled"`
 	Builtin     bool   `json:"builtin"`
 }
@@ -594,6 +595,7 @@ func (m *Manager) SaveMCPServer(s db.MCPServer) error {
 		URL:         s.URL,
 		Headers:     s.Headers,
 		AuthType:    s.AuthType,
+		AuthEnvVar:  s.AuthEnvVar,
 		Enabled:     s.Enabled,
 		Builtin:     s.Builtin,
 	}

@@ -178,6 +178,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 					URL:         rec.URL,
 					Headers:     rec.Headers,
 					AuthType:    rec.AuthType,
+					AuthEnvVar:  rec.AuthEnvVar,
 					Enabled:     rec.Enabled,
 					Builtin:     rec.Builtin,
 				}
