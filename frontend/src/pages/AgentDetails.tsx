@@ -116,13 +116,18 @@ export const AgentDetails: React.FC = () => {
 
             <div className="border-b mb-6">
                 <nav className="-mb-px flex space-x-8">
-                    {['overview', 'logs', 'settings', 'tools'].map(tab => (
+                    {[
+                        { key: 'overview', label: 'Overview' },
+                        { key: 'logs', label: 'Logs' },
+                        { key: 'settings', label: 'Settings' },
+                        { key: 'tools', label: 'Tools & MCPs' },
+                    ].map(({ key, label }) => (
                         <button
-                            key={tab}
-                            onClick={() => setActiveTab(tab)}
-                            className={`${activeTab === tab ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm capitalize`}
+                            key={key}
+                            onClick={() => setActiveTab(key)}
+                            className={`${activeTab === key ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
                         >
-                            {tab}
+                            {label}
                         </button>
                     ))}
                 </nav>
