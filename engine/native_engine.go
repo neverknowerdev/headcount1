@@ -17,6 +17,7 @@ import (
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/mempalace"
 	"gorm.io/gorm"
 )
 
@@ -381,6 +382,12 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
 	}
 
+	// Inject pre-run memory context from MemPalace (best-effort; failures are non-fatal).
+	if memCtx := e.fetchMempalaceContext(runCtx, task, company, agentCfg); memCtx != "" {
+		userMessage = "## Memory from past runs:\n" + memCtx + "\n\n---\n\n" + userMessage
+		e.logInfo(proxyLogger, "MemPalace: injected context into user message")
+	}
+
 	finalText, agentErr := aiAgent.Run(runCtx, systemPrompt, userMessage)
 
 	status := "completed"
@@ -439,6 +446,11 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 
 	e.q.UpdateRunLog(ctx, run.ID, "", status)
+
+	// Write post-run diary entry to MemPalace (async; non-fatal).
+	if agentCfg != nil {
+		go e.writePostRunDiary(context.Background(), task, company, agentCfg, status, finalText)
+	}
 
 	// Update run metadata in filesystem.
 	settings = loadSettings()
@@ -632,3 +644,68 @@ Changes:
 	return msg, nil
 }
 
+// fetchMempalaceContext queries MemPalace for agent diary + semantic search
+// results relevant to the current task. Returns "" on any failure so the
+// caller can degrade gracefully.
+func (e *NativeEngine) fetchMempalaceContext(ctx context.Context, task db.Task, company db.Company, agentCfg *agentconfig.AgentConfig) string {
+	// Skip subprocess spawn when the palace directory has never been initialised.
+	// This avoids a ~500 ms Python startup penalty in fresh environments and in
+	// unit tests that don't seed a palace.
+	if _, err := os.Stat(mempalace.DefaultPalaceDir()); os.IsNotExist(err) {
+		return ""
+	}
+
+	client, err := mempalace.NewClient(ctx)
+	if err != nil || client == nil {
+		return ""
+	}
+	defer client.Close()
+
+	var parts []string
+
+	// Recent diary entries for this agent.
+	if agentCfg != nil {
+		diary, err := client.DiaryRead(ctx, agentCfg.Name, "", 5)
+		if err == nil && mempalace.HasResults(diary) {
+			parts = append(parts, "### Agent diary (recent entries):\n"+diary)
+		}
+	}
+
+	// Semantic search for task-relevant memories scoped to this company.
+	query := task.Title
+	if task.Description != "" && len(task.Title)+len(task.Description) <= 300 {
+		query += " " + task.Description
+	}
+	if results, err := client.Search(ctx, query, company.ShortName, 3); err == nil && mempalace.HasResults(results) {
+		parts = append(parts, "### Related memories from palace:\n"+results)
+	}
+
+	if len(parts) == 0 {
+		return ""
+	}
+	return strings.Join(parts, "\n\n")
+}
+
+// writePostRunDiary saves a diary entry to MemPalace after a run completes.
+// Called in a goroutine; all errors are logged as warnings, not propagated.
+func (e *NativeEngine) writePostRunDiary(ctx context.Context, task db.Task, company db.Company, agentCfg *agentconfig.AgentConfig, status, finalText string) {
+	client, err := mempalace.NewClient(ctx)
+	if err != nil || client == nil {
+		return
+	}
+	defer client.Close()
+
+	// Build an AAAK-style compact summary of the run.
+	entry := fmt.Sprintf("task-%d|%s|status:%s", task.ID, task.Title, status)
+	if finalText != "" {
+		summary := strings.ReplaceAll(finalText, "\n", " ")
+		if len(summary) > 200 {
+			summary = summary[:200] + "..."
+		}
+		entry += "|summary:" + summary
+	}
+
+	if err := client.DiaryWrite(ctx, agentCfg.Name, entry, company.ShortName, "task-completion"); err != nil {
+		fmt.Printf("Warning: MemPalace diary write failed: %v\n", err)
+	}
+}

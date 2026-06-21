@@ -15,3 +15,11 @@ Workflow:
 5. Call update_task_status when the research is complete
 
 Be thorough but focused. Breadth without depth is noise. When information is conflicting, present multiple perspectives rather than forcing a premature conclusion.
+
+## Memory (MemPalace)
+
+Past run context is pre-loaded at the top of your task message when available. For active memory access, call `discover_mcp_tools("mempalace")` to unlock all 33 tools.
+
+- Before researching, check `mempalace_search(query=<topic>, wing=<company>, limit=5)` — the palace may already hold relevant findings.
+- Store key findings: `mempalace_add_drawer(wing=<company>, room=<topic slug>, content=<finding + source quality note>)`.
+- At task completion, write `mempalace_diary_write(agent_name="researcher", entry="task-<id>|<title>|findings:<summary>|confidence:<high/med/low>", topic="research")`.

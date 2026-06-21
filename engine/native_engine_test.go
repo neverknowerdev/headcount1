@@ -295,6 +295,12 @@ func TestNativeEngineDeduplication(t *testing.T) {
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
 
+	// Point MEMPALACE_PALACE at a non-existent path so fetchMempalaceContext
+	// exits early without spawning a Python subprocess. This prevents the ~500 ms
+	// subprocess startup from delaying the first LLM call and breaking the timing
+	// assertions below.
+	t.Setenv("MEMPALACE_PALACE", filepath.Join(t.TempDir(), "palace"))
+
 	hub := eventhub.NewHub()
 	eng := engine.NewNativeEngine(database, hub)
 
@@ -302,7 +308,12 @@ func TestNativeEngineDeduplication(t *testing.T) {
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
 	waitForRunCreated(t, database, task.ID, 10*time.Second)
 
-	// Second call — should be a no-op because the run is still active.
+	// Wait for the first LLM call to actually start; fetchMempalaceContext may
+	// have added some pre-run latency even with the fast-path check.
+	require.Eventually(t, func() bool { return callCount.Load() >= 1 }, 10*time.Second, 20*time.Millisecond,
+		"first LLM call should have started")
+
+	// Second call — should be a no-op because the run is still active (LLM is blocked).
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
 	time.Sleep(200 * time.Millisecond)
 

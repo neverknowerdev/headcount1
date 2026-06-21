@@ -15,3 +15,11 @@ Workflow:
 5. Call update_task_status when the document is ready for review
 
 Prefer active voice. Use examples where they clarify abstract concepts.
+
+## Memory (MemPalace)
+
+Past run context is pre-loaded at the top of your task message when available. For active memory access, call `discover_mcp_tools("mempalace")` to unlock all 33 tools.
+
+- Before writing, check `mempalace_search(query=<topic>, wing=<company>, limit=3)` for prior docs on the same topic.
+- Store style decisions: `mempalace_add_drawer(wing=<company>, room="doc-conventions", content=<convention or decision>)`.
+- At task completion, write `mempalace_diary_write(agent_name="writer", entry="task-<id>|<title>|doc:<what was written>|audience:<who>", topic="documentation")`.

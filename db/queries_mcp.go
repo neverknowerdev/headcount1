@@ -138,6 +138,16 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 			Enabled:     false,
 			Builtin:     true,
 		},
+		{
+			Name:        "mempalace",
+			DisplayName: "MemPalace",
+			Description: "Long-term semantic memory across agent runs — diary, search, and knowledge graph. Install: uv tool install mempalace",
+			Transport:   "stdio",
+			Command:     "mempalace-mcp",
+			Args:        `[]`,
+			Enabled:     true,
+			Builtin:     true,
+		},
 	}
 
 	for _, s := range predefined {
