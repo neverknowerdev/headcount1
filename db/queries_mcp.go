@@ -11,9 +11,10 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 	return s, err
 }
 
-func (q *Queries) ListMCPServersByCompany(ctx context.Context, companyID int32) ([]MCPServer, error) {
+// ListMCPServers returns all MCP servers (global, not company-scoped).
+func (q *Queries) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	var servers []MCPServer
-	err := q.db.WithContext(ctx).Where("company_id = ?", companyID).Order("id").Find(&servers).Error
+	err := q.db.WithContext(ctx).Order("id").Find(&servers).Error
 	return servers, err
 }
 
@@ -32,8 +33,7 @@ func (q *Queries) DeleteMCPServer(ctx context.Context, id int32) error {
 	return q.db.WithContext(ctx).Delete(&MCPServer{}, id).Error
 }
 
-// ListMCPServersForAgent returns all MCP servers enabled for the given agent,
-// including the join-table Enabled flag.
+// ListMCPServersForAgent returns all MCP servers enabled for the given agent.
 func (q *Queries) ListMCPServersForAgent(ctx context.Context, agentID int32) ([]MCPServer, error) {
 	var servers []MCPServer
 	err := q.db.WithContext(ctx).
@@ -44,7 +44,7 @@ func (q *Queries) ListMCPServersForAgent(ctx context.Context, agentID int32) ([]
 	return servers, err
 }
 
-// ListAllAgentMCPServers returns all AgentMCPServer rows for a given agent
+// ListAllAgentMCPAssignments returns all AgentMCPServer rows for a given agent
 // (both enabled and disabled), used by the UI.
 func (q *Queries) ListAllAgentMCPAssignments(ctx context.Context, agentID int32) ([]AgentMCPServer, error) {
 	var rows []AgentMCPServer
@@ -68,18 +68,17 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 	})
 }
 
-// EnsureBuiltinMCPServer creates the paperclip2 built-in MCP server for a
-// company if it does not yet exist.
-func (q *Queries) EnsureBuiltinMCPServer(ctx context.Context, companyID int32) (MCPServer, error) {
+// EnsureBuiltinMCPServer creates the paperclip2 built-in MCP server if it
+// does not yet exist. It is global (not company-scoped).
+func (q *Queries) EnsureBuiltinMCPServer(ctx context.Context) (MCPServer, error) {
 	var existing MCPServer
 	err := q.db.WithContext(ctx).
-		Where("company_id = ? AND name = ? AND builtin = ?", companyID, "paperclip2", true).
+		Where("name = ? AND builtin = ?", "paperclip2", true).
 		First(&existing).Error
 	if err == nil {
 		return existing, nil
 	}
 	s := MCPServer{
-		CompanyID:   companyID,
 		Name:        "paperclip2",
 		DisplayName: "Paperclip2",
 		Description: "Built-in Paperclip2 tools: update task status and create subtasks.",

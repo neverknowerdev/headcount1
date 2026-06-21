@@ -46,7 +46,7 @@ func setupMCPRouter(database *gorm.DB) chi.Router {
 	return r
 }
 
-func seedCompany(t *testing.T, database *gorm.DB) db.Company {
+func seedMCPTestCompany(t *testing.T, database *gorm.DB) db.Company {
 	t.Helper()
 	q := db.New(database)
 	c, err := q.CreateCompany(context.Background(), "Test Co")
@@ -57,11 +57,9 @@ func seedCompany(t *testing.T, database *gorm.DB) db.Company {
 func TestMCPServerCRUD(t *testing.T) {
 	database := setupMCPTestDB(t)
 	r := setupMCPRouter(database)
-	company := seedCompany(t, database)
 
 	// Create
 	payload, _ := json.Marshal(db.MCPServer{
-		CompanyID:   company.ID,
 		Name:        "github",
 		DisplayName: "GitHub MCP",
 		Transport:   "stdio",
@@ -81,7 +79,7 @@ func TestMCPServerCRUD(t *testing.T) {
 	assert.False(t, created.Builtin) // UI-created is never builtin
 
 	// List
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/mcp-servers?company_id=%d", company.ID), nil)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-servers", nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
@@ -114,7 +112,7 @@ func TestMCPServerCRUD(t *testing.T) {
 	assert.Equal(t, http.StatusOK, w.Code)
 
 	// Confirm deleted
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/mcp-servers?company_id=%d", company.ID), nil)
+	req = httptest.NewRequest(http.MethodGet, "/mcp-servers", nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
@@ -124,11 +122,10 @@ func TestMCPServerCRUD(t *testing.T) {
 func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 	database := setupMCPTestDB(t)
 	r := setupMCPRouter(database)
-	company := seedCompany(t, database)
 
-	// Create a builtin server directly in DB.
+	// Create the built-in server directly in DB.
 	q := db.New(database)
-	builtin, err := q.EnsureBuiltinMCPServer(context.Background(), company.ID)
+	builtin, err := q.EnsureBuiltinMCPServer(context.Background())
 	require.NoError(t, err)
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/mcp-servers/%d", builtin.ID), nil)
@@ -140,12 +137,12 @@ func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 func TestAgentMCPAssignments(t *testing.T) {
 	database := setupMCPTestDB(t)
 	r := setupMCPRouter(database)
-	company := seedCompany(t, database)
+	company := seedMCPTestCompany(t, database)
 
-	// Create MCP server.
+	// Create MCP server (global, no company).
 	q := db.New(database)
 	srv, err := q.CreateMCPServer(context.Background(), db.MCPServer{
-		CompanyID: company.ID, Name: "test", Transport: "http", URL: "http://localhost", Enabled: true,
+		Name: "test", Transport: "http", URL: "http://localhost", Enabled: true,
 	})
 	require.NoError(t, err)
 
@@ -176,11 +173,13 @@ func TestAgentMCPAssignments(t *testing.T) {
 	assert.True(t, result[0].Enabled)
 }
 
-func TestMCPServer_ListBadCompanyID(t *testing.T) {
+func TestMCPServer_CreateRequiresNameAndTransport(t *testing.T) {
 	database := setupMCPTestDB(t)
 	r := setupMCPRouter(database)
 
-	req := httptest.NewRequest(http.MethodGet, "/mcp-servers?company_id=abc", nil)
+	payload, _ := json.Marshal(map[string]string{"name": "incomplete"})
+	req := httptest.NewRequest(http.MethodPost, "/mcp-servers", bytes.NewReader(payload))
+	req.Header.Set("Content-Type", "application/json")
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusBadRequest, w.Code)

@@ -1,11 +1,9 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu } from 'lucide-react';
-import { useStore } from '../store';
 
 interface MCPServer {
     id: number;
-    company_id: number;
     name: string;
     display_name: string;
     description: string;
@@ -42,7 +40,6 @@ const emptyForm = {
 };
 
 export const MCPServers: React.FC = () => {
-    const { selectedCompanyId } = useStore();
     const [servers, setServers] = useState<MCPServer[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
@@ -52,14 +49,13 @@ export const MCPServers: React.FC = () => {
     const [error, setError] = useState<string | null>(null);
 
     const fetchServers = useCallback(async () => {
-        if (!selectedCompanyId) return;
         try {
-            const res = await axios.get(`/api/mcp-servers?company_id=${selectedCompanyId}`);
+            const res = await axios.get('/api/mcp-servers');
             setServers(res.data || []);
         } catch (e) {
             console.error(e);
         }
-    }, [selectedCompanyId]);
+    }, []);
 
     useEffect(() => { fetchServers(); }, [fetchServers]);
 
@@ -91,7 +87,7 @@ export const MCPServers: React.FC = () => {
         e.preventDefault();
         setError(null);
         try {
-            const payload = { ...formData, company_id: selectedCompanyId };
+            const payload = { ...formData };
             if (editingId) {
                 await axios.put(`/api/mcp-servers/${editingId}`, payload);
             } else {

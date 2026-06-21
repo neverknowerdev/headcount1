@@ -84,39 +84,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 			}
 		}
 
-		// 3. Sync MCP Servers for this company (with preserved IDs, no auth tokens)
-		mcpRecs, mcpErr := fm.ListMCPServersFromDisk(shortName)
-		if mcpErr != nil {
-			log.Printf("Error listing MCP servers for %s: %v", shortName, mcpErr)
-		} else {
-			for _, rec := range mcpRecs {
-				var existingMCP db.MCPServer
-				if api.db.First(&existingMCP, rec.ID).Error != nil {
-					s := db.MCPServer{
-						ID:          rec.ID,
-						CompanyID:   existing.ID,
-						Name:        rec.Name,
-						DisplayName: rec.DisplayName,
-						Description: rec.Description,
-						Transport:   rec.Transport,
-						Command:     rec.Command,
-						Args:        rec.Args,
-						URL:         rec.URL,
-						Headers:     rec.Headers,
-						AuthType:    rec.AuthType,
-						Enabled:     rec.Enabled,
-						Builtin:     rec.Builtin,
-					}
-					if err := api.db.Omit("Company").Create(&s).Error; err != nil {
-						log.Printf("Failed to restore MCP server %d (%s): %v", rec.ID, rec.Name, err)
-					} else {
-						log.Printf("Restored MCP server %d (%s) for %s", rec.ID, rec.Name, shortName)
-					}
-				}
-			}
-		}
-
-		// 4. Sync Sprints for this company (with preserved IDs)
+		// 3. Sync Sprints for this company (with preserved IDs)
 		sprintRecords, err := fm.ListSprintsFromDisk(shortName)
 		if err != nil {
 			log.Printf("Error listing sprints for %s: %v", shortName, err)
@@ -159,7 +127,38 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
-	// 5. Sync Tasks (after companies and sprints are in DB)
+	// 5. Sync MCP Servers (global, no company FK)
+	mcpRecs, mcpErr := fm.ListMCPServersFromDisk()
+	if mcpErr != nil {
+		log.Printf("Error listing MCP servers: %v", mcpErr)
+	} else {
+		for _, rec := range mcpRecs {
+			var existingMCP db.MCPServer
+			if api.db.First(&existingMCP, rec.ID).Error != nil {
+				s := db.MCPServer{
+					ID:          rec.ID,
+					Name:        rec.Name,
+					DisplayName: rec.DisplayName,
+					Description: rec.Description,
+					Transport:   rec.Transport,
+					Command:     rec.Command,
+					Args:        rec.Args,
+					URL:         rec.URL,
+					Headers:     rec.Headers,
+					AuthType:    rec.AuthType,
+					Enabled:     rec.Enabled,
+					Builtin:     rec.Builtin,
+				}
+				if err := api.db.Create(&s).Error; err != nil {
+					log.Printf("Failed to restore MCP server %d (%s): %v", rec.ID, rec.Name, err)
+				} else {
+					log.Printf("Restored MCP server %d (%s)", rec.ID, rec.Name)
+				}
+			}
+		}
+	}
+
+	// 6. Sync Tasks (after companies and sprints are in DB)
 	for _, shortName := range compShortNames {
 		var comp db.Company
 		if api.db.Where("short_name = ?", shortName).First(&comp).Error != nil {
@@ -306,17 +305,13 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
 		}
 	}
 
-	// Export MCP servers (per company)
+	// Export MCP servers (global, like LLM providers)
 	var mcpServers []db.MCPServer
 	api.db.Find(&mcpServers)
 	for _, s := range mcpServers {
-		comp, ok := compByID[s.CompanyID]
-		if !ok {
-			continue
-		}
-		mcpPath := filepath.Join(basePath, "companies", comp.ShortName, "mcp-servers", formatID(s.ID)+".json")
+		mcpPath := filepath.Join(basePath, "data", "mcp-servers", formatID(s.ID)+".json")
 		if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
-			if err := fm.SaveMCPServer(comp, s); err != nil {
+			if err := fm.SaveMCPServer(s); err != nil {
 				log.Printf("Export: failed to write MCP server %d: %v", s.ID, err)
 			}
 		}

@@ -15,13 +15,7 @@ import (
 )
 
 func (api *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-	companyIDStr := r.URL.Query().Get("company_id")
-	companyID, err := strconv.Atoi(companyIDStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "company_id required")
-		return
-	}
-	servers, err := api.q.ListMCPServersByCompany(r.Context(), int32(companyID))
+	servers, err := api.q.ListMCPServers(r.Context())
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -35,8 +29,8 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
-	if req.Name == "" || req.Transport == "" || req.CompanyID == 0 {
-		api.respondError(w, http.StatusBadRequest, "name, transport, and company_id are required")
+	if req.Name == "" || req.Transport == "" {
+		api.respondError(w, http.StatusBadRequest, "name and transport are required")
 		return
 	}
 	req.Builtin = false // UI-created servers are never builtin
@@ -45,7 +39,7 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.saveMCPServerToDisk(r.Context(), s)
+	api.saveMCPServerToDisk(s)
 	api.respondJSON(w, http.StatusCreated, s)
 }
 
@@ -80,9 +74,7 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
-	// Preserve immutable fields.
 	req.ID = existing.ID
-	req.CompanyID = existing.CompanyID
 	req.Builtin = existing.Builtin
 	// Don't clear an existing auth token if the request sends an empty one.
 	if req.AuthToken == "" {
@@ -94,7 +86,7 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.saveMCPServerToDisk(r.Context(), s)
+	api.saveMCPServerToDisk(s)
 	api.respondJSON(w, http.StatusOK, s)
 }
 
@@ -117,12 +109,11 @@ func (api *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.deleteMCPServerFromDisk(r.Context(), s)
+	api.deleteMCPServerFromDisk(s.ID)
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 // DiscoverMCPServerTools connects to the MCP server and returns its tool list.
-// This is used by the UI to preview available tools.
 func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
@@ -180,34 +171,6 @@ func (api *API) GetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, assignments)
 }
 
-// saveMCPServerToDisk writes the MCP server config to the company's filesystem directory.
-// Auth tokens are never written to disk.
-func (api *API) saveMCPServerToDisk(ctx context.Context, s db.MCPServer) {
-	company, err := api.q.GetCompany(ctx, s.CompanyID)
-	if err != nil {
-		log.Printf("Warning: saveMCPServerToDisk: company %d not found: %v", s.CompanyID, err)
-		return
-	}
-	settings := LoadSettings()
-	fm := filesystem.NewManager(settings.BasePath)
-	if err := fm.SaveMCPServer(company, s); err != nil {
-		log.Printf("Warning: failed to write MCP server %d to disk: %v", s.ID, err)
-	}
-}
-
-// deleteMCPServerFromDisk removes the on-disk record for the MCP server.
-func (api *API) deleteMCPServerFromDisk(ctx context.Context, s db.MCPServer) {
-	company, err := api.q.GetCompany(ctx, s.CompanyID)
-	if err != nil {
-		return
-	}
-	settings := LoadSettings()
-	fm := filesystem.NewManager(settings.BasePath)
-	if err := fm.DeleteMCPServerFile(company, s.ID); err != nil {
-		log.Printf("Warning: failed to delete MCP server file %d: %v", s.ID, err)
-	}
-}
-
 // SetAgentMCPServers replaces all MCP assignments for an agent.
 func (api *API) SetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
@@ -225,4 +188,20 @@ func (api *API) SetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+func (api *API) saveMCPServerToDisk(s db.MCPServer) {
+	settings := LoadSettings()
+	fm := filesystem.NewManager(settings.BasePath)
+	if err := fm.SaveMCPServer(s); err != nil {
+		log.Printf("Warning: failed to write MCP server %d to disk: %v", s.ID, err)
+	}
+}
+
+func (api *API) deleteMCPServerFromDisk(id int32) {
+	settings := LoadSettings()
+	fm := filesystem.NewManager(settings.BasePath)
+	if err := fm.DeleteMCPServerFile(id); err != nil {
+		log.Printf("Warning: failed to delete MCP server file %d: %v", id, err)
+	}
 }
