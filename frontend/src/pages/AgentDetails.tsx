@@ -3,11 +3,8 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save } from 'lucide-react';
-import { useStore } from '../store';
-
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
-    const { selectedCompanyId } = useStore();
     const [agent, setAgent] = useState<any>(null);
     const [stats, setStats] = useState<any>(null);
     const [providers, setProviders] = useState<any[]>([]);
