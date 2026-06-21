@@ -125,6 +125,20 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/list", api.ListBackups)
 		r.Post("/restore", api.RestoreBackup)
 	})
+
+	r.Route("/mcp-servers", func(r chi.Router) {
+		r.Get("/", api.ListMCPServers)
+		r.Post("/", api.CreateMCPServer)
+		r.Get("/{id}", api.GetMCPServer)
+		r.Put("/{id}", api.UpdateMCPServer)
+		r.Delete("/{id}", api.DeleteMCPServer)
+		r.Post("/{id}/discover", api.DiscoverMCPServerTools)
+	})
+
+	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
+		r.Get("/", api.GetAgentMCPServers)
+		r.Put("/", api.SetAgentMCPServers)
+	})
 }
 
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {

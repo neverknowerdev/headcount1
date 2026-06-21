@@ -3,14 +3,18 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save } from 'lucide-react';
+import { useStore } from '../store';
 
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
+    const { selectedCompanyId } = useStore();
     const [agent, setAgent] = useState<any>(null);
     const [stats, setStats] = useState<any>(null);
     const [providers, setProviders] = useState<any[]>([]);
     const [activeTab, setActiveTab] = useState('overview');
     const [runs, setRuns] = useState<any[]>([]);
+    const [mcpServers, setMcpServers] = useState<any[]>([]);
+    const [mcpAssignments, setMcpAssignments] = useState<Record<number, boolean>>({});
 
     const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
 
@@ -42,9 +46,44 @@ export const AgentDetails: React.FC = () => {
         }
     }, [id]);
 
+    const fetchMCPData = useCallback(async () => {
+        if (!selectedCompanyId || !id) return;
+        try {
+            const [serversRes, assignRes] = await Promise.all([
+                axios.get(`/api/mcp-servers?company_id=${selectedCompanyId}`),
+                axios.get(`/api/agents/${id}/mcp-servers`),
+            ]);
+            setMcpServers(serversRes.data || []);
+            const map: Record<number, boolean> = {};
+            for (const a of (assignRes.data || [])) {
+                map[a.mcp_server_id] = a.enabled;
+            }
+            setMcpAssignments(map);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [id, selectedCompanyId]);
+
     useEffect(() => {
         fetchData();
     }, [fetchData]);
+
+    useEffect(() => {
+        if (activeTab === 'tools') fetchMCPData();
+    }, [activeTab, fetchMCPData]);
+
+    const handleSaveMCPAssignments = async () => {
+        try {
+            const assignments = Object.entries(mcpAssignments).map(([serverId, enabled]) => ({
+                mcp_server_id: parseInt(serverId),
+                enabled,
+            }));
+            await axios.put(`/api/agents/${id}/mcp-servers`, assignments);
+            alert('MCP server assignments saved!');
+        } catch (e) {
+            alert('Failed to save MCP assignments');
+        }
+    };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -148,53 +187,97 @@ export const AgentDetails: React.FC = () => {
 
 
                 {activeTab === 'tools' && (
-                    <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border max-w-2xl space-y-4">
-                        <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
-                            <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
-                                <option value="primary">Primary</option>
-                                <option value="subagent">Subagent</option>
-                            </select>
-                        </div>
-                        <div className="pt-4">
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
-                            <div className="space-y-2">
-                                {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill', 'update_task_status'].map(tool => {
-                                    const perms = JSON.parse(formData.permissions || '{}');
-                                    const isEnabled = tool === 'update_task_status' ? true : (perms[tool] !== 'deny');
-                                    return (
-                                        <div key={tool} className="flex items-center">
-                                            <input
-                                                type="checkbox"
-                                                id={`tool-${tool}`}
-                                                checked={isEnabled}
-                                                disabled={tool === 'update_task_status'}
-                                                onChange={(e) => {
-                                                    const newPerms = { ...perms };
-                                                    if (e.target.checked) {
-                                                        newPerms[tool] = 'allow';
-                                                    } else {
-                                                        newPerms[tool] = 'deny';
-                                                    }
-                                                    setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
-                                                }}
-                                                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded disabled:opacity-50"
-                                            />
-                                            <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
-                                                {tool}
-                                            </label>
-                                        </div>
-                                    );
-                                })}
+                    <div className="max-w-2xl space-y-6">
+                        <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-4">
+                            <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
+                                <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
+                                    <option value="primary">Primary</option>
+                                    <option value="subagent">Subagent</option>
+                                </select>
                             </div>
+                            <div className="pt-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+                                <div className="space-y-2">
+                                    {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill', 'update_task_status'].map(tool => {
+                                        const perms = JSON.parse(formData.permissions || '{}');
+                                        const isEnabled = tool === 'update_task_status' ? true : (perms[tool] !== 'deny');
+                                        return (
+                                            <div key={tool} className="flex items-center">
+                                                <input
+                                                    type="checkbox"
+                                                    id={`tool-${tool}`}
+                                                    checked={isEnabled}
+                                                    disabled={tool === 'update_task_status'}
+                                                    onChange={(e) => {
+                                                        const newPerms = { ...perms };
+                                                        if (e.target.checked) {
+                                                            newPerms[tool] = 'allow';
+                                                        } else {
+                                                            newPerms[tool] = 'deny';
+                                                        }
+                                                        setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
+                                                    }}
+                                                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded disabled:opacity-50"
+                                                />
+                                                <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
+                                                    {tool}
+                                                    {tool === 'update_task_status' && <span className="ml-2 text-xs text-gray-400">(always enabled — part of Paperclip2 MCP)</span>}
+                                                </label>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t mt-6">
+                                <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
+                                    <Save size={16} className="mr-2" /> Save Changes
+                                </button>
+                            </div>
+                        </form>
+
+                        <div className="bg-white p-6 rounded-lg shadow border space-y-4">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="font-bold text-lg">MCP Servers</h3>
+                                <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage MCP Servers</Link>
+                            </div>
+                            {mcpServers.length === 0 ? (
+                                <p className="text-sm text-gray-500 italic">No MCP servers configured for this workspace. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Add one</Link>.</p>
+                            ) : (
+                                <div className="space-y-2">
+                                    {mcpServers.map((srv: any) => {
+                                        return (
+                                            <div key={srv.id} className="flex items-center gap-3">
+                                                <input
+                                                    type="checkbox"
+                                                    id={`mcp-${srv.id}`}
+                                                    checked={!!mcpAssignments[srv.id]}
+                                                    disabled={srv.builtin}
+                                                    onChange={e => {
+                                                        setMcpAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }));
+                                                    }}
+                                                    className="h-4 w-4 text-indigo-600 border-gray-300 rounded disabled:opacity-50"
+                                                />
+                                                <label htmlFor={`mcp-${srv.id}`} className="text-sm text-gray-900 flex-1">
+                                                    <span className="font-medium">{srv.display_name || srv.name}</span>
+                                                    {srv.builtin && <span className="ml-2 text-xs text-indigo-500">(built-in, always available)</span>}
+                                                    {srv.description && <span className="ml-2 text-xs text-gray-400">{srv.description}</span>}
+                                                </label>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            )}
+                            {mcpServers.length > 0 && (
+                                <div className="pt-3 border-t">
+                                    <button onClick={handleSaveMCPAssignments} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm">
+                                        <Save size={14} className="mr-2" /> Save MCP Assignments
+                                    </button>
+                                </div>
+                            )}
                         </div>
-                        <div className="pt-4 border-t mt-6">
-                            <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
-                                <Save size={16} className="mr-2" /> Save Changes
-                            </button>
-                        </div>
-                    </form>
+                    </div>
                 )}
 
                 {activeTab === 'settings' && (

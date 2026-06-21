@@ -73,6 +73,8 @@ func main() {
 		&db.Run{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.MCPServer{},
+		&db.AgentMCPServer{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)

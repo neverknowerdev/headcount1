@@ -300,6 +300,37 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
+	// Load MCP servers enabled for this agent and set up two-phase discovery.
+	if mcpServers, mcpErr := e.q.ListMCPServersForAgent(ctx, agent.ID); mcpErr == nil && len(mcpServers) > 0 {
+		var externalMCPs []db.MCPServer
+		for _, srv := range mcpServers {
+			if srv.Transport == "builtin" {
+				continue // built-in tools are already in the registry
+			}
+			// Honour AllowedMCPs filter from agent config.
+			if agentCfg != nil && len(agentCfg.AllowedMCPs) > 0 {
+				allowed := false
+				for _, name := range agentCfg.AllowedMCPs {
+					if name == srv.Name {
+						allowed = true
+						break
+					}
+				}
+				if !allowed {
+					continue
+				}
+			}
+			externalMCPs = append(externalMCPs, srv)
+		}
+		if len(externalMCPs) > 0 {
+			discoverTool := tools.NewDiscoverMCPTools(registry, externalMCPs)
+			registry.Register(discoverTool)
+			e.logInfo(proxyLogger, fmt.Sprintf("MCP: %d external server(s) available for discovery", len(externalMCPs)))
+		}
+	} else if mcpErr != nil {
+		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP servers for agent: %v", mcpErr))
+	}
+
 	// Determine agent mode and reasoning level from config.
 	agentMode := aicli.ModeMessageHistory
 	reasoningLevel := ""

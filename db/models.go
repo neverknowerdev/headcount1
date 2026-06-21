@@ -161,6 +161,35 @@ type RunTokenStats struct {
 	TotalTokens      int `json:"total_tokens"`      // sum of everything above (excludes CachedTokens)
 }
 
+// MCPServer stores configuration for an MCP (Model Context Protocol) server.
+type MCPServer struct {
+	ID          int32     `json:"id" gorm:"primaryKey"`
+	CompanyID   int32     `json:"company_id" gorm:"not null"`
+	Company     Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Name        string    `json:"name" gorm:"not null"`         // unique slug, e.g. "github"
+	DisplayName string    `json:"display_name"`                  // e.g. "GitHub MCP"
+	Description string    `json:"description"`                   // brief description sent to agents
+	Transport   string    `json:"transport" gorm:"not null"`     // "stdio", "http", "builtin"
+	Command     string    `json:"command"`                       // stdio: executable path
+	Args        string    `json:"args" gorm:"type:text"`         // stdio: JSON array of string args
+	URL         string    `json:"url"`                           // http: base URL
+	Headers     string    `json:"headers" gorm:"type:text"`      // http: JSON object of extra headers
+	AuthType    string    `json:"auth_type"`                     // "none", "bearer", "oauth2"
+	AuthToken   string    `json:"auth_token"`                    // bearer token (stored plaintext for now)
+	Enabled     bool      `json:"enabled" gorm:"not null;default:true"`
+	Builtin     bool      `json:"builtin" gorm:"not null;default:false"` // pre-defined, cannot be deleted
+	Agents      []Agent   `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// AgentMCPServer is the join table for the Agent <-> MCPServer many-to-many.
+type AgentMCPServer struct {
+	AgentID     int32 `json:"agent_id" gorm:"primaryKey"`
+	MCPServerID int32 `json:"mcp_server_id" gorm:"primaryKey"`
+	Enabled     bool  `json:"enabled" gorm:"not null;default:true"`
+}
+
 type ActivityLog struct {
 	ID         int32     `json:"id" gorm:"primaryKey"`
 	CompanyID  int32     `json:"company_id" gorm:"not null"`
