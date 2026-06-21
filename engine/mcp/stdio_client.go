@@ -23,10 +23,14 @@ type stdioClient struct {
 
 // newStdioClient spawns the MCP server subprocess. extraEnv is a list of
 // "KEY=VALUE" strings appended to the current process environment.
-func newStdioClient(command string, args []string, extraEnv []string) (*stdioClient, error) {
+// dir sets the working directory of the subprocess; empty string means inherit.
+func newStdioClient(command string, args []string, extraEnv []string, dir string) (*stdioClient, error) {
 	cmd := exec.Command(command, args...)
 	if len(extraEnv) > 0 {
 		cmd.Env = append(os.Environ(), extraEnv...)
+	}
+	if dir != "" {
+		cmd.Dir = dir
 	}
 
 	stdin, err := cmd.StdinPipe()

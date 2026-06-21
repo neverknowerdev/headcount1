@@ -295,6 +295,23 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}))
 	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent)))
 
+	// Wire codegraph proxy: one MCP server process per project, project names
+	// exposed as an enum on every codegraph tool call.
+	if cgServers, cgErr := e.q.ListCodegraphProjectServers(ctx, task.CompanyID); cgErr == nil && len(cgServers) > 0 {
+		var currentProj *db.Project
+		if task.ProjectID != nil {
+			if p, pErr := e.q.GetProject(ctx, *task.ProjectID); pErr == nil {
+				currentProj = &p
+			}
+		}
+		cgProxy := tools.NewCodegraphProxy(currentProj, cgServers)
+		cgProxy.RegisterAll(registry)
+		defer cgProxy.Close()
+		e.logInfo(proxyLogger, fmt.Sprintf("Codegraph: %d project(s) available", len(cgServers)))
+	} else if cgErr != nil {
+		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
+	}
+
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)

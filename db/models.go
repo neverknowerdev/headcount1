@@ -21,6 +21,7 @@ type Project struct {
 	Description     string    `json:"description"`
 	WorkspaceFolder string    `json:"workspace_folder"`
 	RepositoryUrl   string    `json:"repository_url"`
+	IsExternal      bool      `json:"is_external" gorm:"not null;default:false"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -179,6 +180,8 @@ type MCPServer struct {
 	ToolsCache  string    `json:"tools_cache" gorm:"type:text"`     // JSON array of discovered tools, cached on startup
 	Enabled     bool      `json:"enabled" gorm:"not null;default:true"`
 	Builtin     bool      `json:"builtin" gorm:"not null;default:false"` // pre-defined, cannot be deleted
+	WorkDir     string    `json:"work_dir"`                             // working directory for stdio servers (e.g. project repo path)
+	ProjectID   *int32    `json:"project_id"`                           // set for auto-created codegraph servers; soft ref (no FK constraint)
 	Agents      []Agent   `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

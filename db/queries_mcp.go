@@ -33,6 +33,36 @@ func (q *Queries) DeleteMCPServer(ctx context.Context, id int32) error {
 	return q.db.WithContext(ctx).Delete(&MCPServer{}, id).Error
 }
 
+// CodegraphProjectServer pairs a Project with its auto-created codegraph MCP server.
+type CodegraphProjectServer struct {
+	Project Project
+	Server  MCPServer
+}
+
+// ListCodegraphProjectServers returns all projects for a company that have an
+// associated codegraph MCP server (ProjectID set on the server).
+func (q *Queries) ListCodegraphProjectServers(ctx context.Context, companyID int32) ([]CodegraphProjectServer, error) {
+	var servers []MCPServer
+	err := q.db.WithContext(ctx).
+		Where("project_id IS NOT NULL").
+		Find(&servers).Error
+	if err != nil {
+		return nil, err
+	}
+
+	var result []CodegraphProjectServer
+	for _, s := range servers {
+		var proj Project
+		if err := q.db.WithContext(ctx).
+			Where("id = ? AND company_id = ?", *s.ProjectID, companyID).
+			First(&proj).Error; err != nil {
+			continue // project doesn't belong to this company; skip
+		}
+		result = append(result, CodegraphProjectServer{Project: proj, Server: s})
+	}
+	return result, nil
+}
+
 func (q *Queries) UpdateMCPServerToolsCache(ctx context.Context, id int32, toolsJSON string) error {
 	return q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", id).Update("tools_cache", toolsJSON).Error
 }

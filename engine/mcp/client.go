@@ -40,7 +40,7 @@ func NewClient(s db.MCPServer) (Client, error) {
 		if s.AuthEnvVar != "" && s.AuthToken != "" {
 			extraEnv = []string{s.AuthEnvVar + "=" + s.AuthToken}
 		}
-		return newStdioClient(s.Command, args, extraEnv)
+		return newStdioClient(s.Command, args, extraEnv, s.WorkDir)
 	case "http":
 		if s.URL == "" {
 			return nil, fmt.Errorf("mcp server %q: http transport requires a URL", s.Name)
