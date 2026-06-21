@@ -66,6 +66,7 @@ export const MCPServers: React.FC = () => {
     const [formData, setFormData] = useState<typeof emptyForm>({ ...emptyForm });
     const [discoveredTools, setDiscoveredTools] = useState<Record<number, MCPTool[]>>({});
     const [discovering, setDiscovering] = useState<number | null>(null);
+    const [discoverErrors, setDiscoverErrors] = useState<Record<number, string>>({});
     const [error, setError] = useState<string | null>(null);
 
     const fetchServers = useCallback(async () => {
@@ -173,11 +174,13 @@ export const MCPServers: React.FC = () => {
 
     const handleDiscover = async (id: number) => {
         setDiscovering(id);
+        setDiscoverErrors(prev => { const n = { ...prev }; delete n[id]; return n; });
         try {
             const res = await axios.post(`/api/mcp-servers/${id}/discover`);
             setDiscoveredTools(prev => ({ ...prev, [id]: res.data.tools || [] }));
         } catch (e: any) {
-            alert('Discovery failed: ' + (e.response?.data?.error || e.message));
+            const msg = e.response?.data?.error || e.message || 'Unknown error';
+            setDiscoverErrors(prev => ({ ...prev, [id]: msg }));
         } finally {
             setDiscovering(null);
         }
@@ -192,8 +195,8 @@ export const MCPServers: React.FC = () => {
         <div className="h-full flex flex-col space-y-6">
             <div className="flex justify-between items-center">
                 <div>
-                    <h1 className="text-2xl font-bold">MCP Servers</h1>
-                    <p className="text-sm text-gray-500 mt-1">Connect Model Context Protocol servers to extend agent capabilities.</p>
+                    <h1 className="text-2xl font-bold">Tools & MCPs</h1>
+                    <p className="text-sm text-gray-500 mt-1">Connect MCP servers to extend agent capabilities.</p>
                 </div>
                 <button
                     onClick={() => openModal()}
@@ -245,6 +248,7 @@ export const MCPServers: React.FC = () => {
                                 server={s}
                                 tools={discoveredTools[s.id]}
                                 discovering={discovering === s.id}
+                                discoverError={discoverErrors[s.id]}
                                 onConnect={() => openConnectModal(s)}
                                 onToggle={() => handleToggleEnabled(s)}
                                 onDiscover={() => handleDiscover(s.id)}
@@ -300,6 +304,9 @@ export const MCPServers: React.FC = () => {
                                         </button>
                                     </div>
                                 </div>
+                                {discoverErrors[s.id] && (
+                                    <div className="mt-2 text-xs text-red-600 bg-red-50 rounded p-2">{discoverErrors[s.id]}</div>
+                                )}
                                 {discoveredTools[s.id] && (
                                     <div className="mt-3 pt-3 border-t">
                                         <p className="text-xs font-semibold text-gray-500 mb-2">{discoveredTools[s.id].length} tool{discoveredTools[s.id].length !== 1 ? 's' : ''} available</p>
@@ -478,16 +485,30 @@ export const MCPServers: React.FC = () => {
     );
 };
 
+const INSTALL_INSTRUCTIONS: Record<string, { cmd: string; note: string }> = {
+    github: {
+        cmd: 'brew install github/tap/github-mcp-server',
+        note: 'Then generate a token at github.com/settings/tokens with repo + read:org scope.',
+    },
+    'google-docs': {
+        cmd: 'npm install -g @modelcontextprotocol/server-gdrive',
+        note: 'Create a service account in Google Cloud Console and download the credentials JSON file.',
+    },
+};
+
 // Card for pre-defined integrations (github, google-docs, etc.)
-function PredefinedServerCard({ server, tools, discovering, onConnect, onToggle, onDiscover }: {
+function PredefinedServerCard({ server, tools, discovering, discoverError, onConnect, onToggle, onDiscover }: {
     server: MCPServer;
     tools?: MCPTool[];
     discovering: boolean;
+    discoverError?: string;
     onConnect: () => void;
     onToggle: () => void;
     onDiscover: () => void;
 }) {
+    const [showDetails, setShowDetails] = React.useState(false);
     const isConnected = server.enabled;
+    const install = INSTALL_INSTRUCTIONS[server.name];
 
     return (
         <div className={`bg-white rounded-lg border shadow-sm p-5 ${!isConnected ? 'border-gray-200' : 'border-green-200'}`}>
@@ -514,28 +535,55 @@ function PredefinedServerCard({ server, tools, discovering, onConnect, onToggle,
                     <p className="text-sm text-gray-600 mb-3">{server.description}</p>
 
                     {!isConnected ? (
-                        <button
-                            onClick={onConnect}
-                            className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700"
-                        >
-                            <Key size={13} /> Connect
-                        </button>
-                    ) : (
-                        <div className="flex items-center gap-2">
+                        <div className="space-y-3">
+                            {install && (
+                                <div className="bg-gray-50 rounded p-3 text-xs space-y-1">
+                                    <p className="font-semibold text-gray-600">Setup:</p>
+                                    <p className="font-mono text-gray-700 bg-gray-100 rounded px-2 py-1">{install.cmd}</p>
+                                    <p className="text-gray-500">{install.note}</p>
+                                </div>
+                            )}
                             <button
-                                onClick={onDiscover}
-                                disabled={discovering}
-                                className="text-blue-500 hover:text-blue-700 px-2 py-1 text-xs border border-blue-200 rounded hover:bg-blue-50 flex items-center gap-1"
+                                onClick={onConnect}
+                                className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700"
                             >
-                                <Search size={13} />
-                                {discovering ? 'Loading…' : 'Discover Tools'}
+                                <Key size={13} /> Connect
                             </button>
-                            <button onClick={onConnect} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded flex items-center gap-1">
-                                <Edit2 size={12} /> Update token
-                            </button>
-                            <button onClick={onToggle} className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded flex items-center gap-1">
-                                <Power size={12} /> Disconnect
-                            </button>
+                        </div>
+                    ) : (
+                        <div className="space-y-2">
+                            <div className="flex items-center gap-2 flex-wrap">
+                                <button
+                                    onClick={onDiscover}
+                                    disabled={discovering}
+                                    className="text-blue-500 hover:text-blue-700 px-2 py-1 text-xs border border-blue-200 rounded hover:bg-blue-50 flex items-center gap-1"
+                                >
+                                    <Search size={13} />
+                                    {discovering ? 'Loading…' : 'Discover Tools'}
+                                </button>
+                                <button onClick={onConnect} className="text-xs text-gray-600 hover:text-gray-900 px-2 py-1 border border-gray-200 rounded flex items-center gap-1">
+                                    <Key size={12} /> Re-authenticate
+                                </button>
+                                <button onClick={() => setShowDetails(v => !v)} className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded flex items-center gap-1">
+                                    <Edit2 size={12} /> {showDetails ? 'Hide details' : 'Details'}
+                                </button>
+                                <button onClick={onToggle} className="text-xs text-red-500 hover:text-red-700 px-2 py-1 border border-red-200 rounded flex items-center gap-1">
+                                    <Power size={12} /> Disconnect
+                                </button>
+                            </div>
+                            {discoverError && (
+                                <div className="text-xs text-red-600 bg-red-50 border border-red-100 rounded p-2">
+                                    <span className="font-semibold">Discovery failed:</span> {discoverError}
+                                    {install && <span className="block mt-1 text-gray-500">Make sure the binary is installed: <span className="font-mono">{install.cmd}</span></span>}
+                                </div>
+                            )}
+                            {showDetails && (
+                                <div className="bg-gray-50 rounded p-3 text-xs space-y-1 border border-gray-100">
+                                    {server.command && <p><span className="font-semibold text-gray-500">Command:</span> <span className="font-mono text-gray-700">{server.command} {server.args && server.args !== '[]' ? JSON.parse(server.args).join(' ') : ''}</span></p>}
+                                    {server.auth_env_var && <p><span className="font-semibold text-gray-500">Auth env var:</span> <span className="font-mono text-gray-700">{server.auth_env_var}</span></p>}
+                                    {install && <p className="text-gray-500 pt-1">{install.note}</p>}
+                                </div>
+                            )}
                         </div>
                     )}
                 </div>

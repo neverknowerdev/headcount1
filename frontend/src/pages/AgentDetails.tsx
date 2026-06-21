@@ -47,10 +47,10 @@ export const AgentDetails: React.FC = () => {
     }, [id]);
 
     const fetchMCPData = useCallback(async () => {
-        if (!selectedCompanyId || !id) return;
+        if (!id) return;
         try {
             const [serversRes, assignRes] = await Promise.all([
-                axios.get(`/api/mcp-servers?company_id=${selectedCompanyId}`),
+                axios.get('/api/mcp-servers'),
                 axios.get(`/api/agents/${id}/mcp-servers`),
             ]);
             setMcpServers(serversRes.data || []);
@@ -58,11 +58,14 @@ export const AgentDetails: React.FC = () => {
             for (const a of (assignRes.data || [])) {
                 map[a.mcp_server_id] = a.enabled;
             }
+            // Paperclip2 is always on — ensure it's always reflected as enabled
+            const p2 = (serversRes.data || []).find((s: any) => s.name === 'paperclip2');
+            if (p2) map[p2.id] = true;
             setMcpAssignments(map);
         } catch (e) {
             console.error(e);
         }
-    }, [id, selectedCompanyId]);
+    }, [id]);
 
     useEffect(() => {
         fetchData();
@@ -74,12 +77,16 @@ export const AgentDetails: React.FC = () => {
 
     const handleSaveMCPAssignments = async () => {
         try {
+            // Always include paperclip2 as enabled
+            const p2 = mcpServers.find((s: any) => s.name === 'paperclip2');
             const assignments = Object.entries(mcpAssignments).map(([serverId, enabled]) => ({
                 mcp_server_id: parseInt(serverId),
                 enabled,
             }));
+            if (p2 && !assignments.find(a => a.mcp_server_id === p2.id)) {
+                assignments.push({ mcp_server_id: p2.id, enabled: true });
+            }
             await axios.put(`/api/agents/${id}/mcp-servers`, assignments);
-            alert('MCP server assignments saved!');
         } catch (e) {
             alert('Failed to save MCP assignments');
         }
@@ -239,43 +246,58 @@ export const AgentDetails: React.FC = () => {
 
                         <div className="bg-white p-6 rounded-lg shadow border space-y-4">
                             <div className="flex items-center justify-between mb-2">
-                                <h3 className="font-bold text-lg">MCP Servers</h3>
-                                <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage MCP Servers</Link>
+                                <h3 className="font-bold text-lg">Tools & MCPs</h3>
+                                <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Tools & MCPs</Link>
                             </div>
-                            {mcpServers.length === 0 ? (
-                                <p className="text-sm text-gray-500 italic">No MCP servers configured for this workspace. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Add one</Link>.</p>
-                            ) : (
-                                <div className="space-y-2">
-                                    {mcpServers.map((srv: any) => {
-                                        return (
+
+                            {/* Paperclip2 — always on */}
+                            {(() => {
+                                const p2 = mcpServers.find((s: any) => s.name === 'paperclip2');
+                                if (!p2) return null;
+                                return (
+                                    <div className="flex items-center gap-3 p-3 bg-indigo-50 rounded-lg border border-indigo-100">
+                                        <input type="checkbox" checked disabled className="h-4 w-4 text-indigo-600 border-gray-300 rounded opacity-60" />
+                                        <div className="flex-1 min-w-0">
+                                            <span className="text-sm font-medium text-gray-900">{p2.display_name}</span>
+                                            <span className="ml-2 text-xs text-indigo-600 font-medium">Always On</span>
+                                            <p className="text-xs text-gray-500 mt-0.5">{p2.description}</p>
+                                        </div>
+                                    </div>
+                                );
+                            })()}
+
+                            {/* Optional connected MCPs */}
+                            {(() => {
+                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.enabled);
+                                if (optional.length === 0) return (
+                                    <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
+                                );
+                                return (
+                                    <div className="space-y-2">
+                                        {optional.map((srv: any) => (
                                             <div key={srv.id} className="flex items-center gap-3">
                                                 <input
                                                     type="checkbox"
                                                     id={`mcp-${srv.id}`}
                                                     checked={!!mcpAssignments[srv.id]}
-                                                    disabled={srv.builtin}
-                                                    onChange={e => {
-                                                        setMcpAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }));
-                                                    }}
-                                                    className="h-4 w-4 text-indigo-600 border-gray-300 rounded disabled:opacity-50"
+                                                    onChange={e => setMcpAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }))}
+                                                    className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
                                                 />
                                                 <label htmlFor={`mcp-${srv.id}`} className="text-sm text-gray-900 flex-1">
                                                     <span className="font-medium">{srv.display_name || srv.name}</span>
-                                                    {srv.builtin && <span className="ml-2 text-xs text-indigo-500">(built-in, always available)</span>}
                                                     {srv.description && <span className="ml-2 text-xs text-gray-400">{srv.description}</span>}
                                                 </label>
                                             </div>
-                                        );
-                                    })}
-                                </div>
-                            )}
-                            {mcpServers.length > 0 && (
-                                <div className="pt-3 border-t">
-                                    <button onClick={handleSaveMCPAssignments} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm">
-                                        <Save size={14} className="mr-2" /> Save MCP Assignments
-                                    </button>
-                                </div>
-                            )}
+                                        ))}
+                                    </div>
+                                );
+                            })()}
+
+                            <div className="pt-3 border-t">
+                                <button onClick={handleSaveMCPAssignments} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm">
+                                    <Save size={14} className="mr-2" /> Save
+                                </button>
+                            </div>
                         </div>
                     </div>
                 )}
