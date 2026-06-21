@@ -93,9 +93,9 @@ func New(cfg Config) *Agent {
 func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (string, error) {
 	switch a.Mode {
 	case ModeMessageHistory, "":
-		return a.runMessageHistory(ctx, systemPrompt, userMessage, "")
-	case ModeCompactThinking:
 		return a.runMessageHistory(ctx, systemPrompt, userMessage, a.reasoningEffort())
+	case ModeCompactThinking:
+		return "", fmt.Errorf("compact_thinking mode is not yet implemented")
 	default:
 		return "", fmt.Errorf("unsupported agent mode: %s", a.Mode)
 	}

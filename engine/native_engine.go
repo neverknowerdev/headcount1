@@ -293,7 +293,11 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		return nil
 	}))
-	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent)))
+	var agentNames []string
+	if e.agentFactory != nil {
+		agentNames = e.agentFactory.ListNames()
+	}
+	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
 
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
