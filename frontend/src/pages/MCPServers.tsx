@@ -90,6 +90,8 @@ export const MCPServers: React.FC = () => {
         }
     }, []);
 
+    useEffect(() => { fetchServers(); }, [fetchServers]);
+
     const openModal = (s?: MCPServer) => {
         setError(null);
         if (s) {
