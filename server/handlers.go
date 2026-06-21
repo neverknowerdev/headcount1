@@ -36,6 +36,11 @@ func (s *Server) Sync(ctx context.Context) error {
 	return api.SyncDBWithFilesystem(ctx)
 }
 
+func (s *Server) CacheMCPTools(ctx context.Context) {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api.DiscoverAndCacheAllMCPTools(ctx)
+}
+
 func (s *Server) Mount(r chi.Router) {
 
 	go s.hub.Run()

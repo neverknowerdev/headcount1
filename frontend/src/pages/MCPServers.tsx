@@ -15,6 +15,7 @@ interface MCPServer {
     auth_type: string;
     auth_env_var: string;
     auth_token: string;
+    tools_cache: string;
     enabled: boolean;
     builtin: boolean;
     created_at: string;
@@ -72,23 +73,22 @@ export const MCPServers: React.FC = () => {
     const fetchServers = useCallback(async () => {
         try {
             const res = await axios.get('/api/mcp-servers');
-            setServers(res.data || []);
+            const data: MCPServer[] = res.data || [];
+            setServers(data);
+            // Seed discoveredTools from cached tools stored on the server
+            const cached: Record<number, MCPTool[]> = {};
+            for (const s of data) {
+                if (s.name === 'paperclip2') {
+                    cached[s.id] = PAPERCLIP2_TOOLS;
+                } else if (s.tools_cache) {
+                    try { cached[s.id] = JSON.parse(s.tools_cache); } catch {}
+                }
+            }
+            setDiscoveredTools(cached);
         } catch (e) {
             console.error(e);
         }
     }, []);
-
-    // Auto-show paperclip2 tools on load
-    useEffect(() => {
-        fetchServers();
-    }, [fetchServers]);
-
-    useEffect(() => {
-        const p2 = servers.find(s => s.name === 'paperclip2');
-        if (p2 && !discoveredTools[p2.id]) {
-            setDiscoveredTools(prev => ({ ...prev, [p2.id]: PAPERCLIP2_TOOLS }));
-        }
-    }, [servers]);
 
     const openModal = (s?: MCPServer) => {
         setError(null);

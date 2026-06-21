@@ -14,6 +14,65 @@ import (
 	"github.com/go-chi/chi/v5"
 )
 
+// DiscoverAndCacheAllMCPTools runs tool discovery for all enabled MCP servers
+// and stores the results in tools_cache. Called in a background goroutine on startup.
+func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
+	servers, err := api.q.ListMCPServers(ctx)
+	if err != nil {
+		log.Printf("MCP cache: failed to list servers: %v", err)
+		return
+	}
+	for _, s := range servers {
+		if !s.Enabled {
+			continue
+		}
+		var toolsJSON string
+		if s.Transport == "builtin" {
+			// Paperclip2: hardcode tools
+			type slimTool struct {
+				Name        string `json:"name"`
+				Description string `json:"description"`
+			}
+			builtins := []slimTool{
+				{Name: "update_task_status", Description: "Update the status of the current task (to-do, in-progress, in-review, done, blocked, cancelled)."},
+				{Name: "create_subtask", Description: "Create a new subtask and assign it to a sub-agent for execution."},
+			}
+			if b, err := json.Marshal(builtins); err == nil {
+				toolsJSON = string(b)
+			}
+		} else {
+			client, err := mcp.NewClient(s)
+			if err != nil {
+				log.Printf("MCP cache: %s: connect failed: %v", s.Name, err)
+				continue
+			}
+			discCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+			_, initErr := client.Initialize(discCtx)
+			if initErr == nil {
+				tools, listErr := client.ListTools(discCtx)
+				if listErr == nil {
+					if b, err := json.Marshal(tools); err == nil {
+						toolsJSON = string(b)
+					}
+				} else {
+					log.Printf("MCP cache: %s: list tools failed: %v", s.Name, listErr)
+				}
+			} else {
+				log.Printf("MCP cache: %s: initialize failed: %v", s.Name, initErr)
+			}
+			client.Close()
+			cancel()
+		}
+		if toolsJSON != "" {
+			if err := api.q.UpdateMCPServerToolsCache(ctx, s.ID, toolsJSON); err != nil {
+				log.Printf("MCP cache: %s: save cache failed: %v", s.Name, err)
+			} else {
+				log.Printf("MCP cache: %s: cached tools", s.Name)
+			}
+		}
+	}
+}
+
 func (api *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
 	servers, err := api.q.ListMCPServers(r.Context())
 	if err != nil {
@@ -161,6 +220,10 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusBadGateway, "MCP tools/list failed: "+err.Error())
 		return
+	}
+	// Persist discovered tools to cache so they survive restarts and load on page open.
+	if b, err := json.Marshal(mcpTools); err == nil {
+		_ = api.q.UpdateMCPServerToolsCache(r.Context(), int32(id), string(b))
 	}
 	api.respondJSON(w, http.StatusOK, map[string]any{"tools": mcpTools})
 }

@@ -176,6 +176,7 @@ type MCPServer struct {
 	AuthType    string    `json:"auth_type"`                        // "none", "bearer", "credentials-file"
 	AuthToken   string    `json:"auth_token"`                       // bearer token or credentials path (never written to disk)
 	AuthEnvVar  string    `json:"auth_env_var"`                     // env var name to inject AuthToken into stdio processes
+	ToolsCache  string    `json:"tools_cache" gorm:"type:text"`     // JSON array of discovered tools, cached on startup
 	Enabled     bool      `json:"enabled" gorm:"not null;default:true"`
 	Builtin     bool      `json:"builtin" gorm:"not null;default:false"` // pre-defined, cannot be deleted
 	Agents      []Agent   `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`

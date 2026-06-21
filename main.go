@@ -100,6 +100,9 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
+	// Discover and cache tools for all enabled MCP servers in the background.
+	go srv.CacheMCPTools(context.Background())
+
 	// Check if backup is needed on startup
 	paperclipHome := db.PaperclipHome()
 	if backup.ShouldBackupOnStartup(paperclipHome) {

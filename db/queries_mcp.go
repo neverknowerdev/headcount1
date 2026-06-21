@@ -33,6 +33,10 @@ func (q *Queries) DeleteMCPServer(ctx context.Context, id int32) error {
 	return q.db.WithContext(ctx).Delete(&MCPServer{}, id).Error
 }
 
+func (q *Queries) UpdateMCPServerToolsCache(ctx context.Context, id int32, toolsJSON string) error {
+	return q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", id).Update("tools_cache", toolsJSON).Error
+}
+
 // ListMCPServersForAgent returns all MCP servers enabled for the given agent.
 func (q *Queries) ListMCPServersForAgent(ctx context.Context, agentID int32) ([]MCPServer, error) {
 	var servers []MCPServer
