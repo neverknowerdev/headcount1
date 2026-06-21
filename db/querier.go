@@ -33,6 +33,11 @@ type TaskQuerier interface {
 	GetTask(ctx context.Context, id int32) (Task, error)
 }
 
+type SubtaskQuerier interface {
+	ListSubtasksByParent(ctx context.Context, parentID int32) ([]Task, error)
+	CountRunningSubtasks(ctx context.Context, parentID int32) (int64, error)
+}
+
 type CommentQuerier interface {
 	CreateComment(ctx context.Context, c Comment) (Comment, error)
 	ListCommentsByTask(ctx context.Context, taskID int32) ([]Comment, error)
@@ -78,6 +83,7 @@ type Querier interface {
 	ProjectQuerier
 	AgentQuerier
 	TaskQuerier
+	SubtaskQuerier
 	CommentQuerier
 	AttachmentQuerier
 	RunQuerier
