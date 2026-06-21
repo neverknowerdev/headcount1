@@ -554,3 +554,93 @@ func (m *Manager) ListTaskCommentsFromDisk(companyShortName string, taskID int32
 	}
 	return recs, nil
 }
+
+// MCPServerRecord is a flat MCPServer for filesystem storage (no GORM associations).
+type MCPServerRecord struct {
+	ID          int32  `json:"id"`
+	CompanyID   int32  `json:"company_id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+	Transport   string `json:"transport"`
+	Command     string `json:"command,omitempty"`
+	Args        string `json:"args,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Headers     string `json:"headers,omitempty"`
+	AuthType    string `json:"auth_type,omitempty"`
+	// AuthToken is intentionally omitted — credentials are not written to disk.
+	Enabled bool `json:"enabled"`
+	Builtin bool `json:"builtin"`
+}
+
+func (m *Manager) mcpServerDir(companyShortName string) string {
+	return filepath.Join(m.basePath, "companies", companyShortName, "mcp-servers")
+}
+
+// SaveMCPServer writes companies/{shortName}/mcp-servers/{id}.json.
+// Auth tokens are never written to disk.
+func (m *Manager) SaveMCPServer(company db.Company, s db.MCPServer) error {
+	dir := m.mcpServerDir(company.ShortName)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	rec := MCPServerRecord{
+		ID:          s.ID,
+		CompanyID:   s.CompanyID,
+		Name:        s.Name,
+		DisplayName: s.DisplayName,
+		Description: s.Description,
+		Transport:   s.Transport,
+		Command:     s.Command,
+		Args:        s.Args,
+		URL:         s.URL,
+		Headers:     s.Headers,
+		AuthType:    s.AuthType,
+		Enabled:     s.Enabled,
+		Builtin:     s.Builtin,
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", s.ID)), data, 0644)
+}
+
+// ListMCPServersFromDisk reads all MCP server files for a company.
+func (m *Manager) ListMCPServersFromDisk(companyShortName string) ([]MCPServerRecord, error) {
+	dir := m.mcpServerDir(companyShortName)
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var result []MCPServerRecord
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			log.Printf("Skipping unreadable MCP server file %s: %v", e.Name(), err)
+			continue
+		}
+		var rec MCPServerRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			log.Printf("Skipping invalid MCP server file %s: %v", e.Name(), err)
+			continue
+		}
+		result = append(result, rec)
+	}
+	return result, nil
+}
+
+// DeleteMCPServerFile removes the on-disk record for an MCP server.
+func (m *Manager) DeleteMCPServerFile(company db.Company, id int32) error {
+	path := filepath.Join(m.mcpServerDir(company.ShortName), fmt.Sprintf("%d.json", id))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
+}

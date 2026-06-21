@@ -3,12 +3,14 @@ package endpoints
 import (
 	"context"
 	"encoding/json"
+	"log"
 	"net/http"
 	"strconv"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/mcp"
+	"agent-orchestrator/pkg/filesystem"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -43,6 +45,7 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.saveMCPServerToDisk(r.Context(), s)
 	api.respondJSON(w, http.StatusCreated, s)
 }
 
@@ -91,6 +94,7 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.saveMCPServerToDisk(r.Context(), s)
 	api.respondJSON(w, http.StatusOK, s)
 }
 
@@ -113,6 +117,7 @@ func (api *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.deleteMCPServerFromDisk(r.Context(), s)
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
@@ -173,6 +178,34 @@ func (api *API) GetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, assignments)
+}
+
+// saveMCPServerToDisk writes the MCP server config to the company's filesystem directory.
+// Auth tokens are never written to disk.
+func (api *API) saveMCPServerToDisk(ctx context.Context, s db.MCPServer) {
+	company, err := api.q.GetCompany(ctx, s.CompanyID)
+	if err != nil {
+		log.Printf("Warning: saveMCPServerToDisk: company %d not found: %v", s.CompanyID, err)
+		return
+	}
+	settings := LoadSettings()
+	fm := filesystem.NewManager(settings.BasePath)
+	if err := fm.SaveMCPServer(company, s); err != nil {
+		log.Printf("Warning: failed to write MCP server %d to disk: %v", s.ID, err)
+	}
+}
+
+// deleteMCPServerFromDisk removes the on-disk record for the MCP server.
+func (api *API) deleteMCPServerFromDisk(ctx context.Context, s db.MCPServer) {
+	company, err := api.q.GetCompany(ctx, s.CompanyID)
+	if err != nil {
+		return
+	}
+	settings := LoadSettings()
+	fm := filesystem.NewManager(settings.BasePath)
+	if err := fm.DeleteMCPServerFile(company, s.ID); err != nil {
+		log.Printf("Warning: failed to delete MCP server file %d: %v", s.ID, err)
+	}
 }
 
 // SetAgentMCPServers replaces all MCP assignments for an agent.
