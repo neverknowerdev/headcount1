@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
 import { useNavigate } from 'react-router-dom';
+import { PublicAccessSection } from '../components/PublicAccessSection';
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
@@ -237,6 +238,8 @@ export const Settings: React.FC = () => {
                     </div>
                 </form>
             </div>
+
+            <PublicAccessSection />
 
             <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>

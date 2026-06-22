@@ -125,6 +125,12 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/list", api.ListBackups)
 		r.Post("/restore", api.RestoreBackup)
 	})
+
+	r.Route("/tunnel", func(r chi.Router) {
+		r.Get("/status", api.GetTunnelStatus)
+		r.Post("/start", api.StartTunnel)
+		r.Post("/stop", api.StopTunnel)
+	})
 }
 
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {

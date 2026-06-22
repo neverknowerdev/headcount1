@@ -93,6 +93,9 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
+	// Restore tunnel if it was enabled before restart
+	endpoints.InitTunnel()
+
 	// Check if backup is needed on startup
 	paperclipHome := db.PaperclipHome()
 	if backup.ShouldBackupOnStartup(paperclipHome) {

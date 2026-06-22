@@ -16,6 +16,8 @@ type Settings struct {
 	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
 	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
 	SystemLLMModel   string   `json:"system_llm_model" yaml:"system_llm_model"`
+	TunnelProvider   string   `json:"tunnel_provider" yaml:"tunnel_provider"`
+	TunnelEnabled    bool     `json:"tunnel_enabled" yaml:"tunnel_enabled"`
 }
 
 type SSHKeyPayload struct {
