@@ -1,7 +1,16 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
 import { useNavigate } from 'react-router-dom';
+
+interface UpdateStatus {
+    current: { branch: string; commit_hash: string; build_date: string };
+    latest?: { branch: string; commit_hash: string; build_date: string };
+    update_available: boolean;
+    last_checked?: string;
+    checking: boolean;
+    error?: string;
+}
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
@@ -23,9 +32,16 @@ export const Settings: React.FC = () => {
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
     const [githubPat, setGithubPat] = useState('');
     const [systemLlmModel, setSystemLlmModel] = useState('');
+    const [updateBranch, setUpdateBranch] = useState('main');
+    const [autoUpdate, setAutoUpdate] = useState(false);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
+
+    const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+    const [checking, setChecking] = useState(false);
+    const [applying, setApplying] = useState(false);
+    const [updateMsg, setUpdateMsg] = useState('');
 
     useEffect(() => {
         const fetchSettings = async () => {
@@ -36,6 +52,8 @@ export const Settings: React.FC = () => {
                     setGitRemoteUrl(res.data.git_remote_url || '');
                     setGithubPat(res.data.github_pat || '');
                     setSystemLlmModel(res.data.system_llm_model || '');
+                    setUpdateBranch(res.data.update_branch || 'main');
+                    setAutoUpdate(res.data.auto_update || false);
                 }
             } catch (e) {
                 console.error(e);
@@ -43,6 +61,52 @@ export const Settings: React.FC = () => {
         };
         fetchSettings();
     }, []);
+
+    const fetchUpdateStatus = useCallback(async () => {
+        try {
+            const res = await axios.get('/api/updates/status');
+            setUpdateStatus(res.data);
+        } catch (e) {
+            console.error(e);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchUpdateStatus();
+    }, [fetchUpdateStatus]);
+
+    const handleCheckUpdate = async () => {
+        setChecking(true);
+        setUpdateMsg('');
+        try {
+            const res = await axios.post('/api/updates/check');
+            setUpdateStatus(res.data);
+            if (res.data.error) {
+                setUpdateMsg('Error: ' + res.data.error);
+            } else if (res.data.update_available) {
+                setUpdateMsg('Update available!');
+            } else {
+                setUpdateMsg('You are on the latest version.');
+            }
+        } catch (e: any) {
+            setUpdateMsg('Check failed: ' + (e.response?.data || e.message));
+        } finally {
+            setChecking(false);
+        }
+    };
+
+    const handleApplyUpdate = async () => {
+        if (!window.confirm('Apply update and restart the server?')) return;
+        setApplying(true);
+        setUpdateMsg('');
+        try {
+            await axios.post('/api/updates/apply');
+            setUpdateMsg('Update applied — server is restarting. Refresh in a moment.');
+        } catch (e: any) {
+            setUpdateMsg('Apply failed: ' + (e.response?.data || e.message));
+            setApplying(false);
+        }
+    };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -52,7 +116,9 @@ export const Settings: React.FC = () => {
                 base_path: basePath,
                 git_remote_url: gitRemoteUrl,
                 github_pat: githubPat,
-                system_llm_model: systemLlmModel
+                system_llm_model: systemLlmModel,
+                update_branch: updateBranch,
+                auto_update: autoUpdate,
             });
 
             if (sshKey) {
@@ -236,6 +302,93 @@ export const Settings: React.FC = () => {
                         </button>
                     </div>
                 </form>
+            </div>
+
+            <div className="bg-white p-6 rounded-lg shadow-sm border mt-8">
+                <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Auto-Update</h2>
+
+                {updateStatus && (
+                    <div className="mb-4 text-sm text-gray-600 space-y-1">
+                        <div>
+                            <span className="font-medium">Current version:</span>{' '}
+                            <code className="bg-gray-100 px-1 rounded">
+                                {updateStatus.current.branch}+{updateStatus.current.build_date}+{updateStatus.current.commit_hash}
+                            </code>
+                        </div>
+                        {updateStatus.latest && (
+                            <div>
+                                <span className="font-medium">Latest available:</span>{' '}
+                                <code className="bg-gray-100 px-1 rounded">
+                                    {updateStatus.latest.branch}+{updateStatus.latest.build_date}+{updateStatus.latest.commit_hash}
+                                </code>
+                            </div>
+                        )}
+                        {updateStatus.last_checked && (
+                            <div className="text-xs text-gray-400">
+                                Last checked: {new Date(updateStatus.last_checked).toLocaleString()}
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Tracked Branch
+                        </label>
+                        <p className="text-xs text-gray-500 mb-2">
+                            Branch to watch for updates. Must have a GitHub release published by CI.
+                        </p>
+                        <input
+                            type="text"
+                            value={updateBranch}
+                            onChange={e => setUpdateBranch(e.target.value)}
+                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                            placeholder="main"
+                        />
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <input
+                            type="checkbox"
+                            id="auto_update"
+                            checked={autoUpdate}
+                            onChange={e => setAutoUpdate(e.target.checked)}
+                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                        />
+                        <label htmlFor="auto_update" className="text-sm text-gray-700">
+                            Auto-update when a new version is detected (checks every 60 minutes)
+                        </label>
+                    </div>
+
+                    {updateMsg && (
+                        <div className={`text-sm px-3 py-2 rounded ${updateStatus?.update_available ? 'bg-yellow-50 text-yellow-800 border border-yellow-200' : 'bg-gray-50 text-gray-700 border border-gray-200'}`}>
+                            {updateMsg}
+                        </div>
+                    )}
+
+                    <div className="flex gap-3 flex-wrap">
+                        <button
+                            type="button"
+                            onClick={handleCheckUpdate}
+                            disabled={checking}
+                            className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
+                        >
+                            {checking ? 'Checking...' : 'Check for Updates'}
+                        </button>
+
+                        {updateStatus?.update_available && (
+                            <button
+                                type="button"
+                                onClick={handleApplyUpdate}
+                                disabled={applying}
+                                className="bg-green-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-green-700 disabled:bg-green-400"
+                            >
+                                {applying ? 'Applying...' : 'Apply Update & Restart'}
+                            </button>
+                        )}
+                    </div>
+                </div>
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">

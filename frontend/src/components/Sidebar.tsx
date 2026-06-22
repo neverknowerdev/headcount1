@@ -1,7 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings } from 'lucide-react';
 import { useStore } from '../store';
+import axios from 'axios';
 
 const getNavItems = (companyIdentifier: string | null) => {
   const base = companyIdentifier ? `/companies/${companyIdentifier}` : '';
@@ -22,6 +23,19 @@ export const Sidebar: React.FC = () => {
   const { selectedCompanyId, companies } = useStore();
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
+
+  const [versionDisplay, setVersionDisplay] = useState<string>('');
+  const [hasUpdate, setHasUpdate] = useState(false);
+
+  useEffect(() => {
+    axios.get('/api/version').then(res => {
+      setVersionDisplay(res.data.display || 'dev');
+    }).catch(() => {});
+
+    axios.get('/api/updates/status').then(res => {
+      setHasUpdate(res.data.update_available || false);
+    }).catch(() => {});
+  }, []);
 
 
 
@@ -64,7 +78,18 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-
+      {versionDisplay && (
+        <div className="px-3 py-3 border-t border-gray-100">
+          <div className="text-xs text-gray-400 font-mono truncate" title={versionDisplay}>
+            {versionDisplay}
+          </div>
+          {hasUpdate && (
+            <div className="mt-1 text-xs text-yellow-600 font-medium">
+              Update available
+            </div>
+          )}
+        </div>
+      )}
     </div>
   );
 };

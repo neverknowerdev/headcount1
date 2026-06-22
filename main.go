@@ -18,6 +18,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/updater"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -25,6 +26,13 @@ import (
 	"github.com/glebarez/sqlite"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
+)
+
+// These are set at build time via -ldflags.
+var (
+	CommitHash = "unknown"
+	BuildDate  = "unknown"
+	Branch     = "main"
 )
 
 //go:embed all:frontend/dist
@@ -85,8 +93,19 @@ func main() {
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
 
+	upd := updater.New(Branch, CommitHash, BuildDate, func() string {
+		return endpoints.LoadSettings().GitHubPAT
+	})
+	// Apply tracked branch from saved settings (may differ from build branch).
+	if savedBranch := endpoints.LoadSettings().UpdateBranch; savedBranch != "" {
+		upd.SetTrackedBranch(savedBranch)
+	}
+	upd.StartPeriodicCheck(60 * time.Minute)
+	log.Printf("Auto-updater started (tracking branch: %s, build: %s)", upd.GetTrackedBranch(), upd.GetStatus().Current.DisplayString())
+
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
+	srv.SetUpdater(upd)
 
 	// Sync database with filesystem on startup
 	if err := srv.Sync(context.Background()); err != nil {
@@ -118,7 +137,7 @@ func main() {
 		if utils.IsE2E() {
 			log.Println("E2E mode enabled - e2e routes active")
 			r.Route("/e2e", func(r chi.Router) {
-				api := endpoints.NewAPI(database, eng, hub)
+				api := endpoints.NewAPI(database, eng, hub, upd)
 				r.Post("/wipe-db", api.WipeDB)
 			})
 		}

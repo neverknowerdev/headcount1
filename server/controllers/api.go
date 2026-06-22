@@ -9,22 +9,25 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/updater"
 	"gorm.io/gorm"
 )
 
 type API struct {
-	db     *gorm.DB
-	q      *db.Queries
-	engine engine.Engine
-	hub    *eventhub.Hub
+	db      *gorm.DB
+	q       *db.Queries
+	engine  engine.Engine
+	hub     *eventhub.Hub
+	updater *updater.Updater
 }
 
-func NewAPI(database *gorm.DB, eng engine.Engine, h *eventhub.Hub) *API {
+func NewAPI(database *gorm.DB, eng engine.Engine, h *eventhub.Hub, upd *updater.Updater) *API {
 	return &API{
-		db:     database,
-		q:      db.New(database),
-		engine: eng,
-		hub:    h,
+		db:      database,
+		q:       db.New(database),
+		engine:  eng,
+		hub:     h,
+		updater: upd,
 	}
 }
 

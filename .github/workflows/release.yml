@@ -1,0 +1,90 @@
+name: Release
+
+on:
+  push:
+    branches:
+      - main
+      - 'release/**'
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Get commit info
+        id: info
+        run: |
+          BRANCH="${GITHUB_REF#refs/heads/}"
+          # Sanitize branch name for use as a git tag (replace / with -)
+          TAG=$(echo "$BRANCH" | tr '/' '-')
+          echo "commit=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
+          echo "date=$(date -u +%Y-%m-%d)" >> $GITHUB_OUTPUT
+          echo "branch=$BRANCH" >> $GITHUB_OUTPUT
+          echo "tag=$TAG" >> $GITHUB_OUTPUT
+
+      - name: Build frontend
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Build binary (linux/amd64)
+        run: |
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.CommitHash=${{ steps.info.outputs.commit }} -X main.BuildDate=${{ steps.info.outputs.date }} -X main.Branch=${{ steps.info.outputs.branch }}" \
+            -o agent-orchestrator-linux-amd64 \
+            main.go
+
+      - name: Build binary (darwin/amd64)
+        run: |
+          GOOS=darwin GOARCH=amd64 go build \
+            -ldflags "-X main.CommitHash=${{ steps.info.outputs.commit }} -X main.BuildDate=${{ steps.info.outputs.date }} -X main.Branch=${{ steps.info.outputs.branch }}" \
+            -o agent-orchestrator-darwin-amd64 \
+            main.go
+
+      - name: Build binary (darwin/arm64)
+        run: |
+          GOOS=darwin GOARCH=arm64 go build \
+            -ldflags "-X main.CommitHash=${{ steps.info.outputs.commit }} -X main.BuildDate=${{ steps.info.outputs.date }} -X main.Branch=${{ steps.info.outputs.branch }}" \
+            -o agent-orchestrator-darwin-arm64 \
+            main.go
+
+      - name: Create release metadata
+        run: |
+          printf '{"commit_hash":"%s","build_date":"%s","branch":"%s"}' \
+            "${{ steps.info.outputs.commit }}" \
+            "${{ steps.info.outputs.date }}" \
+            "${{ steps.info.outputs.branch }}" > release-notes.json
+
+      - name: Delete existing release for this branch
+        run: |
+          gh release delete "${{ steps.info.outputs.tag }}" --yes 2>/dev/null || true
+          git push origin :refs/tags/${{ steps.info.outputs.tag }} 2>/dev/null || true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Publish release
+        run: |
+          gh release create "${{ steps.info.outputs.tag }}" \
+            --title "Build: ${{ steps.info.outputs.branch }} @ ${{ steps.info.outputs.commit }}" \
+            --notes-file release-notes.json \
+            --prerelease \
+            agent-orchestrator-linux-amd64 \
+            agent-orchestrator-darwin-amd64 \
+            agent-orchestrator-darwin-arm64
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}

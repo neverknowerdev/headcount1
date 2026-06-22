@@ -7,6 +7,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/updater"
 	"agent-orchestrator/server/controllers"
 	"context"
 	"github.com/go-chi/chi/v5"
@@ -15,10 +16,11 @@ import (
 )
 
 type Server struct {
-	db     *gorm.DB
-	q      db.Querier
-	hub    *eventhub.Hub
-	engine engine.Engine
+	db      *gorm.DB
+	q       db.Querier
+	hub     *eventhub.Hub
+	engine  engine.Engine
+	updater *updater.Updater
 }
 
 func NewServer(database *gorm.DB, eng engine.Engine) *Server {
@@ -29,10 +31,12 @@ func NewServer(database *gorm.DB, eng engine.Engine) *Server {
 	}
 }
 
+func (s *Server) SetUpdater(upd *updater.Updater) { s.updater = upd }
+
 func (s *Server) SetHub(h *eventhub.Hub) { s.hub = h }
 
 func (s *Server) Sync(ctx context.Context) error {
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api := endpoints.NewAPI(s.db, s.engine, s.hub, s.updater)
 	return api.SyncDBWithFilesystem(ctx)
 }
 
@@ -42,7 +46,7 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Get("/ws", s.serveWs)
 
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api := endpoints.NewAPI(s.db, s.engine, s.hub, s.updater)
 
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)
@@ -124,6 +128,13 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/status", api.GetBackupStatus)
 		r.Get("/list", api.ListBackups)
 		r.Post("/restore", api.RestoreBackup)
+	})
+
+	r.Get("/version", api.GetVersion)
+	r.Route("/updates", func(r chi.Router) {
+		r.Get("/status", api.GetUpdateStatus)
+		r.Post("/check", api.CheckForUpdate)
+		r.Post("/apply", api.ApplyUpdate)
 	})
 }
 
