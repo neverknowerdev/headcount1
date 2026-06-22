@@ -414,24 +414,18 @@ func TestMempalacePostRunDiaryWrite(t *testing.T) {
 	runID := waitForRunCreatedE2E(t, database, task.ID, 10*time.Second)
 	waitForRunDoneE2E(t, database, runID, 30*time.Second)
 
-	// Poll MemPalace until the async diary goroutine has finished writing.
-	var diary string
-	require.Eventually(t, func() bool {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
-		c, err := mempalace.NewClientWithPalace(ctx, palace, "sqlite_exact")
-		if err != nil || c == nil {
-			return false
-		}
-		defer c.Close()
-		diary, _ = c.DiaryRead(ctx, "programmer", "", 10)
-		return mempalace.HasResults(diary) && strings.Contains(strings.ToLower(diary), "oauth2")
-	}, 15*time.Second, 500*time.Millisecond, "post-run diary entry should appear in MemPalace")
+	// Diary write is synchronous: by the time the run is done, the entry is in the palace.
+	ctx := context.Background()
+	c, err := mempalace.NewClientWithPalace(ctx, palace, "sqlite_exact")
+	require.NoError(t, err)
+	require.NotNil(t, c)
+	defer c.Close()
 
-	assert.Contains(t, strings.ToLower(diary), "oauth2",
-		"diary should mention the task title")
-	assert.Contains(t, diary, "task-",
-		"diary should use the task-<id> AAAK format")
+	diary, err := c.DiaryRead(ctx, "programmer", "", 10)
+	require.NoError(t, err)
+	assert.True(t, mempalace.HasResults(diary), "post-run diary entry should be present")
+	assert.Contains(t, strings.ToLower(diary), "oauth2", "diary should mention the task title")
+	assert.Contains(t, diary, "task-", "diary should use the task-<id> AAAK format")
 }
 
 // TestMempalaceMemoryInfluencesSubsequentRun verifies the complete memory loop:

@@ -445,12 +445,13 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		))
 	}
 
-	e.q.UpdateRunLog(ctx, run.ID, "", status)
-
-	// Write post-run diary entry to MemPalace (async; non-fatal).
+	// Write post-run diary entry before marking the run done so that
+	// "run completed" always implies "diary written" — no external race.
 	if agentCfg != nil {
-		go e.writePostRunDiary(context.Background(), task, company, agentCfg, status, finalText)
+		e.writePostRunDiary(ctx, task, company, agentCfg, status, finalText)
 	}
+
+	e.q.UpdateRunLog(ctx, run.ID, "", status)
 
 	// Update run metadata in filesystem.
 	settings = loadSettings()
@@ -687,7 +688,7 @@ func (e *NativeEngine) fetchMempalaceContext(ctx context.Context, task db.Task, 
 }
 
 // writePostRunDiary saves a diary entry to MemPalace after a run completes.
-// Called in a goroutine; all errors are logged as warnings, not propagated.
+// Errors are logged as warnings and never propagated to the caller.
 func (e *NativeEngine) writePostRunDiary(ctx context.Context, task db.Task, company db.Company, agentCfg *agentconfig.AgentConfig, status, finalText string) {
 	client, err := mempalace.NewClient(ctx)
 	if err != nil || client == nil {
