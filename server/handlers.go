@@ -131,6 +131,12 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/restore", api.RestoreBackup)
 	})
 
+	r.Route("/memory", func(r chi.Router) {
+		r.Get("/taxonomy", api.GetMemoryTaxonomy)
+		r.Get("/drawers", api.ListMemoryDrawers)
+		r.Get("/drawer", api.GetMemoryDrawer)
+	})
+
 	r.Route("/mcp-servers", func(r chi.Router) {
 		r.Get("/", api.ListMCPServers)
 		r.Post("/", api.CreateMCPServer)

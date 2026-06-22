@@ -13,6 +13,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/mempalace"
 	"gorm.io/gorm"
 )
 
@@ -127,6 +128,17 @@ func restoreFilesystem(tempDir, basePath string) error {
 		data, err := os.ReadFile(srcSettings)
 		if err == nil {
 			os.WriteFile(dstSettings, data, 0644)
+		}
+	}
+
+	// Restore MemPalace palace directory (agent long-term memory)
+	srcPalace := filepath.Join(tempDir, "palace")
+	if _, err := os.Stat(srcPalace); err == nil {
+		dstPalace := mempalace.DefaultPalaceDir()
+		if err := os.MkdirAll(dstPalace, 0755); err != nil {
+			log.Printf("Warning: failed to create palace directory: %v", err)
+		} else if err := copyDir(srcPalace, dstPalace); err != nil {
+			log.Printf("Warning: failed to restore MemPalace palace: %v", err)
 		}
 	}
 

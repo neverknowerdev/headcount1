@@ -13,6 +13,7 @@ import { SkillsManager } from './pages/SkillsManager';
 import { MCPServers } from './pages/MCPServers';
 import { Settings } from './pages/Settings';
 import { Backup } from './pages/Backup';
+import { Memory } from './pages/Memory';
 import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 
@@ -36,6 +37,7 @@ function App() {
           <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
           <Route path="/companies/:shortName/settings" element={<Settings />} />
           <Route path="/companies/:shortName/backup" element={<Backup />} />
+          <Route path="/companies/:shortName/memory" element={<Memory />} />
           <Route path="/" element={<Dashboard />} />
           <Route path="*" element={<Navigate to="/" replace />} />
         </Routes>

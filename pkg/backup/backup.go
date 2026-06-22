@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"agent-orchestrator/pkg/mempalace"
 )
 
 type BackupManifest struct {
@@ -77,6 +79,11 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 	// Backup companies directory (Manager format: settings, sprints, tasks, comments)
 	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "companies"), "companies", &itemCount); err != nil {
 		log.Printf("Warning: failed to backup companies directory: %v", err)
+	}
+
+	// Backup MemPalace palace directory (agent long-term memory)
+	if err := addDirectoryToTar(tarWriter, mempalace.DefaultPalaceDir(), "palace", &itemCount); err != nil {
+		log.Printf("Warning: failed to backup MemPalace palace: %v", err)
 	}
 
 	// Update manifest with item count

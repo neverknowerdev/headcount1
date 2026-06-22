@@ -120,6 +120,32 @@ func (c *Client) Search(ctx context.Context, query, wing string, limit int) (str
 	return c.inner.CallTool(ctx, "mempalace_search", raw)
 }
 
+// GetTaxonomy returns the full palace hierarchy (wings → rooms → drawer counts).
+func (c *Client) GetTaxonomy(ctx context.Context) (string, error) {
+	raw, _ := json.Marshal(map[string]any{})
+	return c.inner.CallTool(ctx, "mempalace_get_taxonomy", raw)
+}
+
+// ListDrawers returns drawers filtered by wing and/or room with pagination.
+func (c *Client) ListDrawers(ctx context.Context, wing, room string, limit, offset int) (string, error) {
+	args := map[string]any{"limit": limit, "offset": offset}
+	if wing != "" {
+		args["wing"] = wing
+	}
+	if room != "" {
+		args["room"] = room
+	}
+	raw, _ := json.Marshal(args)
+	return c.inner.CallTool(ctx, "mempalace_list_drawers", raw)
+}
+
+// GetDrawer fetches a single drawer by ID.
+func (c *Client) GetDrawer(ctx context.Context, drawerID string) (string, error) {
+	args := map[string]any{"drawer_id": drawerID}
+	raw, _ := json.Marshal(args)
+	return c.inner.CallTool(ctx, "mempalace_get_drawer", raw)
+}
+
 // Close shuts down the underlying MCP subprocess.
 func (c *Client) Close() error {
 	return c.inner.Close()
