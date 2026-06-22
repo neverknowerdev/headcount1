@@ -13,6 +13,7 @@ import (
 	"regexp"
 	"strings"
 	"sync"
+	"time"
 )
 
 type TunnelStatusResponse struct {
@@ -155,37 +156,80 @@ func launchTunnel(provider, port string) {
 
 var cfURLRegex = regexp.MustCompile(`https://[a-zA-Z0-9-]+\.trycloudflare\.com`)
 
+// launchCloudflareTunnel runs cloudflared in a restart loop with exponential
+// backoff. It exits only when the context is cancelled (user stops the tunnel)
+// or the binary is missing (fatal, no point retrying).
 func launchCloudflareTunnel(port string) {
 	ctx, cancel := context.WithCancel(context.Background())
-
 	tunnelMu.Lock()
 	tunnelCancel = cancel
 	tunnelMu.Unlock()
 
+	const maxBackoff = 32 * time.Second
+	backoff := time.Second
+
+	for {
+		if ctx.Err() != nil {
+			return
+		}
+
+		crashed, fatal := runOneCloudflareTunnel(ctx, port)
+
+		if ctx.Err() != nil {
+			return // intentional stop by user
+		}
+		if fatal {
+			return // binary missing or other unrecoverable error
+		}
+
+		if crashed {
+			// Was running fine, then died — reset backoff since it worked before
+			backoff = time.Second
+		}
+
+		log.Printf("[tunnel] cloudflared not running, restarting in %s", backoff)
+		tunnelMu.Lock()
+		tunnelURL = ""
+		tunnelSt = "starting"
+		tunnelErr = ""
+		tunnelMu.Unlock()
+
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(backoff):
+		}
+		backoff = min(backoff*2, maxBackoff)
+	}
+}
+
+// runOneCloudflareTunnel starts one cloudflared process and blocks until it
+// exits. Returns (crashed, fatal):
+//   - crashed=true  — process ran successfully (URL obtained), then died
+//   - fatal=true    — unrecoverable error (binary not found); caller should not retry
+func runOneCloudflareTunnel(ctx context.Context, port string) (crashed bool, fatal bool) {
 	cmd := exec.CommandContext(ctx, "cloudflared", "tunnel", "--url",
 		fmt.Sprintf("http://localhost:%s", port), "--no-autoupdate")
 
 	stderr, err := cmd.StderrPipe()
 	if err != nil {
 		setTunnelError("failed to create stderr pipe: " + err.Error())
-		cancel()
-		return
+		return false, false
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		setTunnelError("failed to create stdout pipe: " + err.Error())
-		cancel()
-		return
+		return false, false
 	}
 
 	if err := cmd.Start(); err != nil {
 		msg := err.Error()
 		if strings.Contains(msg, "executable file not found") || strings.Contains(msg, "no such file") {
-			msg = "cloudflared not found — please install it first (see instructions above)."
+			setTunnelError("cloudflared not found — please install it first (see instructions above).")
+			return false, true
 		}
-		setTunnelError(msg)
-		cancel()
-		return
+		setTunnelError("failed to start cloudflared: " + msg)
+		return false, false
 	}
 
 	tunnelMu.Lock()
@@ -193,6 +237,7 @@ func launchCloudflareTunnel(port string) {
 	tunnelMu.Unlock()
 
 	urlFound := make(chan string, 1)
+	done := make(chan error, 1)
 
 	scan := func(r io.Reader) {
 		scanner := bufio.NewScanner(r)
@@ -207,10 +252,11 @@ func launchCloudflareTunnel(port string) {
 			}
 		}
 	}
-
 	go scan(stderr)
 	go scan(stdout)
+	go func() { done <- cmd.Wait() }()
 
+	// Wait for URL, early exit, or context cancellation
 	select {
 	case url := <-urlFound:
 		tunnelMu.Lock()
@@ -218,12 +264,24 @@ func launchCloudflareTunnel(port string) {
 		tunnelSt = "running"
 		tunnelMu.Unlock()
 		log.Printf("[tunnel] Cloudflare URL ready: %s", url)
+	case <-done:
+		return false, false // exited before URL appeared
 	case <-ctx.Done():
-		return
+		<-done
+		return false, false
 	}
 
-	if err := cmd.Wait(); err != nil && ctx.Err() == nil {
-		setTunnelError("cloudflared process stopped unexpectedly: " + err.Error())
+	// Process is up and serving — wait for it to die
+	select {
+	case <-done:
+		if ctx.Err() != nil {
+			return false, false
+		}
+		log.Printf("[tunnel] cloudflared crashed")
+		return true, false
+	case <-ctx.Done():
+		<-done
+		return false, false
 	}
 }
 
