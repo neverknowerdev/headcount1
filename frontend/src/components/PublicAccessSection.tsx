@@ -35,6 +35,11 @@ curl -L https://github.com/cloudflare/cloudflared/releases/latest/download/cloud
 
 # No account needed — click "Enable Tunnel" below and a temporary URL will be generated.`;
 
+interface ServerInfo {
+    ips: string[];
+    port: string;
+}
+
 export const PublicAccessSection: React.FC = () => {
     const [tunnelStatus, setTunnelStatus] = useState<TunnelStatus>({
         provider: '',
@@ -42,6 +47,7 @@ export const PublicAccessSection: React.FC = () => {
         url: '',
         status: 'stopped',
     });
+    const [serverInfo, setServerInfo] = useState<ServerInfo>({ ips: [], port: '8080' });
     const [selectedProvider, setSelectedProvider] = useState('');
     const [loading, setLoading] = useState(false);
     const [showInstructions, setShowInstructions] = useState<string | null>(null);
@@ -61,6 +67,7 @@ export const PublicAccessSection: React.FC = () => {
 
     useEffect(() => {
         fetchStatus();
+        axios.get<ServerInfo>('/api/server-info').then(res => setServerInfo(res.data)).catch(() => {});
     }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
     useEffect(() => {
@@ -253,7 +260,7 @@ export const PublicAccessSection: React.FC = () => {
             )}
 
             {/* Action buttons */}
-            <div className="flex gap-3 flex-wrap">
+            <div className="flex gap-3 flex-wrap mb-6">
                 {!isRunning && !isStarting && (
                     <button
                         type="button"
@@ -285,6 +292,31 @@ export const PublicAccessSection: React.FC = () => {
                     </button>
                 )}
             </div>
+
+            {/* Local network access — always visible as fallback */}
+            {serverInfo.ips.length > 0 && (
+                <div className="border-t pt-4">
+                    <p className="text-xs font-medium text-gray-500 uppercase tracking-wide mb-2">
+                        Direct access (local network)
+                    </p>
+                    <p className="text-xs text-gray-500 mb-2">
+                        If the tunnel stops working, you can reach this instance directly on your local network:
+                    </p>
+                    <div className="flex flex-wrap gap-2">
+                        {serverInfo.ips.map(ip => (
+                            <a
+                                key={ip}
+                                href={`http://${ip}:${serverInfo.port}`}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                className="font-mono text-xs bg-gray-100 hover:bg-gray-200 text-gray-700 rounded px-2 py-1"
+                            >
+                                http://{ip}:{serverInfo.port}
+                            </a>
+                        ))}
+                    </div>
+                </div>
+            )}
         </div>
     );
 };

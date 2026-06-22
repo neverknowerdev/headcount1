@@ -2,6 +2,7 @@ package endpoints
 
 import (
 	"encoding/json"
+	"net"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -102,4 +103,44 @@ func (api *API) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.WriteHeader(http.StatusOK)
+}
+
+func (api *API) GetServerInfo(w http.ResponseWriter, r *http.Request) {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+
+	var ips []string
+	ifaces, err := net.Interfaces()
+	if err == nil {
+		for _, iface := range ifaces {
+			if iface.Flags&net.FlagUp == 0 || iface.Flags&net.FlagLoopback != 0 {
+				continue
+			}
+			addrs, err := iface.Addrs()
+			if err != nil {
+				continue
+			}
+			for _, addr := range addrs {
+				var ip net.IP
+				switch v := addr.(type) {
+				case *net.IPNet:
+					ip = v.IP
+				case *net.IPAddr:
+					ip = v.IP
+				}
+				if ip == nil || ip.IsLoopback() || ip.To4() == nil {
+					continue
+				}
+				ips = append(ips, ip.String())
+			}
+		}
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(map[string]interface{}{
+		"ips":  ips,
+		"port": port,
+	})
 }

@@ -55,6 +55,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post("/settings", api.UpdateSettings)
 	r.Post("/settings/ssh", api.UploadSSHKey)
 	r.Post("/settings/sync", api.SyncSettings)
+	r.Get("/server-info", api.GetServerInfo)
 	r.Get("/activities", api.ListActivities)
 
 	r.Route("/skills", func(r chi.Router) {
