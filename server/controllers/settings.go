@@ -5,19 +5,21 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"time"
 
 	"agent-orchestrator/db"
 	"gopkg.in/yaml.v3"
 )
 
 type Settings struct {
-	BasePath         string   `json:"base_path" yaml:"base_path"`
-	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
-	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
-	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-	SystemLLMModel   string   `json:"system_llm_model" yaml:"system_llm_model"`
-	UpdateBranch     string   `json:"update_branch" yaml:"update_branch"`
-	AutoUpdate       bool     `json:"auto_update" yaml:"auto_update"`
+	BasePath                string   `json:"base_path" yaml:"base_path"`
+	WorkspaceFolders        []string `json:"workspace_folders" yaml:"workspace_folders"`
+	GitRemoteURL            string   `json:"git_remote_url" yaml:"git_remote_url"`
+	GitHubPAT               string   `json:"github_pat" yaml:"github_pat"`
+	SystemLLMModel          string   `json:"system_llm_model" yaml:"system_llm_model"`
+	UpdateBranch            string   `json:"update_branch" yaml:"update_branch"`
+	AutoUpdate              bool     `json:"auto_update" yaml:"auto_update"`
+	UpdateCheckIntervalMins int      `json:"update_check_interval_mins" yaml:"update_check_interval_mins"`
 }
 
 type SSHKeyPayload struct {
@@ -75,6 +77,16 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	if err := SaveSettings(settings); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
+	}
+
+	// Propagate updater-related settings to the live updater immediately.
+	if api.updater != nil {
+		if settings.UpdateBranch != "" {
+			api.updater.SetTrackedBranch(settings.UpdateBranch)
+		}
+		if settings.UpdateCheckIntervalMins > 0 {
+			api.updater.SetCheckInterval(time.Duration(settings.UpdateCheckIntervalMins) * time.Minute)
+		}
 	}
 
 	w.Header().Set("Content-Type", "application/json")

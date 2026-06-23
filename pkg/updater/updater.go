@@ -58,10 +58,13 @@ type releaseMetadata struct {
 	Branch     string `json:"branch"`
 }
 
+const DefaultCheckInterval = 60 * time.Minute
+
 type Updater struct {
 	mu            sync.RWMutex
 	current       VersionInfo
 	trackedBranch string
+	checkInterval time.Duration
 	status        UpdateStatus
 	githubPATFn   func() string
 	stopCh        chan struct{}
@@ -79,10 +82,26 @@ func New(branch, commitHash, buildDate string, githubPATFn func() string) *Updat
 	return &Updater{
 		current:       current,
 		trackedBranch: branch,
+		checkInterval: DefaultCheckInterval,
 		status:        UpdateStatus{Current: current},
 		githubPATFn:   githubPATFn,
 		stopCh:        make(chan struct{}),
 	}
+}
+
+func (u *Updater) SetCheckInterval(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.checkInterval = d
+}
+
+func (u *Updater) GetCheckIntervalMins() int {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return int(u.checkInterval.Minutes())
 }
 
 func (u *Updater) GetStatus() UpdateStatus {
@@ -218,13 +237,18 @@ func (u *Updater) ApplyUpdate() error {
 	return nil
 }
 
-func (u *Updater) StartPeriodicCheck(interval time.Duration) {
+// StartPeriodicCheck starts a background goroutine that checks for updates.
+// It re-reads the interval before each wait, so changes via SetCheckInterval
+// take effect after the current sleep completes.
+func (u *Updater) StartPeriodicCheck() {
 	go func() {
-		ticker := time.NewTicker(interval)
-		defer ticker.Stop()
 		for {
+			u.mu.RLock()
+			interval := u.checkInterval
+			u.mu.RUnlock()
+
 			select {
-			case <-ticker.C:
+			case <-time.After(interval):
 				if err := u.CheckForUpdate(); err != nil {
 					log.Printf("Periodic update check failed: %v", err)
 				}

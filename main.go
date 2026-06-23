@@ -96,12 +96,17 @@ func main() {
 	upd := updater.New(Branch, CommitHash, BuildDate, func() string {
 		return endpoints.LoadSettings().GitHubPAT
 	})
-	// Apply tracked branch from saved settings (may differ from build branch).
-	if savedBranch := endpoints.LoadSettings().UpdateBranch; savedBranch != "" {
-		upd.SetTrackedBranch(savedBranch)
+	// Apply saved settings (branch and poll interval may differ from build defaults).
+	savedSettings := endpoints.LoadSettings()
+	if savedSettings.UpdateBranch != "" {
+		upd.SetTrackedBranch(savedSettings.UpdateBranch)
 	}
-	upd.StartPeriodicCheck(60 * time.Minute)
-	log.Printf("Auto-updater started (tracking branch: %s, build: %s)", upd.GetTrackedBranch(), upd.GetStatus().Current.DisplayString())
+	if savedSettings.UpdateCheckIntervalMins > 0 {
+		upd.SetCheckInterval(time.Duration(savedSettings.UpdateCheckIntervalMins) * time.Minute)
+	}
+	upd.StartPeriodicCheck()
+	log.Printf("Auto-updater started (tracking branch: %s, interval: %dm, build: %s)",
+		upd.GetTrackedBranch(), upd.GetCheckIntervalMins(), upd.GetStatus().Current.DisplayString())
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)

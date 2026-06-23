@@ -34,6 +34,7 @@ export const Settings: React.FC = () => {
     const [systemLlmModel, setSystemLlmModel] = useState('');
     const [updateBranch, setUpdateBranch] = useState('main');
     const [autoUpdate, setAutoUpdate] = useState(false);
+    const [updateCheckIntervalMins, setUpdateCheckIntervalMins] = useState(60);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
@@ -54,6 +55,7 @@ export const Settings: React.FC = () => {
                     setSystemLlmModel(res.data.system_llm_model || '');
                     setUpdateBranch(res.data.update_branch || 'main');
                     setAutoUpdate(res.data.auto_update || false);
+                    setUpdateCheckIntervalMins(res.data.update_check_interval_mins || 60);
                 }
             } catch (e) {
                 console.error(e);
@@ -119,6 +121,7 @@ export const Settings: React.FC = () => {
                 system_llm_model: systemLlmModel,
                 update_branch: updateBranch,
                 auto_update: autoUpdate,
+                update_check_interval_mins: updateCheckIntervalMins,
             });
 
             if (sshKey) {
@@ -332,20 +335,38 @@ export const Settings: React.FC = () => {
                 )}
 
                 <div className="space-y-4">
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Tracked Branch
-                        </label>
-                        <p className="text-xs text-gray-500 mb-2">
-                            Branch to watch for updates. Must have a GitHub release published by CI.
-                        </p>
-                        <input
-                            type="text"
-                            value={updateBranch}
-                            onChange={e => setUpdateBranch(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="main"
-                        />
+                    <div className="flex gap-4">
+                        <div className="flex-1">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Tracked Branch
+                            </label>
+                            <p className="text-xs text-gray-500 mb-2">
+                                Branch to watch for updates. Must have a GitHub release published by CI.
+                            </p>
+                            <input
+                                type="text"
+                                value={updateBranch}
+                                onChange={e => setUpdateBranch(e.target.value)}
+                                className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                                placeholder="main"
+                            />
+                        </div>
+
+                        <div className="w-40">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">
+                                Poll Interval (mins)
+                            </label>
+                            <p className="text-xs text-gray-500 mb-2">
+                                How often to check automatically.
+                            </p>
+                            <input
+                                type="number"
+                                min={1}
+                                value={updateCheckIntervalMins}
+                                onChange={e => setUpdateCheckIntervalMins(Math.max(1, parseInt(e.target.value) || 60))}
+                                className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                            />
+                        </div>
                     </div>
 
                     <div className="flex items-center gap-3">
