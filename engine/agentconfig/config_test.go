@@ -129,7 +129,7 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "CEO", cfg.Name)
 	assert.NotEmpty(t, cfg.Prompt)
-	assert.Equal(t, agentconfig.ChatTypeCompactThinking, cfg.ChatType)
+	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Equal(t, agentconfig.ReasoningLevelMax, cfg.ReasoningLevel)
 	// Builtin configs intentionally have no hardcoded models so that the
 	// runtime resolver picks from the configured provider's supported list.

@@ -21,41 +21,48 @@ type SubtaskParams struct {
 type CreateSubtaskFunc func(ctx context.Context, p SubtaskParams) (int32, error)
 
 type createSubtaskTool struct {
-	fn CreateSubtaskFunc
+	fn         CreateSubtaskFunc
+	agentNames []string
 }
 
 // NewCreateSubtask returns a tool that creates a subtask and delegates its
-// execution to a named agent. fn is called to perform the DB write and
-// to enqueue the new task for processing.
-func NewCreateSubtask(fn CreateSubtaskFunc) aicli.Tool {
-	return &createSubtaskTool{fn: fn}
+// execution to a named agent. agentNames is used to build an enum in the tool
+// schema so the LLM picks from the configured agents rather than guessing.
+func NewCreateSubtask(fn CreateSubtaskFunc, agentNames []string) aicli.Tool {
+	return &createSubtaskTool{fn: fn, agentNames: agentNames}
 }
 
 func (t *createSubtaskTool) Def() aicli.ToolDef {
-	params := json.RawMessage(`{
+	agentNameProp := map[string]interface{}{
+		"type":        "string",
+		"description": "Name of the agent config to use",
+	}
+	if len(t.agentNames) > 0 {
+		agentNameProp["enum"] = t.agentNames
+	}
+
+	params, _ := json.Marshal(map[string]interface{}{
 		"type": "object",
-		"properties": {
-			"title": {
-				"type": "string",
-				"description": "Short title for the subtask"
+		"properties": map[string]interface{}{
+			"title": map[string]string{
+				"type":        "string",
+				"description": "Short title for the subtask",
 			},
-			"description": {
-				"type": "string",
-				"description": "Detailed description of what the subtask should accomplish"
+			"description": map[string]string{
+				"type":        "string",
+				"description": "Detailed description of what the subtask should accomplish",
 			},
-			"agent_name": {
-				"type": "string",
-				"description": "Name of the agent config to use (e.g. Programmer, QA, Researcher)"
-			}
+			"agent_name": agentNameProp,
 		},
-		"required": ["title", "description", "agent_name"]
-	}`)
+		"required": []string{"title", "description", "agent_name"},
+	})
+
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
 			Name:        "create_subtask",
 			Description: "Create a subtask and delegate its execution to a specialist agent. Only one subtask can run at a time — this call fails if a subtask is already running.",
-			Parameters:  params,
+			Parameters:  json.RawMessage(params),
 		},
 	}
 }

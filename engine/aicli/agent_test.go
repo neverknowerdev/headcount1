@@ -405,7 +405,7 @@ func TestCreateSubtaskTool_Success(t *testing.T) {
 	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
 		capturedParams = p
 		return 42, nil
-	})
+	}, []string{"Programmer", "QA", "Researcher"})
 
 	result, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"title": "Write tests",
@@ -419,11 +419,49 @@ func TestCreateSubtaskTool_Success(t *testing.T) {
 	assert.Contains(t, result, "QA")
 }
 
+// TestCreateSubtaskTool_DefIncludesEnum verifies that the tool definition
+// includes the agent_name enum when agent names are provided.
+func TestCreateSubtaskTool_DefIncludesEnum(t *testing.T) {
+	names := []string{"Programmer", "QA", "Researcher"}
+	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
+		return 1, nil
+	}, names)
+	def := tool.Def()
+
+	// The schema should embed the enum values.
+	var schema map[string]interface{}
+	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
+	props := schema["properties"].(map[string]interface{})
+	agentProp := props["agent_name"].(map[string]interface{})
+	enumRaw := agentProp["enum"].([]interface{})
+	var got []string
+	for _, v := range enumRaw {
+		got = append(got, v.(string))
+	}
+	assert.Equal(t, names, got)
+}
+
+// TestCreateSubtaskTool_DefNoEnumWhenEmpty verifies that no enum is emitted
+// when no agent names are provided.
+func TestCreateSubtaskTool_DefNoEnumWhenEmpty(t *testing.T) {
+	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
+		return 1, nil
+	}, nil)
+	def := tool.Def()
+
+	var schema map[string]interface{}
+	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
+	props := schema["properties"].(map[string]interface{})
+	agentProp := props["agent_name"].(map[string]interface{})
+	_, hasEnum := agentProp["enum"]
+	assert.False(t, hasEnum)
+}
+
 // TestCreateSubtaskTool_CallbackError propagates callback errors.
 func TestCreateSubtaskTool_CallbackError(t *testing.T) {
 	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
 		return 0, fmt.Errorf("a subtask is already running")
-	})
+	}, nil)
 
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"title": "x", "description": "y", "agent_name": "QA"
@@ -436,7 +474,7 @@ func TestCreateSubtaskTool_CallbackError(t *testing.T) {
 func TestCreateSubtaskTool_MissingTitle(t *testing.T) {
 	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
 		return 1, nil
-	})
+	}, nil)
 	_, err := tool.Execute(context.Background(), json.RawMessage(`{
 		"title": "", "description": "d", "agent_name": "QA"
 	}`))
@@ -447,7 +485,7 @@ func TestCreateSubtaskTool_MissingTitle(t *testing.T) {
 func TestCreateSubtaskTool_InvalidJSON(t *testing.T) {
 	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
 		return 1, nil
-	})
+	}, nil)
 	_, err := tool.Execute(context.Background(), json.RawMessage(`not json`))
 	require.Error(t, err)
 }

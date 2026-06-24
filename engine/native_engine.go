@@ -292,7 +292,11 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		return nil
 	}))
-	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent)))
+	var agentNames []string
+	if e.agentFactory != nil {
+		agentNames = e.agentFactory.ListNames()
+	}
+	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
 
 	// Wire codegraph proxy: one MCP server process per project, project names
 	// exposed as an enum on every codegraph tool call.
