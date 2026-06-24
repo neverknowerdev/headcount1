@@ -1,14 +1,16 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
+	"log"
 	"net/http"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/server/controllers"
-	"context"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -39,6 +41,22 @@ func (s *Server) Sync(ctx context.Context) error {
 func (s *Server) CacheMCPTools(ctx context.Context) {
 	api := endpoints.NewAPI(s.db, s.engine, s.hub)
 	api.DiscoverAndCacheAllMCPTools(ctx)
+}
+
+// StartMCPCacheScheduler refreshes the MCP tool cache every 24 hours.
+// Run in a goroutine — blocks until ctx is cancelled.
+func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("MCP cache: running scheduled refresh...")
+			s.CacheMCPTools(ctx)
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 func (s *Server) Mount(r chi.Router) {
@@ -138,11 +156,25 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{id}", api.UpdateMCPServer)
 		r.Delete("/{id}", api.DeleteMCPServer)
 		r.Post("/{id}/discover", api.DiscoverMCPServerTools)
+		r.Post("/{id}/accounts", api.CreateMCPAccount)
+		r.Post("/{id}/google-oauth", api.StartGoogleOAuth)
+		r.Get("/{id}/google-oauth", api.PollGoogleOAuth)
+	})
+
+	r.Route("/mcp-accounts/{accountID}", func(r chi.Router) {
+		r.Put("/", api.UpdateMCPAccount)
+		r.Delete("/", api.DeleteMCPAccount)
+		r.Post("/discover", api.DiscoverMCPAccountTools)
 	})
 
 	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
 		r.Get("/", api.GetAgentMCPServers)
 		r.Put("/", api.SetAgentMCPServers)
+	})
+
+	r.Route("/agents/{id}/mcp-accounts", func(r chi.Router) {
+		r.Get("/", api.GetAgentMCPAccounts)
+		r.Put("/", api.SetAgentMCPAccounts)
 	})
 }
 

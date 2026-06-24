@@ -9,68 +9,148 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 )
 
-// fakeMCPClient is a minimal in-memory MCP client for testing DiscoverMCPTools.
-type fakeMCPClient struct {
-	tools  []fakeToolDef
-	called map[string]json.RawMessage
+// TestNewMCPSessionStore_ServerNames verifies the store lists servers correctly.
+func TestNewMCPSessionStore_ServerNames(t *testing.T) {
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "github/alice", Transport: "http", URL: "http://localhost"},
+		{Name: "postiz/main", Transport: "http", URL: "http://localhost"},
+	}, nil, nil)
+	names := store.ServerNames()
+	assert.Equal(t, []string{"github/alice", "postiz/main"}, names)
 }
 
-type fakeToolDef struct {
-	name        string
-	description string
-	result      string
+// TestNewMCPSessionStore_Empty verifies empty store is safe.
+func TestNewMCPSessionStore_Empty(t *testing.T) {
+	store := tools.NewMCPSessionStore(nil, nil, nil)
+	assert.Empty(t, store.ServerNames())
 }
 
-func (f *fakeMCPClient) Initialize(_ context.Context) (interface{}, error) { return nil, nil }
-func (f *fakeMCPClient) ListTools(_ context.Context) (interface{}, error)  { return f.tools, nil }
-func (f *fakeMCPClient) CallTool(_ context.Context, name string, args json.RawMessage) (string, error) {
-	if f.called == nil {
-		f.called = make(map[string]json.RawMessage)
-	}
-	f.called[name] = args
-	for _, t := range f.tools {
-		if t.name == name {
-			return t.result, nil
-		}
-	}
-	return "", nil
-}
-func (f *fakeMCPClient) Close() error { return nil }
-
-// TestDiscoverMCPTools_UnknownServer verifies error on bad server name.
-func TestDiscoverMCPTools_UnknownServer(t *testing.T) {
-	reg := aicli.NewRegistry()
-	d := tools.NewDiscoverMCPTools(reg, []db.MCPServer{
-		{Name: "known", Transport: "http", URL: "http://localhost"},
+// TestNewMCPSessionStore_ToolsCache verifies tool names are parsed from ToolsCache.
+func TestNewMCPSessionStore_ToolsCache(t *testing.T) {
+	cache, _ := json.Marshal([]map[string]interface{}{
+		{"name": "list_issues"},
+		{"name": "create_issue"},
 	})
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "github/alice", Transport: "http", URL: "http://localhost", ToolsCache: string(cache)},
+	}, nil, nil)
+	listing := store.CompactListing()
+	assert.Contains(t, listing, "list_issues")
+	assert.Contains(t, listing, "create_issue")
+}
 
-	_, err := d.Execute(context.Background(), json.RawMessage(`{"server_name":"unknown"}`))
+// TestCallMCPTool_UnknownServer verifies error on unknown server name.
+func TestCallMCPTool_UnknownServer(t *testing.T) {
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "known", Transport: "http", URL: "http://localhost"},
+	}, nil, nil)
+	callTool, _ := tools.NewMCPTools(store)
+
+	_, err := callTool.Execute(context.Background(), json.RawMessage(`{"server":"unknown","tool":"foo"}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown MCP server")
 }
 
-// TestDiscoverMCPTools_BuiltinSkipped verifies builtin servers are not added.
-func TestDiscoverMCPTools_BuiltinSkipped(t *testing.T) {
-	reg := aicli.NewRegistry()
-	// NewDiscoverMCPTools should only contain non-builtin servers.
-	servers := []db.MCPServer{
-		{Name: "paperclip2", Transport: "builtin", Builtin: true},
-	}
-	d := tools.NewDiscoverMCPTools(reg, servers)
+// TestDiscoverMCPTool_UnknownServer verifies error on unknown server.
+func TestDiscoverMCPTool_UnknownServer(t *testing.T) {
+	store := tools.NewMCPSessionStore(nil, nil, nil)
+	_, discoverTool := tools.NewMCPTools(store)
 
-	// The tool def should mention paperclip2 (even builtin servers are listed
-	// for discovery if they were passed in; native_engine filters them out).
-	_ = d
+	_, err := discoverTool.Execute(context.Background(), json.RawMessage(`{"server":"nope","tool":"foo"}`))
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "unknown MCP server")
 }
 
-// TestDiscoverMCPTools_InvalidArgs ensures bad JSON is rejected gracefully.
-func TestDiscoverMCPTools_InvalidArgs(t *testing.T) {
-	reg := aicli.NewRegistry()
-	d := tools.NewDiscoverMCPTools(reg, nil)
-	_, err := d.Execute(context.Background(), json.RawMessage(`not json`))
+// TestDiscoverMCPTool_CachedTool verifies description is returned from cache without connecting.
+func TestDiscoverMCPTool_CachedTool(t *testing.T) {
+	cache, _ := json.Marshal([]map[string]interface{}{
+		{
+			"name":        "list_issues",
+			"description": "List issues for a repository.",
+			"inputSchema": map[string]interface{}{
+				"type": "object",
+				"properties": map[string]interface{}{
+					"owner": map[string]interface{}{"type": "string", "description": "Repo owner"},
+					"repo":  map[string]interface{}{"type": "string", "description": "Repo name"},
+				},
+				"required": []string{"owner", "repo"},
+			},
+		},
+	})
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "github/alice", Transport: "http", URL: "http://localhost", ToolsCache: string(cache)},
+	}, nil, nil)
+	_, discoverTool := tools.NewMCPTools(store)
+
+	result, err := discoverTool.Execute(context.Background(), json.RawMessage(`{"server":"github/alice","tool":"list_issues"}`))
+	require.NoError(t, err)
+	assert.Contains(t, result, "list_issues")
+	assert.Contains(t, result, "List issues for a repository.")
+	assert.Contains(t, result, "owner")
+	assert.Contains(t, result, "repo")
+}
+
+// TestDiscoverMCPTool_InvalidArgs ensures bad JSON is rejected.
+func TestDiscoverMCPTool_InvalidArgs(t *testing.T) {
+	store := tools.NewMCPSessionStore(nil, nil, nil)
+	_, discoverTool := tools.NewMCPTools(store)
+
+	_, err := discoverTool.Execute(context.Background(), json.RawMessage(`not json`))
 	require.Error(t, err)
+}
+
+// TestOnToolCall_Fires verifies the onToolCall callback receives server and tool name.
+func TestOnToolCall_Fires(t *testing.T) {
+	cache, _ := json.Marshal([]map[string]interface{}{
+		{"name": "list_issues"},
+	})
+	var gotServer, gotTool string
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "github/alice", Transport: "http", URL: "http://localhost", ToolsCache: string(cache)},
+	}, nil, func(server, tool string) {
+		gotServer, gotTool = server, tool
+	})
+	// onToolCall fires on success — trigger via an unknown server to check it's only
+	// called on success (error path must NOT fire it).
+	callTool, _ := tools.NewMCPTools(store)
+	_, _ = callTool.Execute(context.Background(), json.RawMessage(`{"server":"unknown","tool":"foo"}`))
+	assert.Empty(t, gotServer, "callback should not fire on error")
+	assert.Empty(t, gotTool)
+	_ = store // suppress unused warning
+}
+
+// TestCompactListing verifies the listing format includes server and tool names.
+func TestCompactListing(t *testing.T) {
+	cache, _ := json.Marshal([]map[string]interface{}{
+		{"name": "get_issue"},
+		{"name": "create_pr"},
+	})
+	store := tools.NewMCPSessionStore([]db.MCPServer{
+		{Name: "github/alice", Transport: "http", URL: "http://localhost", ToolsCache: string(cache)},
+		{Name: "postiz/main", Transport: "http", URL: "http://localhost"},
+	}, nil, nil)
+	listing := store.CompactListing()
+	assert.Contains(t, listing, "github/alice")
+	assert.Contains(t, listing, "get_issue")
+	assert.Contains(t, listing, "create_pr")
+	assert.Contains(t, listing, "postiz/main")
+	assert.Contains(t, listing, "call_mcp_tool")
+	assert.Contains(t, listing, "discover_mcp_tool")
+}
+
+// TestCompactListing_Empty returns empty string for no servers.
+func TestCompactListing_Empty(t *testing.T) {
+	store := tools.NewMCPSessionStore(nil, nil, nil)
+	assert.Empty(t, store.CompactListing())
+}
+
+// TestNewMCPTools_Defs verifies the two tools have the expected names.
+func TestNewMCPTools_Defs(t *testing.T) {
+	store := tools.NewMCPSessionStore(nil, nil, nil)
+	callTool, discoverTool := tools.NewMCPTools(store)
+	assert.Equal(t, "call_mcp_tool", callTool.Def().Function.Name)
+	assert.Equal(t, "discover_mcp_tool", discoverTool.Def().Function.Name)
 }

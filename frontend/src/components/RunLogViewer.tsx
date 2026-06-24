@@ -25,6 +25,8 @@ interface RunTokenStats {
   tool_output_tokens?: number;
   cached_tokens?: number;
   total_tokens?: number;
+  mcp_tool_tokens?: number;
+  mcp_server_tokens?: Record<string, number>;
 }
 
 interface LogEntry {
@@ -60,20 +62,61 @@ interface ToolPair {
 }
 
 type GroupedItem =
-  | { kind: 'in';    key: number; msg: LogMessage }
-  | { kind: 'out';   key: number; msg: LogMessage; toolPairs: ToolPair[] }
-  | { kind: 'error'; key: number; msg: LogMessage }
-  | { kind: 'info';  key: number; msg: LogMessage };
+  | { kind: 'in';             key: number; msg: LogMessage }
+  | { kind: 'out';            key: number; msg: LogMessage; toolPairs: ToolPair[] }
+  | { kind: 'error';          key: number; msg: LogMessage }
+  | { kind: 'info';           key: number; msg: LogMessage }
+  | { kind: 'system';         key: number; content: string; ts?: string }
+  | { kind: 'init-user';      key: number; content: string; ts?: string }
+  | { kind: 'init-human';     key: number; content: string; ts?: string }
+  | { kind: 'init-assistant'; key: number; content: string; ts?: string };
 
 function groupMessages(messages: LogMessage[]): GroupedItem[] {
   const items: GroupedItem[] = [];
   let key = 0;
   let lastOut: (GroupedItem & { kind: 'out' }) | null = null;
+  let firstRequestDone = false;
 
   for (const msg of messages) {
     switch (msg.entry.type) {
       case 'request': {
         lastOut = null;
+        if (!firstRequestDone) {
+          firstRequestDone = true;
+          // Expand initial context into per-message rows (system, user, assistant).
+          let expandedOk = false;
+          try {
+            const parsed = JSON.parse(msg.entry.content);
+            if (parsed.messages && Array.isArray(parsed.messages)) {
+              const ts = msg.entry.ts;
+              const newItems: GroupedItem[] = [];
+              let userMsgCount = 0;
+              for (const m of parsed.messages as any[]) {
+                if (m.role === 'tool') continue;
+                const content = stringifyMessageContent(m.content);
+                if (m.role === 'system') {
+                  newItems.push({ kind: 'system', key: key++, content, ts });
+                } else if (m.role === 'user') {
+                  userMsgCount++;
+                  if (userMsgCount === 1) {
+                    // First user message = task description, sent by agent/orchestrator
+                    newItems.push({ kind: 'init-user', key: key++, content, ts });
+                  } else {
+                    // Subsequent user messages = human comments
+                    newItems.push({ kind: 'init-human', key: key++, content, ts });
+                  }
+                } else if (m.role === 'assistant') {
+                  newItems.push({ kind: 'init-assistant', key: key++, content, ts });
+                }
+              }
+              if (newItems.length > 0) {
+                items.push(...newItems);
+                expandedOk = true;
+              }
+            }
+          } catch {}
+          if (expandedOk) break;
+        }
         items.push({ kind: 'in', key: key++, msg });
         break;
       }
@@ -131,6 +174,8 @@ function JsonBlock({ data }: { data: string }) {
   );
 }
 
+const MCP_TOOL_NAMES = new Set(['call_mcp_tool', 'discover_mcp_tool']);
+
 interface ParsedRequestContent {
   latestText: string | null;
   messageCount: number;
@@ -140,6 +185,7 @@ interface ParsedRequestContent {
   estimatedTotalTokens: number;
   currentTurnTokens: number;  // tokens for just the new messages in this turn
   toolResultTokens: number;   // estimated tokens from tool results in this turn
+  mcpToolTokens: number;      // subset of toolResultTokens from MCP dispatcher tools
 }
 
 // Try to extract readable text from a tool result value that may be JSON.
@@ -182,7 +228,7 @@ function stringifyMessageContent(content: unknown): string {
 function parseRequestContent(content: string): ParsedRequestContent {
   const empty: ParsedRequestContent = {
     latestText: null, messageCount: 0, toolResultCount: 0, toolResults: [],
-    historyMessageCount: 0, estimatedTotalTokens: 0, currentTurnTokens: 0, toolResultTokens: 0,
+    historyMessageCount: 0, estimatedTotalTokens: 0, currentTurnTokens: 0, toolResultTokens: 0, mcpToolTokens: 0,
   };
   try {
     const parsed = JSON.parse(content);
@@ -221,16 +267,22 @@ function parseRequestContent(content: string): ParsedRequestContent {
       const toolResultTokens = Math.ceil(
         toolResults.reduce((sum, tr) => sum + tr.content.length, 0) / 4
       );
+      const mcpToolTokens = Math.ceil(
+        toolResults.filter(tr => MCP_TOOL_NAMES.has(tr.name))
+          .reduce((sum, tr) => sum + tr.content.length, 0) / 4
+      );
 
+      // Only look at current-turn messages for user text — not history.
+      // This prevents older task messages from showing as the preview on tool-result turns.
       let latestText: string | null = null;
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          const t = stringifyMessageContent(msgs[i].content);
-          if (t) { latestText = t; break; }
+      for (let i = currentTurnMsgs.length - 1; i >= 0; i--) {
+        const m = currentTurnMsgs[i];
+        if (m.role === 'user') {
+          const t = stringifyMessageContent(m.content);
+          if (t && !t.startsWith('[')) { latestText = t; break; }
         }
       }
-      if (!latestText && toolResults.length > 0) latestText = toolResults[0].preview;
-      return { latestText, messageCount: msgs.length, toolResultCount: toolResults.length, toolResults, historyMessageCount, estimatedTotalTokens, currentTurnTokens, toolResultTokens };
+      return { latestText, messageCount: msgs.length, toolResultCount: toolResults.length, toolResults, historyMessageCount, estimatedTotalTokens, currentTurnTokens, toolResultTokens, mcpToolTokens };
     }
     return empty;
   } catch { return empty; }
@@ -310,6 +362,156 @@ function getToolCallPreview(entry: LogEntry): string {
   return entry.tool_name || 'tool call';
 }
 
+// ─── SystemRow: system prompt ─────────────────────────────────────────────────
+
+function SystemRow({ content, ts }: { content: string; ts?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <Brain size={13} className="text-purple-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-purple-600">System</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-400 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-purple-50/10">
+          <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words font-mono bg-white border border-purple-100 rounded-lg p-3 max-h-80 overflow-y-auto">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitUserRow: user message from initial context (task or human comment) ───
+
+function InitUserRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <User size={13} className="text-blue-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-400 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-blue-50/20">
+          {!rawMode ? (
+            <div className="pl-7 bg-white border border-blue-100 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitHumanRow: human comment from initial context ────────────────────────
+
+function InitHumanRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <User size={13} className="text-gray-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-gray-600">User</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-500 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-gray-50/50">
+          {!rawMode ? (
+            <div className="pl-7 bg-white border border-gray-200 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitAssistantRow: assistant message from initial context (AI comment) ────
+
+function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <Bot size={13} className="text-indigo-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">AI Model</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-600">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-indigo-50/10">
+          {!rawMode ? (
+            <div className="pl-7 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── InRow: collapsed request (IN) ───────────────────────────────────────────
 
 function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
@@ -324,9 +526,8 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
       const line = parsed.latestText.split('\n').find(l => l.trim()) || '';
       return line.length > 80 ? line.slice(0, 80) + '…' : line;
     }
-    const first = entry.content.split('\n').find(l => l.trim()) || '';
-    return first.length > 80 ? first.slice(0, 80) + '…' : first;
-  }, [parsed, entry.content]);
+    return null;
+  }, [parsed]);
 
   return (
     <div className="border-b border-gray-100">
@@ -340,8 +541,8 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
         <User size={13} className="text-blue-500 shrink-0" />
         <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
-        <span className="flex-1 truncate text-xs text-gray-600" title={previewText}>
-          {previewText || '(empty)'}
+        <span className="flex-1 truncate text-xs text-gray-400 italic" title={previewText || ''}>
+          {previewText || ''}
         </span>
         {parsed.toolResultCount > 0 && (
           <span className="shrink-0 text-xs text-green-700 bg-green-50 px-1.5 py-0.5 rounded">
@@ -366,6 +567,11 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
             {parsed.toolResultTokens > 0 && (
               <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-mono">
                 tools: {formatTokens(parsed.toolResultTokens)} tok
+              </span>
+            )}
+            {parsed.mcpToolTokens > 0 && (
+              <span className="bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded font-mono">
+                🔌 MCP: {formatTokens(parsed.mcpToolTokens)} tok
               </span>
             )}
             {(promptTokens > 0 || parsed.estimatedTotalTokens > 0) && (
@@ -786,6 +992,9 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
         agg.tool_input_tokens = (agg.tool_input_tokens || 0) + (e.input_tokens ?? e.output_tokens ?? 0);
       } else if (e.type === 'tool_response') {
         agg.tool_output_tokens = (agg.tool_output_tokens || 0) + (e.output_tokens || 0);
+        if (e.tool_name && MCP_TOOL_NAMES.has(e.tool_name)) {
+          agg.mcp_tool_tokens = (agg.mcp_tool_tokens || 0) + (e.output_tokens || 0);
+        }
       } else if (e.type === 'request' && e.prompt_tokens) {
         agg.prompt_tokens = Math.max(agg.prompt_tokens || 0, e.prompt_tokens);
       }
@@ -832,6 +1041,11 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
           })}
         </div>
         <span className="text-xs text-gray-700 font-mono whitespace-nowrap">{formatTokens(total)} tok</span>
+        {(aggregate.mcp_tool_tokens || 0) > 0 && (
+          <span className="text-xs text-teal-700 font-mono whitespace-nowrap bg-teal-50 px-1.5 py-0.5 rounded">
+            🔌 {formatTokens(aggregate.mcp_tool_tokens!)} MCP
+          </span>
+        )}
         {expanded ? <ChevronUp size={10} className="text-gray-400" /> : <ChevronDown size={10} className="text-gray-400" />}
       </button>
       {expanded && (
@@ -847,6 +1061,20 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
               <span className={`w-2 h-2 rounded-full ${cachedSegment.color}`}></span>
               ⚡ {formatTokens(cachedSegment.value)} {cachedSegment.label}
             </span>
+          )}
+          {(aggregate.mcp_tool_tokens || 0) > 0 && (
+            <div className="w-full flex flex-wrap gap-1 pt-0.5 border-t border-gray-100 mt-0.5">
+              <span className="bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded font-mono flex items-center gap-1">
+                🔌 {formatTokens(aggregate.mcp_tool_tokens!)} MCP total
+              </span>
+              {Object.entries(stats?.mcp_server_tokens ?? aggregate.mcp_server_tokens ?? {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([server, count]) => (
+                  <span key={server} className="bg-teal-50/60 text-teal-600 px-1.5 py-0.5 rounded font-mono">
+                    {server}: {formatTokens(count)}
+                  </span>
+                ))}
+            </div>
           )}
         </div>
       )}
@@ -951,9 +1179,13 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
         ) : (
           <div>
             {grouped.map(item => {
-              if (item.kind === 'in')    return <InRow    key={item.key} msg={item.msg} rawMode={rawMode} />;
-              if (item.kind === 'out')   return <OutRow   key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
-              if (item.kind === 'error') return <ErrorRow key={item.key} msg={item.msg} />;
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
+              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>

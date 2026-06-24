@@ -166,7 +166,7 @@ func (q *Queries) GetRunTokenStats(ctx context.Context, runID int32) (RunTokenSt
 // stats. The column is stored as JSON; we read-modify-write the struct and
 // round the totals so re-reads stay stable. Safe to call concurrently.
 func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTokenStats) error {
-	if delta == (RunTokenStats{}) {
+	if delta.IsEmpty() {
 		return nil
 	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -184,6 +184,15 @@ func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTo
 		cur.ToolInputTokens += delta.ToolInputTokens
 		cur.ToolOutputTokens += delta.ToolOutputTokens
 		cur.CachedTokens += delta.CachedTokens
+		cur.MCPToolTokens += delta.MCPToolTokens
+		if len(delta.MCPServerTokens) > 0 {
+			if cur.MCPServerTokens == nil {
+				cur.MCPServerTokens = make(map[string]int, len(delta.MCPServerTokens))
+			}
+			for k, v := range delta.MCPServerTokens {
+				cur.MCPServerTokens[k] += v
+			}
+		}
 		cur.TotalTokens = cur.PromptTokens + cur.CompletionTokens + cur.ReasoningTokens + cur.ToolInputTokens + cur.ToolOutputTokens
 		b, _ := json.Marshal(cur)
 		return tx.Model(&Run{}).Where("id = ?", runID).Update("token_stats", string(b)).Error

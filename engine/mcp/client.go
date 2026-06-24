@@ -51,13 +51,27 @@ func NewClient(s db.MCPServer) (Client, error) {
 				return nil, fmt.Errorf("mcp server %q: invalid headers JSON: %w", s.Name, err)
 			}
 		}
-		if s.AuthType == "bearer" && s.AuthToken != "" {
-			if headers == nil {
-				headers = make(map[string]string)
+		endpointURL := s.URL
+		switch s.AuthType {
+		case "bearer":
+			if s.AuthToken != "" {
+				if headers == nil {
+					headers = make(map[string]string)
+				}
+				headers["Authorization"] = "Bearer " + s.AuthToken
 			}
-			headers["Authorization"] = "Bearer " + s.AuthToken
+		case "url-token":
+			// Token may be the full personal URL or just the path token.
+			// Postiz embeds the key in the path: https://mcp.postiz.com/mcp/<token>
+			if s.AuthToken != "" {
+				if strings.HasPrefix(s.AuthToken, "http://") || strings.HasPrefix(s.AuthToken, "https://") {
+					endpointURL = s.AuthToken
+				} else {
+					endpointURL = strings.TrimRight(s.URL, "/") + "/" + s.AuthToken
+				}
+			}
 		}
-		return newHTTPClient(s.URL, headers), nil
+		return newHTTPClient(endpointURL, headers), nil
 	case "builtin":
 		return nil, fmt.Errorf("builtin MCP servers are not accessed via Client")
 	default:

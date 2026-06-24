@@ -254,28 +254,27 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
 
-	var contextParts []string
-	contextParts = append(contextParts, fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s\n", task.Title, task.Description, mode))
-
+	// Build initial messages: task description as the first user message,
+	// then each comment as its own message with the appropriate role.
+	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, task.Description, mode)
 	if len(attachments) > 0 {
-		contextParts = append(contextParts, "Attachments:")
+		taskContent += "\nAttachments:"
 		for _, a := range attachments {
 			if strings.HasPrefix(a.MimeType, "image/") {
-				contextParts = append(contextParts, fmt.Sprintf("- %s (image)", a.Filename))
+				taskContent += fmt.Sprintf("\n- %s (image)", a.Filename)
 			} else {
-				contextParts = append(contextParts, fmt.Sprintf("- %s", a.Filename))
+				taskContent += fmt.Sprintf("\n- %s", a.Filename)
 			}
 		}
 	}
-
-	if len(comments) > 0 {
-		contextParts = append(contextParts, "Comments:")
-		for _, c := range comments {
-			contextParts = append(contextParts, fmt.Sprintf("[%s]: %s", c.AuthorType, c.Content))
+	initialMessages := []aicli.Message{{Role: "user", Content: taskContent}}
+	for _, c := range comments {
+		role := "user"
+		if c.AuthorType == "agent" {
+			role = "assistant"
 		}
+		initialMessages = append(initialMessages, aicli.Message{Role: role, Content: c.Content})
 	}
-
-	userMessage := strings.Join(contextParts, "\n")
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	// update_task_status and create_subtask are registered like any other tool
@@ -317,12 +316,26 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
-	// Load MCP servers enabled for this agent and set up two-phase discovery.
-	if mcpServers, mcpErr := e.q.ListMCPServersForAgent(ctx, agent.ID); mcpErr == nil && len(mcpServers) > 0 {
+	// MCP listing token costs — set if any MCP servers are active for this run.
+	var listingCostTotal int
+	var listingCostByServer map[string]int
+
+	// Load MCP accounts enabled for this agent and build synthetic MCPServer objects per account.
+	// Each account produces one entry: server config + account's auth token.
+	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
+		// We need the full server config for each account. Fetch servers once.
+		allServers, _ := e.q.ListMCPServers(ctx)
+		serverByID := make(map[int32]db.MCPServer, len(allServers))
+		for _, s := range allServers {
+			serverByID[s.ID] = s
+		}
+
 		var externalMCPs []db.MCPServer
-		for _, srv := range mcpServers {
-			if srv.Transport == "builtin" {
-				continue // built-in tools are already in the registry
+		accountIDByName := make(map[string]int32)
+		for _, acc := range accounts {
+			srv, ok := serverByID[acc.MCPServerID]
+			if !ok || srv.Transport == "builtin" {
+				continue
 			}
 			// Honour AllowedMCPs filter from agent config.
 			if agentCfg != nil && len(agentCfg.AllowedMCPs) > 0 {
@@ -337,15 +350,54 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 					continue
 				}
 			}
-			externalMCPs = append(externalMCPs, srv)
+			// Inject account credentials into a copy of the server config.
+			synthetic := srv
+			synthetic.AuthToken = acc.AuthToken
+			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
+			externalMCPs = append(externalMCPs, synthetic)
+			accountIDByName[synthetic.Name] = acc.ID
 		}
 		if len(externalMCPs) > 0 {
-			discoverTool := tools.NewDiscoverMCPTools(registry, externalMCPs)
+			// Auth error sink: when a live tool call returns 401/unauthorized during a run,
+			// write the error to MCPAccount.last_error so the MCP Servers page shows a warning.
+			onAuthError := func(serverName, rawErr string) {
+				accID, ok := accountIDByName[serverName]
+				if !ok {
+					return
+				}
+				msg := "Auth token invalid or expired. Re-authenticate."
+				if strings.Contains(strings.ToLower(rawErr), "forbidden") ||
+					strings.Contains(strings.ToLower(rawErr), "permission denied") {
+					msg = "Permission denied. Check your auth token has the required scopes."
+				}
+				_ = e.q.UpdateMCPAccountLastError(context.Background(), accID, msg)
+			}
+			serverIDByName := make(map[string]int32, len(externalMCPs))
+			for _, s := range externalMCPs {
+				serverIDByName[s.Name] = s.ID
+			}
+			onToolCall := func(serverName, toolName string) {
+				if srvID, ok := serverIDByName[serverName]; ok {
+					_ = e.q.IncrementMCPToolCallCount(context.Background(), srvID, toolName)
+				}
+			}
+			store := tools.NewMCPSessionStore(externalMCPs, onAuthError, onToolCall)
+			callTool, discoverTool := tools.NewMCPTools(store)
+			registry.Register(callTool)
 			registry.Register(discoverTool)
-			e.logInfo(proxyLogger, fmt.Sprintf("MCP: %d external server(s) available for discovery", len(externalMCPs)))
+
+			mcpNames := store.ServerNames()
+			e.logInfo(proxyLogger, "MCP: "+strings.Join(mcpNames, ", "))
+			// Append compact server+tool listing to the system prompt so it appears on every turn.
+			listing := store.CompactListing()
+			systemPrompt += listing
+			listingCostByServer = store.ListingCostByServer()
+			for _, c := range listingCostByServer {
+				listingCostTotal += c
+			}
 		}
 	} else if mcpErr != nil {
-		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP servers for agent: %v", mcpErr))
+		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP accounts for agent: %v", mcpErr))
 	}
 
 	// Determine agent mode and reasoning level from config.
@@ -363,15 +415,17 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	// appear in the log file and the DB (identical format to the gateway).
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
 	agentCfgObj := aicli.Config{
-		Client:         llmClient,
-		Registry:       registry,
-		Mode:           agentMode,
-		ProviderName:   provider.Name,
-		AgentName:      agent.Name,
-		ReasoningLevel: reasoningLevel,
-		Queries:        e.q,
-		RunID:          run.ID,
-		Logger:         proxyLogger,
+		Client:                llmClient,
+		Registry:              registry,
+		Mode:                  agentMode,
+		ProviderName:          provider.Name,
+		AgentName:             agent.Name,
+		ReasoningLevel:        reasoningLevel,
+		MCPListingCostPerTurn: listingCostTotal,
+		MCPServerListingCosts: listingCostByServer,
+		Queries:               e.q,
+		RunID:                 run.ID,
+		Logger:                proxyLogger,
 	}
 	aiAgent := aicli.New(agentCfgObj)
 
@@ -381,7 +435,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
 	}
 
-	finalText, agentErr := aiAgent.Run(runCtx, systemPrompt, userMessage)
+	finalText, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
 
 	status := "completed"
 

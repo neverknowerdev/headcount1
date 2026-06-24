@@ -11,7 +11,7 @@ export const AgentDetails: React.FC = () => {
     const [activeTab, setActiveTab] = useState('overview');
     const [runs, setRuns] = useState<any[]>([]);
     const [mcpServers, setMcpServers] = useState<any[]>([]);
-    const [mcpAssignments, setMcpAssignments] = useState<Record<number, boolean>>({});
+    const [mcpAccountAssignments, setMcpAccountAssignments] = useState<Record<number, boolean>>({});
 
     const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
 
@@ -48,17 +48,14 @@ export const AgentDetails: React.FC = () => {
         try {
             const [serversRes, assignRes] = await Promise.all([
                 axios.get('/api/mcp-servers'),
-                axios.get(`/api/agents/${id}/mcp-servers`),
+                axios.get(`/api/agents/${id}/mcp-accounts`),
             ]);
             setMcpServers(serversRes.data || []);
             const map: Record<number, boolean> = {};
             for (const a of (assignRes.data || [])) {
-                map[a.mcp_server_id] = a.enabled;
+                map[a.mcp_account_id] = a.enabled;
             }
-            // Paperclip2 is always on — ensure it's always reflected as enabled
-            const p2 = (serversRes.data || []).find((s: any) => s.name === 'paperclip2');
-            if (p2) map[p2.id] = true;
-            setMcpAssignments(map);
+            setMcpAccountAssignments(map);
         } catch (e) {
             console.error(e);
         }
@@ -74,16 +71,11 @@ export const AgentDetails: React.FC = () => {
 
     const handleSaveMCPAssignments = async () => {
         try {
-            // Always include paperclip2 as enabled
-            const p2 = mcpServers.find((s: any) => s.name === 'paperclip2');
-            const assignments = Object.entries(mcpAssignments).map(([serverId, enabled]) => ({
-                mcp_server_id: parseInt(serverId),
+            const assignments = Object.entries(mcpAccountAssignments).map(([accountId, enabled]) => ({
+                mcp_account_id: parseInt(accountId),
                 enabled,
             }));
-            if (p2 && !assignments.find(a => a.mcp_server_id === p2.id)) {
-                assignments.push({ mcp_server_id: p2.id, enabled: true });
-            }
-            await axios.put(`/api/agents/${id}/mcp-servers`, assignments);
+            await axios.put(`/api/agents/${id}/mcp-accounts`, assignments);
         } catch (e) {
             alert('Failed to save MCP assignments');
         }
@@ -266,29 +258,49 @@ export const AgentDetails: React.FC = () => {
                                 );
                             })()}
 
-                            {/* Optional connected MCPs */}
+                            {/* Optional connected MCPs — grouped by server, per-account checkboxes */}
                             {(() => {
-                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.enabled);
-                                if (optional.length === 0) return (
+                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin);
+                                const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin);
+                                const allExternal = [...builtin, ...optional];
+                                if (allExternal.length === 0) return (
                                     <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
                                 );
                                 return (
-                                    <div className="space-y-2">
-                                        {optional.map((srv: any) => (
-                                            <div key={srv.id} className="flex items-center gap-3">
-                                                <input
-                                                    type="checkbox"
-                                                    id={`mcp-${srv.id}`}
-                                                    checked={!!mcpAssignments[srv.id]}
-                                                    onChange={e => setMcpAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }))}
-                                                    className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
-                                                />
-                                                <label htmlFor={`mcp-${srv.id}`} className="text-sm text-gray-900 flex-1">
-                                                    <span className="font-medium">{srv.display_name || srv.name}</span>
-                                                    {srv.description && <span className="ml-2 text-xs text-gray-400">{srv.description}</span>}
-                                                </label>
-                                            </div>
-                                        ))}
+                                    <div className="space-y-3">
+                                        {allExternal.map((srv: any) => {
+                                            const accounts: any[] = srv.accounts || [];
+                                            return (
+                                                <div key={srv.id} className="border border-gray-100 rounded-lg overflow-hidden">
+                                                    <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-100">
+                                                        <span className="text-sm font-semibold text-gray-800">{srv.display_name || srv.name}</span>
+                                                        {accounts.length === 0 && (
+                                                            <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-amber-600 hover:text-amber-800">Not connected</Link>
+                                                        )}
+                                                    </div>
+                                                    {accounts.length === 0 ? (
+                                                        <p className="px-3 py-2 text-xs text-gray-400 italic">No accounts configured. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-500 hover:underline">Authorize</Link>.</p>
+                                                    ) : (
+                                                        <div className="divide-y divide-gray-50">
+                                                            {accounts.map((acc: any) => (
+                                                                <label key={acc.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={!!mcpAccountAssignments[acc.id]}
+                                                                        onChange={e => setMcpAccountAssignments(prev => ({ ...prev, [acc.id]: e.target.checked }))}
+                                                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
+                                                                    />
+                                                                    <div className="min-w-0">
+                                                                        <span className="text-sm text-gray-900 font-medium">{acc.name}</span>
+                                                                        {!acc.has_token && <span className="ml-2 text-xs text-amber-500">No token</span>}
+                                                                    </div>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
                                     </div>
                                 );
                             })()}

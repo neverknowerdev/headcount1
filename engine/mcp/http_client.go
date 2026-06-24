@@ -7,16 +7,20 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"sync"
 	"sync/atomic"
 	"time"
 )
 
-// httpClient communicates with an MCP server over HTTP (JSON-RPC over POST).
+// httpClient communicates with an MCP server over Streamable HTTP (JSON-RPC over POST).
+// It tracks the Mcp-Session-Id returned by initialize and sends it on all subsequent requests.
 type httpClient struct {
-	url     string
-	headers map[string]string
-	http    *http.Client
-	nextID  atomic.Int32
+	url       string
+	headers   map[string]string
+	http      *http.Client
+	nextID    atomic.Int32
+	sessionID string
+	mu        sync.Mutex
 }
 
 func newHTTPClient(url string, headers map[string]string) *httpClient {
@@ -54,15 +58,29 @@ func (c *httpClient) post(ctx context.Context, method string, params any) (*Resp
 		return nil, err
 	}
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json, text/event-stream")
 	for k, v := range c.headers {
 		httpReq.Header.Set(k, v)
 	}
+	c.mu.Lock()
+	if c.sessionID != "" {
+		httpReq.Header.Set("Mcp-Session-Id", c.sessionID)
+	}
+	c.mu.Unlock()
 
 	resp, err := c.http.Do(httpReq)
 	if err != nil {
 		return nil, fmt.Errorf("http mcp: %w", err)
 	}
 	defer resp.Body.Close()
+
+	// Capture session ID from the response (Streamable HTTP protocol).
+	if sid := resp.Header.Get("Mcp-Session-Id"); sid != "" {
+		c.mu.Lock()
+		c.sessionID = sid
+		c.mu.Unlock()
+	}
+
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, fmt.Errorf("http mcp: read body: %w", err)
