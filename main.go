@@ -71,6 +71,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
 		&db.MCPServer{},

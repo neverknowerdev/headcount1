@@ -336,10 +336,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		return nil
 	}))
 
-	// Track whether finish_task_execution was called so we can force it if not.
+	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
 
-	registry.Register(tools.NewFinishTaskExecution(func(finCtx context.Context, status, description, explanation string) error {
+	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus string) error {
 		taskFinished = true
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
@@ -350,7 +350,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			return err
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
-		if err := e.q.UpdateRunResult(finCtx, run.ID, description, explanation); err != nil {
+		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, ""); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
 		runID := run.ID
@@ -358,7 +358,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			TaskID:      task.ID,
 			AuthorType:  "agent",
 			CommentType: "task_done",
-			Content:     description,
+			Content:     finishStatus,
 			RunID:       &runID,
 		})
 		if cErr == nil {
@@ -367,26 +367,44 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		return nil
 	}))
 
-	registry.Register(tools.NewAddComment(func(addCtx context.Context, commentType, content string) error {
-		comment, err := e.q.CreateComment(addCtx, db.Comment{
-			TaskID:      task.ID,
-			AuthorType:  "agent",
-			CommentType: commentType,
-			Content:     content,
-		})
-		if err != nil {
-			return err
-		}
-		e.hub.BroadcastEvent("comment_created", comment)
-		return nil
-	}))
-
 	registry.Register(tools.NewExpandRunResult(func(expCtx context.Context, runID int32) (string, error) {
 		r, err := e.q.GetRun(expCtx, runID)
 		if err != nil {
 			return "", err
 		}
-		return r.ResultExplanation, nil
+		return r.ResultDescription, nil
+	}))
+
+	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
+	artifactDir := func() string {
+		base := settings.BasePath
+		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
+			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
+		}
+		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
+	}()
+
+	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content string) error {
+		if err := os.MkdirAll(artifactDir, 0755); err != nil {
+			return fmt.Errorf("could not create artifact directory: %w", err)
+		}
+		filePath := filepath.Join(artifactDir, filename)
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			return fmt.Errorf("could not write artifact file: %w", err)
+		}
+		artifact, err := e.q.CreateArtifact(wCtx, db.Artifact{
+			TaskID:   task.ID,
+			RunID:    run.ID,
+			Filename: filename,
+			FilePath: filePath,
+			Content:  content,
+		})
+		if err != nil {
+			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
+			return nil
+		}
+		e.hub.BroadcastEvent("artifact_created", artifact)
+		return nil
 	}))
 	var agentNames []string
 	if e.agentFactory != nil {
@@ -551,7 +569,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
-	// If the agent returned plain text (not via add_comment/finish_task_execution), save it.
+	// If the agent returned plain text (not via finish_task), save it as a comment.
 	if finalText != "" {
 		comment, _ := e.q.CreateComment(ctx, db.Comment{
 			TaskID:     task.ID,
@@ -561,11 +579,11 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.hub.BroadcastEvent("comment_created", comment)
 	}
 
-	// If finish_task_execution was not called, force a follow-up turn.
+	// If finish_task was not called, force a follow-up turn.
 	if agentErr == nil && !taskFinished {
-		e.logInfo(proxyLogger, "finish_task_execution not called. Sending follow-up to force it.")
+		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
-			"You must call finish_task_execution before ending. Choose the appropriate status: 'in-review' if done, 'blocked' if stuck, 'done' if fully complete, or 'refinement' if you need clarification. Provide a short description and a detailed explanation.")
+			"You must call finish_task before ending. Choose the appropriate status: 'in-review' if done, 'blocked' if stuck, 'done' if fully complete, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 		}

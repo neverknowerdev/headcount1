@@ -26,6 +26,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [runs, setRuns] = useState<any[]>([]);
     const [runAgent, setRunAgent] = useState(true);
     const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
+    const [artifacts, setArtifacts] = useState<any[]>([]);
+    const [expandedArtifact, setExpandedArtifact] = useState<number | null>(null);
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -83,15 +85,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if (!taskId) return;
         const fetchDetails = async () => {
             try {
-                const [taskRes, commentsRes, runsRes] = await Promise.all([
+                const [taskRes, commentsRes, runsRes, artifactsRes] = await Promise.all([
                     axios.get(`/api/tasks/${taskId}`),
                     axios.get(`/api/comments?task_id=${taskId}`),
-                    axios.get(`/api/tasks/${taskId}/runs`)
+                    axios.get(`/api/tasks/${taskId}/runs`),
+                    axios.get(`/api/tasks/${taskId}/artifacts`),
                 ]);
                 const t = taskRes.data;
                 setTask(t);
                 setComments(commentsRes.data || []);
                 setRuns(runsRes.data || []);
+                setArtifacts(artifactsRes.data || []);
                 setFormData({
                     title: t.title,
                     description: t.description || '',
@@ -115,6 +119,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             const msg = JSON.parse(event.data);
             if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
                 setComments(prev => [...prev, msg.payload]);
+            }
+            if (msg.type === 'artifact_created' && msg.payload.task_id === taskId) {
+                setArtifacts(prev => {
+                    const exists = prev.some((a: any) => a.id === msg.payload.id);
+                    return exists ? prev.map((a: any) => a.id === msg.payload.id ? msg.payload : a) : [...prev, msg.payload];
+                });
             }
             if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
                 setRuns(prev => [...prev, msg.payload]);
@@ -406,6 +416,36 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         </form>
                                     )}
                                 </div>
+
+                                {/* Artifacts panel */}
+                                {artifacts.length > 0 && (
+                                    <div className="mt-6">
+                                        <h3 className="text-sm font-semibold text-gray-700 mb-3 border-b pb-2">📄 Artifacts</h3>
+                                        <div className="space-y-2">
+                                            {artifacts.map((a: any) => (
+                                                <div key={a.id} className="border border-emerald-200 rounded-lg bg-emerald-50 shadow-sm overflow-hidden">
+                                                    <button
+                                                        className="w-full px-3 py-2 flex items-center justify-between text-xs text-left hover:bg-emerald-100 transition-colors"
+                                                        onClick={() => setExpandedArtifact(expandedArtifact === a.id ? null : a.id)}
+                                                    >
+                                                        <span className="font-semibold text-emerald-800">{a.filename}</span>
+                                                        <div className="flex items-center gap-2 text-emerald-600">
+                                                            <span className="text-gray-400">{new Date(a.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                                                            {expandedArtifact === a.id ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                        </div>
+                                                    </button>
+                                                    {expandedArtifact === a.id && (
+                                                        <div className="px-3 pb-3 border-t border-emerald-200 bg-white">
+                                                            <div className="prose prose-sm max-w-none mt-2 prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-emerald-700 prose-code:bg-emerald-50 prose-code:px-1 prose-code:rounded">
+                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content}</ReactMarkdown>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    </div>
+                                )}
                             </div>
                         )}
                     </div>

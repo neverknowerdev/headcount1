@@ -100,8 +100,9 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.CreateTask)
 		r.Get("/{id}", api.GetTask)
 		r.Put("/{id}", api.UpdateTask)
-		r.Put("/{id}/status", api.UpdateTask) // Keep for backward compatibility if needed, though they map to same
+		r.Put("/{id}/status", api.UpdateTask)
 		r.Get("/{id}/runs", api.ListTaskRuns)
+		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
 	})
 
 	r.Route("/agents", func(r chi.Router) {

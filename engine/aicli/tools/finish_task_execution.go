@@ -8,28 +8,27 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// FinishTaskExecution is called by the agent at the end of every run to record
-// the outcome, update the task status, and leave a visible summary for the user.
-type FinishTaskExecution struct {
-	onFinish func(ctx context.Context, status, description, explanation string) error
+// FinishTask is called by the agent at the end of every run to record the
+// outcome, update the task status, and leave a visible one-line summary.
+type FinishTask struct {
+	onFinish func(ctx context.Context, status, finishStatus string) error
 }
 
-func NewFinishTaskExecution(onFinish func(ctx context.Context, status, description, explanation string) error) *FinishTaskExecution {
-	return &FinishTaskExecution{onFinish: onFinish}
+func NewFinishTask(onFinish func(ctx context.Context, status, finishStatus string) error) *FinishTask {
+	return &FinishTask{onFinish: onFinish}
 }
 
-func (t *FinishTaskExecution) Def() aicli.ToolDef {
+func (t *FinishTask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "finish_task_execution",
+			Name: "finish_task",
 			Description: "MUST be called at the end of every run to record the outcome and update the task status. " +
 				"Use 'in-review' when the work is done and ready for human review. " +
 				"Use 'blocked' when you are stuck and need user input. " +
 				"Use 'done' when the task is fully complete and no review is needed. " +
 				"Use 'refinement' when you need clarification before you can proceed. " +
-				"task_status_description is a short one-sentence summary shown to the user. " +
-				"task_status_explanation is a detailed markdown report of everything you did.",
+				"finish_status is a short one-sentence summary of the outcome shown to the user.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
@@ -38,32 +37,27 @@ func (t *FinishTaskExecution) Def() aicli.ToolDef {
 						"enum":["in-review","blocked","done","refinement"],
 						"description":"New status for the task"
 					},
-					"task_status_description":{
+					"finish_status":{
 						"type":"string",
-						"description":"Short one-sentence summary of the outcome (shown inline in the timeline)"
-					},
-					"task_status_explanation":{
-						"type":"string",
-						"description":"Detailed markdown report of what was done, decisions made, and next steps"
+						"description":"Short one-sentence summary of the outcome (shown in the activity timeline)"
 					}
 				},
-				"required":["task_status","task_status_description","task_status_explanation"]
+				"required":["task_status","finish_status"]
 			}`),
 		},
 	}
 }
 
-func (t *FinishTaskExecution) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *FinishTask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var p struct {
-		TaskStatus            string `json:"task_status"`
-		TaskStatusDescription string `json:"task_status_description"`
-		TaskStatusExplanation string `json:"task_status_explanation"`
+		TaskStatus   string `json:"task_status"`
+		FinishStatus string `json:"finish_status"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	if err := t.onFinish(ctx, p.TaskStatus, p.TaskStatusDescription, p.TaskStatusExplanation); err != nil {
-		return "", fmt.Errorf("finish_task_execution: %w", err)
+	if err := t.onFinish(ctx, p.TaskStatus, p.FinishStatus); err != nil {
+		return "", fmt.Errorf("finish_task: %w", err)
 	}
-	return fmt.Sprintf("Task status set to %q and result recorded.", p.TaskStatus), nil
+	return fmt.Sprintf("Task status set to %q.", p.TaskStatus), nil
 }
