@@ -4,13 +4,39 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"strings"
 
 	"agent-orchestrator/engine/aicli"
 )
 
-// WriteArtifactFile lets the agent publish a markdown document as a named
-// output artifact attached to the current task.
+// codeExtensions is a blocklist of file extensions that are not allowed as
+// artifacts because they are source code or configuration files.
+var codeExtensions = map[string]bool{
+	// Languages
+	".go": true, ".js": true, ".ts": true, ".tsx": true, ".jsx": true,
+	".py": true, ".rb": true, ".java": true, ".kt": true, ".swift": true,
+	".c": true, ".cpp": true, ".cc": true, ".h": true, ".hpp": true,
+	".cs": true, ".rs": true, ".php": true, ".scala": true, ".clj": true,
+	".ex": true, ".exs": true, ".elm": true, ".hs": true, ".ml": true,
+	".fs": true, ".fsx": true, ".lua": true, ".r": true, ".m": true,
+	".dart": true, ".vue": true, ".svelte": true, ".astro": true,
+	// Shell / scripts
+	".sh": true, ".bash": true, ".zsh": true, ".fish": true,
+	".ps1": true, ".bat": true, ".cmd": true,
+	// Config / data formats
+	".json": true, ".yaml": true, ".yml": true, ".toml": true,
+	".xml": true, ".ini": true, ".cfg": true, ".conf": true,
+	".env": true, ".lock": true, ".gradle": true, ".cmake": true,
+	// Query / schema
+	".sql": true, ".graphql": true, ".gql": true, ".proto": true,
+	// Build / tooling
+	".makefile": true, ".dockerfile": true, ".gitignore": true,
+	".dockerignore": true, ".editorconfig": true,
+}
+
+// WriteArtifactFile lets the agent publish output artifacts for the current task.
+// Any file type is allowed except source code and config files.
 type WriteArtifactFile struct {
 	onWrite func(ctx context.Context, filename, content string) error
 }
@@ -24,20 +50,21 @@ func (t *WriteArtifactFile) Def() aicli.ToolDef {
 		Type: "function",
 		Function: aicli.FuncMeta{
 			Name: "write_artifact_file",
-			Description: "Write a markdown (.md) output artifact for the current task. " +
-				"Use this to produce structured deliverables: plans, reports, documentation, specs, etc. " +
-				"Artifacts are saved to the project artifacts directory and displayed in the task UI. " +
-				"Only .md files are accepted.",
+			Description: "Write an output artifact for the current task. " +
+				"Use this for deliverables: reports (.md), specifications, diagrams (.svg), " +
+				"images (.png, .jpg), PDFs, audio, video, or any non-code output. " +
+				"Source code and config files (.go, .js, .json, .yaml, etc.) are not allowed. " +
+				"Artifacts are saved to the project artifacts directory and shown in the task UI.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
 					"filename":{
 						"type":"string",
-						"description":"File name ending in .md, e.g. \"plan.md\" or \"report.md\""
+						"description":"File name with extension, e.g. \"report.md\", \"diagram.svg\", \"analysis.pdf\""
 					},
 					"content":{
 						"type":"string",
-						"description":"Full markdown content of the artifact"
+						"description":"File content (text for .md/.svg/.html/.txt; base64-encoded for binary formats)"
 					}
 				},
 				"required":["filename","content"]
@@ -54,11 +81,15 @@ func (t *WriteArtifactFile) Execute(ctx context.Context, args json.RawMessage) (
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	if !strings.HasSuffix(strings.ToLower(p.Filename), ".md") {
-		return "", fmt.Errorf("write_artifact_file: only .md files are allowed, got %q", p.Filename)
-	}
 	if strings.ContainsAny(p.Filename, "/\\") {
 		return "", fmt.Errorf("write_artifact_file: filename must not contain path separators")
+	}
+	ext := strings.ToLower(filepath.Ext(p.Filename))
+	if ext == "" {
+		return "", fmt.Errorf("write_artifact_file: filename must have an extension")
+	}
+	if codeExtensions[ext] {
+		return "", fmt.Errorf("write_artifact_file: %q is a code/config file type and cannot be an artifact; use write_file instead", ext)
 	}
 	if err := t.onWrite(ctx, p.Filename, p.Content); err != nil {
 		return "", fmt.Errorf("write_artifact_file: %w", err)
