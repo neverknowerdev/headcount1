@@ -26,9 +26,11 @@ interface MCPServer {
     auth_env_var: string;
     tools_cache: string;
     last_error: string;
+    init_status: string;
     enabled: boolean;
     builtin: boolean;
     deps_installed: boolean;
+    project_id: number | null;
     accounts: MCPAccount[];
     created_at: string;
     updated_at: string;
@@ -392,15 +394,43 @@ export const MCPServers: React.FC = () => {
                 <section>
                     <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Custom Servers</h2>
                     <div className="grid grid-cols-1 gap-4">
-                        {custom.map(s => (
-                            <div key={s.id} className={`bg-white rounded-lg border shadow-sm p-5 ${!s.enabled ? 'opacity-60' : ''}`}>
+                        {custom.map(s => {
+                            const isCodegraph = !!s.project_id;
+                            const cgReady = s.init_status === 'ready';
+                            const cgInitializing = s.init_status === 'initializing';
+                            const cgError = s.init_status?.startsWith('error:');
+                            const borderCls = isCodegraph
+                                ? (cgReady ? 'border-green-200' : cgInitializing ? 'border-amber-200' : cgError ? 'border-red-200' : 'border-gray-200')
+                                : (!s.enabled ? 'border-gray-200 opacity-60' : 'border-gray-200');
+                            return (
+                            <div key={s.id} className={`bg-white rounded-lg border shadow-sm p-5 ${borderCls}`}>
                                 <div className="flex items-start justify-between">
                                     <div className="flex-1 min-w-0">
                                         <div className="flex items-center gap-2 mb-1">
                                             <h3 className="text-base font-semibold text-gray-900">{s.display_name || s.name}</h3>
-                                            <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${s.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
-                                                {s.enabled ? 'Enabled' : 'Disabled'}
-                                            </span>
+                                            {isCodegraph ? (
+                                                cgReady ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
+                                                        <CheckCircle2 size={10} /> Ready
+                                                    </span>
+                                                ) : cgInitializing ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
+                                                        <AlertCircle size={10} /> Initializing…
+                                                    </span>
+                                                ) : cgError ? (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                                        <AlertCircle size={10} /> Init failed
+                                                    </span>
+                                                ) : (
+                                                    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-500">
+                                                        <AlertCircle size={10} /> Not initialized
+                                                    </span>
+                                                )
+                                            ) : (
+                                                <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${s.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                                                    {s.enabled ? 'Enabled' : 'Disabled'}
+                                                </span>
+                                            )}
                                             <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-gray-100 text-gray-600">
                                                 {transportIcon(s.transport)}{s.transport}
                                             </span>
@@ -456,7 +486,8 @@ export const MCPServers: React.FC = () => {
                                     </div>
                                 )}
                             </div>
-                        ))}
+                        );
+                        })}
                     </div>
                 </section>
             )}

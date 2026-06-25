@@ -24,15 +24,7 @@ func NewGitManager(repoPath, sshDir string) *GitManager {
 func (g *GitManager) runGitCommand(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
 	cmd.Dir = g.repoPath
-	cmd.Env = os.Environ()
-
-	// Configure SSH to use the specific key and ignore host key checking.
-	// Skip for local file:// repos where SSH is irrelevant.
-	if !g.isLocalOnly() {
-		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", keyPath)
-		cmd.Env = append(cmd.Env, fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
-	}
+	cmd.Env = g.withGitEnv()
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -113,12 +105,14 @@ func (g *GitManager) sshEnv() string {
 		return ""
 	}
 	keyPath := filepath.Join(g.sshDir, "id_rsa")
-	return fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", keyPath)
+	return fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
 }
 
 // withGitEnv returns os.Environ() plus GIT_SSH_COMMAND when appropriate.
+// GIT_TERMINAL_PROMPT=0 ensures git never prompts for credentials interactively.
 func (g *GitManager) withGitEnv() []string {
 	env := os.Environ()
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
 	if sshCmd := g.sshEnv(); sshCmd != "" {
 		env = append(env, "GIT_SSH_COMMAND="+sshCmd)
 	}
@@ -199,15 +193,23 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 	// Build env based on the URL, not the manager's repoPath, since this can be called
 	// for arbitrary URLs during CreateProject validation.
 	env := os.Environ()
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
 	if !strings.HasPrefix(repoURL, "file://") && !strings.HasPrefix(repoURL, "/") && !strings.HasPrefix(repoURL, "./") && !strings.HasPrefix(repoURL, "../") {
 		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		env = append(env, fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", keyPath))
+		env = append(env, fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath))
 	}
 	cmd.Env = env
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("git remote validation failed: %v, output: %s", err, string(out))
+		output := string(out)
+		if strings.Contains(output, "Permission denied") ||
+			strings.Contains(output, "Authentication failed") ||
+			strings.Contains(output, "Could not read from remote repository") ||
+			strings.Contains(output, "Host key verification failed") {
+			return fmt.Errorf("[auth] %s", output)
+		}
+		return fmt.Errorf("git remote validation failed: %v, output: %s", err, output)
 	}
 	return nil
 }
@@ -256,7 +258,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
 		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", keyPath)
+		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -289,7 +291,7 @@ func (g *GitManager) MergeBranch(ctx context.Context, baseRepoDir, branchName st
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = baseRepoDir
 		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null", keyPath)
+		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
 		out, err := cmd.CombinedOutput()
 		if err != nil {

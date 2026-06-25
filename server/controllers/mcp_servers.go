@@ -626,34 +626,60 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 
 // ── Agent-account assignment handlers ────────────────────────────────────────
 
-// GetAgentMCPAccounts returns all account assignments for an agent.
+// GetAgentMCPAccounts returns account assignments and codegraph server assignments for an agent.
 func (api *API) GetAgentMCPAccounts(w http.ResponseWriter, r *http.Request) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid agent id")
 		return
 	}
-	assignments, err := api.q.ListAllAgentMCPAccountAssignments(r.Context(), int32(agentID))
+	accounts, err := api.q.ListAllAgentMCPAccountAssignments(r.Context(), int32(agentID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, assignments)
+	cgMap, _ := api.q.GetAgentCodegraphAssignments(r.Context(), int32(agentID))
+	type cgRow struct {
+		ServerID int32 `json:"server_id"`
+		Enabled  bool  `json:"enabled"`
+	}
+	cgRows := make([]cgRow, 0, len(cgMap))
+	for sid, en := range cgMap {
+		cgRows = append(cgRows, cgRow{ServerID: sid, Enabled: en})
+	}
+	api.respondJSON(w, http.StatusOK, map[string]any{
+		"accounts":  accounts,
+		"codegraph": cgRows,
+	})
 }
 
-// SetAgentMCPAccounts replaces all account assignments for an agent.
+// SetAgentMCPAccounts replaces account assignments and codegraph server assignments for an agent.
 func (api *API) SetAgentMCPAccounts(w http.ResponseWriter, r *http.Request) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid agent id")
 		return
 	}
-	var assignments []db.AgentMCPAccount
-	if err := json.NewDecoder(r.Body).Decode(&assignments); err != nil {
+	var payload struct {
+		Accounts  []db.AgentMCPAccount `json:"accounts"`
+		Codegraph []struct {
+			ServerID int32 `json:"server_id"`
+			Enabled  bool  `json:"enabled"`
+		} `json:"codegraph"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
-	if err := api.q.SetAgentMCPAccounts(r.Context(), int32(agentID), assignments); err != nil {
+	if err := api.q.SetAgentMCPAccounts(r.Context(), int32(agentID), payload.Accounts); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	cgAssignments := make([]db.AgentMCPServer, 0, len(payload.Codegraph))
+	for _, cg := range payload.Codegraph {
+		cgAssignments = append(cgAssignments, db.AgentMCPServer{MCPServerID: cg.ServerID, Enabled: cg.Enabled})
+	}
+	if err := api.q.SetAgentCodegraphAssignments(r.Context(), int32(agentID), cgAssignments); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
