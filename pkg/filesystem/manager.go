@@ -56,7 +56,7 @@ func (m *Manager) ListCompanies() ([]string, error) {
 
 	companies := []string{}
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" && entry.Name() != "mcp-servers" && entry.Name() != "runs" && entry.Name() != "docker" {
 			companies = append(companies, entry.Name())
 		}
 	}
@@ -553,4 +553,98 @@ func (m *Manager) ListTaskCommentsFromDisk(companyShortName string, taskID int32
 		return nil, err
 	}
 	return recs, nil
+}
+
+// MCPServerRecord is a flat MCPServer for filesystem storage (no GORM associations).
+// Auth tokens are intentionally omitted — credentials are never written to disk.
+type MCPServerRecord struct {
+	ID          int32  `json:"id"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	Description string `json:"description"`
+	Transport   string `json:"transport"`
+	Command     string `json:"command,omitempty"`
+	Args        string `json:"args,omitempty"`
+	URL         string `json:"url,omitempty"`
+	Headers     string `json:"headers,omitempty"`
+	AuthType    string `json:"auth_type,omitempty"`
+	AuthEnvVar  string `json:"auth_env_var,omitempty"` // env var name; token itself is never stored
+	WorkDir     string `json:"work_dir,omitempty"`
+	ProjectID   *int32 `json:"project_id,omitempty"`
+	Enabled     bool   `json:"enabled"`
+	Builtin     bool   `json:"builtin"`
+}
+
+func (m *Manager) mcpServerDir() string {
+	return filepath.Join(m.basePath, "data", "mcp-servers")
+}
+
+// SaveMCPServer writes data/mcp-servers/{id}.json.
+// MCP servers are global (not company-scoped). Auth tokens are never written to disk.
+func (m *Manager) SaveMCPServer(s db.MCPServer) error {
+	dir := m.mcpServerDir()
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	rec := MCPServerRecord{
+		ID:          s.ID,
+		Name:        s.Name,
+		DisplayName: s.DisplayName,
+		Description: s.Description,
+		Transport:   s.Transport,
+		Command:     s.Command,
+		Args:        s.Args,
+		URL:         s.URL,
+		Headers:     s.Headers,
+		AuthType:    s.AuthType,
+		AuthEnvVar:  s.AuthEnvVar,
+		WorkDir:     s.WorkDir,
+		ProjectID:   s.ProjectID,
+		Enabled:     s.Enabled,
+		Builtin:     s.Builtin,
+	}
+	data, err := json.MarshalIndent(rec, "", "  ")
+	if err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(dir, fmt.Sprintf("%d.json", s.ID)), data, 0644)
+}
+
+// ListMCPServersFromDisk reads all global MCP server files from data/mcp-servers/.
+func (m *Manager) ListMCPServersFromDisk() ([]MCPServerRecord, error) {
+	dir := m.mcpServerDir()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var result []MCPServerRecord
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(dir, e.Name()))
+		if err != nil {
+			log.Printf("Skipping unreadable MCP server file %s: %v", e.Name(), err)
+			continue
+		}
+		var rec MCPServerRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			log.Printf("Skipping invalid MCP server file %s: %v", e.Name(), err)
+			continue
+		}
+		result = append(result, rec)
+	}
+	return result, nil
+}
+
+// DeleteMCPServerFile removes the on-disk record for an MCP server.
+func (m *Manager) DeleteMCPServerFile(id int32) error {
+	path := filepath.Join(m.mcpServerDir(), fmt.Sprintf("%d.json", id))
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return err
+	}
+	return nil
 }

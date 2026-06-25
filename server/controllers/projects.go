@@ -36,9 +36,16 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		Description     string `json:"description"`
 		WorkspaceFolder string `json:"workspace_folder"`
 		RepositoryUrl   string `json:"repository_url"`
+		IsExternal      bool   `json:"is_external"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	// External projects require a git URL to clone from.
+	if req.IsExternal && req.RepositoryUrl == "" {
+		api.respondError(w, http.StatusBadRequest, "external projects require repository_url")
 		return
 	}
 
@@ -62,8 +69,8 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		Description:     req.Description,
 		WorkspaceFolder: req.WorkspaceFolder,
 		RepositoryUrl:   req.RepositoryUrl,
+		IsExternal:      req.IsExternal,
 	}
-
 
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
@@ -110,6 +117,27 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
+	}
+
+	// Auto-create a codegraph MCP server for every project so agents can run
+	// semantic code analysis. The server is disabled by default; agents or users
+	// enable it explicitly. WorkDir is set to the project repo path so codegraph
+	// finds its SQLite knowledge graph.
+	repoPath := fsManager.GetProjectRepoPath(comp, proj)
+	cgID := proj.ID
+	cgServer := db.MCPServer{
+		Name:        fmt.Sprintf("codegraph-%d", proj.ID),
+		DisplayName: fmt.Sprintf("CodeGraph: %s", proj.Name),
+		Description: fmt.Sprintf("Semantic code intelligence for project %q. Run codegraph_init once to build the knowledge graph.", proj.Name),
+		Transport:   "stdio",
+		Command:     "codegraph",
+		Args:        `["serve","--mcp"]`,
+		WorkDir:     repoPath,
+		ProjectID:   &cgID,
+		Enabled:     false,
+	}
+	if _, err := api.q.CreateMCPServer(r.Context(), cgServer); err != nil {
+		log.Printf("Warning: failed to create codegraph MCP server for project %d: %v", proj.ID, err)
 	}
 
 	api.logActivity(req.CompanyID, "project_created", int32(proj.ID), "project", "")

@@ -12,6 +12,13 @@ import (
 	"agent-orchestrator/pkg/tokens"
 )
 
+// mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
+// Their responses are pruned from older history turns to avoid token accumulation.
+var mcpDispatcherTools = map[string]bool{
+	"call_mcp_tool":    true,
+	"discover_mcp_tool": true,
+}
+
 // Mode controls how the agent manages its conversation state.
 type Mode string
 
@@ -48,9 +55,13 @@ type Agent struct {
 	ProviderName   string
 	AgentName      string
 	ReasoningLevel string // "low", "medium", "max" → mapped to API values
-	q              *db.Queries
-	runID          int32
-	logger         RunLogger
+	// MCPListingCostPerTurn is the estimated token cost of the MCP CompactListing
+	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
+	MCPListingCostPerTurn    int
+	MCPServerListingCosts    map[string]int
+	q                        *db.Queries
+	runID                    int32
+	logger                   RunLogger
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -62,10 +73,12 @@ type Config struct {
 	AgentName      string
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
-	ReasoningLevel string
-	Queries        *db.Queries
-	RunID          int32
-	Logger         RunLogger
+	ReasoningLevel           string
+	MCPListingCostPerTurn    int
+	MCPServerListingCosts    map[string]int
+	Queries                  *db.Queries
+	RunID                    int32
+	Logger                   RunLogger
 }
 
 // New creates an Agent from a Config.
@@ -75,15 +88,17 @@ func New(cfg Config) *Agent {
 		mode = ModeMessageHistory
 	}
 	return &Agent{
-		Client:         cfg.Client,
-		Registry:       cfg.Registry,
-		Mode:           mode,
-		ProviderName:   cfg.ProviderName,
-		AgentName:      cfg.AgentName,
-		ReasoningLevel: cfg.ReasoningLevel,
-		q:              cfg.Queries,
-		runID:          cfg.RunID,
-		logger:         cfg.Logger,
+		Client:                cfg.Client,
+		Registry:              cfg.Registry,
+		Mode:                  mode,
+		ProviderName:          cfg.ProviderName,
+		AgentName:             cfg.AgentName,
+		ReasoningLevel:        cfg.ReasoningLevel,
+		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
+		MCPServerListingCosts: cfg.MCPServerListingCosts,
+		q:                     cfg.Queries,
+		runID:                 cfg.RunID,
+		logger:                cfg.Logger,
 	}
 }
 
@@ -91,11 +106,18 @@ func New(cfg Config) *Agent {
 // It returns the final text response from the LLM after all tool calls are
 // exhausted, or an error if the loop fails.
 func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (string, error) {
+	return a.RunWithMessages(ctx, systemPrompt, []Message{{Role: "user", Content: userMessage}})
+}
+
+// RunWithMessages executes the agent loop with an explicit slice of initial
+// messages (after the system prompt). Use this when the initial context
+// contains multiple turns, e.g. task description + per-comment messages.
+func (a *Agent) RunWithMessages(ctx context.Context, systemPrompt string, initialMessages []Message) (string, error) {
 	switch a.Mode {
 	case ModeMessageHistory, "":
-		return a.runMessageHistory(ctx, systemPrompt, userMessage, a.reasoningEffort())
+		return a.runMessageHistory(ctx, systemPrompt, initialMessages, "")
 	case ModeCompactThinking:
-		return "", fmt.Errorf("compact_thinking mode is not yet implemented")
+		return a.runMessageHistory(ctx, systemPrompt, initialMessages, a.reasoningEffort())
 	default:
 		return "", fmt.Errorf("unsupported agent mode: %s", a.Mode)
 	}
@@ -118,12 +140,12 @@ func (a *Agent) reasoningEffort() string {
 // runMessageHistory maintains a rolling conversation history and sends the
 // full history to the LLM on every turn. reasoningEffort is passed verbatim
 // as the request's reasoning_effort field when non-empty.
-func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage, reasoningEffort string) (string, error) {
+func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, initialMessages []Message, reasoningEffort string) (string, error) {
 	history := []Message{}
 	if systemPrompt != "" {
 		history = append(history, Message{Role: "system", Content: systemPrompt})
 	}
-	history = append(history, Message{Role: "user", Content: userMessage})
+	history = append(history, initialMessages...)
 
 	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
@@ -132,7 +154,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage
 		}
 
 		req := ChatRequest{
-			Messages:        history,
+			Messages:        pruneMCPHistory(history),
 			Tools:           a.Registry.Defs(),
 			ReasoningEffort: reasoningEffort,
 		}
@@ -167,6 +189,23 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage
 				CompletionTokens: resp.Usage.CompletionTokens,
 				CachedTokens:     resp.Usage.PromptTokensDetails.CachedTokens,
 				ReasoningTokens:  resp.Usage.CompletionTokensDetails.ReasoningTokens,
+			}
+			runID := a.runID
+			go func() {
+				for i := 0; i < 3; i++ {
+					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
+				}
+			}()
+		}
+
+		// Accumulate MCP listing overhead once per turn (it's in the system prompt every call).
+		if a.MCPListingCostPerTurn > 0 && a.q != nil && a.runID > 0 {
+			delta := db.RunTokenStats{
+				MCPToolTokens:   a.MCPListingCostPerTurn,
+				MCPServerTokens: a.MCPServerListingCosts,
 			}
 			runID := a.runID
 			go func() {
@@ -217,6 +256,8 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt, userMessage
 // invocation and result, and returns the corresponding tool-result Messages.
 func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Message, error) {
 	results := make([]Message, 0, len(calls))
+	mcpServerTokens := map[string]int{}
+	mcpTotalTokens := 0
 
 	for _, tc := range calls {
 		argsRaw := json.RawMessage(tc.Function.Arguments)
@@ -260,6 +301,17 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			}()
 		}
 
+		// Track all MCP dispatcher calls: discover descriptions + actual tool calls/responses.
+		if mcpDispatcherTools[tc.Function.Name] {
+			mcpTotalTokens += outTokens
+			var p struct {
+				Server string `json:"server"`
+			}
+			if json.Unmarshal(argsRaw, &p) == nil && p.Server != "" {
+				mcpServerTokens[p.Server] += outTokens
+			}
+		}
+
 		results = append(results, Message{
 			Role:       "tool",
 			ToolCallID: tc.ID,
@@ -267,6 +319,21 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			Content:    output,
 		})
 	}
+
+	// Roll up MCP token stats as a single delta after all tool calls.
+	if a.q != nil && a.runID > 0 && mcpTotalTokens > 0 {
+		delta := db.RunTokenStats{MCPToolTokens: mcpTotalTokens, MCPServerTokens: mcpServerTokens}
+		runID := a.runID
+		go func() {
+			for i := 0; i < 3; i++ {
+				if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					break
+				}
+				time.Sleep(100 * time.Millisecond)
+			}
+		}()
+	}
+
 	return results, nil
 }
 
@@ -294,6 +361,31 @@ func (a *Agent) appendRunLog(entryType, content string, extra map[string]interfa
 			time.Sleep(100 * time.Millisecond)
 		}
 	}()
+}
+
+// pruneMCPHistory replaces old MCP tool responses with a placeholder so they
+// don't consume tokens on every subsequent LLM call. Only the most recent
+// batch of MCP results (those after the last assistant message) is kept intact.
+func pruneMCPHistory(history []Message) []Message {
+	// Find the last assistant message index.
+	lastAssistant := -1
+	for i := len(history) - 1; i >= 0; i-- {
+		if history[i].Role == "assistant" {
+			lastAssistant = i
+			break
+		}
+	}
+	if lastAssistant <= 0 {
+		return history
+	}
+	pruned := make([]Message, len(history))
+	copy(pruned, history)
+	for i := 0; i < lastAssistant; i++ {
+		if pruned[i].Role == "tool" && mcpDispatcherTools[pruned[i].Name] {
+			pruned[i].Content = "[omitted]"
+		}
+	}
+	return pruned
 }
 
 // msgsToMap converts []Message to []map[string]interface{} so the proxy

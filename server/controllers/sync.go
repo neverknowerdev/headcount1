@@ -17,6 +17,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 	settings := LoadSettings()
 	log.Printf("Syncing DB with filesystem at %s", settings.BasePath)
 	fm := filesystem.NewManager(settings.BasePath)
+	storage := filesystem.NewStorage(settings.BasePath)
 	if err := fm.SetupBaseDirectories(); err != nil {
 		return err
 	}
@@ -24,7 +25,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 	// Phase 1: Export current DB → filesystem (only writes files that don't exist yet).
 	// This handles the case where a worktree has existing DB data from before write-through
 	// was added, ensuring that data reaches the filesystem for other worktrees to pick up.
-	api.exportDBToFilesystem(fm, settings.BasePath)
+	api.exportDBToFilesystem(fm, storage, settings.BasePath)
 
 	// Phase 2: Import filesystem → DB (create DB records from filesystem files).
 	// This handles the case where a fresh-DB worktree needs to pick up data written by
@@ -84,7 +85,38 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 			}
 		}
 
-		// 3. Sync Sprints for this company (with preserved IDs)
+		// 3. Sync Agents for this company (with preserved IDs)
+		agentRecs, agentErr := storage.ReadAgents(shortName)
+		if agentErr != nil {
+			log.Printf("Error listing agents for %s: %v", shortName, agentErr)
+		} else {
+			for _, rec := range agentRecs {
+				var existingAgent db.Agent
+				if api.db.First(&existingAgent, rec.ID).Error != nil {
+					agent := db.Agent{
+						ID:           rec.ID,
+						CompanyID:    existing.ID,
+						Name:         rec.Name,
+						Description:  rec.Description,
+						SystemPrompt: rec.SystemPrompt,
+						ProviderID:   rec.ProviderID,
+						Model:        rec.Model,
+						Mode:         rec.Mode,
+						Permissions:  rec.Permissions,
+					}
+					if agent.Mode == "" {
+						agent.Mode = "primary"
+					}
+					if err := api.db.Omit("Company", "Provider").Create(&agent).Error; err != nil {
+						log.Printf("Failed to restore agent %d (%s): %v", rec.ID, rec.Name, err)
+					} else {
+						log.Printf("Restored agent %d (%s) for %s", rec.ID, rec.Name, shortName)
+					}
+				}
+			}
+		}
+
+		// 4. Sync Sprints for this company (with preserved IDs)
 		sprintRecords, err := fm.ListSprintsFromDisk(shortName)
 		if err != nil {
 			log.Printf("Error listing sprints for %s: %v", shortName, err)
@@ -127,7 +159,39 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
-	// 5. Sync Tasks (after companies and sprints are in DB)
+	// 5. Sync MCP Servers (global, no company FK)
+	mcpRecs, mcpErr := fm.ListMCPServersFromDisk()
+	if mcpErr != nil {
+		log.Printf("Error listing MCP servers: %v", mcpErr)
+	} else {
+		for _, rec := range mcpRecs {
+			var existingMCP db.MCPServer
+			if api.db.First(&existingMCP, rec.ID).Error != nil {
+				s := db.MCPServer{
+					ID:          rec.ID,
+					Name:        rec.Name,
+					DisplayName: rec.DisplayName,
+					Description: rec.Description,
+					Transport:   rec.Transport,
+					Command:     rec.Command,
+					Args:        rec.Args,
+					URL:         rec.URL,
+					Headers:     rec.Headers,
+					AuthType:    rec.AuthType,
+					AuthEnvVar:  rec.AuthEnvVar,
+					Enabled:     rec.Enabled,
+					Builtin:     rec.Builtin,
+				}
+				if err := api.db.Create(&s).Error; err != nil {
+					log.Printf("Failed to restore MCP server %d (%s): %v", rec.ID, rec.Name, err)
+				} else {
+					log.Printf("Restored MCP server %d (%s)", rec.ID, rec.Name)
+				}
+			}
+		}
+	}
+
+	// 6. Sync Tasks (after companies and sprints are in DB)
 	for _, shortName := range compShortNames {
 		var comp db.Company
 		if api.db.Where("short_name = ?", shortName).First(&comp).Error != nil {
@@ -227,7 +291,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 
 // exportDBToFilesystem writes current DB records to disk for any that don't have a file yet.
 // This is safe to call repeatedly — it never overwrites existing files.
-func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
+func (api *API) exportDBToFilesystem(fm *filesystem.Manager, storage *filesystem.Storage, basePath string) {
 	// Export companies (settings.yml)
 	var companies []db.Company
 	api.db.Find(&companies)
@@ -252,10 +316,26 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
 		}
 	}
 
-	// Build company ID → shortName map for sprint/task export
+	// Build company ID → shortName map for sprint/task/agent export
 	compByID := make(map[int32]db.Company, len(companies))
 	for _, c := range companies {
 		compByID[c.ID] = c
+	}
+
+	// Export agents (written to data/{shortName}/agents/ by Storage)
+	var agents []db.Agent
+	api.db.Find(&agents)
+	for _, a := range agents {
+		comp, ok := compByID[a.CompanyID]
+		if !ok {
+			continue
+		}
+		agentPath := filepath.Join(basePath, "data", comp.ShortName, "agents", formatID(a.ID)+".json")
+		if _, err := os.Stat(agentPath); os.IsNotExist(err) {
+			if err := storage.WriteAgent(a, comp.ShortName); err != nil {
+				log.Printf("Export: failed to write agent %d: %v", a.ID, err)
+			}
+		}
 	}
 
 	// Export sprints
@@ -270,6 +350,18 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, basePath string) {
 		if _, err := os.Stat(sprintPath); os.IsNotExist(err) {
 			if err := fm.SaveSprint(comp, s); err != nil {
 				log.Printf("Export: failed to write sprint %d: %v", s.ID, err)
+			}
+		}
+	}
+
+	// Export MCP servers (global, like LLM providers)
+	var mcpServers []db.MCPServer
+	api.db.Find(&mcpServers)
+	for _, s := range mcpServers {
+		mcpPath := filepath.Join(basePath, "data", "mcp-servers", formatID(s.ID)+".json")
+		if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
+			if err := fm.SaveMCPServer(s); err != nil {
+				log.Printf("Export: failed to write MCP server %d: %v", s.ID, err)
 			}
 		}
 	}

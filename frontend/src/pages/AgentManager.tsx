@@ -8,6 +8,10 @@ export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
+    const [showModal, setShowModal] = useState(false);
+    const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState('');
 
     const fetchAgents = useCallback(async () => {
         if (!selectedCompanyId) return;
@@ -24,9 +28,42 @@ export const AgentManager: React.FC = () => {
         fetchAgents();
     }, [fetchAgents]);
 
+    const openModal = () => {
+        setForm({ name: '', description: '', system_prompt: '' });
+        setError('');
+        setShowModal(true);
+    };
+
+    const handleCreate = async () => {
+        if (!form.name.trim()) { setError('Name is required.'); return; }
+        setSaving(true);
+        setError('');
+        try {
+            const res = await axios.post('/api/agents', {
+                company_id: selectedCompanyId,
+                name: form.name.trim(),
+                description: form.description.trim(),
+                system_prompt: form.system_prompt.trim(),
+            });
+            setShowModal(false);
+            window.location.href = `/companies/${shortName}/agents/${res.data.id}`;
+        } catch (e: any) {
+            setError(e?.response?.data?.error || 'Failed to create agent.');
+            setSaving(false);
+        }
+    };
+
     return (
         <div className="h-full flex flex-col space-y-6">
-            <h1 className="text-2xl font-bold">Agents</h1>
+            <div className="flex items-center justify-between">
+                <h1 className="text-2xl font-bold">Agents</h1>
+                <button
+                    onClick={openModal}
+                    className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+                >
+                    + Add agent
+                </button>
+            </div>
 
             <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {agents.map(agent => (
@@ -47,7 +84,74 @@ export const AgentManager: React.FC = () => {
                 ))}
             </div>
             {agents.length === 0 && (
-                <div className="text-center text-gray-500 italic mt-10">No agents hired yet.</div>
+                <div className="text-center mt-16">
+                    <p className="text-gray-400 italic mb-4">No agents hired yet.</p>
+                    <button
+                        onClick={openModal}
+                        className="px-5 py-2.5 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 transition-colors"
+                    >
+                        + Add your first agent
+                    </button>
+                </div>
+            )}
+
+            {showModal && (
+                <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
+                    <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
+                        <h2 className="text-lg font-semibold text-gray-900">New agent</h2>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+                            <input
+                                autoFocus
+                                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                placeholder="e.g. Research Assistant"
+                                value={form.name}
+                                onChange={e => setForm(f => ({ ...f, name: e.target.value }))}
+                                onKeyDown={e => e.key === 'Enter' && handleCreate()}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                            <input
+                                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                placeholder="What does this agent do?"
+                                value={form.description}
+                                onChange={e => setForm(f => ({ ...f, description: e.target.value }))}
+                            />
+                        </div>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1">System prompt</label>
+                            <textarea
+                                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
+                                rows={4}
+                                placeholder="Optional — you can set this later in agent settings."
+                                value={form.system_prompt}
+                                onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
+                            />
+                        </div>
+
+                        {error && <p className="text-sm text-red-600">{error}</p>}
+
+                        <div className="flex justify-end gap-3 pt-1">
+                            <button
+                                onClick={() => setShowModal(false)}
+                                className="px-4 py-2 text-sm text-gray-600 hover:text-gray-900"
+                            >
+                                Cancel
+                            </button>
+                            <button
+                                onClick={handleCreate}
+                                disabled={saving}
+                                className="px-4 py-2 bg-indigo-600 text-white text-sm font-medium rounded-lg hover:bg-indigo-700 disabled:opacity-50 transition-colors"
+                            >
+                                {saving ? 'Creating…' : 'Create agent'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
             )}
         </div>
     );

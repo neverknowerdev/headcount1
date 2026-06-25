@@ -8,6 +8,8 @@ export default defineConfig({
     react()
   ],
   server: {
+    port: 5174,
+    strictPort: true,
     proxy: {
       '/api': 'http://localhost:8080',
       '/ws': {

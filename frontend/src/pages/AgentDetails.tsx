@@ -3,7 +3,6 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save } from 'lucide-react';
-
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -11,6 +10,8 @@ export const AgentDetails: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
     const [activeTab, setActiveTab] = useState('overview');
     const [runs, setRuns] = useState<any[]>([]);
+    const [mcpServers, setMcpServers] = useState<any[]>([]);
+    const [mcpAccountAssignments, setMcpAccountAssignments] = useState<Record<number, boolean>>({});
 
     const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
 
@@ -42,9 +43,43 @@ export const AgentDetails: React.FC = () => {
         }
     }, [id]);
 
+    const fetchMCPData = useCallback(async () => {
+        if (!id) return;
+        try {
+            const [serversRes, assignRes] = await Promise.all([
+                axios.get('/api/mcp-servers'),
+                axios.get(`/api/agents/${id}/mcp-accounts`),
+            ]);
+            setMcpServers(serversRes.data || []);
+            const map: Record<number, boolean> = {};
+            for (const a of (assignRes.data || [])) {
+                map[a.mcp_account_id] = a.enabled;
+            }
+            setMcpAccountAssignments(map);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [id]);
+
     useEffect(() => {
         fetchData();
     }, [fetchData]);
+
+    useEffect(() => {
+        if (activeTab === 'tools') fetchMCPData();
+    }, [activeTab, fetchMCPData]);
+
+    const handleSaveMCPAssignments = async () => {
+        try {
+            const assignments = Object.entries(mcpAccountAssignments).map(([accountId, enabled]) => ({
+                mcp_account_id: parseInt(accountId),
+                enabled,
+            }));
+            await axios.put(`/api/agents/${id}/mcp-accounts`, assignments);
+        } catch (e) {
+            alert('Failed to save MCP assignments');
+        }
+    };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -73,13 +108,18 @@ export const AgentDetails: React.FC = () => {
 
             <div className="border-b mb-6">
                 <nav className="-mb-px flex space-x-8">
-                    {['overview', 'logs', 'settings', 'tools'].map(tab => (
+                    {[
+                        { key: 'overview', label: 'Overview' },
+                        { key: 'logs', label: 'Logs' },
+                        { key: 'settings', label: 'Settings' },
+                        { key: 'tools', label: 'Tools & MCPs' },
+                    ].map(({ key, label }) => (
                         <button
-                            key={tab}
-                            onClick={() => setActiveTab(tab)}
-                            className={`${activeTab === tab ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm capitalize`}
+                            key={key}
+                            onClick={() => setActiveTab(key)}
+                            className={`${activeTab === key ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
                         >
-                            {tab}
+                            {label}
                         </button>
                     ))}
                 </nav>
@@ -148,53 +188,130 @@ export const AgentDetails: React.FC = () => {
 
 
                 {activeTab === 'tools' && (
-                    <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border max-w-2xl space-y-4">
-                        <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
-                            <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
-                                <option value="primary">Primary</option>
-                                <option value="subagent">Subagent</option>
-                            </select>
-                        </div>
-                        <div className="pt-4">
-                            <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
-                            <div className="space-y-2">
-                                {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill', 'update_task_status'].map(tool => {
-                                    const perms = JSON.parse(formData.permissions || '{}');
-                                    const isEnabled = tool === 'update_task_status' ? true : (perms[tool] !== 'deny');
-                                    return (
-                                        <div key={tool} className="flex items-center">
-                                            <input
-                                                type="checkbox"
-                                                id={`tool-${tool}`}
-                                                checked={isEnabled}
-                                                disabled={tool === 'update_task_status'}
-                                                onChange={(e) => {
-                                                    const newPerms = { ...perms };
-                                                    if (e.target.checked) {
-                                                        newPerms[tool] = 'allow';
-                                                    } else {
-                                                        newPerms[tool] = 'deny';
-                                                    }
-                                                    setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
-                                                }}
-                                                className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded disabled:opacity-50"
-                                            />
-                                            <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
-                                                {tool}
-                                            </label>
+                    <div className="max-w-2xl space-y-6">
+                        <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-4">
+                            <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
+                                <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
+                                    <option value="primary">Primary</option>
+                                    <option value="subagent">Subagent</option>
+                                </select>
+                            </div>
+                            <div className="pt-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+                                <div className="space-y-2">
+                                    {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill'].map(tool => {
+                                        const perms = JSON.parse(formData.permissions || '{}');
+                                        const isEnabled = perms[tool] !== 'deny';
+                                        return (
+                                            <div key={tool} className="flex items-center">
+                                                <input
+                                                    type="checkbox"
+                                                    id={`tool-${tool}`}
+                                                    checked={isEnabled}
+                                                    onChange={(e) => {
+                                                        const newPerms = { ...perms };
+                                                        if (e.target.checked) {
+                                                            newPerms[tool] = 'allow';
+                                                        } else {
+                                                            newPerms[tool] = 'deny';
+                                                        }
+                                                        setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
+                                                    }}
+                                                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
+                                                />
+                                                <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
+                                                    {tool}
+                                                </label>
+                                            </div>
+                                        );
+                                    })}
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t mt-6">
+                                <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
+                                    <Save size={16} className="mr-2" /> Save Changes
+                                </button>
+                            </div>
+                        </form>
+
+                        <div className="bg-white p-6 rounded-lg shadow border space-y-4">
+                            <div className="flex items-center justify-between mb-2">
+                                <h3 className="font-bold text-lg">Tools & MCPs</h3>
+                                <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Tools & MCPs</Link>
+                            </div>
+
+                            {/* Paperclip2 — always on */}
+                            {(() => {
+                                const p2 = mcpServers.find((s: any) => s.name === 'paperclip2');
+                                if (!p2) return null;
+                                return (
+                                    <div className="flex items-center gap-3 p-3 bg-indigo-50 rounded-lg border border-indigo-100">
+                                        <input type="checkbox" checked disabled className="h-4 w-4 text-indigo-600 border-gray-300 rounded opacity-60" />
+                                        <div className="flex-1 min-w-0">
+                                            <span className="text-sm font-medium text-gray-900">{p2.display_name}</span>
+                                            <span className="ml-2 text-xs text-indigo-600 font-medium">Always On</span>
+                                            <p className="text-xs text-gray-500 mt-0.5">{p2.description}</p>
                                         </div>
-                                    );
-                                })}
+                                    </div>
+                                );
+                            })()}
+
+                            {/* Optional connected MCPs — grouped by server, per-account checkboxes */}
+                            {(() => {
+                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin);
+                                const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin);
+                                const allExternal = [...builtin, ...optional];
+                                if (allExternal.length === 0) return (
+                                    <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
+                                );
+                                return (
+                                    <div className="space-y-3">
+                                        {allExternal.map((srv: any) => {
+                                            const accounts: any[] = srv.accounts || [];
+                                            return (
+                                                <div key={srv.id} className="border border-gray-100 rounded-lg overflow-hidden">
+                                                    <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-100">
+                                                        <span className="text-sm font-semibold text-gray-800">{srv.display_name || srv.name}</span>
+                                                        {accounts.length === 0 && (
+                                                            <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-amber-600 hover:text-amber-800">Not connected</Link>
+                                                        )}
+                                                    </div>
+                                                    {accounts.length === 0 ? (
+                                                        <p className="px-3 py-2 text-xs text-gray-400 italic">No accounts configured. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-500 hover:underline">Authorize</Link>.</p>
+                                                    ) : (
+                                                        <div className="divide-y divide-gray-50">
+                                                            {accounts.map((acc: any) => (
+                                                                <label key={acc.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                                                                    <input
+                                                                        type="checkbox"
+                                                                        checked={!!mcpAccountAssignments[acc.id]}
+                                                                        onChange={e => setMcpAccountAssignments(prev => ({ ...prev, [acc.id]: e.target.checked }))}
+                                                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
+                                                                    />
+                                                                    <div className="min-w-0">
+                                                                        <span className="text-sm text-gray-900 font-medium">{acc.name}</span>
+                                                                        {!acc.has_token && <span className="ml-2 text-xs text-amber-500">No token</span>}
+                                                                    </div>
+                                                                </label>
+                                                            ))}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            );
+                                        })}
+                                    </div>
+                                );
+                            })()}
+
+                            <div className="pt-3 border-t">
+                                <button onClick={handleSaveMCPAssignments} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm">
+                                    <Save size={14} className="mr-2" /> Save
+                                </button>
                             </div>
                         </div>
-                        <div className="pt-4 border-t mt-6">
-                            <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
-                                <Save size={16} className="mr-2" /> Save Changes
-                            </button>
-                        </div>
-                    </form>
+                    </div>
                 )}
 
                 {activeTab === 'settings' && (

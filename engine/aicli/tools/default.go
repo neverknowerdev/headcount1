@@ -6,6 +6,7 @@ import (
 
 // DefaultRegistry returns a Registry pre-loaded with the built-in file, shell,
 // and web tools, all sandboxed to workspacePath.
+// Codegraph tools are added separately via CodegraphProxy in the engine.
 func DefaultRegistry(workspacePath string) *aicli.Registry {
 	r := aicli.NewRegistry()
 	r.Register(NewReadFile(workspacePath))

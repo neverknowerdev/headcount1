@@ -73,12 +73,27 @@ func main() {
 		&db.Run{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.MCPServer{},
+		&db.MCPAccount{},
+		&db.AgentMCPServer{},
+		&db.AgentMCPAccount{},
+		&db.MCPToolStat{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
 	recoverStaleRuns(database)
+
+	// Seed predefined MCP servers (paperclip2, github, google-docs) if not present.
+	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
+	}
+
+	// Migrate any legacy auth_token fields from MCPServer → MCPAccount.
+	if err := db.New(database).MigrateServerTokensToAccounts(context.Background()); err != nil {
+		log.Printf("Warning: MCP account migration failed: %v", err)
+	}
 
 	hub := eventhub.NewHub()
 
@@ -92,6 +107,10 @@ func main() {
 	if err := srv.Sync(context.Background()); err != nil {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
+
+	// Discover and cache tools for all enabled MCP servers in the background.
+	go srv.CacheMCPTools(context.Background())
+	go srv.StartMCPCacheScheduler(context.Background())
 
 	// Check if backup is needed on startup
 	paperclipHome := db.PaperclipHome()

@@ -1,6 +1,6 @@
 import React, { useMemo } from 'react';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings } from 'lucide-react';
+import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings, Cpu } from 'lucide-react';
 import { useStore } from '../store';
 
 const getNavItems = (companyIdentifier: string | null) => {
@@ -10,8 +10,9 @@ const getNavItems = (companyIdentifier: string | null) => {
     { icon: CheckSquare, label: 'Tasks', path: `${base}/tasks` },
     { icon: FolderOpen, label: 'Projects', path: `${base}/projects` },
     { icon: Users, label: 'Agents', path: `${base}/agents` },
-    { icon: Settings, label: 'LLM Providers', path: `${base}/providers` },
     { icon: Code, label: 'Skills', path: `${base}/skills` },
+    { icon: Cpu, label: 'MCP Servers', path: `${base}/mcp-servers` },
+    { icon: Settings, label: 'LLM Providers', path: `${base}/providers` },
     { icon: Activity, label: 'Run Logs', path: `${base}/runs` },
     { icon: Settings, label: 'Settings', path: `${base}/settings` },
   ];

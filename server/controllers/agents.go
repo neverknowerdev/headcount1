@@ -93,6 +93,14 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	settings := LoadSettings()
+	storage := filesystem.NewStorage(settings.BasePath)
+	var comp db.Company
+	api.db.First(&comp, agent.CompanyID)
+	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
+		log.Printf("Warning: failed to write agent metadata: %v", err)
+	}
+
 	api.respondJSON(w, http.StatusOK, agent)
 }
 

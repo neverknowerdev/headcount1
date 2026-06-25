@@ -51,6 +51,8 @@ type AgentConfig struct {
 	ParentAgent string `toml:"parent_agent"`
 	// AllowedTools lists tool names the agent may invoke. Empty = all tools.
 	AllowedTools []string `toml:"allowed_tools"`
+	// AllowedMCPs lists MCP server names the agent may use. Empty = all enabled MCPs.
+	AllowedMCPs []string `toml:"allowed_mcps"`
 }
 
 // DefaultModel returns the first entry in AllowedModels, or empty string.

@@ -21,6 +21,7 @@ type Project struct {
 	Description     string    `json:"description"`
 	WorkspaceFolder string    `json:"workspace_folder"`
 	RepositoryUrl   string    `json:"repository_url"`
+	IsExternal      bool      `json:"is_external" gorm:"not null;default:false"`
 	CreatedAt       time.Time `json:"created_at"`
 	UpdatedAt       time.Time `json:"updated_at"`
 }
@@ -152,13 +153,88 @@ type Run struct {
 // Run.TokenStats as JSON so the Run Logs UI can render an overall
 // breakdown without re-iterating LogEntries on every read.
 type RunTokenStats struct {
-	PromptTokens     int `json:"prompt_tokens"`     // sum of all LLM request input tokens (provider-reported)
-	CompletionTokens int `json:"completion_tokens"` // sum of all LLM response output tokens (provider-reported)
-	ReasoningTokens  int `json:"reasoning_tokens"`  // sum of reasoning tokens (provider-reported, or estimated)
-	ToolInputTokens  int `json:"tool_input_tokens"` // sum of tool call argument sizes (estimated, chars/4)
-	ToolOutputTokens int `json:"tool_output_tokens"` // sum of tool response sizes (estimated, chars/4)
-	CachedTokens     int `json:"cached_tokens"`     // sum of cached prompt tokens (subset of PromptTokens)
-	TotalTokens      int `json:"total_tokens"`      // sum of everything above (excludes CachedTokens)
+	PromptTokens     int            `json:"prompt_tokens"`               // sum of all LLM request input tokens (provider-reported)
+	CompletionTokens int            `json:"completion_tokens"`           // sum of all LLM response output tokens (provider-reported)
+	ReasoningTokens  int            `json:"reasoning_tokens"`            // sum of reasoning tokens (provider-reported, or estimated)
+	ToolInputTokens  int            `json:"tool_input_tokens"`           // sum of tool call argument sizes (estimated, chars/4)
+	ToolOutputTokens int            `json:"tool_output_tokens"`          // sum of tool response sizes (estimated, chars/4)
+	CachedTokens     int            `json:"cached_tokens"`               // sum of cached prompt tokens (subset of PromptTokens)
+	TotalTokens      int            `json:"total_tokens"`                // sum of everything above (excludes CachedTokens)
+	MCPToolTokens    int            `json:"mcp_tool_tokens,omitempty"`   // subset of ToolOutputTokens from MCP dispatcher calls
+	MCPServerTokens  map[string]int `json:"mcp_server_tokens,omitempty"` // per-server breakdown of MCPToolTokens
+}
+
+// IsEmpty reports whether all fields are zero, safe for use with map fields.
+func (s RunTokenStats) IsEmpty() bool {
+	return s.PromptTokens == 0 && s.CompletionTokens == 0 && s.ReasoningTokens == 0 &&
+		s.ToolInputTokens == 0 && s.ToolOutputTokens == 0 && s.CachedTokens == 0 &&
+		s.MCPToolTokens == 0 && len(s.MCPServerTokens) == 0
+}
+
+// MCPServer stores configuration for an MCP (Model Context Protocol) server.
+// MCP servers are global (not company-scoped), like LLM providers.
+type MCPServer struct {
+	ID            int32        `json:"id" gorm:"primaryKey"`
+	Name          string       `json:"name" gorm:"not null;uniqueIndex"` // unique slug, e.g. "github"
+	DisplayName   string       `json:"display_name"`
+	Description   string       `json:"description"`
+	Transport     string       `json:"transport" gorm:"not null"` // "stdio", "http", "builtin"
+	Command       string       `json:"command"`
+	Args          string       `json:"args" gorm:"type:text"`
+	URL           string       `json:"url"`
+	Headers       string       `json:"headers" gorm:"type:text"`
+	AuthType      string       `json:"auth_type"`                         // "none", "bearer", "credentials-file"
+	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text"` // legacy; migrated to MCPAccount on startup
+	AuthEnvVar    string       `json:"auth_env_var"`
+	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
+	LastError     string       `json:"last_error" gorm:"type:text"`
+	DepsInstalled bool         `json:"deps_installed" gorm:"-"`    // computed at runtime
+	Enabled       bool         `json:"enabled" gorm:"not null;default:true"`
+	Builtin       bool         `json:"builtin" gorm:"not null;default:false"`
+	WorkDir       string       `json:"work_dir"`                   // working directory for stdio servers (e.g. project repo path)
+	ProjectID     *int32       `json:"project_id"`                 // set for auto-created codegraph servers; soft ref (no FK constraint)
+	Accounts      []MCPAccount `json:"accounts,omitempty" gorm:"foreignKey:MCPServerID"`
+	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
+	CreatedAt     time.Time    `json:"created_at"`
+	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
+// MCPAccount holds credentials for one identity on an MCPServer.
+// A server can have multiple accounts (e.g., personal + work GitHub tokens).
+type MCPAccount struct {
+	ID          int32     `json:"id" gorm:"primaryKey"`
+	MCPServerID int32     `json:"mcp_server_id" gorm:"not null;index"`
+	Name        string    `json:"name" gorm:"not null"` // user label: "Personal", "Work"
+	AuthToken   string    `json:"-" gorm:"type:text"`   // credential; never sent to clients
+	HasToken    bool      `json:"has_token" gorm:"-"`   // computed: AuthToken != ""
+	LastError   string    `json:"last_error" gorm:"type:text"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+}
+
+// AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
+// Still used for built-in (paperclip2) assignments.
+type AgentMCPServer struct {
+	AgentID     int32 `json:"agent_id" gorm:"primaryKey"`
+	MCPServerID int32 `json:"mcp_server_id" gorm:"primaryKey"`
+	Enabled     bool  `json:"enabled" gorm:"not null;default:true"`
+}
+
+// AgentMCPAccount is the join table for Agent <-> MCPAccount.
+// External MCP servers are assigned at the account level (not server level).
+type AgentMCPAccount struct {
+	AgentID      int32 `json:"agent_id" gorm:"primaryKey"`
+	MCPAccountID int32 `json:"mcp_account_id" gorm:"primaryKey"`
+	Enabled      bool  `json:"enabled" gorm:"not null;default:true"`
+}
+
+// MCPToolStat tracks cumulative call counts per tool per MCP server.
+// Used to sort tools by popularity in the agent system prompt.
+type MCPToolStat struct {
+	ID          int32  `json:"id" gorm:"primaryKey;autoIncrement"`
+	MCPServerID int32  `json:"mcp_server_id" gorm:"not null;uniqueIndex:idx_mcp_tool_stat"`
+	ToolName    string `json:"tool_name" gorm:"not null;uniqueIndex:idx_mcp_tool_stat"`
+	CallCount   int64  `json:"call_count" gorm:"not null;default:0"`
 }
 
 type ActivityLog struct {
