@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
-import { X, Send, Save, Archive, ExternalLink } from 'lucide-react';
+import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -25,6 +25,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [isSaving, setIsSaving] = useState(false);
     const [runs, setRuns] = useState<any[]>([]);
     const [runAgent, setRunAgent] = useState(true);
+    const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -261,28 +262,70 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 const c = item.data;
                                                 const ts = new Date(c.created_at);
                                                 const timeStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const isTaskDone = c.comment_type === 'task_done';
+                                                const isAskUser = c.comment_type === 'ask_user';
+                                                const isAgent = c.author_type === 'agent';
+
+                                                // Look up the run explanation for task_done comments
+                                                const linkedRun = isTaskDone && c.run_id
+                                                    ? runs.find((r: any) => r.id === c.run_id)
+                                                    : null;
+                                                const hasExplanation = linkedRun && linkedRun.result_explanation;
+                                                const isExpanded = expandedComments.has(c.id);
+
+                                                let bubbleClass = 'bg-indigo-50 border border-indigo-100 text-gray-800';
+                                                if (isTaskDone) bubbleClass = 'bg-green-50 border border-green-200 text-gray-800';
+                                                else if (isAskUser) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
+                                                else if (!isAgent) bubbleClass = 'bg-gray-200 text-gray-900';
+
+                                                const authorLabel = isAgent
+                                                    ? (isTaskDone ? '✅ Agent — done' : isAskUser ? '❓ Agent — asking' : '🤖 Agent')
+                                                    : '👤 You';
+
                                                 return (
-                                                    <div key={`c-${c.id}`} className={`flex flex-col ${c.author_type === 'agent' ? 'items-start' : 'items-end'}`}>
-                                                        <div className={`max-w-[85%] rounded-lg p-3 text-sm ${c.author_type === 'agent' ? 'bg-indigo-50 border border-indigo-100 text-gray-800' : 'bg-gray-200 text-gray-900'}`}>
+                                                    <div key={`c-${c.id}`} className={`flex flex-col ${isAgent ? 'items-start' : 'items-end'}`}>
+                                                        <div className={`max-w-[85%] rounded-lg p-3 text-sm ${bubbleClass}`}>
                                                             <span className="text-xs font-bold block mb-1 text-gray-500">
-                                                                {c.author_type === 'agent' ? '🤖 Agent' : '👤 You'}
+                                                                {authorLabel}
                                                                 <span className="ml-2 font-normal">{timeStr}</span>
                                                             </span>
-                                                            {c.author_type === 'agent' ? (
+                                                            {isAgent ? (
                                                                 <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-indigo-700 prose-code:bg-indigo-100 prose-code:px-1 prose-code:rounded prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1">
                                                                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.content}</ReactMarkdown>
                                                                 </div>
                                                             ) : (
                                                                 <span className="whitespace-pre-wrap">{c.content}</span>
                                                             )}
+                                                            {hasExplanation && (
+                                                                <div className="mt-2 pt-2 border-t border-green-200">
+                                                                    <button
+                                                                        onClick={() => setExpandedComments(prev => {
+                                                                            const next = new Set(prev);
+                                                                            if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                                                            return next;
+                                                                        })}
+                                                                        className="flex items-center gap-1 text-xs text-green-700 hover:text-green-900 font-medium"
+                                                                    >
+                                                                        {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                                        {isExpanded ? 'Hide details' : 'Show details'}
+                                                                    </button>
+                                                                    {isExpanded && (
+                                                                        <div className="mt-2 prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-indigo-700 prose-code:bg-indigo-100 prose-code:px-1 prose-code:rounded">
+                                                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{linkedRun.result_explanation}</ReactMarkdown>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     </div>
                                                 );
                                             } else {
                                                 const r = item.data;
-                                                const ts = new Date(r.started_at);
-                                                const runDate = ts.getFullYear() > 1 ? ts : new Date(r.ended_at || Date.now());
-                                                const timeStr = runDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const startTs = new Date(r.started_at);
+                                                const endTs = r.ended_at ? new Date(r.ended_at) : null;
+                                                const displayTs = startTs.getFullYear() > 1 ? startTs : (endTs || new Date());
+                                                const startStr = displayTs.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const endStr = endTs ? endTs.toLocaleString(undefined, { hour: '2-digit', minute: '2-digit' }) : null;
                                                 const statusColors: Record<string, string> = {
                                                     running: 'bg-yellow-100 text-yellow-800 border-yellow-200',
                                                     completed: 'bg-green-100 text-green-800 border-green-200',
@@ -297,7 +340,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                 <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
-                                                                    <span className="text-gray-400">{timeStr}</span>
+                                                                    <span className="text-gray-400">
+                                                                        {startStr}{endStr ? ` → ${endStr}` : ''}
+                                                                    </span>
                                                                     <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-gray-400 hover:text-indigo-600" title="View full log">
                                                                         <ExternalLink size={14} />
                                                                     </Link>

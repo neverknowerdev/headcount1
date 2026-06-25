@@ -77,6 +77,14 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 		}
 	case "in-progress":
 		go e.run(context.Background(), task, "implement")
+	case "in-review", "blocked", "done", "refinement":
+		// Re-run triggered by a user comment (Run Agent flag). Move back to in-progress.
+		task.Status = "in-progress"
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			return err
+		}
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+		go e.run(context.Background(), task, "implement")
 	}
 
 	return nil
@@ -253,9 +261,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
+	pastRuns, _ := e.q.ListCompletedRunsByTask(ctx, task.ID)
 
 	// Build initial messages: task description as the first user message,
-	// then each comment as its own message with the appropriate role.
+	// then past run results and human/agent comments interleaved chronologically.
 	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, task.Description, mode)
 	if len(attachments) > 0 {
 		taskContent += "\nAttachments:"
@@ -267,13 +276,47 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			}
 		}
 	}
-	initialMessages := []aicli.Message{{Role: "user", Content: taskContent}}
+
+	type timelineEntry struct {
+		t    time.Time
+		role string
+		text string
+	}
+	var timeline []timelineEntry
+
+	// Add past completed runs as compact JSON agent messages (description only, not explanation).
+	for _, r := range pastRuns {
+		ts := r.StartedAt
+		if r.EndedAt != nil {
+			ts = *r.EndedAt
+		}
+		msg := fmt.Sprintf(`{"run_id":%d,"completed_at":"%s","result":%q}`,
+			r.ID, ts.Format(time.RFC3339), r.ResultDescription)
+		timeline = append(timeline, timelineEntry{t: ts, role: "assistant", text: msg})
+	}
+
+	// Add human comments and non-task_done agent comments.
 	for _, c := range comments {
+		if c.AuthorType == "agent" && c.CommentType == "task_done" {
+			continue // already represented by the run result JSON above
+		}
 		role := "user"
-		if c.AuthorType == "agent" {
+		if c.AuthorType == "agent" || c.AuthorType == "system" {
 			role = "assistant"
 		}
-		initialMessages = append(initialMessages, aicli.Message{Role: role, Content: c.Content})
+		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: c.Content})
+	}
+
+	// Sort chronologically.
+	for i := 1; i < len(timeline); i++ {
+		for j := i; j > 0 && timeline[j].t.Before(timeline[j-1].t); j-- {
+			timeline[j], timeline[j-1] = timeline[j-1], timeline[j]
+		}
+	}
+
+	initialMessages := []aicli.Message{{Role: "user", Content: taskContent}}
+	for _, entry := range timeline {
+		initialMessages = append(initialMessages, aicli.Message{Role: entry.role, Content: entry.text})
 	}
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
@@ -291,6 +334,59 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		return nil
+	}))
+
+	// Track whether finish_task_execution was called so we can force it if not.
+	var taskFinished bool
+
+	registry.Register(tools.NewFinishTaskExecution(func(finCtx context.Context, status, description, explanation string) error {
+		taskFinished = true
+		t, err := e.q.GetTask(finCtx, task.ID)
+		if err != nil {
+			return err
+		}
+		t.Status = status
+		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
+			return err
+		}
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
+		if err := e.q.UpdateRunResult(finCtx, run.ID, description, explanation); err != nil {
+			fmt.Printf("Warning: failed to store run result: %v\n", err)
+		}
+		runID := run.ID
+		comment, cErr := e.q.CreateComment(finCtx, db.Comment{
+			TaskID:      task.ID,
+			AuthorType:  "agent",
+			CommentType: "task_done",
+			Content:     description,
+			RunID:       &runID,
+		})
+		if cErr == nil {
+			e.hub.BroadcastEvent("comment_created", comment)
+		}
+		return nil
+	}))
+
+	registry.Register(tools.NewAddComment(func(addCtx context.Context, commentType, content string) error {
+		comment, err := e.q.CreateComment(addCtx, db.Comment{
+			TaskID:      task.ID,
+			AuthorType:  "agent",
+			CommentType: commentType,
+			Content:     content,
+		})
+		if err != nil {
+			return err
+		}
+		e.hub.BroadcastEvent("comment_created", comment)
+		return nil
+	}))
+
+	registry.Register(tools.NewExpandRunResult(func(expCtx context.Context, runID int32) (string, error) {
+		r, err := e.q.GetRun(expCtx, runID)
+		if err != nil {
+			return "", err
+		}
+		return r.ResultExplanation, nil
 	}))
 	var agentNames []string
 	if e.agentFactory != nil {
@@ -455,7 +551,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
-	// If the agent returned text, save it as a comment.
+	// If the agent returned plain text (not via add_comment/finish_task_execution), save it.
 	if finalText != "" {
 		comment, _ := e.q.CreateComment(ctx, db.Comment{
 			TaskID:     task.ID,
@@ -465,19 +561,13 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.hub.BroadcastEvent("comment_created", comment)
 	}
 
-	// If the task status was not updated during the run, force a follow-up turn.
-	taskAfter, _ := e.q.GetTask(ctx, task.ID)
-	if agentErr == nil && taskAfter.Status == task.Status {
-		e.logInfo(proxyLogger, "Task status not updated by agent. Sending follow-up to force update.")
-		followUpText, followErr := aiAgent.Run(runCtx, systemPrompt,
-			"Please call update_task_status with the appropriate status: in-progress, blocked, or in-review.")
-		if followErr == nil && followUpText != "" {
-			comment, _ := e.q.CreateComment(ctx, db.Comment{
-				TaskID:     task.ID,
-				AuthorType: "agent",
-				Content:    followUpText,
-			})
-			e.hub.BroadcastEvent("comment_created", comment)
+	// If finish_task_execution was not called, force a follow-up turn.
+	if agentErr == nil && !taskFinished {
+		e.logInfo(proxyLogger, "finish_task_execution not called. Sending follow-up to force it.")
+		_, followErr := aiAgent.Run(runCtx, systemPrompt,
+			"You must call finish_task_execution before ending. Choose the appropriate status: 'in-review' if done, 'blocked' if stuck, 'done' if fully complete, or 'refinement' if you need clarification. Provide a short description and a detailed explanation.")
+		if followErr != nil {
+			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 		}
 	}
 

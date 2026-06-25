@@ -50,13 +50,16 @@ func loadSettings() Settings {
 	return settings
 }
 
-const promptTemplate = `you're an agent that works on a task. Your goal is to implement the task by itself, asking for help only when you're stuck with smth.
+const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
 
-You should call update_task_status when it's needed:
-- when you start works on it - in-progress
-- when you're done - in-review
-- when you stuck - blocked
-- when you have clarification questions in the beginning of the work - refinement
+At the end of every run you MUST call finish_task_execution — there are no exceptions:
+- in-review: work is done, ready for human review
+- blocked: you are stuck and need user input
+- done: task is fully complete, no review needed
+- refinement: you need clarification before you can start
+
+Use add_comment during a run to leave progress updates or ask the user questions.
+Use expand_run_result to read the full explanation of any previous run listed in your context.
 
 Context of your work:
 {{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}

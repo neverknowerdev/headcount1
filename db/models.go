@@ -110,14 +110,16 @@ type Task struct {
 }
 
 type Comment struct {
-	ID         int32     `json:"id" gorm:"primaryKey"`
-	TaskID     int32     `json:"task_id" gorm:"not null"`
-	Task       Task      `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
-	AuthorType string    `json:"author_type" gorm:"not null"`
-	AuthorID   *int32    `json:"author_id"`
-	Content    string    `json:"content" gorm:"not null"`
-	CreatedAt  time.Time `json:"created_at"`
-	UpdatedAt  time.Time `json:"updated_at"`
+	ID          int32     `json:"id" gorm:"primaryKey"`
+	TaskID      int32     `json:"task_id" gorm:"not null"`
+	Task        Task      `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	AuthorType  string    `json:"author_type" gorm:"not null"`
+	AuthorID    *int32    `json:"author_id"`
+	Content     string    `json:"content" gorm:"not null"`
+	CommentType string    `json:"comment_type" gorm:"default:''"`
+	RunID       *int32    `json:"run_id"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type Attachment struct {
@@ -133,20 +135,22 @@ type Attachment struct {
 }
 
 type Run struct {
-	ID              int32      `json:"id" gorm:"primaryKey"`
-	TaskID          int32      `json:"task_id" gorm:"not null"`
-	Task            Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
-	AgentID         int32      `json:"agent_id" gorm:"not null"`
-	Agent           Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
-	Status          string     `json:"status" gorm:"not null"`
-	SessionID       string     `json:"session_id"`
-	LogFilePath     string     `json:"log_file_path"`
-	LogContent      string     `json:"log_content"`
-	LogEntries      string     `json:"log_entries" gorm:"type:text"` // JSON array of structured log entries
-	TokenStats      string     `json:"token_stats" gorm:"type:text"`  // JSON object with aggregated token counts
-	StartedAt       time.Time  `json:"started_at"`
-	EndedAt         *time.Time `json:"ended_at"`
-	LastMessageTime *time.Time `json:"last_message_time"`
+	ID                int32      `json:"id" gorm:"primaryKey"`
+	TaskID            int32      `json:"task_id" gorm:"not null"`
+	Task              Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	AgentID           int32      `json:"agent_id" gorm:"not null"`
+	Agent             Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	Status            string     `json:"status" gorm:"not null"`
+	SessionID         string     `json:"session_id"`
+	LogFilePath       string     `json:"log_file_path"`
+	LogContent        string     `json:"log_content"`
+	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
+	TokenStats        string     `json:"token_stats" gorm:"type:text"`         // JSON object with aggregated token counts
+	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
+	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
+	StartedAt         time.Time  `json:"started_at"`
+	EndedAt           *time.Time `json:"ended_at"`
+	LastMessageTime   *time.Time `json:"last_message_time"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to

@@ -198,3 +198,24 @@ func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTo
 		return tx.Model(&Run{}).Where("id = ?", runID).Update("token_stats", string(b)).Error
 	})
 }
+
+// UpdateRunResult stores the short description and detailed explanation produced
+// by the finish_task_execution tool call at the end of a run.
+func (q *Queries) UpdateRunResult(ctx context.Context, runID int32, description, explanation string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{
+			"result_description": description,
+			"result_explanation": explanation,
+		}).Error
+}
+
+// ListCompletedRunsByTask returns all completed runs for a task that have a
+// result_description set, ordered by start time ascending.
+func (q *Queries) ListCompletedRunsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("task_id = ? AND status = ? AND result_description != ''", taskID, "completed").
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
