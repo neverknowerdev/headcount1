@@ -215,7 +215,7 @@ export const ProjectSettings: React.FC = () => {
             value={repositoryUrl}
             onChange={e => setRepositoryUrl(e.target.value)}
             className="w-full border rounded p-2 text-sm font-mono"
-            placeholder="github.com/user/repo"
+            placeholder="git@github.com:user/repo.git"
           />
           <p className="text-xs text-gray-500 mt-1">
             Enter a URL like <code>github.com/user/repo</code> or <code>git@github.com:user/repo.git</code>.
