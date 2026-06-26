@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
 import { useNavigate } from 'react-router-dom';
@@ -26,6 +26,8 @@ export const Settings: React.FC = () => {
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
+    const [sshFileName, setSshFileName] = useState('');
+    const sshFileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
         const fetchSettings = async () => {
@@ -78,6 +80,15 @@ export const Settings: React.FC = () => {
         } finally {
             setSaving(false);
         }
+    };
+
+    const handleSshFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setSshFileName(file.name);
+        const reader = new FileReader();
+        reader.onload = ev => setSshKey((ev.target?.result as string) || '');
+        reader.readAsText(file);
     };
 
     const handleSync = async () => {
@@ -195,18 +206,37 @@ export const Settings: React.FC = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Upload SSH Key
+                            SSH Private Key
                         </label>
-                        <p className="text-xs text-gray-500 mb-3">
-                            Paste your private SSH key here to authenticate Git operations. It will be saved securely.
+                        <p className="text-xs text-gray-500 mb-2">
+                            Used to authenticate Git operations for private repositories. Paste the key or upload the file directly.
                         </p>
                         <textarea
                             value={sshKey}
-                            onChange={e => setSshKey(e.target.value)}
+                            onChange={e => { setSshKey(e.target.value); setSshFileName(''); }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border font-mono"
                             rows={4}
                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
                         />
+                        <div className="mt-2 flex items-center gap-3">
+                            <button
+                                type="button"
+                                onClick={() => sshFileInputRef.current?.click()}
+                                className="text-sm text-indigo-600 hover:text-indigo-800 border border-indigo-300 rounded px-3 py-1"
+                            >
+                                Upload from file
+                            </button>
+                            {sshFileName && (
+                                <span className="text-xs text-gray-500 font-mono">{sshFileName}</span>
+                            )}
+                            <input
+                                ref={sshFileInputRef}
+                                type="file"
+                                accept=".pem,.key,*"
+                                className="hidden"
+                                onChange={handleSshFileUpload}
+                            />
+                        </div>
                     </div>
 
                     <div className="flex gap-4">

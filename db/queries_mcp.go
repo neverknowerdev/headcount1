@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os/exec"
 
@@ -25,7 +26,10 @@ func (q *Queries) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 		for j := range servers[i].Accounts {
 			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
 		}
-		if servers[i].Transport != "builtin" {
+		// For non-builtin servers, Enabled reflects account presence — EXCEPT
+		// for codegraph servers (ProjectID set) which are managed by init_status,
+		// not by accounts.
+		if servers[i].Transport != "builtin" && servers[i].ProjectID == nil {
 			servers[i].Enabled = len(servers[i].Accounts) > 0
 		}
 		// Check whether a dedicated CLI binary is installed.
@@ -63,12 +67,13 @@ type CodegraphProjectServer struct {
 	Server  MCPServer
 }
 
-// ListCodegraphProjectServers returns all projects for a company that have an
-// associated codegraph MCP server (ProjectID set on the server).
+// ListCodegraphProjectServers returns ready codegraph servers for a company.
+// Only servers with init_status = 'ready' are returned so agent runs don't
+// get an un-initialised knowledge graph.
 func (q *Queries) ListCodegraphProjectServers(ctx context.Context, companyID int32) ([]CodegraphProjectServer, error) {
 	var servers []MCPServer
 	err := q.db.WithContext(ctx).
-		Where("project_id IS NOT NULL").
+		Where("project_id IS NOT NULL AND init_status = 'ready'").
 		Find(&servers).Error
 	if err != nil {
 		return nil, err
@@ -87,6 +92,54 @@ func (q *Queries) ListCodegraphProjectServers(ctx context.Context, companyID int
 	return result, nil
 }
 
+// RepairOrphanedCodegraphServers fixes codegraph servers whose project_id column
+// is NULL but whose name encodes the project ID as "codegraph-{N}". This can
+// happen when a server was created before the project_id column was added.
+func (q *Queries) RepairOrphanedCodegraphServers(ctx context.Context) error {
+	var servers []MCPServer
+	if err := q.db.WithContext(ctx).
+		Where("project_id IS NULL AND name LIKE 'codegraph-%'").
+		Find(&servers).Error; err != nil {
+		return err
+	}
+	for _, s := range servers {
+		var projectID int32
+		if _, err := fmt.Sscanf(s.Name, "codegraph-%d", &projectID); err != nil || projectID == 0 {
+			continue
+		}
+		// Verify the project exists before linking.
+		var proj Project
+		if err := q.db.WithContext(ctx).First(&proj, projectID).Error; err != nil {
+			continue
+		}
+		q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", s.ID).Update("project_id", projectID)
+		log.Printf("codegraph repair: linked server %d (%s) to project %d", s.ID, s.Name, projectID)
+	}
+	return nil
+}
+
+// ListPendingCodegraphServers returns all codegraph servers (across all companies)
+// whose init_status is not yet 'ready'. Used by the startup sweep.
+func (q *Queries) ListPendingCodegraphServers(ctx context.Context) ([]CodegraphProjectServer, error) {
+	var servers []MCPServer
+	err := q.db.WithContext(ctx).
+		Where("project_id IS NOT NULL AND init_status != 'ready'").
+		Find(&servers).Error
+	if err != nil {
+		return nil, err
+	}
+
+	var result []CodegraphProjectServer
+	for _, s := range servers {
+		var proj Project
+		if err := q.db.WithContext(ctx).First(&proj, s.ProjectID).Error; err != nil {
+			continue
+		}
+		result = append(result, CodegraphProjectServer{Project: proj, Server: s})
+	}
+	return result, nil
+}
+
 func (q *Queries) UpdateMCPServerToolsCache(ctx context.Context, id int32, toolsJSON string) error {
 	return q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", id).
 		Updates(map[string]any{"tools_cache": toolsJSON, "last_error": ""}).Error
@@ -94,6 +147,17 @@ func (q *Queries) UpdateMCPServerToolsCache(ctx context.Context, id int32, tools
 
 func (q *Queries) UpdateMCPServerLastError(ctx context.Context, id int32, errMsg string) error {
 	return q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", id).Update("last_error", errMsg).Error
+}
+
+func (q *Queries) UpdateMCPServerInitStatus(ctx context.Context, id int32, status string) error {
+	return q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", id).Update("init_status", status).Error
+}
+
+// GetCodegraphServerForProject returns the auto-created codegraph MCP server for a project.
+func (q *Queries) GetCodegraphServerForProject(ctx context.Context, projectID int32) (MCPServer, error) {
+	var s MCPServer
+	err := q.db.WithContext(ctx).Where("project_id = ?", projectID).First(&s).Error
+	return s, err
 }
 
 // ── MCPToolStat ──────────────────────────────────────────────────────────────
@@ -190,6 +254,46 @@ func (q *Queries) SetAgentMCPAccounts(ctx context.Context, agentID int32, assign
 		for _, a := range assignments {
 			a.AgentID = agentID
 			if err := tx.Create(&a).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
+}
+
+// GetAgentCodegraphAssignments returns a map of codegraph server ID → enabled for a given agent.
+// Servers with no row default to enabled.
+func (q *Queries) GetAgentCodegraphAssignments(ctx context.Context, agentID int32) (map[int32]bool, error) {
+	var rows []AgentMCPServer
+	err := q.db.WithContext(ctx).
+		Joins("JOIN mcp_servers ON mcp_servers.id = agent_mcp_servers.mcp_server_id").
+		Where("agent_mcp_servers.agent_id = ? AND mcp_servers.project_id IS NOT NULL", agentID).
+		Find(&rows).Error
+	if err != nil {
+		return nil, err
+	}
+	result := make(map[int32]bool, len(rows))
+	for _, r := range rows {
+		result[r.MCPServerID] = r.Enabled
+	}
+	return result, nil
+}
+
+// SetAgentCodegraphAssignments replaces all codegraph server assignments for an agent.
+// Uses raw SQL for the INSERT so GORM's zero-value skipping doesn't drop Enabled=false.
+func (q *Queries) SetAgentCodegraphAssignments(ctx context.Context, agentID int32, assignments []AgentMCPServer) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Exec(
+			`DELETE FROM agent_mcp_servers WHERE agent_id = ? AND mcp_server_id IN (SELECT id FROM mcp_servers WHERE project_id IS NOT NULL)`,
+			agentID,
+		).Error; err != nil {
+			return err
+		}
+		for _, a := range assignments {
+			if err := tx.Exec(
+				`INSERT INTO agent_mcp_servers (agent_id, mcp_server_id, enabled) VALUES (?, ?, ?)`,
+				agentID, a.MCPServerID, a.Enabled,
+			).Error; err != nil {
 				return err
 			}
 		}

@@ -188,6 +188,7 @@ type MCPServer struct {
 	AuthEnvVar    string       `json:"auth_env_var"`
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
+	InitStatus    string       `json:"init_status" gorm:"default:''"` // codegraph lifecycle: "initializing", "ready", "error: ..."
 	DepsInstalled bool         `json:"deps_installed" gorm:"-"`    // computed at runtime
 	Enabled       bool         `json:"enabled" gorm:"not null;default:true"`
 	Builtin       bool         `json:"builtin" gorm:"not null;default:false"`

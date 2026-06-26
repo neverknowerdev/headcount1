@@ -43,6 +43,13 @@ func (s *Server) CacheMCPTools(ctx context.Context) {
 	api.DiscoverAndCacheAllMCPTools(ctx)
 }
 
+// InitPendingCodegraphServers runs codegraph init for any project whose
+// codegraph server is not yet in the "ready" state and whose repo is on disk.
+func (s *Server) InitPendingCodegraphServers(ctx context.Context) {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api.InitPendingCodegraphServers(ctx)
+}
+
 // StartMCPCacheScheduler refreshes the MCP tool cache every 24 hours.
 // Run in a goroutine — blocks until ctx is cancelled.
 func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
@@ -93,6 +100,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.CreateProject)
 		r.Get("/{id}", api.GetProject)
 		r.Put("/{id}", api.UpdateProject)
+		r.Get("/{id}/codegraph", api.GetProjectCodegraph)
 	})
 
 	r.Route("/tasks", func(r chi.Router) {
