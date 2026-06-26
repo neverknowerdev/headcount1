@@ -137,8 +137,8 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 				Description string `json:"description"`
 			}
 			builtins := []slimTool{
-				{Name: "update_task_status", Description: "Update the status of the current task (to-do, in-progress, in-review, done, blocked, cancelled)."},
 				{Name: "create_subtask", Description: "Create a new subtask and assign it to a sub-agent for execution."},
+				{Name: "expand_run_result", Description: "Retrieve the full detailed explanation for a previous run."},
 			}
 			if b, jsonErr := json.Marshal(builtins); jsonErr == nil {
 				_ = api.q.UpdateMCPServerToolsCache(ctx, s.ID, string(b))
@@ -329,8 +329,8 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Transport == "builtin" {
 		tools := []map[string]string{
-			{"name": "update_task_status", "description": "Update the status of the current task."},
 			{"name": "create_subtask", "description": "Create a new subtask and assign it to a subagent."},
+			{"name": "expand_run_result", "description": "Retrieve the full detailed explanation for a previous run."},
 		}
 		api.respondJSON(w, http.StatusOK, map[string]any{"tools": tools})
 		return

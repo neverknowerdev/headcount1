@@ -3,7 +3,6 @@ package aicli_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -82,13 +81,13 @@ func TestAgentToolCall(t *testing.T) {
 	fixturePath := filepath.Join("testdata", "fixtures", "tool_call.json")
 	client := newTestClient(t, fixturePath)
 
-	// Track whether update_task_status was called.
-	var statusCalled atomic.Bool
+	// Track whether finish_task was called.
+	var finishCalled atomic.Bool
 	var capturedStatus string
 
 	reg := aicli.NewRegistry()
-	reg.Register(tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
-		statusCalled.Store(true)
+	reg.Register(tools.NewFinishTask(func(ctx context.Context, status, finishStatus string) error {
+		finishCalled.Store(true)
 		capturedStatus = status
 		return nil
 	}))
@@ -103,7 +102,7 @@ func TestAgentToolCall(t *testing.T) {
 	result, err := agent.Run(context.Background(), "You are an agent.", "Complete the task and update its status.")
 	require.NoError(t, err)
 
-	assert.True(t, statusCalled.Load(), "update_task_status should have been called")
+	assert.True(t, finishCalled.Load(), "finish_task should have been called")
 	assert.Equal(t, "in-review", capturedStatus)
 	assert.Contains(t, result, "in-review")
 }
@@ -346,20 +345,6 @@ func TestAgentWriteFileTool(t *testing.T) {
 	assert.Equal(t, "task completed", string(data))
 }
 
-// TestUpdateTaskStatusTool verifies that UpdateTaskStatusTool calls the callback.
-func TestUpdateTaskStatusTool(t *testing.T) {
-	var called string
-	tool := tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
-		called = status
-		return nil
-	})
-
-	result, err := tool.Execute(context.Background(), json.RawMessage(`{"status":"blocked"}`))
-	require.NoError(t, err)
-	assert.Equal(t, "blocked", called)
-	assert.Contains(t, result, "blocked")
-}
-
 // ---- Registry.Filter tests --------------------------------------------------
 
 // TestRegistryFilter_EmptyAllowedReturnsOriginal verifies that an empty allowed
@@ -395,99 +380,6 @@ func TestRegistryFilter_Subset(t *testing.T) {
 	_, err = filtered.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo x"}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown tool")
-}
-
-// ---- CreateSubtask tool tests -----------------------------------------------
-
-// TestCreateSubtaskTool_Success verifies the happy path.
-func TestCreateSubtaskTool_Success(t *testing.T) {
-	var capturedParams tools.SubtaskParams
-	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
-		capturedParams = p
-		return 42, nil
-	}, []string{"Programmer", "QA", "Researcher"})
-
-	result, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "Write tests",
-		"description": "Add unit tests for the new feature",
-		"agent_name": "QA"
-	}`))
-	require.NoError(t, err)
-	assert.Equal(t, "Write tests", capturedParams.Title)
-	assert.Equal(t, "QA", capturedParams.AgentName)
-	assert.Contains(t, result, "42")
-	assert.Contains(t, result, "QA")
-}
-
-// TestCreateSubtaskTool_DefIncludesEnum verifies that the tool definition
-// includes the agent_name enum when agent names are provided.
-func TestCreateSubtaskTool_DefIncludesEnum(t *testing.T) {
-	names := []string{"Programmer", "QA", "Researcher"}
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, names)
-	def := tool.Def()
-
-	// The schema should embed the enum values.
-	var schema map[string]interface{}
-	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
-	props := schema["properties"].(map[string]interface{})
-	agentProp := props["agent_name"].(map[string]interface{})
-	enumRaw := agentProp["enum"].([]interface{})
-	var got []string
-	for _, v := range enumRaw {
-		got = append(got, v.(string))
-	}
-	assert.Equal(t, names, got)
-}
-
-// TestCreateSubtaskTool_DefNoEnumWhenEmpty verifies that no enum is emitted
-// when no agent names are provided.
-func TestCreateSubtaskTool_DefNoEnumWhenEmpty(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	def := tool.Def()
-
-	var schema map[string]interface{}
-	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
-	props := schema["properties"].(map[string]interface{})
-	agentProp := props["agent_name"].(map[string]interface{})
-	_, hasEnum := agentProp["enum"]
-	assert.False(t, hasEnum)
-}
-
-// TestCreateSubtaskTool_CallbackError propagates callback errors.
-func TestCreateSubtaskTool_CallbackError(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
-		return 0, fmt.Errorf("a subtask is already running")
-	}, nil)
-
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "x", "description": "y", "agent_name": "QA"
-	}`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already running")
-}
-
-// TestCreateSubtaskTool_MissingTitle returns error when title is empty.
-func TestCreateSubtaskTool_MissingTitle(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "", "description": "d", "agent_name": "QA"
-	}`))
-	require.Error(t, err)
-}
-
-// TestCreateSubtaskTool_InvalidJSON returns error on bad JSON.
-func TestCreateSubtaskTool_InvalidJSON(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	_, err := tool.Execute(context.Background(), json.RawMessage(`not json`))
-	require.Error(t, err)
 }
 
 // TestAgentWithLiveProvider runs against the real LLM provider and records

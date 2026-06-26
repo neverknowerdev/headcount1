@@ -19,12 +19,19 @@ type mcpSession struct {
 	tools  []mcp.Tool
 }
 
+// builtinEntry holds the tools and handler for an in-process builtin MCP server.
+type builtinEntry struct {
+	tools   []mcp.Tool
+	handler func(ctx context.Context, toolName string, args json.RawMessage) (string, error)
+}
+
 // MCPSessionStore manages live MCP connections shared across the MCP tools.
 type MCPSessionStore struct {
 	mu          sync.Mutex
 	sessions    map[string]*mcpSession
 	servers     map[string]db.MCPServer
 	cachedTools map[string][]mcp.Tool // parsed from ToolsCache at startup
+	builtins    map[string]*builtinEntry
 	onAuthError func(serverName, errMsg string)
 	onToolCall  func(serverName, toolName string)
 }
@@ -47,9 +54,57 @@ func NewMCPSessionStore(servers []db.MCPServer, onAuthError func(string, string)
 		sessions:    make(map[string]*mcpSession),
 		servers:     srvMap,
 		cachedTools: toolCache,
+		builtins:    make(map[string]*builtinEntry),
 		onAuthError: onAuthError,
 		onToolCall:  onToolCall,
 	}
+}
+
+// RegisterBuiltin registers an in-process MCP server that is dispatched locally
+// without any network connection.
+func (s *MCPSessionStore) RegisterBuiltin(name string, mcpTools []mcp.Tool, handler func(ctx context.Context, toolName string, args json.RawMessage) (string, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.builtins[name] = &builtinEntry{tools: mcpTools, handler: handler}
+}
+
+// AddExternalServer adds an external MCP server to the store after construction.
+func (s *MCPSessionStore) AddExternalServer(srv db.MCPServer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.servers[srv.Name] = srv
+	if srv.ToolsCache != "" {
+		var cached []mcp.Tool
+		if json.Unmarshal([]byte(srv.ToolsCache), &cached) == nil {
+			s.cachedTools[srv.Name] = cached
+		}
+	}
+}
+
+// BuiltinFullListing returns a system-prompt block with full tool descriptions
+// for all registered builtin servers. Unlike CompactListing, it emits complete
+// parameter descriptions so the model never needs to call discover_mcp_tool.
+func (s *MCPSessionStore) BuiltinFullListing() string {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if len(s.builtins) == 0 {
+		return ""
+	}
+	names := make([]string, 0, len(s.builtins))
+	for name := range s.builtins {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	var sb strings.Builder
+	for _, name := range names {
+		entry := s.builtins[name]
+		fmt.Fprintf(&sb, "\n%s MCP server tools (always available via call_mcp_tool):\n", name)
+		for _, tool := range entry.tools {
+			sb.WriteString(formatToolDescription(tool))
+			sb.WriteString("\n")
+		}
+	}
+	return sb.String()
 }
 
 // ServerNames returns the sorted list of available server names.
@@ -261,6 +316,22 @@ func (t *CallMCPTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if len(p.Input) == 0 {
 		p.Input = json.RawMessage("{}")
 	}
+
+	// Dispatch to builtin handler if registered.
+	t.store.mu.Lock()
+	b, isBuiltin := t.store.builtins[p.Server]
+	t.store.mu.Unlock()
+	if isBuiltin {
+		result, err := b.handler(ctx, p.Tool, p.Input)
+		if err != nil {
+			return "", fmt.Errorf("[%s/%s] %w", p.Server, p.Tool, err)
+		}
+		if t.store.onToolCall != nil {
+			t.store.onToolCall(p.Server, p.Tool)
+		}
+		return result, nil
+	}
+
 	sess, err := t.store.getOrConnect(ctx, p.Server)
 	if err != nil {
 		return "", err
@@ -309,6 +380,20 @@ func (t *DiscoverMCPTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("discover_mcp_tool: %w", err)
 	}
+
+	// Check builtins first.
+	t.store.mu.Lock()
+	b, isBuiltin := t.store.builtins[p.Server]
+	t.store.mu.Unlock()
+	if isBuiltin {
+		for _, tool := range b.tools {
+			if tool.Name == p.Tool {
+				return formatToolDescription(tool), nil
+			}
+		}
+		return "", fmt.Errorf("tool %q not found in builtin server %q", p.Tool, p.Server)
+	}
+
 	mcpTools, err := t.store.toolsForServer(ctx, p.Server)
 	if err != nil {
 		return "", err

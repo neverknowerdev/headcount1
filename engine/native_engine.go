@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -13,6 +14,7 @@ import (
 	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
+	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
@@ -320,21 +322,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
-	// update_task_status and create_subtask are registered like any other tool
-	// and may be excluded by the agent config's AllowedTools filter.
 	registry := tools.DefaultRegistry(workspacePath)
-	registry.Register(tools.NewUpdateTaskStatus(func(updateCtx context.Context, status string) error {
-		t, err := e.q.GetTask(updateCtx, task.ID)
-		if err != nil {
-			return err
-		}
-		t.Status = status
-		if _, err := e.q.UpdateTask(updateCtx, t); err != nil {
-			return err
-		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
-		return nil
-	}))
 
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
@@ -365,14 +353,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			e.hub.BroadcastEvent("comment_created", comment)
 		}
 		return nil
-	}))
-
-	registry.Register(tools.NewExpandRunResult(func(expCtx context.Context, runID int32) (string, error) {
-		r, err := e.q.GetRun(expCtx, runID)
-		if err != nil {
-			return "", err
-		}
-		return r.ResultDescription, nil
 	}))
 
 	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
@@ -410,7 +390,77 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	if e.agentFactory != nil {
 		agentNames = e.agentFactory.ListNames()
 	}
-	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
+
+	// Build the MCP session store. paperclip2 is always registered as a builtin so
+	// the model can call create_subtask and expand_run_result on every run.
+	accountIDByName := make(map[string]int32)
+	serverIDByName := make(map[string]int32)
+	onAuthError := func(serverName, rawErr string) {
+		accID, ok := accountIDByName[serverName]
+		if !ok {
+			return
+		}
+		msg := "Auth token invalid or expired. Re-authenticate."
+		if strings.Contains(strings.ToLower(rawErr), "forbidden") ||
+			strings.Contains(strings.ToLower(rawErr), "permission denied") {
+			msg = "Permission denied. Check your auth token has the required scopes."
+		}
+		_ = e.q.UpdateMCPAccountLastError(context.Background(), accID, msg)
+	}
+	onToolCall := func(serverName, toolName string) {
+		if srvID, ok := serverIDByName[serverName]; ok {
+			_ = e.q.IncrementMCPToolCallCount(context.Background(), srvID, toolName)
+		}
+	}
+	store := tools.NewMCPSessionStore(nil, onAuthError, onToolCall)
+
+	createFn := e.makeCreateSubtaskFunc(ctx, task, agent)
+	store.RegisterBuiltin("paperclip2", paperclip2MCPTools(agentNames), func(bCtx context.Context, toolName string, rawArgs json.RawMessage) (string, error) {
+		switch toolName {
+		case "create_subtask":
+			var p struct {
+				Title       string `json:"title"`
+				Description string `json:"description"`
+				AgentName   string `json:"agent_name"`
+			}
+			if err := json.Unmarshal(rawArgs, &p); err != nil {
+				return "", fmt.Errorf("create_subtask: %w", err)
+			}
+			if p.Title == "" {
+				return "", fmt.Errorf("title is required")
+			}
+			if p.AgentName == "" {
+				return "", fmt.Errorf("agent_name is required")
+			}
+			taskID, err := createFn(bCtx, p.Title, p.Description, p.AgentName)
+			if err != nil {
+				return "", err
+			}
+			return fmt.Sprintf("Subtask %d created and queued for execution by %s agent.", taskID, p.AgentName), nil
+		case "expand_run_result":
+			var p struct {
+				RunID int32 `json:"run_id"`
+			}
+			if err := json.Unmarshal(rawArgs, &p); err != nil {
+				return "", fmt.Errorf("expand_run_result: %w", err)
+			}
+			r, err := e.q.GetRun(bCtx, p.RunID)
+			if err != nil {
+				return "", fmt.Errorf("expand_run_result: %w", err)
+			}
+			if r.ResultDescription == "" {
+				return "No detailed explanation available for this run.", nil
+			}
+			return r.ResultDescription, nil
+		default:
+			return "", fmt.Errorf("unknown paperclip2 tool %q", toolName)
+		}
+	})
+
+	callTool, discoverTool := tools.NewMCPTools(store)
+	registry.Register(callTool)
+	registry.Register(discoverTool)
+	systemPrompt += store.BuiltinFullListing()
 
 	// Wire codegraph proxy: one MCP server process per project, project names
 	// exposed as an enum on every codegraph tool call.
@@ -434,22 +484,17 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
-	// MCP listing token costs — set if any MCP servers are active for this run.
+	// MCP listing token costs — set if any external MCP servers are active for this run.
 	var listingCostTotal int
 	var listingCostByServer map[string]int
 
-	// Load MCP accounts enabled for this agent and build synthetic MCPServer objects per account.
-	// Each account produces one entry: server config + account's auth token.
+	// Load MCP accounts enabled for this agent and register external servers in the store.
 	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
-		// We need the full server config for each account. Fetch servers once.
 		allServers, _ := e.q.ListMCPServers(ctx)
 		serverByID := make(map[int32]db.MCPServer, len(allServers))
 		for _, s := range allServers {
 			serverByID[s.ID] = s
 		}
-
-		var externalMCPs []db.MCPServer
-		accountIDByName := make(map[string]int32)
 		for _, acc := range accounts {
 			srv, ok := serverByID[acc.MCPServerID]
 			if !ok || srv.Transport == "builtin" {
@@ -468,45 +513,16 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 					continue
 				}
 			}
-			// Inject account credentials into a copy of the server config.
 			synthetic := srv
 			synthetic.AuthToken = acc.AuthToken
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
-			externalMCPs = append(externalMCPs, synthetic)
+			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
+			serverIDByName[synthetic.Name] = synthetic.ID
 		}
-		if len(externalMCPs) > 0 {
-			// Auth error sink: when a live tool call returns 401/unauthorized during a run,
-			// write the error to MCPAccount.last_error so the MCP Servers page shows a warning.
-			onAuthError := func(serverName, rawErr string) {
-				accID, ok := accountIDByName[serverName]
-				if !ok {
-					return
-				}
-				msg := "Auth token invalid or expired. Re-authenticate."
-				if strings.Contains(strings.ToLower(rawErr), "forbidden") ||
-					strings.Contains(strings.ToLower(rawErr), "permission denied") {
-					msg = "Permission denied. Check your auth token has the required scopes."
-				}
-				_ = e.q.UpdateMCPAccountLastError(context.Background(), accID, msg)
-			}
-			serverIDByName := make(map[string]int32, len(externalMCPs))
-			for _, s := range externalMCPs {
-				serverIDByName[s.Name] = s.ID
-			}
-			onToolCall := func(serverName, toolName string) {
-				if srvID, ok := serverIDByName[serverName]; ok {
-					_ = e.q.IncrementMCPToolCallCount(context.Background(), srvID, toolName)
-				}
-			}
-			store := tools.NewMCPSessionStore(externalMCPs, onAuthError, onToolCall)
-			callTool, discoverTool := tools.NewMCPTools(store)
-			registry.Register(callTool)
-			registry.Register(discoverTool)
-
-			mcpNames := store.ServerNames()
+		mcpNames := store.ServerNames()
+		if len(mcpNames) > 0 {
 			e.logInfo(proxyLogger, "MCP: "+strings.Join(mcpNames, ", "))
-			// Append compact server+tool listing to the system prompt so it appears on every turn.
 			listing := store.CompactListing()
 			systemPrompt += listing
 			listingCostByServer = store.ListingCostByServer()
@@ -646,11 +662,11 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	})
 }
 
-// makeCreateSubtaskFunc returns the callback used by the create_subtask tool.
+// makeCreateSubtaskFunc returns the callback used by the paperclip2 MCP create_subtask handler.
 // It enforces the single-running-subtask constraint, creates the DB record, and
 // enqueues the subtask for processing.
-func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) tools.CreateSubtaskFunc {
-	return func(callCtx context.Context, p tools.SubtaskParams) (int32, error) {
+func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) func(callCtx context.Context, title, description, agentName string) (int32, error) {
+	return func(callCtx context.Context, title, description, agentName string) (int32, error) {
 		// Reject if another subtask of this parent is already running.
 		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
 		if err != nil {
@@ -663,10 +679,10 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 		// Look up the requested agent config; validate it exists.
 		var configName string
 		if e.agentFactory != nil {
-			if _, cfgErr := e.agentFactory.GetConfig(p.AgentName); cfgErr != nil {
-				return 0, fmt.Errorf("unknown agent config %q: %w", p.AgentName, cfgErr)
+			if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
+				return 0, fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
 			}
-			configName = p.AgentName
+			configName = agentName
 		}
 
 		parentID := parentTask.ID
@@ -677,8 +693,8 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 			SprintID:        parentTask.SprintID,
 			AgentID:         &agentID,
 			ParentID:        &parentID,
-			Title:           p.Title,
-			Description:     p.Description,
+			Title:           title,
+			Description:     description,
 			TaskType:        db.TaskTypeImplement,
 			Status:          "to-do",
 			Priority:        "Normal",
@@ -700,6 +716,44 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 		}
 
 		return subtask.ID, nil
+	}
+}
+
+// paperclip2MCPTools returns the tool definitions exposed by the paperclip2 builtin MCP server.
+func paperclip2MCPTools(agentNames []string) []mcp.Tool {
+	agentNameProp := map[string]interface{}{
+		"type":        "string",
+		"description": "Name of the agent config to use",
+	}
+	if len(agentNames) > 0 {
+		agentNameProp["enum"] = agentNames
+	}
+	createSubtaskParams, _ := json.Marshal(map[string]interface{}{
+		"type": "object",
+		"properties": map[string]interface{}{
+			"title": map[string]interface{}{
+				"type":        "string",
+				"description": "Short title for the subtask",
+			},
+			"description": map[string]interface{}{
+				"type":        "string",
+				"description": "Detailed description of what the subtask should accomplish",
+			},
+			"agent_name": agentNameProp,
+		},
+		"required": []string{"title", "description", "agent_name"},
+	})
+	return []mcp.Tool{
+		{
+			Name:        "create_subtask",
+			Description: "Create a subtask and delegate its execution to a specialist agent. Only one subtask can run at a time — this call fails if a subtask is already running.",
+			InputSchema: json.RawMessage(createSubtaskParams),
+		},
+		{
+			Name:        "expand_run_result",
+			Description: "Retrieve the full detailed explanation for a previous run. Use this when the short result summary in your context is not enough to understand what a previous run did. The run_id is shown in each run entry in your conversation history.",
+			InputSchema: json.RawMessage(`{"type":"object","properties":{"run_id":{"type":"integer","description":"The numeric ID of the run whose explanation you want to read"}},"required":["run_id"]}`),
+		},
 	}
 }
 
