@@ -106,7 +106,7 @@ test.describe.serial('Paperclip2 App', () => {
         await page.click('button:has-text("Save Task")');
 
         // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to update_task_status, moving the task
+        // will respond with a tool call to finish_task, moving the task
         // to "in-review". Wait for that real outcome.
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 

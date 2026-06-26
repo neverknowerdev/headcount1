@@ -3,10 +3,10 @@ import * as net from 'net';
 import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
-const TOOL_NAME = 'update_task_status';
+const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
-const TOOL_ARGS = { status: 'in-review' };
-const COMPLETION_TEXT = 'Task status has been updated. All done.';
+const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
+const COMPLETION_TEXT = 'Task is now in review. All done.';
 
 interface ReceivedRequest {
     method: string;
@@ -52,7 +52,7 @@ interface ChatChunk {
  * tests.
  *
  * Endpoints:
- *   - POST /v1/chat/completions   -> returns a tool call to `update_task_status`
+ *   - POST /v1/chat/completions   -> returns a tool call to `finish_task`
  *                                   on the first request, then a text completion.
  *   - GET  /v1/models             -> returns one model so `TestProvider` succeeds.
  *   - GET  /__test/requests       -> returns the log of received requests (test introspection).
