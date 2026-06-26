@@ -279,14 +279,6 @@ func (q *Queries) MigrateServerTokensToAccounts(ctx context.Context) error {
 func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 	predefined := []MCPServer{
 		{
-			Name:        "paperclip2",
-			DisplayName: "Paperclip2",
-			Description: "Built-in tools: update task status and create subtasks for agents.",
-			Transport:   "builtin",
-			Enabled:     true,
-			Builtin:     true,
-		},
-		{
 			Name:        "github",
 			DisplayName: "GitHub",
 			Description: "Access GitHub repos, issues, pull requests, and code search. Auto-installs via brew on first use.",

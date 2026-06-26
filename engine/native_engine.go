@@ -2,7 +2,6 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,7 +13,6 @@ import (
 	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
-	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
@@ -391,8 +389,19 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		agentNames = e.agentFactory.ListNames()
 	}
 
-	// Build the MCP session store. paperclip2 is always registered as a builtin so
-	// the model can call create_subtask and expand_run_result on every run.
+	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
+	registry.Register(tools.NewExpandRunResult(func(rCtx context.Context, runID int32) (string, error) {
+		r, err := e.q.GetRun(rCtx, runID)
+		if err != nil {
+			return "", err
+		}
+		if r.ResultDescription == "" {
+			return "No detailed explanation available for this run.", nil
+		}
+		return r.ResultDescription, nil
+	}))
+
+	// Build the MCP session store for external integrations.
 	accountIDByName := make(map[string]int32)
 	serverIDByName := make(map[string]int32)
 	onAuthError := func(serverName, rawErr string) {
@@ -414,53 +423,9 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 	store := tools.NewMCPSessionStore(nil, onAuthError, onToolCall)
 
-	createFn := e.makeCreateSubtaskFunc(ctx, task, agent)
-	store.RegisterBuiltin("paperclip2", paperclip2MCPTools(agentNames), func(bCtx context.Context, toolName string, rawArgs json.RawMessage) (string, error) {
-		switch toolName {
-		case "create_subtask":
-			var p struct {
-				Title       string `json:"title"`
-				Description string `json:"description"`
-				AgentName   string `json:"agent_name"`
-			}
-			if err := json.Unmarshal(rawArgs, &p); err != nil {
-				return "", fmt.Errorf("create_subtask: %w", err)
-			}
-			if p.Title == "" {
-				return "", fmt.Errorf("title is required")
-			}
-			if p.AgentName == "" {
-				return "", fmt.Errorf("agent_name is required")
-			}
-			taskID, err := createFn(bCtx, p.Title, p.Description, p.AgentName)
-			if err != nil {
-				return "", err
-			}
-			return fmt.Sprintf("Subtask %d created and queued for execution by %s agent.", taskID, p.AgentName), nil
-		case "expand_run_result":
-			var p struct {
-				RunID int32 `json:"run_id"`
-			}
-			if err := json.Unmarshal(rawArgs, &p); err != nil {
-				return "", fmt.Errorf("expand_run_result: %w", err)
-			}
-			r, err := e.q.GetRun(bCtx, p.RunID)
-			if err != nil {
-				return "", fmt.Errorf("expand_run_result: %w", err)
-			}
-			if r.ResultDescription == "" {
-				return "No detailed explanation available for this run.", nil
-			}
-			return r.ResultDescription, nil
-		default:
-			return "", fmt.Errorf("unknown paperclip2 tool %q", toolName)
-		}
-	})
-
 	callTool, discoverTool := tools.NewMCPTools(store)
 	registry.Register(callTool)
 	registry.Register(discoverTool)
-	systemPrompt += store.BuiltinFullListing()
 
 	// Wire codegraph proxy: one MCP server process per project, project names
 	// exposed as an enum on every codegraph tool call.
@@ -662,7 +627,7 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	})
 }
 
-// makeCreateSubtaskFunc returns the callback used by the paperclip2 MCP create_subtask handler.
+// makeCreateSubtaskFunc returns the callback used by the create_subtask tool.
 // It enforces the single-running-subtask constraint, creates the DB record, and
 // enqueues the subtask for processing.
 func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) func(callCtx context.Context, title, description, agentName string) (int32, error) {
@@ -716,44 +681,6 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 		}
 
 		return subtask.ID, nil
-	}
-}
-
-// paperclip2MCPTools returns the tool definitions exposed by the paperclip2 builtin MCP server.
-func paperclip2MCPTools(agentNames []string) []mcp.Tool {
-	agentNameProp := map[string]interface{}{
-		"type":        "string",
-		"description": "Name of the agent config to use",
-	}
-	if len(agentNames) > 0 {
-		agentNameProp["enum"] = agentNames
-	}
-	createSubtaskParams, _ := json.Marshal(map[string]interface{}{
-		"type": "object",
-		"properties": map[string]interface{}{
-			"title": map[string]interface{}{
-				"type":        "string",
-				"description": "Short title for the subtask",
-			},
-			"description": map[string]interface{}{
-				"type":        "string",
-				"description": "Detailed description of what the subtask should accomplish",
-			},
-			"agent_name": agentNameProp,
-		},
-		"required": []string{"title", "description", "agent_name"},
-	})
-	return []mcp.Tool{
-		{
-			Name:        "create_subtask",
-			Description: "Create a subtask and delegate its execution to a specialist agent. Only one subtask can run at a time — this call fails if a subtask is already running.",
-			InputSchema: json.RawMessage(createSubtaskParams),
-		},
-		{
-			Name:        "expand_run_result",
-			Description: "Retrieve the full detailed explanation for a previous run. Use this when the short result summary in your context is not enough to understand what a previous run did. The run_id is shown in each run entry in your conversation history.",
-			InputSchema: json.RawMessage(`{"type":"object","properties":{"run_id":{"type":"integer","description":"The numeric ID of the run whose explanation you want to read"}},"required":["run_id"]}`),
-		},
 	}
 }
 

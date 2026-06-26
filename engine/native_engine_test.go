@@ -343,8 +343,8 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 
 // ---- subtask tests ----------------------------------------------------------
 
-// createSubtaskHandler returns a mock LLM that first calls create_subtask via the
-// paperclip2 MCP server, then acknowledges the result with a text response.
+// createSubtaskHandler returns a mock LLM that first calls create_subtask directly,
+// then acknowledges the result with a text response.
 func createSubtaskHandler(t *testing.T) http.Handler {
 	t.Helper()
 	var count atomic.Int32
@@ -353,7 +353,6 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 		n := count.Add(1)
 		switch n {
 		case 1:
-			// First turn: call create_subtask via MCP
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": "chatcmpl-sub-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
@@ -363,8 +362,8 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 						"tool_calls": []map[string]interface{}{{
 							"id": "call_sub_001", "type": "function",
 							"function": map[string]interface{}{
-								"name":      "call_mcp_tool",
-								"arguments": `{"server":"paperclip2","tool":"create_subtask","input":{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}}`,
+								"name":      "create_subtask",
+								"arguments": `{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`,
 							},
 						}},
 					},
@@ -373,7 +372,6 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 			})
 		default:
-			// Subsequent turns: plain text
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": "chatcmpl-sub-002", "model": "test-model",
 				"choices": []map[string]interface{}{{
@@ -434,8 +432,8 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 							{
 								"id": "call_d1", "type": "function",
 								"function": map[string]interface{}{
-									"name":      "call_mcp_tool",
-									"arguments": `{"server":"paperclip2","tool":"create_subtask","input":{"title":"sub1","description":"d1","agent_name":"Programmer"}}`,
+									"name":      "create_subtask",
+									"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
 								},
 							},
 						},
@@ -563,68 +561,9 @@ func TestNativeEngineSubtaskNotifiesParent(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "parent task should have received a system comment")
 }
 
-// ---- paperclip2 MCP e2e tests -----------------------------------------------
-
-// TestNativeEnginePaperclipMCPCreateSubtask verifies that the model can invoke
-// create_subtask via the paperclip2 builtin MCP server using call_mcp_tool.
-func TestNativeEnginePaperclipMCPCreateSubtask(t *testing.T) {
-	var count atomic.Int32
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := count.Add(1)
-		if n == 1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-mcp-001", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role": "assistant", "content": "",
-						"tool_calls": []map[string]interface{}{{
-							"id": "call_mcp_001", "type": "function",
-							"function": map[string]interface{}{
-								"name":      "call_mcp_tool",
-								"arguments": `{"server":"paperclip2","tool":"create_subtask","input":{"title":"MCP subtask","description":"created via MCP","agent_name":"Programmer"}}`,
-							},
-						}},
-					},
-					"finish_reason": "tool_calls",
-				}},
-				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
-			})
-			return
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-mcp-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": "Subtask created via paperclip2 MCP."},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35},
-		})
-	})
-
-	mockSrv := startTestServer(t, handler)
-	database := setupTestDB(t)
-	task := seedTestData(t, database, mockSrv.URL)
-
-	hub := eventhub.NewHub()
-	eng := engine.NewNativeEngine(database, hub)
-	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
-
-	q := db.New(database)
-	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
-	waitForRunDone(t, q, runID, 30*time.Second)
-
-	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
-	assert.Equal(t, task.ID, *subtask.ParentID)
-	assert.Equal(t, "MCP subtask", subtask.Title)
-	assert.Equal(t, "Programmer", subtask.AgentConfigName)
-}
-
-// TestNativeEnginePaperclipMCPExpandRunResult verifies that the model can invoke
-// expand_run_result via the paperclip2 builtin MCP server and receive the run description.
-func TestNativeEnginePaperclipMCPExpandRunResult(t *testing.T) {
+// TestNativeEngineExpandRunResult verifies that the model can invoke expand_run_result
+// and receive the full run description.
+func TestNativeEngineExpandRunResult(t *testing.T) {
 	var pastRunID atomic.Int32
 	var capturedToolResult atomic.Value // stores string
 	var count atomic.Int32
@@ -643,8 +582,8 @@ func TestNativeEnginePaperclipMCPExpandRunResult(t *testing.T) {
 						"tool_calls": []map[string]interface{}{{
 							"id": "call_exp_001", "type": "function",
 							"function": map[string]interface{}{
-								"name":      "call_mcp_tool",
-								"arguments": fmt.Sprintf(`{"server":"paperclip2","tool":"expand_run_result","input":{"run_id":%d}}`, runID),
+								"name":      "expand_run_result",
+								"arguments": fmt.Sprintf(`{"run_id":%d}`, runID),
 							},
 						}},
 					},

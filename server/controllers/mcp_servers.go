@@ -131,21 +131,6 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 	}
 
 	for _, s := range servers {
-		if s.Transport == "builtin" {
-			type slimTool struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-			}
-			builtins := []slimTool{
-				{Name: "create_subtask", Description: "Create a new subtask and assign it to a sub-agent for execution."},
-				{Name: "expand_run_result", Description: "Retrieve the full detailed explanation for a previous run."},
-			}
-			if b, jsonErr := json.Marshal(builtins); jsonErr == nil {
-				_ = api.q.UpdateMCPServerToolsCache(ctx, s.ID, string(b))
-			}
-			continue
-		}
-
 		// For external servers, try each account until one succeeds.
 		if len(s.Accounts) == 0 {
 			continue
@@ -326,14 +311,6 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Transport == "stdio" {
 		installMCPDependencies(r.Context())
-	}
-	if s.Transport == "builtin" {
-		tools := []map[string]string{
-			{"name": "create_subtask", "description": "Create a new subtask and assign it to a subagent."},
-			{"name": "expand_run_result", "description": "Retrieve the full detailed explanation for a previous run."},
-		}
-		api.respondJSON(w, http.StatusOK, map[string]any{"tools": tools})
-		return
 	}
 	if len(s.Accounts) == 0 {
 		api.respondError(w, http.StatusBadRequest, "no accounts configured — add an account first")
