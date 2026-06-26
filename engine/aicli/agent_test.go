@@ -195,7 +195,7 @@ func TestClientBodyEmbeddedError(t *testing.T) {
 	assert.Contains(t, err.Error(), "model not found")
 }
 
-// TestToolReadFile verifies the read_file tool in isolation.
+// TestToolReadFile verifies the read tool in isolation.
 func TestToolReadFile(t *testing.T) {
 	workDir := t.TempDir()
 	content := "line1\nline2\nline3"
@@ -203,12 +203,12 @@ func TestToolReadFile(t *testing.T) {
 
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"test.txt"}`))
+	result, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"test.txt"}`))
 	require.NoError(t, err)
 	assert.Equal(t, content, result)
 }
 
-// TestToolListDir verifies the list_dir tool.
+// TestToolListDir verifies the ls tool.
 func TestToolListDir(t *testing.T) {
 	workDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("a"), 0644))
@@ -217,19 +217,19 @@ func TestToolListDir(t *testing.T) {
 
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "list_dir", json.RawMessage(`{"path":".","recursive":false}`))
+	result, err := reg.Execute(context.Background(), "ls", json.RawMessage(`{"path":".","recursive":false}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "a.txt")
 	assert.Contains(t, result, "sub/")
 	assert.NotContains(t, result, "b.txt") // non-recursive
 }
 
-// TestToolExecCommand verifies the exec_command tool.
+// TestToolExecCommand verifies the bash tool.
 func TestToolExecCommand(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo hello"}`))
+	result, err := reg.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hello"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "hello\n", result)
 }
@@ -257,28 +257,28 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 		tool string
 		args string
 	}{
-		// read_file: absolute path outside workspace
-		{"read_file", `{"path":"/etc/passwd"}`},
-		// read_file: traversal via ../..
-		{"read_file", `{"path":"../../etc/passwd"}`},
-		// list_dir: parent traversal
-		{"list_dir", `{"path":".."}`},
+		// read: absolute path outside workspace
+		{"read", `{"path":"/etc/passwd"}`},
+		// read: traversal via ../..
+		{"read", `{"path":"../../etc/passwd"}`},
+		// ls: parent traversal
+		{"ls", `{"path":".."}`},
 		// grep: absolute path outside workspace
 		{"grep", `{"pattern":"root","path":"/etc"}`},
-		// write_file: absolute path outside workspace
-		{"write_file", `{"path":"/tmp/evil.txt","content":"hack"}`},
-		// write_file: traversal outside workspace
-		{"write_file", `{"path":"../evil.txt","content":"hack"}`},
-		// exec_command: ls on absolute path outside workspace
-		{"exec_command", `{"command":"ls /etc"}`},
-		// exec_command: cat on absolute path outside workspace
-		{"exec_command", `{"command":"cat /etc/passwd"}`},
-		// exec_command: parent directory via ".."
-		{"exec_command", `{"command":"ls .."}`},
-		// exec_command: parent traversal in relative path
-		{"exec_command", `{"command":"cat ../secret.txt"}`},
-		// exec_command: embedded traversal in relative path
-		{"exec_command", `{"command":"ls sub/../../outside"}`},
+		// write: absolute path outside workspace
+		{"write", `{"path":"/tmp/evil.txt","content":"hack"}`},
+		// write: traversal outside workspace
+		{"write", `{"path":"../evil.txt","content":"hack"}`},
+		// bash: ls on absolute path outside workspace
+		{"bash", `{"command":"ls /etc"}`},
+		// bash: cat on absolute path outside workspace
+		{"bash", `{"command":"cat /etc/passwd"}`},
+		// bash: parent directory via ".."
+		{"bash", `{"command":"ls .."}`},
+		// bash: parent traversal in relative path
+		{"bash", `{"command":"cat ../secret.txt"}`},
+		// bash: embedded traversal in relative path
+		{"bash", `{"command":"ls sub/../../outside"}`},
 	}
 
 	for _, tc := range cases {
@@ -291,14 +291,14 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 	}
 }
 
-// TestToolWriteFile verifies that write_file creates files inside the workspace
-// and that read_file can read them back.
+// TestToolWriteFile verifies that write creates files inside the workspace
+// and that read can read them back.
 func TestToolWriteFile(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
 	// Write a top-level file.
-	result, err := reg.Execute(context.Background(), "write_file",
+	result, err := reg.Execute(context.Background(), "write",
 		json.RawMessage(`{"path":"output.txt","content":"hello from agent"}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "output.txt")
@@ -308,22 +308,22 @@ func TestToolWriteFile(t *testing.T) {
 	assert.Equal(t, "hello from agent", string(data))
 
 	// Write in a nested subdirectory — parent dirs should be created automatically.
-	_, err = reg.Execute(context.Background(), "write_file",
+	_, err = reg.Execute(context.Background(), "write",
 		json.RawMessage(`{"path":"sub/dir/nested.txt","content":"nested content"}`))
 	require.NoError(t, err)
 	data, err = os.ReadFile(filepath.Join(workDir, "sub", "dir", "nested.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "nested content", string(data))
 
-	// Round-trip: write then read back via read_file.
-	readResult, err := reg.Execute(context.Background(), "read_file",
+	// Round-trip: write then read back via read.
+	readResult, err := reg.Execute(context.Background(), "read",
 		json.RawMessage(`{"path":"output.txt"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "hello from agent", readResult)
 }
 
 // TestAgentWriteFileTool verifies the full agent-loop path where the LLM calls
-// write_file and the file is created in the workspace.
+// write and the file is created in the workspace.
 func TestAgentWriteFileTool(t *testing.T) {
 	fixturePath := filepath.Join("testdata", "fixtures", "write_file_tool.json")
 	client := newTestClient(t, fixturePath)
@@ -384,15 +384,15 @@ func TestRegistryFilter_Subset(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
-	filtered := reg.Filter([]string{"read_file", "grep"})
+	filtered := reg.Filter([]string{"read", "grep"})
 
-	// read_file and grep should work.
+	// read and grep should work.
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("hi"), 0644))
-	_, err := filtered.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"f.txt"}`))
+	_, err := filtered.Execute(context.Background(), "read", json.RawMessage(`{"path":"f.txt"}`))
 	require.NoError(t, err)
 
-	// exec_command should not exist in the filtered registry.
-	_, err = filtered.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo x"}`))
+	// bash should not exist in the filtered registry.
+	_, err = filtered.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo x"}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown tool")
 }

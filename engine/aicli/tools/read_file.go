@@ -23,7 +23,7 @@ func (t *ReadFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "read_file",
+			Name:        "read",
 			Description: "Read a file inside the workspace. Returns the file content as text.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -49,7 +49,7 @@ func (t *ReadFile) Execute(_ context.Context, args json.RawMessage) (string, err
 	}
 	data, err := os.ReadFile(resolved)
 	if err != nil {
-		return "", fmt.Errorf("read_file: %w", err)
+		return "", fmt.Errorf("read: %w", err)
 	}
 	content := string(data)
 	if len(content) > 100_000 {

@@ -25,7 +25,7 @@ func (t *ListDir) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "list_dir",
+			Name:        "ls",
 			Description: "List files inside the workspace. Returns a line-per-entry listing.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -67,12 +67,12 @@ func (t *ListDir) Execute(_ context.Context, args json.RawMessage) (string, erro
 			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("list_dir: %w", err)
+			return "", fmt.Errorf("ls: %w", err)
 		}
 	} else {
 		entries, err := os.ReadDir(resolved)
 		if err != nil {
-			return "", fmt.Errorf("list_dir: %w", err)
+			return "", fmt.Errorf("ls: %w", err)
 		}
 		for _, e := range entries {
 			if e.IsDir() {

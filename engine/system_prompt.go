@@ -58,7 +58,7 @@ At the end of every run you MUST call finish_task — there are no exceptions:
 - done: task is fully complete, no review needed
 - refinement: you need clarification before you can start
 
-Use write_artifact_file to produce structured markdown deliverables (plans, reports, specs, documentation).
+Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
 Use expand_run_result to read the full explanation of any previous run listed in your context.
 
 Context of your work:

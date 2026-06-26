@@ -16,7 +16,7 @@
                 "id": "call_fixture_002",
                 "type": "function",
                 "function": {
-                  "name": "read_file",
+                  "name": "read",
                   "arguments": "{\"path\":\"hello.txt\"}"
                 }
               }

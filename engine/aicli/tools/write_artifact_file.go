@@ -49,7 +49,7 @@ func (t *WriteArtifactFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "write_artifact_file",
+			Name: "write_artifact",
 			Description: "Write an output artifact for the current task. " +
 				"Use this for deliverables: reports (.md), specifications, diagrams (.svg), " +
 				"images (.png, .jpg), PDFs, audio, video, or any non-code output. " +
@@ -82,17 +82,17 @@ func (t *WriteArtifactFile) Execute(ctx context.Context, args json.RawMessage) (
 		return "", err
 	}
 	if strings.ContainsAny(p.Filename, "/\\") {
-		return "", fmt.Errorf("write_artifact_file: filename must not contain path separators")
+		return "", fmt.Errorf("write_artifact: filename must not contain path separators")
 	}
 	ext := strings.ToLower(filepath.Ext(p.Filename))
 	if ext == "" {
-		return "", fmt.Errorf("write_artifact_file: filename must have an extension")
+		return "", fmt.Errorf("write_artifact: filename must have an extension")
 	}
 	if codeExtensions[ext] {
-		return "", fmt.Errorf("write_artifact_file: %q is a code/config file type and cannot be an artifact; use write_file instead", ext)
+		return "", fmt.Errorf("write_artifact: %q is a code/config file type and cannot be an artifact; use write instead", ext)
 	}
 	if err := t.onWrite(ctx, p.Filename, p.Content); err != nil {
-		return "", fmt.Errorf("write_artifact_file: %w", err)
+		return "", fmt.Errorf("write_artifact: %w", err)
 	}
 	return fmt.Sprintf("Artifact %q written.", p.Filename), nil
 }
