@@ -102,6 +102,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{id}", api.UpdateTask)
 		r.Put("/{id}/status", api.UpdateTask)
 		r.Get("/{id}/runs", api.ListTaskRuns)
+		r.Post("/{id}/rerun", api.RerunTask)
 		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
 	})
 

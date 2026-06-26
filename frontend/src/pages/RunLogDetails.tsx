@@ -1,7 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Square, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer } from '../components/RunLogViewer';
 
 function parseLogContent(logContent: string): any[] {
@@ -49,6 +49,7 @@ export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
     const [run, setRun] = useState<any>(null);
     const [isStopping, setIsStopping] = useState(false);
+    const [isRerunning, setIsRerunning] = useState(false);
     const [logMessages, setLogMessages] = useState<any[]>([]);
     const [streamStalled, setStreamStalled] = useState<{at: number, message: string} | null>(null);
     const [lastEventAt, setLastEventAt] = useState<number>(Date.now());
@@ -148,6 +149,19 @@ export const RunLogDetails: React.FC = () => {
         }
     };
 
+    const handleRerun = async () => {
+        if (!run?.task_id) return;
+        setIsRerunning(true);
+        try {
+            await axios.post(`/api/tasks/${run.task_id}/rerun`);
+        } catch (e) {
+            console.error(e);
+            alert('Failed to start re-run');
+        } finally {
+            setIsRerunning(false);
+        }
+    };
+
     if (!run) return <div>Loading...</div>;
 
     return (
@@ -159,16 +173,28 @@ export const RunLogDetails: React.FC = () => {
                     </Link>
                     <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
                 </div>
-                {run.status === 'running' && (
-                    <button
-                        onClick={handleStopRun}
-                        disabled={isStopping}
-                        className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <Square size={16} />
-                        {isStopping ? 'Stopping...' : 'Stop Run'}
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    {run.status === 'running' && (
+                        <button
+                            onClick={handleStopRun}
+                            disabled={isStopping}
+                            className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <Square size={16} />
+                            {isStopping ? 'Stopping...' : 'Stop Run'}
+                        </button>
+                    )}
+                    {run.is_latest && run.status !== 'running' && (
+                        <button
+                            onClick={handleRerun}
+                            disabled={isRerunning}
+                            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <RotateCcw size={16} />
+                            {isRerunning ? 'Starting...' : 'Re-run'}
+                        </button>
+                    )}
+                </div>
             </div>
 
             {streamStalled && run.status === 'running' && (
