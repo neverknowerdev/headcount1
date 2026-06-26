@@ -134,8 +134,8 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByText('Let us see if the agent works')).toBeVisible();
 
         // Verify Agent Run Logs
-        await expect(page.getByText(/Run #\d/)).toBeVisible();
-        await page.click('summary:has-text("Run #")');
+        await expect(page.getByText(/Run #\d/).first()).toBeVisible();
+        await page.locator('summary:has-text("Run #")').first().click();
 
         // Verify Run Logs page
         await page.keyboard.press('Escape');

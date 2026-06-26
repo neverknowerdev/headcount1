@@ -65,7 +65,6 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
     const state = {
         received: [] as ReceivedRequest[],
         requestCount: 0,
-        chatRequestCount: 0,
     };
 
     const server = http.createServer(async (req, res) => {
@@ -110,7 +109,7 @@ async function parseRequestBody(req: http.IncomingMessage): Promise<unknown> {
 function handleTestRoutes(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    state: { received: ReceivedRequest[]; requestCount: number; chatRequestCount: number }
+    state: { received: ReceivedRequest[]; requestCount: number }
 ): boolean {
     if (req.url?.startsWith('/__test/requests') && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -148,7 +147,7 @@ function handleChatCompletionsRoute(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     body: unknown,
-    state: { received: ReceivedRequest[]; requestCount: number; chatRequestCount: number }
+    state: { received: ReceivedRequest[]; requestCount: number }
 ): boolean {
     if (!req.url?.includes('/chat/completions') || req.method !== 'POST') {
         return false;
@@ -157,15 +156,13 @@ function handleChatCompletionsRoute(
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
 
-    // Only count requests that include tool definitions — those are real agent
-    // calls. The TestProvider endpoint sends a bare "Say hello" request without
-    // tools to verify connectivity; that request should not advance the counter
-    // so it doesn't consume the first-call slot.
-    const hasTools = Array.isArray((request as any).tools) && (request as any).tools.length > 0;
-    if (hasTools) {
-        state.chatRequestCount++;
-    }
-    const isFirstCall = state.chatRequestCount === 1;
+    // Determine if this is the first real agent call by checking whether the
+    // conversation already contains a tool result message. If it does, the
+    // agent has already received a finish_task response and just needs a plain
+    // text completion. This approach is stateless across retries.
+    const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
+    const hasToolResult = messages.some((m: any) => m.role === 'tool');
+    const isFirstCall = !hasToolResult;
 
     if (wantsStream) {
         writeStreamingChatCompletion(res, isFirstCall);
