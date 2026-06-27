@@ -159,20 +159,19 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
-	// 5. Sync MCP Servers (global, no company FK)
-	// Codegraph servers (project_id != nil) are auto-created by project sync —
-	// skip them here so stale disk files don't resurrect deleted servers.
+	// 5. Sync MCP Servers (global + codegraph per-project)
 	mcpRecs, mcpErr := fm.ListMCPServersFromDisk()
 	if mcpErr != nil {
 		log.Printf("Error listing MCP servers: %v", mcpErr)
 	} else {
 		for _, rec := range mcpRecs {
+			// For codegraph servers, verify the referenced project exists before restoring.
 			if rec.ProjectID != nil {
-				// Delete leftover codegraph server files — they're managed by project sync.
-				if err := fm.DeleteMCPServerFile(rec.ID); err != nil {
-					log.Printf("Warning: could not delete codegraph server file %d: %v", rec.ID, err)
+				var proj db.Project
+				if api.db.First(&proj, *rec.ProjectID).Error != nil {
+					log.Printf("Skipping codegraph server %d: project %d not found", rec.ID, *rec.ProjectID)
+					continue
 				}
-				continue
 			}
 			var existingMCP db.MCPServer
 			if api.db.First(&existingMCP, rec.ID).Error != nil {
@@ -190,6 +189,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 					AuthEnvVar:  rec.AuthEnvVar,
 					Enabled:     rec.Enabled,
 					Builtin:     rec.Builtin,
+					ProjectID:   rec.ProjectID,
 				}
 				if err := api.db.Create(&s).Error; err != nil {
 					log.Printf("Failed to restore MCP server %d (%s): %v", rec.ID, rec.Name, err)
@@ -295,14 +295,9 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
-	// Clean up orphaned codegraph MCP servers.
-	// Two cases:
-	//   1. project_id IS NOT NULL but the project is gone (normal orphan).
-	//   2. project_id IS NULL but name starts with "codegraph-" — server was imported
-	//      from a stale disk file without its project_id being restored.
+	// Clean up codegraph MCP servers whose project no longer exists.
 	if result := api.db.WithContext(ctx).
-		Where(`(project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects))
-		    OR (project_id IS NULL AND name LIKE 'codegraph-%')`).
+		Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").
 		Delete(&db.MCPServer{}); result.Error != nil {
 		log.Printf("Warning: failed to delete orphaned codegraph servers: %v", result.Error)
 	} else if result.RowsAffected > 0 {
@@ -377,15 +372,10 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, storage *filesystem
 		}
 	}
 
-	// Export MCP servers (global, like LLM providers).
-	// Codegraph servers (ProjectID != nil) are auto-created per-project and must
-	// not be exported — stale files would cause them to be re-imported after deletion.
+	// Export MCP servers (global + codegraph per-project)
 	var mcpServers []db.MCPServer
 	api.db.Find(&mcpServers)
 	for _, s := range mcpServers {
-		if s.ProjectID != nil {
-			continue
-		}
 		mcpPath := filepath.Join(basePath, "data", "mcp-servers", formatID(s.ID)+".json")
 		if _, err := os.Stat(mcpPath); os.IsNotExist(err) {
 			if err := fm.SaveMCPServer(s); err != nil {
