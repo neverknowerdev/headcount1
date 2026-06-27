@@ -6,6 +6,8 @@ import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { RunLogViewer } from './RunLogViewer';
+import { useWebSocket } from '../useWebSocket';
 
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
@@ -115,36 +117,37 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         };
         fetchDetails();
 
-        const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
-                setComments(prev => [...prev, msg.payload]);
-            }
-            if (msg.type === 'artifact_created' && msg.payload.task_id === taskId) {
-                setArtifacts(prev => {
-                    const exists = prev.some((a: any) => a.id === msg.payload.id);
-                    return exists ? prev.map((a: any) => a.id === msg.payload.id ? msg.payload : a) : [...prev, msg.payload];
-                });
-            }
-            if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
-                setRuns(prev => [...prev, msg.payload]);
-                setTask((prev: any) => prev ? { ...prev, run_id: msg.payload.id } : prev);
-            }
-            if (msg.type === 'run_ended' && runs.some((r: any) => r.id === msg.payload.run_id)) {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r));
-                setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
-            }
-            if (msg.type === 'run_log') {
-                if (msg.payload.entry) {
-                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
-                } else if (msg.payload.line) {
-                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
-                }
-            }
-        };
-        return () => ws.close();
     }, [taskId]);
+
+    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+        if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
+            setComments(prev => [...prev, msg.payload]);
+        }
+        if (msg.type === 'artifact_created' && msg.payload.task_id === taskId) {
+            setArtifacts(prev => {
+                const exists = prev.some((a: any) => a.id === msg.payload.id);
+                return exists ? prev.map((a: any) => a.id === msg.payload.id ? msg.payload : a) : [...prev, msg.payload];
+            });
+        }
+        if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
+            setRuns(prev => [...prev, msg.payload]);
+            setTask((prev: any) => prev ? { ...prev, run_id: msg.payload.id } : prev);
+        }
+        if (msg.type === 'run_ended') {
+            setRuns(prev => {
+                if (!prev.some((r: any) => r.id === msg.payload.run_id)) return prev;
+                return prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r);
+            });
+            setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
+        }
+        if (msg.type === 'run_log') {
+            if (msg.payload.entry) {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
+            } else if (msg.payload.line) {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+            }
+        }
+    }, !!taskId);
 
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -384,19 +387,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     </Link>
                                                                 </div>
                                                             </summary>
-                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t max-h-48 overflow-y-auto">
-                                                                {r.log_entries && r.log_entries.length > 0
-                                                                    ? r.log_entries.slice(-5).map((e: any, i: number) => {
-                                                                        if (e.type === 'info') return <div key={i} className="text-gray-400">{e.content}</div>;
-                                                                        if (e.type === 'error') return <div key={i} className="text-red-400">ERROR: {e.content}</div>;
-                                                                        if (e.type === 'request') return <div key={i} className="text-indigo-300">[Request] {e.model || ''}</div>;
-                                                                        if (e.type === 'response') return <div key={i} className="text-green-300">[Response] {e.status_code || 200}</div>;
-                                                                        if (e.type === 'tool_call') return <div key={i} className="text-amber-300">[Tool] {e.tool_name || '...'}</div>;
-                                                                        return null;
-                                                                    })
-                                                                    : r.log_content
-                                                                }
-                                                            </pre>
+                                                            <div className="border-t rounded-b-lg overflow-hidden">
+                                                                <RunLogViewer
+                                                                    compact
+                                                                    messages={(r.log_entries || []).map((e: any, i: number) => ({ id: i, entry: e }))}
+                                                                    status={r.status}
+                                                                />
+                                                            </div>
                                                         </details>
                                                     </div>
                                                 );

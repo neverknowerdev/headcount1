@@ -3,6 +3,7 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer } from '../components/RunLogViewer';
+import { useWebSocket } from '../useWebSocket';
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -103,25 +104,6 @@ export const RunLogDetails: React.FC = () => {
 
         fetchRun();
 
-        const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'run_log' && msg.payload.run_id === parseInt(id || '0')) {
-                setLastEventAt(Date.now());
-                setStreamStalled(null);
-                if (msg.payload.entry) {
-                    setLogMessages(prev => [...prev, { id: prev.length, entry: msg.payload.entry }]);
-                } else if (msg.payload.line) {
-                    setLogMessages(prev => [...prev, { id: prev.length, entry: { type: 'info', content: msg.payload.line } }]);
-                }
-            } else if (msg.type === 'run_ended' && msg.payload.run_id === parseInt(id || '0')) {
-                setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
-            } else if (msg.type === 'run_stalled' && msg.payload.run_id === parseInt(id || '0')) {
-                setLastEventAt(Date.now());
-                setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
-            }
-        };
-
         // Client-side fallback: if no events for 45s while run is "running",
         // surface a "stream stalled" warning even before the server detects it.
         const stallCheck = setInterval(() => {
@@ -131,10 +113,27 @@ export const RunLogDetails: React.FC = () => {
         }, 5000);
 
         return () => {
-            ws.close();
             clearInterval(stallCheck);
         };
     }, [id, run?.status, lastEventAt]);
+
+    const runIdInt = parseInt(id || '0');
+    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+        if (msg.type === 'run_log' && msg.payload.run_id === runIdInt) {
+            setLastEventAt(Date.now());
+            setStreamStalled(null);
+            if (msg.payload.entry) {
+                setLogMessages(prev => [...prev, { id: prev.length, entry: msg.payload.entry }]);
+            } else if (msg.payload.line) {
+                setLogMessages(prev => [...prev, { id: prev.length, entry: { type: 'info', content: msg.payload.line } }]);
+            }
+        } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
+            setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
+        } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
+            setLastEventAt(Date.now());
+            setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
+        }
+    });
 
     const handleStopRun = async () => {
         if (!id || !window.confirm('Are you sure you want to stop this run?')) return;
