@@ -468,8 +468,9 @@ func (q *Queries) MigrateAddProjectFKToMCPServers(ctx context.Context) error {
 	q.db.WithContext(ctx).Raw(
 		`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='mcp_servers'`,
 	).Scan(&ddl)
-	if strings.Contains(strings.ToLower(ddl), `references "projects"`) {
-		return nil // already has the FK
+	lower := strings.ToLower(ddl)
+	if strings.Contains(lower, "references") && strings.Contains(lower, "projects") {
+		return nil // FK already present (glebarez uses backtick-quoted identifiers)
 	}
 	// Purge orphans first — the new FK would reject them.
 	if err := q.db.WithContext(ctx).
