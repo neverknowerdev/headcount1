@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -452,4 +453,30 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// MigrateAddProjectFKToMCPServers adds a proper FK constraint from
+// mcp_servers.project_id → projects.id with ON DELETE CASCADE.
+// SQLite cannot ALTER TABLE ADD CONSTRAINT, so the migrator rebuilds the table.
+// Idempotent: skips if the constraint is already present in the DDL.
+func (q *Queries) MigrateAddProjectFKToMCPServers(ctx context.Context) error {
+	// Only needed for SQLite — PostgreSQL already enforces via the FK tag on AutoMigrate.
+	if q.db.Dialector.Name() != "sqlite" {
+		return nil
+	}
+	var ddl string
+	q.db.WithContext(ctx).Raw(
+		`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='mcp_servers'`,
+	).Scan(&ddl)
+	if strings.Contains(strings.ToLower(ddl), `references "projects"`) {
+		return nil // already has the FK
+	}
+	// Purge orphans first — the new FK would reject them.
+	if err := q.db.WithContext(ctx).
+		Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").
+		Delete(&MCPServer{}).Error; err != nil {
+		return fmt.Errorf("purge orphans: %w", err)
+	}
+	// GORM's SQLite migrator implements CreateConstraint via the 12-step table rebuild.
+	return q.db.WithContext(ctx).Migrator().CreateConstraint(&MCPServer{}, "Project")
 }

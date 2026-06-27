@@ -59,6 +59,13 @@ func main() {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 
+	// Enable FK enforcement for SQLite (disabled by default; must be set per-connection).
+	if database.Dialector.Name() == "sqlite" {
+		if err := database.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
+			log.Printf("Warning: failed to enable SQLite foreign keys: %v", err)
+		}
+	}
+
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
 		&db.Company{},
@@ -94,6 +101,11 @@ func main() {
 	// Repair codegraph servers whose project_id was not set on creation.
 	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {
 		log.Printf("Warning: codegraph repair failed: %v", err)
+	}
+
+	// Add FK constraint from mcp_servers.project_id → projects.id (SQLite table rebuild).
+	if err := db.New(database).MigrateAddProjectFKToMCPServers(context.Background()); err != nil {
+		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
 	// Migrate any legacy auth_token fields from MCPServer → MCPAccount.
