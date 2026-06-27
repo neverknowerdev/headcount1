@@ -286,6 +286,16 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
+	// Clean up codegraph MCP servers whose project no longer exists.
+	// project_id is a soft reference (no FK), so deleting a project leaves orphaned servers.
+	if result := api.db.WithContext(ctx).
+		Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").
+		Delete(&db.MCPServer{}); result.Error != nil {
+		log.Printf("Warning: failed to delete orphaned codegraph servers: %v", result.Error)
+	} else if result.RowsAffected > 0 {
+		log.Printf("Deleted %d orphaned codegraph MCP server(s)", result.RowsAffected)
+	}
+
 	return nil
 }
 
