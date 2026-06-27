@@ -2,7 +2,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
-import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp } from 'lucide-react';
+import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -25,6 +25,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [isSaving, setIsSaving] = useState(false);
     const [runs, setRuns] = useState<any[]>([]);
     const [runAgent, setRunAgent] = useState(true);
+    const [isRerunning, setIsRerunning] = useState(false);
     const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
     const [artifacts, setArtifacts] = useState<any[]>([]);
     const [expandedArtifact, setExpandedArtifact] = useState<number | null>(null);
@@ -197,6 +198,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     };
 
+    const handleRerun = async () => {
+        if (!taskId) return;
+        setIsRerunning(true);
+        try {
+            await axios.post(`/api/tasks/${taskId}/rerun`);
+        } catch (e) {
+            console.error(e);
+            alert('Failed to start re-run');
+        } finally {
+            setIsRerunning(false);
+        }
+    };
+
     const handleArchive = async () => {
         if (!taskId) return;
         if (!window.confirm(formData.is_archived ? "Unarchive this task?" : "Are you sure you want to archive this task?")) return;
@@ -343,6 +357,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     canceled: 'bg-orange-100 text-orange-800 border-orange-200',
                                                 };
                                                 const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
+                                                const maxRunId = Math.max(...runs.map((x: any) => x.id));
+                                                const isLatest = r.id === maxRunId;
                                                 return (
                                                     <div key={`r-${r.id}`} className="flex justify-center">
                                                         <details className="w-full max-w-[90%] border rounded-lg bg-white shadow-sm">
@@ -353,6 +369,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     <span className="text-gray-400">
                                                                         {startStr}{endStr ? ` → ${endStr}` : ''}
                                                                     </span>
+                                                                    {isLatest && r.status !== 'running' && (
+                                                                        <button
+                                                                            onClick={e => { e.preventDefault(); handleRerun(); }}
+                                                                            disabled={isRerunning}
+                                                                            className="flex items-center gap-1 text-indigo-600 hover:text-indigo-800 disabled:opacity-50"
+                                                                            title="Re-run"
+                                                                        >
+                                                                            <RotateCcw size={12} />
+                                                                        </button>
+                                                                    )}
                                                                     <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-gray-400 hover:text-indigo-600" title="View full log">
                                                                         <ExternalLink size={14} />
                                                                     </Link>
