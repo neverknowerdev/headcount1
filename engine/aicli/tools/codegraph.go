@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
@@ -144,7 +145,11 @@ func (p *CodegraphProxy) clientFor(ctx context.Context, entry *cgProjectEntry) (
 	if err != nil {
 		return nil, fmt.Errorf("codegraph: start server for %q: %w", entry.project.Name, err)
 	}
-	if _, err := c.Initialize(ctx); err != nil {
+	// Hard timeout on the MCP handshake so a hung subprocess never freezes the
+	// agent run. 30 s is generous; a healthy server responds in milliseconds.
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := c.Initialize(initCtx); err != nil {
 		c.Close()
 		return nil, fmt.Errorf("codegraph: initialize server for %q: %w", entry.project.Name, err)
 	}

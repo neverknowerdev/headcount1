@@ -91,6 +91,11 @@ func main() {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
 
+	// Repair codegraph servers whose project_id was not set on creation.
+	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {
+		log.Printf("Warning: codegraph repair failed: %v", err)
+	}
+
 	// Migrate any legacy auth_token fields from MCPServer → MCPAccount.
 	if err := db.New(database).MigrateServerTokensToAccounts(context.Background()); err != nil {
 		log.Printf("Warning: MCP account migration failed: %v", err)
@@ -112,6 +117,9 @@ func main() {
 	// Discover and cache tools for all enabled MCP servers in the background.
 	go srv.CacheMCPTools(context.Background())
 	go srv.StartMCPCacheScheduler(context.Background())
+
+	// Resume codegraph init for any project whose knowledge graph isn't ready yet.
+	go srv.InitPendingCodegraphServers(context.Background())
 
 	// Check if backup is needed on startup
 	paperclipHome := db.PaperclipHome()

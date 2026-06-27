@@ -12,6 +12,11 @@ export const AgentDetails: React.FC = () => {
     const [runs, setRuns] = useState<any[]>([]);
     const [mcpServers, setMcpServers] = useState<any[]>([]);
     const [mcpAccountAssignments, setMcpAccountAssignments] = useState<Record<number, boolean>>({});
+    const [codegraphAssignments, setCodegraphAssignments] = useState<Record<number, boolean>>({}); // serverID → enabled (default true)
+    const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [saveError, setSaveError] = useState<string | null>(null);
+    const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+    const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
     const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
 
@@ -51,11 +56,17 @@ export const AgentDetails: React.FC = () => {
                 axios.get(`/api/agents/${id}/mcp-accounts`),
             ]);
             setMcpServers(serversRes.data || []);
-            const map: Record<number, boolean> = {};
-            for (const a of (assignRes.data || [])) {
-                map[a.mcp_account_id] = a.enabled;
+            const data = assignRes.data || {};
+            const accountMap: Record<number, boolean> = {};
+            for (const a of (data.accounts || [])) {
+                accountMap[a.mcp_account_id] = a.enabled;
             }
-            setMcpAccountAssignments(map);
+            setMcpAccountAssignments(accountMap);
+            const cgMap: Record<number, boolean> = {};
+            for (const cg of (data.codegraph || [])) {
+                cgMap[cg.server_id] = cg.enabled;
+            }
+            setCodegraphAssignments(cgMap);
         } catch (e) {
             console.error(e);
         }
@@ -70,19 +81,31 @@ export const AgentDetails: React.FC = () => {
     }, [activeTab, fetchMCPData]);
 
     const handleSaveMCPAssignments = async () => {
+        setMcpSaveState('saving');
+        setMcpSaveError(null);
         try {
-            const assignments = Object.entries(mcpAccountAssignments).map(([accountId, enabled]) => ({
+            const accounts = Object.entries(mcpAccountAssignments).map(([accountId, enabled]) => ({
                 mcp_account_id: parseInt(accountId),
                 enabled,
             }));
-            await axios.put(`/api/agents/${id}/mcp-accounts`, assignments);
-        } catch (e) {
-            alert('Failed to save MCP assignments');
+            const codegraph = Object.entries(codegraphAssignments).map(([serverId, enabled]) => ({
+                server_id: parseInt(serverId),
+                enabled,
+            }));
+            await axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph });
+            setMcpSaveState('saved');
+            setTimeout(() => setMcpSaveState('idle'), 2000);
+        } catch (e: any) {
+            const msg = e.response?.data?.error || e.message || 'Save failed';
+            setMcpSaveError(msg);
+            setMcpSaveState('error');
         }
     };
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
+        setSaveState('saving');
+        setSaveError(null);
         try {
             const payload = {
                 ...formData,
@@ -90,10 +113,11 @@ export const AgentDetails: React.FC = () => {
             };
             await axios.put(`/api/agents/${id}`, payload);
             fetchData();
-            alert('Saved successfully!');
-        } catch (e) {
-            console.error(e);
-            alert('Failed to save');
+            setSaveState('saved');
+            setTimeout(() => setSaveState('idle'), 2000);
+        } catch (e: any) {
+            setSaveError(e.response?.data?.error || e.message || 'Save failed');
+            setSaveState('error');
         }
     };
 
@@ -229,10 +253,12 @@ export const AgentDetails: React.FC = () => {
                                     })}
                                 </div>
                             </div>
-                            <div className="pt-4 border-t mt-6">
-                                <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
-                                    <Save size={16} className="mr-2" /> Save Changes
+                            <div className="pt-4 border-t mt-6 flex items-center gap-3">
+                                <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
+                                    <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
                                 </button>
+                                {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
+                                {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                             </div>
                         </form>
 
@@ -260,8 +286,8 @@ export const AgentDetails: React.FC = () => {
 
                             {/* Optional connected MCPs — grouped by server, per-account checkboxes */}
                             {(() => {
-                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin);
-                                const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin);
+                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin && !s.project_id);
+                                const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin && !s.project_id);
                                 const allExternal = [...builtin, ...optional];
                                 if (allExternal.length === 0) return (
                                     <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
@@ -305,10 +331,56 @@ export const AgentDetails: React.FC = () => {
                                 );
                             })()}
 
-                            <div className="pt-3 border-t">
-                                <button onClick={handleSaveMCPAssignments} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm">
-                                    <Save size={14} className="mr-2" /> Save
+                            {/* CodeGraph servers — checkboxes to enable/disable per agent */}
+                            {(() => {
+                                const codegraph = mcpServers.filter((s: any) => !!s.project_id);
+                                if (codegraph.length === 0) return null;
+                                return (
+                                    <div>
+                                        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">CodeGraph (auto-attached per project)</p>
+                                        <div className="space-y-2">
+                                            {codegraph.map((srv: any) => {
+                                                const ready = srv.init_status === 'ready';
+                                                const initializing = srv.init_status === 'initializing';
+                                                const enabled = srv.id in codegraphAssignments ? codegraphAssignments[srv.id] : true;
+                                                return (
+                                                    <label key={srv.id} className={`border rounded-lg px-3 py-2 flex items-center gap-3 cursor-pointer ${ready ? 'border-green-100 bg-green-50' : 'border-gray-100 bg-gray-50'}`}>
+                                                        <input
+                                                            type="checkbox"
+                                                            checked={enabled}
+                                                            onChange={e => setCodegraphAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }))}
+                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
+                                                        />
+                                                        <span className="text-sm font-medium text-gray-800 flex-1">{srv.display_name || srv.name}</span>
+                                                        {ready ? (
+                                                            <span className="text-xs text-green-700 font-medium">Ready</span>
+                                                        ) : initializing ? (
+                                                            <span className="text-xs text-amber-600 font-medium">Initializing…</span>
+                                                        ) : srv.init_status?.startsWith('error:') ? (
+                                                            <span className="text-xs text-red-500 font-medium">Init failed</span>
+                                                        ) : (
+                                                            <span className="text-xs text-gray-400">Not initialized</span>
+                                                        )}
+                                                    </label>
+                                                );
+                                            })}
+                                        </div>
+                                        <p className="text-xs text-gray-400 mt-1.5">When enabled, codegraph tools are attached to runs for tasks that belong to that project — not for every task. Uncheck to disable for this agent.</p>
+                                    </div>
+                                );
+                            })()}
+
+                            <div className="pt-3 border-t flex items-center gap-3">
+                                <button
+                                    onClick={handleSaveMCPAssignments}
+                                    disabled={mcpSaveState === 'saving'}
+                                    className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm disabled:opacity-60"
+                                >
+                                    <Save size={14} className="mr-2" />
+                                    {mcpSaveState === 'saving' ? 'Saving…' : 'Save'}
                                 </button>
+                                {mcpSaveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
+                                {mcpSaveState === 'error' && <span className="text-sm text-red-600">{mcpSaveError}</span>}
                             </div>
                         </div>
                     </div>
@@ -351,10 +423,12 @@ export const AgentDetails: React.FC = () => {
                             <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
                             <textarea required rows={5} value={formData.system_prompt} onChange={e => setFormData({...formData, system_prompt: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" />
                         </div>
-                        <div className="pt-4">
-                            <button type="submit" className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700">
-                                <Save size={16} className="mr-2" /> Save Changes
+                        <div className="pt-4 flex items-center gap-3">
+                            <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
+                                <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
                             </button>
+                            {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
+                            {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                         </div>
                     </form>
                 )}

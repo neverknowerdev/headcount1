@@ -150,8 +150,8 @@ test.describe.serial('Git Project Scenarios', () => {
         await repoUrlInput.fill(updatedUrl);
 
         // Save
-        await page.click('button:has-text("Save Settings")');
-        await expect(page.getByText('Project settings saved successfully')).toBeVisible({ timeout: 5000 });
+        await page.click('button:has-text("Connect Repository")');
+        await expect(page.getByText('Repository connected successfully')).toBeVisible({ timeout: 5000 });
     });
 
     test('project card shows git branch icon for repo projects', async ({ page }) => {
