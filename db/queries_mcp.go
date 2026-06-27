@@ -18,7 +18,10 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 // For non-builtin servers, Enabled is computed from account presence.
 func (q *Queries) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
 	var servers []MCPServer
-	err := q.db.WithContext(ctx).Order("id").Preload("Accounts").Find(&servers).Error
+	// Exclude codegraph servers whose project has been deleted (project_id is a soft ref with no FK).
+	err := q.db.WithContext(ctx).Order("id").Preload("Accounts").
+		Where("project_id IS NULL OR project_id IN (SELECT id FROM projects)").
+		Find(&servers).Error
 	if err != nil {
 		return nil, err
 	}
