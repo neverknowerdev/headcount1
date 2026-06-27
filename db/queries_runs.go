@@ -96,7 +96,7 @@ func (q *Queries) TouchRunLastMessageTime(ctx context.Context, id int32) error {
 
 func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 	var r Run
-	err := q.db.WithContext(ctx).First(&r, id).Error
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").Preload("Agent").First(&r, id).Error
 	return r, err
 }
 
