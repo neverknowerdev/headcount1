@@ -124,28 +124,13 @@ func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account
 func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 	installMCPDependencies(ctx)
 
-	servers, err := api.q.ListMCPServers(ctx)
+	servers, err := api.q.ListMCPServers(ctx, 0) // 0 = all companies
 	if err != nil {
 		log.Printf("MCP cache: failed to list servers: %v", err)
 		return
 	}
 
 	for _, s := range servers {
-		if s.Transport == "builtin" {
-			type slimTool struct {
-				Name        string `json:"name"`
-				Description string `json:"description"`
-			}
-			builtins := []slimTool{
-				{Name: "update_task_status", Description: "Update the status of the current task (to-do, in-progress, in-review, done, blocked, cancelled)."},
-				{Name: "create_subtask", Description: "Create a new subtask and assign it to a sub-agent for execution."},
-			}
-			if b, jsonErr := json.Marshal(builtins); jsonErr == nil {
-				_ = api.q.UpdateMCPServerToolsCache(ctx, s.ID, string(b))
-			}
-			continue
-		}
-
 		// For external servers, try each account until one succeeds.
 		if len(s.Accounts) == 0 {
 			continue
@@ -202,7 +187,8 @@ func (api *API) sortToolsByPopularity(ctx context.Context, serverID int32, tools
 }
 
 func (api *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-	servers, err := api.q.ListMCPServers(r.Context())
+	companyID, _ := strconv.Atoi(r.URL.Query().Get("company_id"))
+	servers, err := api.q.ListMCPServers(r.Context(), int32(companyID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -326,14 +312,6 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 	if s.Transport == "stdio" {
 		installMCPDependencies(r.Context())
-	}
-	if s.Transport == "builtin" {
-		tools := []map[string]string{
-			{"name": "update_task_status", "description": "Update the status of the current task."},
-			{"name": "create_subtask", "description": "Create a new subtask and assign it to a subagent."},
-		}
-		api.respondJSON(w, http.StatusOK, map[string]any{"tools": tools})
-		return
 	}
 	if len(s.Accounts) == 0 {
 		api.respondError(w, http.StatusBadRequest, "no accounts configured — add an account first")

@@ -158,7 +158,7 @@ func waitForRunCreated(t *testing.T, database *gorm.DB, taskID int32, timeout ti
 
 // ---- mock LLM handler -------------------------------------------------------
 
-// toolCallThenTextHandler returns an update_task_status tool call on the first
+// toolCallThenTextHandler returns a finish_task tool call on the first
 // chat-completions request, then a plain text response on subsequent requests.
 func toolCallThenTextHandler(t *testing.T) http.Handler {
 	t.Helper()
@@ -176,8 +176,8 @@ func toolCallThenTextHandler(t *testing.T) http.Handler {
 						"tool_calls": []map[string]interface{}{{
 							"id": "call_001", "type": "function",
 							"function": map[string]interface{}{
-								"name":      "update_task_status",
-								"arguments": `{"status":"in-review"}`,
+								"name":      "finish_task",
+								"arguments": `{"task_status":"in-review","finish_status":"Task completed and ready for review"}`,
 							},
 						}},
 					},
@@ -221,7 +221,7 @@ func TestNativeEngineProcessTask(t *testing.T) {
 
 	updatedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "in-review", updatedTask.Status, "agent should have called update_task_status")
+	assert.Equal(t, "in-review", updatedTask.Status, "agent should have called finish_task")
 
 	comments, err := q.ListCommentsByTask(context.Background(), task.ID)
 	require.NoError(t, err)
@@ -338,13 +338,13 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 
 	updatedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "in-review", updatedTask.Status, "fixture encodes an update_task_status(in-review) call")
+	assert.Equal(t, "in-review", updatedTask.Status, "fixture encodes a finish_task(in-review) call")
 }
 
 // ---- subtask tests ----------------------------------------------------------
 
-// createSubtaskHandler returns a mock LLM that first calls create_subtask, then
-// acknowledges the result with a text response.
+// createSubtaskHandler returns a mock LLM that first calls create_subtask directly,
+// then acknowledges the result with a text response.
 func createSubtaskHandler(t *testing.T) http.Handler {
 	t.Helper()
 	var count atomic.Int32
@@ -353,7 +353,6 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 		n := count.Add(1)
 		switch n {
 		case 1:
-			// First turn: call create_subtask
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": "chatcmpl-sub-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
@@ -363,7 +362,7 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 						"tool_calls": []map[string]interface{}{{
 							"id": "call_sub_001", "type": "function",
 							"function": map[string]interface{}{
-								"name": "create_subtask",
+								"name":      "create_subtask",
 								"arguments": `{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`,
 							},
 						}},
@@ -373,7 +372,6 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 			})
 		default:
-			// Subsequent turns: plain text
 			json.NewEncoder(w).Encode(map[string]interface{}{
 				"id": "chatcmpl-sub-002", "model": "test-model",
 				"choices": []map[string]interface{}{{
@@ -467,10 +465,10 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 				"message": map[string]interface{}{
 					"role": "assistant", "content": "",
 					"tool_calls": []map[string]interface{}{{
-						"id": "call_uts", "type": "function",
+						"id": "call_ft", "type": "function",
 						"function": map[string]interface{}{
-							"name":      "update_task_status",
-							"arguments": `{"status":"in-review"}`,
+							"name":      "finish_task",
+							"arguments": `{"task_status":"in-review","finish_status":"done"}`,
 						},
 					}},
 				},
@@ -561,6 +559,104 @@ func TestNativeEngineSubtaskNotifiesParent(t *testing.T) {
 		}
 		return false
 	}, 5*time.Second, 100*time.Millisecond, "parent task should have received a system comment")
+}
+
+// TestNativeEngineExpandRunResult verifies that the model can invoke expand_run_result
+// and receive the full run description.
+func TestNativeEngineExpandRunResult(t *testing.T) {
+	var pastRunID atomic.Int32
+	var capturedToolResult atomic.Value // stores string
+	var count atomic.Int32
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := count.Add(1)
+		if n == 1 {
+			runID := pastRunID.Load()
+			json.NewEncoder(w).Encode(map[string]interface{}{
+				"id": "chatcmpl-exp-001", "model": "test-model",
+				"choices": []map[string]interface{}{{
+					"index": 0,
+					"message": map[string]interface{}{
+						"role": "assistant", "content": "",
+						"tool_calls": []map[string]interface{}{{
+							"id": "call_exp_001", "type": "function",
+							"function": map[string]interface{}{
+								"name":      "expand_run_result",
+								"arguments": fmt.Sprintf(`{"run_id":%d}`, runID),
+							},
+						}},
+					},
+					"finish_reason": "tool_calls",
+				}},
+				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
+			})
+			return
+		}
+		if n == 2 {
+			// Capture the tool result from the request messages.
+			bodyBytes, _ := io.ReadAll(r.Body)
+			var req struct {
+				Messages []struct {
+					Role    string `json:"role"`
+					Content string `json:"content"`
+				} `json:"messages"`
+			}
+			if json.Unmarshal(bodyBytes, &req) == nil {
+				for _, msg := range req.Messages {
+					if msg.Role == "tool" {
+						capturedToolResult.Store(msg.Content)
+					}
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"id": "chatcmpl-exp-002", "model": "test-model",
+			"choices": []map[string]interface{}{{
+				"index":         0,
+				"message":       map[string]interface{}{"role": "assistant", "content": "I read the run details."},
+				"finish_reason": "stop",
+			}},
+			"usage": map[string]int{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35},
+		})
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	// Insert a completed past run with a known ResultDescription.
+	q := db.New(database)
+	pastRun, err := q.CreateRun(context.Background(), db.Run{
+		TaskID:    task.ID,
+		AgentID:   *task.AgentID,
+		Status:    "running",
+		StartedAt: time.Now().Add(-time.Hour),
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.UpdateRunResult(context.Background(), pastRun.ID, "Detailed explanation of the past run.", ""))
+	require.NoError(t, q.UpdateRunLog(context.Background(), pastRun.ID, "", "completed"))
+	pastRunID.Store(pastRun.ID)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	// Wait for the engine's run (not the pre-existing past run) to appear and complete.
+	var engineRunID int32
+	require.Eventually(t, func() bool {
+		var id sql.NullInt64
+		if err := database.Raw("SELECT id FROM runs WHERE task_id = ? AND id > ? ORDER BY id DESC LIMIT 1", task.ID, pastRun.ID).Scan(&id).Error; err == nil && id.Valid {
+			engineRunID = int32(id.Int64)
+			return true
+		}
+		return false
+	}, 10*time.Second, 50*time.Millisecond, "engine run should have been created")
+	waitForRunDone(t, q, engineRunID, 30*time.Second)
+
+	// Verify the tool result contained the expected run description.
+	toolResult, _ := capturedToolResult.Load().(string)
+	assert.Contains(t, toolResult, "Detailed explanation of the past run.")
 }
 
 // fixtureHandler wraps a FixtureTransport as an HTTP handler.

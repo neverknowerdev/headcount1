@@ -1,20 +1,24 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useParams, Link } from 'react-router-dom';
-import { X, Send, Save, Archive, ExternalLink } from 'lucide-react';
+import { useParams, Link, useNavigate } from 'react-router-dom';
+import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw, ArrowLeft, MoreHorizontal } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { RunLogViewer } from './RunLogViewer';
+import { useWebSocket } from '../useWebSocket';
 
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
     projectId?: number;
     onClose: () => void;
     onTaskCreated?: () => void;
+    standalone?: boolean; // render as a full page instead of an overlay modal
 }
 
-export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose, onTaskCreated }) => {
+export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose, onTaskCreated, standalone }) => {
+    const navigate = useNavigate();
     const { shortName } = useParams<{shortName: string}>();
     const prefix = shortName ? shortName.toUpperCase() : 'T';
     const { selectedCompanyId } = useStore();
@@ -25,6 +29,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [isSaving, setIsSaving] = useState(false);
     const [runs, setRuns] = useState<any[]>([]);
     const [runAgent, setRunAgent] = useState(true);
+    const [isRerunning, setIsRerunning] = useState(false);
+    const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
+    const [expandedArtifact, setExpandedArtifact] = useState<number | null>(null);
+    const [openRunMenu, setOpenRunMenu] = useState<number | null>(null);
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -78,19 +86,28 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCompanyId, taskId]);
 
+    // Fetches only comments + runs — safe to call for re-sync without resetting the form.
+    const fetchActivity = useCallback(async () => {
+        if (!taskId) return;
+        try {
+            const [commentsRes, runsRes] = await Promise.all([
+                axios.get(`/api/comments?task_id=${taskId}`),
+                axios.get(`/api/tasks/${taskId}/runs`),
+            ]);
+            setComments(commentsRes.data || []);
+            setRuns(runsRes.data || []);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [taskId]);
+
     useEffect(() => {
         if (!taskId) return;
-        const fetchDetails = async () => {
+        const load = async () => {
             try {
-                const [taskRes, commentsRes, runsRes] = await Promise.all([
-                    axios.get(`/api/tasks/${taskId}`),
-                    axios.get(`/api/comments?task_id=${taskId}`),
-                    axios.get(`/api/tasks/${taskId}/runs`)
-                ]);
+                const taskRes = await axios.get(`/api/tasks/${taskId}`);
                 const t = taskRes.data;
                 setTask(t);
-                setComments(commentsRes.data || []);
-                setRuns(runsRes.data || []);
                 setFormData({
                     title: t.title,
                     description: t.description || '',
@@ -103,36 +120,49 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     status: t.status,
                     is_archived: t.is_archived,
                 });
+                await fetchActivity();
             } catch (e) {
                 console.error(e);
             }
         };
-        fetchDetails();
-
-        const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
-                setComments(prev => [...prev, msg.payload]);
-            }
-            if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
-                setRuns(prev => [...prev, msg.payload]);
-                setTask((prev: any) => prev ? { ...prev, run_id: msg.payload.id } : prev);
-            }
-            if (msg.type === 'run_ended' && runs.some((r: any) => r.id === msg.payload.run_id)) {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r));
-                setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
-            }
-            if (msg.type === 'run_log') {
-                if (msg.payload.entry) {
-                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
-                } else if (msg.payload.line) {
-                    setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
-                }
-            }
-        };
-        return () => ws.close();
+        load();
+    // fetchActivity is stable (useCallback on taskId), so this effectively depends only on taskId
+    // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [taskId]);
+
+    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+        if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
+            setComments(prev => {
+                // deduplicate: ignore if we already have this comment (e.g. from a recent re-fetch)
+                if (prev.some((c: any) => c.id === msg.payload.id)) return prev;
+                return [...prev, msg.payload];
+            });
+        }
+        if (msg.type === 'task_updated' && (msg.payload.id === taskId || msg.payload.task_id === taskId)) {
+            setTask((prev: any) => prev ? { ...prev, ...msg.payload } : prev);
+        }
+        if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
+            setRuns(prev => prev.some((r: any) => r.id === msg.payload.id) ? prev : [...prev, msg.payload]);
+            setTask((prev: any) => prev ? { ...prev, run_id: msg.payload.id } : prev);
+        }
+        if (msg.type === 'run_ended') {
+            const runIsOurs = runs.some((r: any) => r.id === msg.payload.run_id) || task?.run_id === msg.payload.run_id;
+            setRuns(prev => {
+                if (!prev.some((r: any) => r.id === msg.payload.run_id)) return prev;
+                return prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r);
+            });
+            setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
+            // Re-sync after run completes to catch any comments/artifacts whose WS events may have been missed
+            if (runIsOurs) fetchActivity();
+        }
+        if (msg.type === 'run_log') {
+            if (msg.payload.entry) {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
+            } else if (msg.payload.line) {
+                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
+            }
+        }
+    }, !!taskId);
 
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -186,6 +216,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     };
 
+    const handleRerun = async () => {
+        if (!taskId) return;
+        setIsRerunning(true);
+        try {
+            await axios.post(`/api/tasks/${taskId}/rerun`);
+        } catch (e) {
+            console.error(e);
+            alert('Failed to start re-run');
+        } finally {
+            setIsRerunning(false);
+        }
+    };
+
     const handleArchive = async () => {
         if (!taskId) return;
         if (!window.confirm(formData.is_archived ? "Unarchive this task?" : "Are you sure you want to archive this task?")) return;
@@ -203,27 +246,39 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
     if (taskId && !task) return null;
 
-    return (
-        <div className="fixed inset-0 bg-black/50 bg-opacity-50 flex justify-center items-center z-50">
-            <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
-                <div className="p-6 border-b flex justify-between items-center">
-                    <div>
-                        {taskId ? (
-                            <>
-                                <span className="text-xs font-semibold text-gray-500 uppercase tracking-wider block mb-1">
-                                    Task {prefix}-{task.id} {formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-2 py-0.5 rounded">Archived</span> : null}
-                                </span>
-                            </>
-                        ) : (
-                            <h2 className="text-xl font-bold text-gray-900">Create New Task</h2>
-                        )}
-                    </div>
-                    <button onClick={onClose} className="text-gray-400 hover:text-gray-600"><X /></button>
+    const header = (
+        <div className="px-6 py-4 border-b flex items-center gap-4 bg-white shrink-0">
+            {standalone ? (
+                <button onClick={() => navigate(-1)} className="text-gray-400 hover:text-gray-700 shrink-0">
+                    <ArrowLeft size={20} />
+                </button>
+            ) : (
+                <button onClick={onClose} className="text-gray-400 hover:text-gray-600 shrink-0"><X /></button>
+            )}
+            {taskId ? (
+                <div className="flex flex-col min-w-0">
+                    <span className="text-xs font-mono text-gray-400">{prefix}-{task.id}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
+                    <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
                 </div>
+            ) : (
+                <h2 className="text-xl font-bold text-gray-900">Create New Task</h2>
+            )}
+        </div>
+    );
 
-                <div className="flex-1 overflow-y-auto flex">
+    const footer = !taskId ? (
+        <div className="p-4 border-t bg-white flex justify-end items-center shrink-0">
+            <button type="submit" form="task-form" disabled={isSaving} className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 flex items-center">
+                <Save size={16} className="mr-2" /> Create Task
+            </button>
+        </div>
+    ) : null;
+
+    const contentArea = (
+        <div className="flex-1 overflow-y-auto flex min-h-0 overflow-x-hidden">
+                <div className="flex-1 overflow-y-auto flex min-w-0">
                     {/* Left content area */}
-                    <div className="flex-1 p-6 bg-gray-50 flex flex-col">
+                    <div className="flex-1 p-6 bg-gray-50 flex flex-col min-w-0">
                         <form id="task-form" onSubmit={handleSaveTask} className="space-y-4">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
@@ -238,9 +293,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         {taskId && (
                             <div className="flex-1 mt-8">
                                 <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Activity</h3>
-                                <div className="space-y-4" data-testid="comments-list">
+                                <div className="space-y-4 min-w-0 overflow-x-hidden" data-testid="comments-list">
                                     {(() => {
-                                        // Merge comments and runs into a single chronological timeline
+                                        // Merge comments (includes artifact_created and status_change) and runs into a single chronological timeline
                                         const timeline: {type: 'comment' | 'run'; data: any; time: number}[] = [];
                                         comments.forEach((c: any) => {
                                             timeline.push({ type: 'comment', data: c, time: new Date(c.created_at).getTime() });
@@ -261,28 +316,160 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 const c = item.data;
                                                 const ts = new Date(c.created_at);
                                                 const timeStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const isStatusChange = c.comment_type === 'status_change';
+                                                const isArtifact = c.comment_type === 'artifact_created';
+                                                const isTaskDone = c.comment_type === 'task_done';
+                                                const isAskUser = c.comment_type === 'ask_user';
+                                                const isAgent = c.author_type === 'agent';
+
+                                                // Artifact entry — compact card with expandable content
+                                                if (isArtifact) {
+                                                    let meta: {filename?: string; content?: string} = {};
+                                                    try { meta = JSON.parse(c.content); } catch {}
+                                                    const isExpanded = expandedArtifact === c.id;
+                                                    return (
+                                                        <div key={`c-${c.id}`} className="border border-emerald-200 rounded-lg bg-emerald-50 shadow-sm overflow-hidden">
+                                                            <button
+                                                                className="w-full px-3 py-2 flex items-center justify-between text-xs text-left hover:bg-emerald-100 transition-colors"
+                                                                onClick={() => setExpandedArtifact(isExpanded ? null : c.id)}
+                                                            >
+                                                                <span className="flex items-center gap-2">
+                                                                    <span className="text-emerald-600">📄</span>
+                                                                    <span className="font-semibold text-emerald-800">{meta.filename || 'artifact'}</span>
+                                                                </span>
+                                                                <div className="flex items-center gap-2 text-gray-400">
+                                                                    <span>{timeStr}</span>
+                                                                    {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                                </div>
+                                                            </button>
+                                                            {isExpanded && meta.content && (
+                                                                <div className="px-3 pb-3 border-t border-emerald-200 bg-white">
+                                                                    <div className="prose prose-sm max-w-none mt-2 prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-emerald-700 prose-code:bg-emerald-50 prose-code:px-1 prose-code:rounded">
+                                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{meta.content}</ReactMarkdown>
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                }
+
+                                                // Compact status-change row (no bubble)
+                                                if (isStatusChange) {
+                                                    let meta: {from?: string; to?: string} = {};
+                                                    try { meta = JSON.parse(c.content); } catch {}
+                                                    const statusLabel: Record<string, string> = {
+                                                        'to-do': 'To Do', 'in-progress': 'In Progress',
+                                                        'in-review': 'In Review', 'done': 'Done',
+                                                        'blocked': 'Blocked', 'refinement': 'Refinement',
+                                                    };
+                                                    const fromLabel = statusLabel[meta.from || ''] || meta.from || '';
+                                                    const toLabel = statusLabel[meta.to || ''] || meta.to || '';
+                                                    const actor = c.author_type === 'human' ? '👤' : '⚙️';
+                                                    return (
+                                                        <div key={`c-${c.id}`} className="flex items-center justify-center gap-2 text-xs text-gray-400 py-1">
+                                                            <span>{actor}</span>
+                                                            <span className="px-1.5 py-0.5 rounded bg-gray-100 text-gray-500 font-medium">{fromLabel}</span>
+                                                            <span>→</span>
+                                                            <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-medium">{toLabel}</span>
+                                                            <span className="text-gray-300">{timeStr}</span>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                // Parse task_done content (JSON with msg/from/to, or legacy plain string)
+                                                let taskDoneMeta: {msg?: string; from?: string; to?: string} | null = null;
+                                                if (isTaskDone) {
+                                                    try { taskDoneMeta = JSON.parse(c.content); } catch {}
+                                                }
+                                                const displayContent = taskDoneMeta?.msg ?? c.content;
+
+                                                // Look up the run explanation for task_done comments
+                                                const linkedRun = isTaskDone && c.run_id
+                                                    ? runs.find((r: any) => r.id === c.run_id)
+                                                    : null;
+                                                const hasExplanation = linkedRun && linkedRun.result_explanation;
+                                                const isExpanded = expandedComments.has(c.id);
+
+                                                let bubbleClass = 'bg-indigo-50 border border-indigo-100 text-gray-800';
+                                                if (isTaskDone) bubbleClass = 'bg-green-50 border border-green-200 text-gray-800';
+                                                else if (isAskUser) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
+                                                else if (!isAgent) bubbleClass = 'bg-gray-200 text-gray-900';
+
+                                                const authorLabel = isAgent ? '🤖 Agent' : '👤 You';
+
+                                                const statusLabel: Record<string, string> = {
+                                                    'to-do': 'To Do', 'in-progress': 'In Progress',
+                                                    'in-review': 'In Review', 'done': 'Done',
+                                                    'blocked': 'Blocked', 'refinement': 'Refinement',
+                                                };
+
                                                 return (
-                                                    <div key={`c-${c.id}`} className={`flex flex-col ${c.author_type === 'agent' ? 'items-start' : 'items-end'}`}>
-                                                        <div className={`max-w-[85%] rounded-lg p-3 text-sm ${c.author_type === 'agent' ? 'bg-indigo-50 border border-indigo-100 text-gray-800' : 'bg-gray-200 text-gray-900'}`}>
-                                                            <span className="text-xs font-bold block mb-1 text-gray-500">
-                                                                {c.author_type === 'agent' ? '🤖 Agent' : '👤 You'}
-                                                                <span className="ml-2 font-normal">{timeStr}</span>
+                                                    <div key={`c-${c.id}`} className={`flex flex-col ${isAgent ? 'items-start' : 'items-end'}`}>
+                                                        <div className={`max-w-[85%] rounded-lg p-3 text-sm ${bubbleClass}`}>
+                                                            <span className="text-xs font-bold flex items-center gap-2 mb-1 text-gray-500">
+                                                                <span>{authorLabel}</span>
+                                                                {taskDoneMeta?.from && taskDoneMeta?.to && (
+                                                                    <span className="inline-flex items-center gap-1 font-normal">
+                                                                        <span className="px-1.5 py-0.5 rounded bg-white/60 text-gray-500 border border-gray-200 text-xs">
+                                                                            {statusLabel[taskDoneMeta.from] || taskDoneMeta.from}
+                                                                        </span>
+                                                                        <span className="text-gray-400">→</span>
+                                                                        <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700 border border-green-200 text-xs font-medium">
+                                                                            {statusLabel[taskDoneMeta.to] || taskDoneMeta.to}
+                                                                        </span>
+                                                                    </span>
+                                                                )}
+                                                                <span className="font-normal ml-auto">{timeStr}</span>
                                                             </span>
-                                                            {c.author_type === 'agent' ? (
+                                                            {isAgent ? (
                                                                 <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-indigo-700 prose-code:bg-indigo-100 prose-code:px-1 prose-code:rounded prose-table:text-xs prose-th:px-2 prose-th:py-1 prose-td:px-2 prose-td:py-1">
-                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.content}</ReactMarkdown>
+                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{displayContent}</ReactMarkdown>
                                                                 </div>
                                                             ) : (
-                                                                <span className="whitespace-pre-wrap">{c.content}</span>
+                                                                <span className="whitespace-pre-wrap">{displayContent}</span>
+                                                            )}
+                                                            {hasExplanation && (
+                                                                <div className="mt-2 pt-2 border-t border-green-200">
+                                                                    <button
+                                                                        onClick={() => setExpandedComments(prev => {
+                                                                            const next = new Set(prev);
+                                                                            if (next.has(c.id)) next.delete(c.id); else next.add(c.id);
+                                                                            return next;
+                                                                        })}
+                                                                        className="flex items-center gap-1 text-xs text-green-700 hover:text-green-900 font-medium"
+                                                                    >
+                                                                        {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                                        {isExpanded ? 'Hide details' : 'Show details'}
+                                                                    </button>
+                                                                    {isExpanded && (
+                                                                        <div className="mt-2 prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-pre:bg-gray-800 prose-pre:text-green-300 prose-pre:text-xs prose-code:text-indigo-700 prose-code:bg-indigo-100 prose-code:px-1 prose-code:rounded">
+                                                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{linkedRun.result_explanation}</ReactMarkdown>
+                                                                        </div>
+                                                                    )}
+                                                                </div>
                                                             )}
                                                         </div>
                                                     </div>
                                                 );
                                             } else {
                                                 const r = item.data;
-                                                const ts = new Date(r.started_at);
-                                                const runDate = ts.getFullYear() > 1 ? ts : new Date(r.ended_at || Date.now());
-                                                const timeStr = runDate.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const startTs = new Date(r.started_at);
+                                                const endTs = r.ended_at ? new Date(r.ended_at) : null;
+                                                const displayTs = startTs.getFullYear() > 1 ? startTs : (endTs || new Date());
+                                                const startStr = displayTs.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                                                const durationMs = endTs && startTs.getFullYear() > 1 ? endTs.getTime() - startTs.getTime() : null;
+                                                const durationStr = durationMs !== null
+                                                    ? durationMs < 60000
+                                                        ? `${Math.round(durationMs / 1000)}s`
+                                                        : `${Math.floor(durationMs / 60000)}m ${Math.round((durationMs % 60000) / 1000)}s`
+                                                    : null;
+                                                let totalTokens = 0;
+                                                if (r.token_stats) {
+                                                    try { totalTokens = JSON.parse(r.token_stats).total_tokens || 0; } catch {}
+                                                }
+                                                const tokenStr = totalTokens >= 1000
+                                                    ? `${Math.round(totalTokens / 1000)}K tok`
+                                                    : totalTokens > 0 ? `${totalTokens} tok` : null;
                                                 const statusColors: Record<string, string> = {
                                                     running: 'bg-yellow-100 text-yellow-800 border-yellow-200',
                                                     completed: 'bg-green-100 text-green-800 border-green-200',
@@ -290,32 +477,57 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     canceled: 'bg-orange-100 text-orange-800 border-orange-200',
                                                 };
                                                 const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
+                                                const maxRunId = Math.max(...runs.map((x: any) => x.id));
+                                                const isLatest = r.id === maxRunId;
+                                                const menuOpen = openRunMenu === r.id;
                                                 return (
-                                                    <div key={`r-${r.id}`} className="flex justify-center">
-                                                        <details className="w-full max-w-[90%] border rounded-lg bg-white shadow-sm">
+                                                    <div key={`r-${r.id}`} className="w-full min-w-0">
+                                                        <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
                                                                 <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
-                                                                    <span className="text-gray-400">{timeStr}</span>
-                                                                    <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-gray-400 hover:text-indigo-600" title="View full log">
-                                                                        <ExternalLink size={14} />
-                                                                    </Link>
+                                                                    <span className="text-gray-400">{startStr}</span>
+                                                                    {durationStr && <span className="text-gray-400">{durationStr}</span>}
+                                                                    {tokenStr && <span className="text-gray-400">{tokenStr}</span>}
+                                                                    <div className="relative">
+                                                                        {menuOpen && <div className="fixed inset-0 z-10" onClick={e => { e.stopPropagation(); setOpenRunMenu(null); }} />}
+                                                                        <button
+                                                                            onClick={e => { e.preventDefault(); e.stopPropagation(); setOpenRunMenu(menuOpen ? null : r.id); }}
+                                                                            className={`relative z-20 p-1 rounded hover:bg-gray-100 ${menuOpen ? 'text-gray-700 bg-gray-100' : 'text-gray-400 hover:text-gray-600'}`}
+                                                                        >
+                                                                            <MoreHorizontal size={15} />
+                                                                        </button>
+                                                                        {menuOpen && (
+                                                                            <div className="absolute right-0 top-6 z-20 bg-white border rounded-lg shadow-lg py-1 min-w-[130px]">
+                                                                                {isLatest && r.status !== 'running' && (
+                                                                                    <button
+                                                                                        onClick={e => { e.preventDefault(); setOpenRunMenu(null); handleRerun(); }}
+                                                                                        disabled={isRerunning}
+                                                                                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 disabled:opacity-50"
+                                                                                    >
+                                                                                        <RotateCcw size={11} /> Re-run
+                                                                                    </button>
+                                                                                )}
+                                                                                <Link
+                                                                                    to={`/companies/${shortName}/run-logs/${r.id}`}
+                                                                                    onClick={() => setOpenRunMenu(null)}
+                                                                                    className="block px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 text-gray-700"
+                                                                                >
+                                                                                    <ExternalLink size={11} /> View full log
+                                                                                </Link>
+                                                                            </div>
+                                                                        )}
+                                                                    </div>
                                                                 </div>
                                                             </summary>
-                                                            <pre className="text-xs bg-gray-900 text-green-400 p-3 rounded-b-lg overflow-x-auto whitespace-pre-wrap border-t max-h-48 overflow-y-auto">
-                                                                {r.log_entries && r.log_entries.length > 0
-                                                                    ? r.log_entries.slice(-5).map((e: any, i: number) => {
-                                                                        if (e.type === 'info') return <div key={i} className="text-gray-400">{e.content}</div>;
-                                                                        if (e.type === 'error') return <div key={i} className="text-red-400">ERROR: {e.content}</div>;
-                                                                        if (e.type === 'request') return <div key={i} className="text-indigo-300">[Request] {e.model || ''}</div>;
-                                                                        if (e.type === 'response') return <div key={i} className="text-green-300">[Response] {e.status_code || 200}</div>;
-                                                                        if (e.type === 'tool_call') return <div key={i} className="text-amber-300">[Tool] {e.tool_name || '...'}</div>;
-                                                                        return null;
-                                                                    })
-                                                                    : r.log_content
-                                                                }
-                                                            </pre>
+                                                            <div className="border-t rounded-b-lg overflow-hidden">
+                                                                <RunLogViewer
+                                                                    compact
+                                                                    messages={(r.log_entries || []).map((e: any, i: number) => ({ id: i, entry: e }))}
+                                                                    status={r.status}
+                                                                />
+                                                            </div>
                                                         </details>
                                                     </div>
                                                 );
@@ -361,12 +573,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         </form>
                                     )}
                                 </div>
+
                             </div>
                         )}
                     </div>
 
                     {/* Right sidebar */}
-                    <div className="w-72 bg-white border-l p-6 space-y-4 overflow-y-auto">
+                    <div className="w-72 shrink-0 bg-white border-l flex flex-col">
+                        <div className="flex-1 p-6 space-y-4 overflow-y-auto">
                         {taskId && (
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
@@ -459,25 +673,41 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                 </div>
                             )}
                         </div>
-                    </div>
-                </div>
-
-                <div className="p-4 border-t bg-white flex justify-between items-center">
-                    <div>
+                        </div>
                         {taskId && (
-                            <button type="button" onClick={handleArchive} className="text-red-600 hover:text-red-800 text-sm flex items-center px-4 py-2 border border-red-200 rounded hover:bg-red-50">
-                                <Archive size={16} className="mr-2" /> {formData.is_archived ? "Unarchive" : "Archive"}
-                            </button>
+                            <div className="p-4 border-t space-y-2 shrink-0">
+                                <button type="submit" form="task-form" disabled={isSaving} className="w-full bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 flex items-center justify-center text-sm">
+                                    <Save size={16} className="mr-2" /> Save Task
+                                </button>
+                                <button type="button" onClick={handleArchive} className="w-full text-red-600 hover:text-red-800 text-sm flex items-center justify-center px-4 py-2 border border-red-200 rounded hover:bg-red-50">
+                                    <Archive size={16} className="mr-2" /> {formData.is_archived ? "Unarchive" : "Archive"}
+                                </button>
+                            </div>
                         )}
                     </div>
-                    <div className="flex space-x-3">
-                        <button onClick={onClose} className="text-gray-600 hover:text-gray-900 px-4 py-2">Cancel</button>
-                        <button type="submit" form="task-form" disabled={isSaving} className="bg-indigo-600 text-white px-4 py-2 rounded-md hover:bg-indigo-700 flex items-center">
-                            <Save size={16} className="mr-2" /> {taskId ? "Save Task" : "Create Task"}
-                        </button>
-                    </div>
                 </div>
+        </div>
+    );
+
+    if (standalone) {
+        return (
+            <div className="h-full flex flex-col">
+                {header}
+                <div className="flex-1 min-h-0">{contentArea}</div>
+                {footer}
+            </div>
+        );
+    }
+
+    return (
+        <div className="fixed inset-0 bg-black/50 bg-opacity-50 flex justify-center items-center z-50">
+            <div className="bg-white rounded-lg shadow-xl w-full max-w-4xl max-h-[90vh] flex flex-col">
+                {header}
+                <div className="flex-1 min-h-0">{contentArea}</div>
+                {footer}
             </div>
         </div>
     );
 };
+
+export default TaskModal;

@@ -100,13 +100,13 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Assign agent and move to "To Do" — this triggers the engine
         await page.click('text=Write E2E Tests');
-        await expect(page.getByText('Task PW-INC-1')).toBeVisible();
+        await expect(page.getByText('PW-INC-1')).toBeVisible();
         await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
         await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
         // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to update_task_status, moving the task
+        // will respond with a tool call to finish_task, moving the task
         // to "in-review". Wait for that real outcome.
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
@@ -130,12 +130,12 @@ test.describe.serial('Paperclip2 App', () => {
         await page.goto('/companies/pw-inc/tasks');
         await page.click('text=Write E2E Tests');
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
         await expect(page.getByText('Let us see if the agent works')).toBeVisible();
 
         // Verify Agent Run Logs
-        await expect(page.getByText(/Run #\d/)).toBeVisible();
-        await page.click('summary:has-text("Run #")');
+        await expect(page.getByText(/Run #\d/).first()).toBeVisible();
+        await page.locator('summary:has-text("Run #")').first().click();
 
         // Verify Run Logs page
         await page.keyboard.press('Escape');

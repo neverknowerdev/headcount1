@@ -52,6 +52,19 @@ func NewMCPSessionStore(servers []db.MCPServer, onAuthError func(string, string)
 	}
 }
 
+// AddExternalServer adds an external MCP server to the store after construction.
+func (s *MCPSessionStore) AddExternalServer(srv db.MCPServer) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.servers[srv.Name] = srv
+	if srv.ToolsCache != "" {
+		var cached []mcp.Tool
+		if json.Unmarshal([]byte(srv.ToolsCache), &cached) == nil {
+			s.cachedTools[srv.Name] = cached
+		}
+	}
+}
+
 // ServerNames returns the sorted list of available server names.
 func (s *MCPSessionStore) ServerNames() []string {
 	names := make([]string, 0, len(s.servers))
@@ -261,6 +274,7 @@ func (t *CallMCPTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if len(p.Input) == 0 {
 		p.Input = json.RawMessage("{}")
 	}
+
 	sess, err := t.store.getOrConnect(ctx, p.Server)
 	if err != nil {
 		return "", err
@@ -309,6 +323,7 @@ func (t *DiscoverMCPTool) Execute(ctx context.Context, args json.RawMessage) (st
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("discover_mcp_tool: %w", err)
 	}
+
 	mcpTools, err := t.store.toolsForServer(ctx, p.Server)
 	if err != nil {
 		return "", err

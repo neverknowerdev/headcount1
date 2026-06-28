@@ -1,8 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
-import { ArrowLeft, Square, AlertCircle } from 'lucide-react';
+import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer } from '../components/RunLogViewer';
+import { useWebSocket } from '../useWebSocket';
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -49,9 +50,10 @@ export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
     const [run, setRun] = useState<any>(null);
     const [isStopping, setIsStopping] = useState(false);
+    const [isRerunning, setIsRerunning] = useState(false);
     const [logMessages, setLogMessages] = useState<any[]>([]);
     const [streamStalled, setStreamStalled] = useState<{at: number, message: string} | null>(null);
-    const [lastEventAt, setLastEventAt] = useState<number>(Date.now());
+    const lastEventAtRef = useRef<number>(Date.now());
     const [tokenStats, setTokenStats] = useState<any>(null);
 
     useEffect(() => {
@@ -102,38 +104,36 @@ export const RunLogDetails: React.FC = () => {
 
         fetchRun();
 
-        const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'run_log' && msg.payload.run_id === parseInt(id || '0')) {
-                setLastEventAt(Date.now());
-                setStreamStalled(null);
-                if (msg.payload.entry) {
-                    setLogMessages(prev => [...prev, { id: prev.length, entry: msg.payload.entry }]);
-                } else if (msg.payload.line) {
-                    setLogMessages(prev => [...prev, { id: prev.length, entry: { type: 'info', content: msg.payload.line } }]);
-                }
-            } else if (msg.type === 'run_ended' && msg.payload.run_id === parseInt(id || '0')) {
-                setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
-            } else if (msg.type === 'run_stalled' && msg.payload.run_id === parseInt(id || '0')) {
-                setLastEventAt(Date.now());
-                setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
-            }
-        };
-
         // Client-side fallback: if no events for 45s while run is "running",
         // surface a "stream stalled" warning even before the server detects it.
         const stallCheck = setInterval(() => {
-            if (run?.status === 'running' && Date.now() - lastEventAt > 45000) {
-                setStreamStalled(prev => prev ?? { at: lastEventAt, message: 'No log activity for 45+ seconds' });
+            if (run?.status === 'running' && Date.now() - lastEventAtRef.current > 45000) {
+                setStreamStalled(prev => prev ?? { at: lastEventAtRef.current, message: 'No log activity for 45+ seconds' });
             }
         }, 5000);
 
         return () => {
-            ws.close();
             clearInterval(stallCheck);
         };
-    }, [id, run?.status, lastEventAt]);
+    }, [id, run?.status]);
+
+    const runIdInt = parseInt(id || '0');
+    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+        if (msg.type === 'run_log' && msg.payload.run_id === runIdInt) {
+            lastEventAtRef.current = Date.now();
+            setStreamStalled(null);
+            if (msg.payload.entry) {
+                setLogMessages(prev => [...prev, { id: prev.length, entry: msg.payload.entry }]);
+            } else if (msg.payload.line) {
+                setLogMessages(prev => [...prev, { id: prev.length, entry: { type: 'info', content: msg.payload.line } }]);
+            }
+        } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
+            setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
+        } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
+            lastEventAtRef.current = Date.now();
+            setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
+        }
+    });
 
     const handleStopRun = async () => {
         if (!id || !window.confirm('Are you sure you want to stop this run?')) return;
@@ -148,6 +148,19 @@ export const RunLogDetails: React.FC = () => {
         }
     };
 
+    const handleRerun = async () => {
+        if (!run?.task_id) return;
+        setIsRerunning(true);
+        try {
+            await axios.post(`/api/tasks/${run.task_id}/rerun`);
+        } catch (e) {
+            console.error(e);
+            alert('Failed to start re-run');
+        } finally {
+            setIsRerunning(false);
+        }
+    };
+
     if (!run) return <div>Loading...</div>;
 
     return (
@@ -159,16 +172,28 @@ export const RunLogDetails: React.FC = () => {
                     </Link>
                     <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
                 </div>
-                {run.status === 'running' && (
-                    <button
-                        onClick={handleStopRun}
-                        disabled={isStopping}
-                        className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
-                    >
-                        <Square size={16} />
-                        {isStopping ? 'Stopping...' : 'Stop Run'}
-                    </button>
-                )}
+                <div className="flex items-center gap-2">
+                    {run.status === 'running' && (
+                        <button
+                            onClick={handleStopRun}
+                            disabled={isStopping}
+                            className="flex items-center gap-2 bg-red-600 text-white px-4 py-2 rounded hover:bg-red-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <Square size={16} />
+                            {isStopping ? 'Stopping...' : 'Stop Run'}
+                        </button>
+                    )}
+                    {run.is_latest && run.status !== 'running' && (
+                        <button
+                            onClick={handleRerun}
+                            disabled={isRerunning}
+                            className="flex items-center gap-2 bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:opacity-50 disabled:cursor-not-allowed"
+                        >
+                            <RotateCcw size={16} />
+                            {isRerunning ? 'Starting...' : 'Re-run'}
+                        </button>
+                    )}
+                </div>
             </div>
 
             {streamStalled && run.status === 'running' && (

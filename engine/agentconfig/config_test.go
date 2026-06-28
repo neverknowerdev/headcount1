@@ -28,9 +28,9 @@ func TestAgentConfig_IsToolAllowed(t *testing.T) {
 		tool         string
 		want         bool
 	}{
-		{"empty list allows all", nil, "read_file", true},
-		{"explicit match", []string{"read_file", "write_file"}, "read_file", true},
-		{"explicit no match", []string{"read_file"}, "exec_command", false},
+		{"empty list allows all", nil, "read", true},
+		{"explicit match", []string{"read", "write"}, "read", true},
+		{"explicit no match", []string{"read"}, "bash", false},
 		{"wildcard allows all", []string{"*"}, "anything", true},
 	}
 	for _, tt := range tests {
@@ -49,7 +49,7 @@ description = "A test agent"
 chat_type = "message_history"
 allowed_models = ["model-x", "model-y"]
 reasoning_level = "medium"
-allowed_tools = ["read_file", "grep"]
+allowed_tools = ["read", "grep"]
 subagents = ["Other"]
 parent_agent = "Boss"
 `
@@ -62,7 +62,7 @@ func TestLoadFromBytes_ValidTOML(t *testing.T) {
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
 	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
-	assert.Equal(t, []string{"read_file", "grep"}, cfg.AllowedTools)
+	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
 	assert.Equal(t, []string{"Other"}, cfg.Subagents)
 	assert.Equal(t, "Boss", cfg.ParentAgent)
 }

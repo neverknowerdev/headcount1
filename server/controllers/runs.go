@@ -18,7 +18,8 @@ import (
 // an extra round trip to /runs/{id}/token-stats.
 type RunResponse struct {
 	db.Run
-	parsedEntries  []interface{}
+	IsLatest         bool
+	parsedEntries    []interface{}
 	parsedTokenStats interface{}
 }
 
@@ -37,10 +38,12 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(&struct {
 		Alias
+		IsLatest    bool          `json:"is_latest"`
 		LogEntries  []interface{} `json:"log_entries"`
 		TokenStats  interface{}   `json:"token_stats"`
 	}{
 		Alias:      Alias(r),
+		IsLatest:   r.IsLatest,
 		LogEntries: entries,
 		TokenStats: tokenStats,
 	})
@@ -103,7 +106,34 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, toRunResponse(run))
+	resp := toRunResponse(run)
+	// Mark is_latest so the frontend can show the Re-run button only on the most recent run.
+	var maxID int64
+	api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
+	resp.IsLatest = int64(run.ID) == maxID
+	api.respondJSON(w, http.StatusOK, resp)
+}
+
+func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	task, err := api.q.GetTask(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
+	if task.AgentID == nil {
+		api.respondError(w, http.StatusBadRequest, "task has no assigned agent")
+		return
+	}
+	if err := api.engine.ProcessTask(r.Context(), int32(id)); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "queued"})
 }
 
 func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {

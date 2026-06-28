@@ -8,31 +8,17 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// SubtaskParams holds the arguments provided by the LLM when calling
-// create_subtask.
-type SubtaskParams struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	AgentName   string `json:"agent_name"`
-}
-
-// CreateSubtaskFunc is the callback the engine supplies to perform the actual
-// DB write and task dispatch. It returns the created task ID.
-type CreateSubtaskFunc func(ctx context.Context, p SubtaskParams) (int32, error)
-
-type createSubtaskTool struct {
-	fn         CreateSubtaskFunc
+// CreateSubtask delegates work to a specialist agent by creating a child task.
+type CreateSubtask struct {
+	fn         func(ctx context.Context, title, description, agentName string) (int32, error)
 	agentNames []string
 }
 
-// NewCreateSubtask returns a tool that creates a subtask and delegates its
-// execution to a named agent. agentNames is used to build an enum in the tool
-// schema so the LLM picks from the configured agents rather than guessing.
-func NewCreateSubtask(fn CreateSubtaskFunc, agentNames []string) aicli.Tool {
-	return &createSubtaskTool{fn: fn, agentNames: agentNames}
+func NewCreateSubtask(fn func(ctx context.Context, title, description, agentName string) (int32, error), agentNames []string) *CreateSubtask {
+	return &CreateSubtask{fn: fn, agentNames: agentNames}
 }
 
-func (t *createSubtaskTool) Def() aicli.ToolDef {
+func (t *CreateSubtask) Def() aicli.ToolDef {
 	agentNameProp := map[string]interface{}{
 		"type":        "string",
 		"description": "Name of the agent config to use",
@@ -40,15 +26,14 @@ func (t *createSubtaskTool) Def() aicli.ToolDef {
 	if len(t.agentNames) > 0 {
 		agentNameProp["enum"] = t.agentNames
 	}
-
-	params, _ := json.Marshal(map[string]interface{}{
+	schema, _ := json.Marshal(map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"title": map[string]string{
+			"title": map[string]interface{}{
 				"type":        "string",
 				"description": "Short title for the subtask",
 			},
-			"description": map[string]string{
+			"description": map[string]interface{}{
 				"type":        "string",
 				"description": "Detailed description of what the subtask should accomplish",
 			},
@@ -56,21 +41,24 @@ func (t *createSubtaskTool) Def() aicli.ToolDef {
 		},
 		"required": []string{"title", "description", "agent_name"},
 	})
-
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
 			Name:        "create_subtask",
 			Description: "Create a subtask and delegate its execution to a specialist agent. Only one subtask can run at a time — this call fails if a subtask is already running.",
-			Parameters:  json.RawMessage(params),
+			Parameters:  json.RawMessage(schema),
 		},
 	}
 }
 
-func (t *createSubtaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var p SubtaskParams
+func (t *CreateSubtask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var p struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		AgentName   string `json:"agent_name"`
+	}
 	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("invalid create_subtask args: %w", err)
+		return "", fmt.Errorf("create_subtask: %w", err)
 	}
 	if p.Title == "" {
 		return "", fmt.Errorf("title is required")
@@ -78,7 +66,7 @@ func (t *createSubtaskTool) Execute(ctx context.Context, args json.RawMessage) (
 	if p.AgentName == "" {
 		return "", fmt.Errorf("agent_name is required")
 	}
-	taskID, err := t.fn(ctx, p)
+	taskID, err := t.fn(ctx, p.Title, p.Description, p.AgentName)
 	if err != nil {
 		return "", err
 	}

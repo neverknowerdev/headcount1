@@ -16,7 +16,7 @@
                 "id": "call_fixture_010",
                 "type": "function",
                 "function": {
-                  "name": "write_file",
+                  "name": "write",
                   "arguments": "{\"path\":\"result.txt\",\"content\":\"task completed\"}"
                 }
               }

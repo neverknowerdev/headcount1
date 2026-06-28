@@ -52,6 +52,7 @@ interface RunLogViewerProps {
   status?: string;
   autoScroll?: boolean;
   tokenStats?: RunTokenStats | null;
+  compact?: boolean;
 }
 
 // ─── Hierarchical grouping ────────────────────────────────────────────────────
@@ -1084,13 +1085,14 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
 
 // ─── Main RunLogViewer ────────────────────────────────────────────────────────
 
-export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null }) => {
+export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
   const grouped = useMemo(() => groupMessages(messages || []), [messages]);
+  const visibleItems = compact ? grouped.slice(-10) : grouped;
 
   const counts = useMemo(() => {
     let req = 0, res = 0, tools = 0;
@@ -1117,6 +1119,34 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
     const { scrollTop, scrollHeight, clientHeight } = containerRef.current;
     setIsAtBottom(scrollHeight - scrollTop - clientHeight < 50);
   };
+
+  if (compact) {
+    return (
+      <div
+        ref={containerRef}
+        className="overflow-y-auto max-h-48 bg-white"
+      >
+        {visibleItems.length === 0 ? (
+          <div className="flex items-center justify-center text-gray-400 text-xs italic py-4">
+            {status === 'running' ? 'Waiting for logs...' : status === 'failed' ? 'No log entries captured.' : 'No activity yet.'}
+          </div>
+        ) : (
+          <div>
+            {visibleItems.map(item => {
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} />;
+              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+              return <InfoRow key={item.key} msg={item.msg} />;
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="flex flex-col h-full">

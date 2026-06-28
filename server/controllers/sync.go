@@ -159,12 +159,20 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
-	// 5. Sync MCP Servers (global, no company FK)
+	// 5. Sync MCP Servers (global + codegraph per-project)
 	mcpRecs, mcpErr := fm.ListMCPServersFromDisk()
 	if mcpErr != nil {
 		log.Printf("Error listing MCP servers: %v", mcpErr)
 	} else {
 		for _, rec := range mcpRecs {
+			// For codegraph servers, verify the referenced project exists before restoring.
+			if rec.ProjectID != nil {
+				var proj db.Project
+				if api.db.First(&proj, *rec.ProjectID).Error != nil {
+					log.Printf("Skipping codegraph server %d: project %d not found", rec.ID, *rec.ProjectID)
+					continue
+				}
+			}
 			var existingMCP db.MCPServer
 			if api.db.First(&existingMCP, rec.ID).Error != nil {
 				s := db.MCPServer{
@@ -181,6 +189,7 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 					AuthEnvVar:  rec.AuthEnvVar,
 					Enabled:     rec.Enabled,
 					Builtin:     rec.Builtin,
+					ProjectID:   rec.ProjectID,
 				}
 				if err := api.db.Create(&s).Error; err != nil {
 					log.Printf("Failed to restore MCP server %d (%s): %v", rec.ID, rec.Name, err)
@@ -286,6 +295,15 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		}
 	}
 
+	// Clean up codegraph MCP servers whose project no longer exists.
+	if result := api.db.WithContext(ctx).
+		Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").
+		Delete(&db.MCPServer{}); result.Error != nil {
+		log.Printf("Warning: failed to delete orphaned codegraph servers: %v", result.Error)
+	} else if result.RowsAffected > 0 {
+		log.Printf("Deleted %d orphaned codegraph MCP server(s)", result.RowsAffected)
+	}
+
 	return nil
 }
 
@@ -354,7 +372,7 @@ func (api *API) exportDBToFilesystem(fm *filesystem.Manager, storage *filesystem
 		}
 	}
 
-	// Export MCP servers (global, like LLM providers)
+	// Export MCP servers (global + codegraph per-project)
 	var mcpServers []db.MCPServer
 	api.db.Find(&mcpServers)
 	for _, s := range mcpServers {

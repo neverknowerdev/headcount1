@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"log"
 	"os/exec"
+	"strings"
 
 	"gorm.io/gorm"
 )
@@ -16,9 +17,17 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 
 // ListMCPServers returns all MCP servers with their accounts preloaded.
 // For non-builtin servers, Enabled is computed from account presence.
-func (q *Queries) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
+// When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
+// to only those whose project belongs to the given company.
+func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPServer, error) {
 	var servers []MCPServer
-	err := q.db.WithContext(ctx).Order("id").Preload("Accounts").Find(&servers).Error
+	db := q.db.WithContext(ctx).Order("id").Preload("Accounts").Preload("Project")
+	if companyID > 0 {
+		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE company_id = ?)", companyID)
+	} else {
+		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects)")
+	}
+	err := db.Find(&servers).Error
 	if err != nil {
 		return nil, err
 	}
@@ -383,14 +392,6 @@ func (q *Queries) MigrateServerTokensToAccounts(ctx context.Context) error {
 func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 	predefined := []MCPServer{
 		{
-			Name:        "paperclip2",
-			DisplayName: "Paperclip2",
-			Description: "Built-in tools: update task status and create subtasks for agents.",
-			Transport:   "builtin",
-			Enabled:     true,
-			Builtin:     true,
-		},
-		{
 			Name:        "github",
 			DisplayName: "GitHub",
 			Description: "Access GitHub repos, issues, pull requests, and code search. Auto-installs via brew on first use.",
@@ -457,4 +458,31 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// MigrateAddProjectFKToMCPServers adds a proper FK constraint from
+// mcp_servers.project_id → projects.id with ON DELETE CASCADE.
+// SQLite cannot ALTER TABLE ADD CONSTRAINT, so the migrator rebuilds the table.
+// Idempotent: skips if the constraint is already present in the DDL.
+func (q *Queries) MigrateAddProjectFKToMCPServers(ctx context.Context) error {
+	// Only needed for SQLite — PostgreSQL already enforces via the FK tag on AutoMigrate.
+	if q.db.Dialector.Name() != "sqlite" {
+		return nil
+	}
+	var ddl string
+	q.db.WithContext(ctx).Raw(
+		`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='mcp_servers'`,
+	).Scan(&ddl)
+	lower := strings.ToLower(ddl)
+	if strings.Contains(lower, "references") && strings.Contains(lower, "projects") {
+		return nil // FK already present (glebarez uses backtick-quoted identifiers)
+	}
+	// Purge orphans first — the new FK would reject them.
+	if err := q.db.WithContext(ctx).
+		Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").
+		Delete(&MCPServer{}).Error; err != nil {
+		return fmt.Errorf("purge orphans: %w", err)
+	}
+	// GORM's SQLite migrator implements CreateConstraint via the 12-step table rebuild.
+	return q.db.WithContext(ctx).Migrator().CreateConstraint(&MCPServer{}, "Project")
 }

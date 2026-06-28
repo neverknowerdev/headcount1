@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
+import { useStore } from '../store';
 import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2 } from 'lucide-react';
 
 interface MCPAccount {
@@ -31,6 +32,7 @@ interface MCPServer {
     builtin: boolean;
     deps_installed: boolean;
     project_id: number | null;
+    project?: { repository_url?: string; [key: string]: any };
     accounts: MCPAccount[];
     created_at: string;
     updated_at: string;
@@ -76,6 +78,8 @@ const emptyForm = {
 };
 
 export const MCPServers: React.FC = () => {
+    const { selectedCompanyId } = useStore();
+
     // ── Server modal state (for custom servers only) ───────────────────────────
     const [servers, setServers] = useState<MCPServer[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -121,7 +125,8 @@ export const MCPServers: React.FC = () => {
 
     const fetchServers = useCallback(async () => {
         try {
-            const res = await axios.get('/api/mcp-servers');
+            const url = selectedCompanyId ? `/api/mcp-servers?company_id=${selectedCompanyId}` : '/api/mcp-servers';
+            const res = await axios.get(url);
             const data: MCPServer[] = res.data || [];
             setServers(data);
             const cached: Record<number, MCPTool[]> = {};
@@ -136,7 +141,7 @@ export const MCPServers: React.FC = () => {
         } catch (e) {
             console.error(e);
         }
-    }, []);
+    }, [selectedCompanyId]);
 
     useEffect(() => { fetchServers(); }, [fetchServers]);
 
@@ -436,6 +441,9 @@ export const MCPServers: React.FC = () => {
                                             </span>
                                         </div>
                                         {s.description && <p className="text-sm text-gray-600 mb-2">{s.description}</p>}
+                                        {s.project?.repository_url && (
+                                            <p className="text-xs text-gray-400 font-mono truncate mb-1">{s.project.repository_url}</p>
+                                        )}
                                         {s.transport === 'stdio' && s.command && (
                                             <p className="text-xs text-gray-400 font-mono truncate">$ {s.command} {s.args && s.args !== '[]' ? JSON.parse(s.args).join(' ') : ''}</p>
                                         )}

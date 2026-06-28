@@ -28,6 +28,8 @@ func setupMCPTestDB(t *testing.T) *gorm.DB {
 		&db.Agent{},
 		&db.MCPServer{},
 		&db.AgentMCPServer{},
+		&db.MCPAccount{},
+		&db.AgentMCPAccount{},
 	)
 	require.NoError(t, err)
 	return database
@@ -123,10 +125,11 @@ func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 	database := setupMCPTestDB(t)
 	r := setupMCPRouter(database)
 
-	// Create the built-in server directly in DB.
+	// Create the built-in servers and pick one to test deletion protection.
 	q := db.New(database)
-	builtin, err := q.EnsureBuiltinMCPServer(context.Background())
-	require.NoError(t, err)
+	require.NoError(t, q.EnsureBuiltinMCPServers(context.Background()))
+	var builtin db.MCPServer
+	require.NoError(t, database.Where("builtin = ?", true).First(&builtin).Error)
 
 	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/mcp-servers/%d", builtin.ID), nil)
 	w := httptest.NewRecorder()

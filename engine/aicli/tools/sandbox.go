@@ -2,6 +2,7 @@ package tools
 
 import (
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -10,9 +11,16 @@ import (
 // stays inside the workspace. Returns an error if the path escapes.
 func resolvePath(workspacePath, path string) (string, error) {
 	var abs string
-	if filepath.IsAbs(path) {
+	switch {
+	case filepath.IsAbs(path):
 		abs = filepath.Clean(path)
-	} else {
+	case path == "~":
+		homeDir, _ := os.UserHomeDir()
+		abs = homeDir
+	case strings.HasPrefix(path, "~/"):
+		homeDir, _ := os.UserHomeDir()
+		abs = filepath.Clean(filepath.Join(homeDir, path[2:]))
+	default:
 		abs = filepath.Clean(filepath.Join(workspacePath, path))
 	}
 	workspace := filepath.Clean(workspacePath)
@@ -23,9 +31,16 @@ func resolvePath(workspacePath, path string) (string, error) {
 }
 
 // validateCommandPaths rejects shell commands that reference paths outside the
-// workspace — absolute paths and relative traversals alike.
+// workspace — absolute paths, home-dir (~) paths, and relative traversals alike.
 func validateCommandPaths(workspacePath, command string) error {
+	// Reject $HOME / ${HOME} variable references that could bypass path checking.
+	if strings.Contains(command, "$HOME") || strings.Contains(command, "${HOME}") {
+		return fmt.Errorf("command references $HOME which may escape the workspace")
+	}
+
 	workspace := filepath.Clean(workspacePath)
+	homeDir, _ := os.UserHomeDir()
+
 	for _, token := range strings.Fields(command) {
 		token = strings.Trim(token, `"'`)
 		if token == "" {
@@ -35,6 +50,10 @@ func validateCommandPaths(workspacePath, command string) error {
 		switch {
 		case filepath.IsAbs(token):
 			abs = filepath.Clean(token)
+		case token == "~":
+			abs = homeDir
+		case strings.HasPrefix(token, "~/"):
+			abs = filepath.Clean(filepath.Join(homeDir, token[2:]))
 		case looksLikePath(token):
 			abs = filepath.Clean(filepath.Join(workspacePath, token))
 		default:

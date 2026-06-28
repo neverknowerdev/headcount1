@@ -117,8 +117,8 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
         });
         expect(secondCommentRes.ok()).toBeTruthy();
         const commentsAfterSecond: any[] = JSON.parse(fs.readFileSync(commentsPath, 'utf8'));
-        expect(commentsAfterSecond).toHaveLength(2);
-        expect(commentsAfterSecond[1].content).toBe('Second comment');
+        expect(commentsAfterSecond).toHaveLength(3); // original + status_change + second comment
+        expect(commentsAfterSecond[2].content).toBe('Second comment');
     });
 
     test('restores all entities and comments from filesystem after DB wipe', async ({ request }) => {
@@ -144,7 +144,7 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
         expect(restoredTask.title).toBe('Sync Task Updated');
 
         const comments = await (await request.get(`/api/comments?task_id=${taskId}`)).json();
-        expect(comments).toHaveLength(2);
+        expect(comments).toHaveLength(3); // original + status_change + second comment
         expect(comments.find((c: any) => c.id === commentId)).toBeDefined();
     });
 
