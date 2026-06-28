@@ -32,7 +32,7 @@ interface MCPServer {
     builtin: boolean;
     deps_installed: boolean;
     project_id: number | null;
-    repository_url?: string;
+    project?: { repository_url?: string; [key: string]: any };
     accounts: MCPAccount[];
     created_at: string;
     updated_at: string;
@@ -441,8 +441,8 @@ export const MCPServers: React.FC = () => {
                                             </span>
                                         </div>
                                         {s.description && <p className="text-sm text-gray-600 mb-2">{s.description}</p>}
-                                        {s.repository_url && (
-                                            <p className="text-xs text-gray-400 font-mono truncate mb-1">{s.repository_url}</p>
+                                        {s.project?.repository_url && (
+                                            <p className="text-xs text-gray-400 font-mono truncate mb-1">{s.project.repository_url}</p>
                                         )}
                                         {s.transport === 'stdio' && s.command && (
                                             <p className="text-xs text-gray-400 font-mono truncate">$ {s.command} {s.args && s.args !== '[]' ? JSON.parse(s.args).join(' ') : ''}</p>

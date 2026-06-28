@@ -35,9 +35,6 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPSer
 		for j := range servers[i].Accounts {
 			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
 		}
-		if servers[i].Project != nil {
-			servers[i].RepositoryURL = servers[i].Project.RepositoryUrl
-		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
 		// for codegraph servers (ProjectID set) which are managed by init_status,
 		// not by accounts.

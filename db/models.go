@@ -193,13 +193,12 @@ type MCPServer struct {
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
 	InitStatus    string       `json:"init_status" gorm:"default:''"` // codegraph lifecycle: "initializing", "ready", "error: ..."
-	DepsInstalled  bool         `json:"deps_installed" gorm:"-"`    // computed at runtime
-	RepositoryURL  string       `json:"repository_url,omitempty" gorm:"-"` // populated from Project for codegraph servers
+	DepsInstalled  bool         `json:"deps_installed" gorm:"-"` // computed at runtime
 	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
 	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
-	WorkDir        string       `json:"work_dir"`                   // working directory for stdio servers (e.g. project repo path)
+	WorkDir        string       `json:"work_dir"` // working directory for stdio servers (e.g. project repo path)
 	ProjectID      *int32       `json:"project_id" gorm:"index"`
-	Project        *Project     `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	Project        *Project     `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
 	Accounts      []MCPAccount `json:"accounts,omitempty" gorm:"foreignKey:MCPServerID"`
 	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt     time.Time    `json:"created_at"`
@@ -246,6 +245,10 @@ type MCPToolStat struct {
 
 type Artifact struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
+	CompanyID *int32    `json:"company_id" gorm:"index"`
+	Company   *Company  `json:"company,omitempty" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID *int32    `json:"project_id" gorm:"index"`
+	Project   *Project  `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
 	TaskID    int32     `json:"task_id" gorm:"not null"`
 	Task      Task      `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
 	RunID     int32     `json:"run_id" gorm:"not null"`
