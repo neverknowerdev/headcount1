@@ -144,7 +144,7 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
         expect(restoredTask.title).toBe('Sync Task Updated');
 
         const comments = await (await request.get(`/api/comments?task_id=${taskId}`)).json();
-        expect(comments).toHaveLength(2);
+        expect(comments).toHaveLength(3); // original + status_change + second comment
         expect(comments.find((c: any) => c.id === commentId)).toBeDefined();
     });
 

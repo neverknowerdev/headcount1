@@ -130,7 +130,7 @@ test.describe.serial('Paperclip2 App', () => {
         await page.goto('/companies/pw-inc/tasks');
         await page.click('text=Write E2E Tests');
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
         await expect(page.getByText('Let us see if the agent works')).toBeVisible();
 
         // Verify Agent Run Logs
