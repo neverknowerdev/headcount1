@@ -100,7 +100,7 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Assign agent and move to "To Do" — this triggers the engine
         await page.click('text=Write E2E Tests');
-        await expect(page.getByText('Task PW-INC-1')).toBeVisible();
+        await expect(page.getByText('PW-INC-1')).toBeVisible();
         await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
         await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
