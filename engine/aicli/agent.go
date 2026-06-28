@@ -45,12 +45,19 @@ type RunLogger interface {
 	FilePath() string
 }
 
+// ToolCompressionPrompt is appended to the system prompt when token-minimization
+// tools are registered. It instructs the model to call minimize_tool_result after
+// every tool result and to use expand_tool_result when it needs full content back.
+const ToolCompressionPrompt = `
+Tool result compression: After every tool call returns a result (except minimize_tool_result and expand_tool_result themselves), you MUST immediately call minimize_tool_result with a concise summary and key_findings array before taking any other action. If you need the full output of a previous tool call later, use expand_tool_result with the relevant tool_call_ids.`
+
 // Agent runs a message-history agentic loop against an OpenAI-compatible
 // LLM provider.  It supports tool calling, retry (via Client.Complete), and
 // structured logging into the existing RunLog infrastructure.
 type Agent struct {
 	Client         *Client
 	Registry       *Registry
+	Store          *ToolResultStore // optional; enables tool-result minimization
 	Mode           Mode
 	ProviderName   string
 	AgentName      string
@@ -68,6 +75,10 @@ type Agent struct {
 type Config struct {
 	Client         *Client
 	Registry       *Registry
+	// Store enables tool-result minimization. When set, the agent stores each
+	// tool result and transforms history to use compact summaries after the model
+	// has minimized them via minimize_tool_result.
+	Store          *ToolResultStore
 	Mode           Mode
 	ProviderName   string
 	AgentName      string
@@ -90,6 +101,7 @@ func New(cfg Config) *Agent {
 	return &Agent{
 		Client:                cfg.Client,
 		Registry:              cfg.Registry,
+		Store:                 cfg.Store,
 		Mode:                  mode,
 		ProviderName:          cfg.ProviderName,
 		AgentName:             cfg.AgentName,
@@ -153,9 +165,26 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 			return "", ctx.Err()
 		}
 
+		// Take expanded IDs (reset after this turn) and transform history.
+		var expanded map[string]bool
+		if a.Store != nil {
+			expanded = a.Store.TakeExpanded()
+		}
+		msgs := pruneMCPHistory(history)
+		if a.Store != nil {
+			msgs = a.Store.TransformHistory(msgs, expanded)
+		}
+
+		// Exclude minimize_tool_result from the tools list when nothing needs
+		// minimizing — the model should only see it when there is work to do.
+		toolDefs := a.Registry.Defs()
+		if a.Store != nil && !a.Store.HasUnminimized() {
+			toolDefs = excludeTool(toolDefs, "minimize_tool_result")
+		}
+
 		req := ChatRequest{
-			Messages:        pruneMCPHistory(history),
-			Tools:           a.Registry.Defs(),
+			Messages:        msgs,
+			Tools:           toolDefs,
 			ReasoningEffort: reasoningEffort,
 		}
 
@@ -318,6 +347,12 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			Name:       tc.Function.Name,
 			Content:    output,
 		})
+
+		// Record the full result so the store can serve future minimization and
+		// expansion. Skip meta-tools — their results are not subject to minimization.
+		if a.Store != nil && !isMetaTool(tc.Function.Name) {
+			a.Store.Store(tc.ID, tc.Function.Name, tc.Function.Arguments, output)
+		}
 	}
 
 	// Roll up MCP token stats as a single delta after all tool calls.
@@ -386,6 +421,23 @@ func pruneMCPHistory(history []Message) []Message {
 		}
 	}
 	return pruned
+}
+
+// excludeTool returns a copy of defs without the entry named name.
+func excludeTool(defs []ToolDef, name string) []ToolDef {
+	out := make([]ToolDef, 0, len(defs))
+	for _, d := range defs {
+		if d.Function.Name != name {
+			out = append(out, d)
+		}
+	}
+	return out
+}
+
+// isMetaTool reports whether name is an internal token-management tool that
+// should not itself be stored in the ToolResultStore or be subject to minimization.
+func isMetaTool(name string) bool {
+	return name == "minimize_tool_result" || name == "expand_tool_result"
 }
 
 // msgsToMap converts []Message to []map[string]interface{} so the proxy

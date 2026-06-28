@@ -505,6 +505,13 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
+	// Register token-optimization meta-tools after filtering so they are always
+	// available regardless of AgentConfig.AllowedTools.
+	toolResultStore := aicli.NewToolResultStore()
+	registry.Register(tools.NewMinimizeToolResult(toolResultStore.Minimize))
+	registry.Register(tools.NewExpandToolResult(toolResultStore.Expand))
+	systemPrompt += aicli.ToolCompressionPrompt
+
 	// MCP listing token costs — set if any external MCP servers are active for this run.
 	var listingCostTotal int
 	var listingCostByServer map[string]int
@@ -572,6 +579,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,
 		Registry:              registry,
+		Store:                 toolResultStore,
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
 		AgentName:             agent.Name,
