@@ -1,7 +1,7 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
@@ -31,6 +31,7 @@ interface Sprint {
 export const ProjectBoard: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const prefix = shortName ? shortName.toUpperCase() : 'T';
+    const navigate = useNavigate();
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -41,7 +42,6 @@ export const ProjectBoard: React.FC = () => {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
 
   const fetchFiltersData = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -194,7 +194,7 @@ export const ProjectBoard: React.FC = () => {
                                         ref={provided.innerRef}
                                         {...provided.draggableProps}
                                         {...provided.dragHandleProps}
-                                        onClick={() => setViewingTaskId(task.id)}
+                                        onClick={() => navigate(`/companies/${shortName}/tasks/${task.id}`)}
                                         className={`bg-white p-4 rounded-md border shadow-sm ${snapshot.isDragging ? 'shadow-lg ring-2 ring-indigo-500 border-transparent' : 'hover:border-indigo-300'} transition-shadow cursor-grab`}
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
@@ -223,7 +223,6 @@ export const ProjectBoard: React.FC = () => {
             </div>
         </DragDropContext>
       </div>
-      {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => {setViewingTaskId(null); fetchTasks();}} />}
       {isCreateModalOpen && <TaskModal onClose={() => setIsCreateModalOpen(false)} onTaskCreated={fetchTasks} />}
     </div>
   );

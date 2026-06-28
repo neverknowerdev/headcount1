@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
@@ -53,7 +53,7 @@ export const RunLogDetails: React.FC = () => {
     const [isRerunning, setIsRerunning] = useState(false);
     const [logMessages, setLogMessages] = useState<any[]>([]);
     const [streamStalled, setStreamStalled] = useState<{at: number, message: string} | null>(null);
-    const [lastEventAt, setLastEventAt] = useState<number>(Date.now());
+    const lastEventAtRef = useRef<number>(Date.now());
     const [tokenStats, setTokenStats] = useState<any>(null);
 
     useEffect(() => {
@@ -107,20 +107,20 @@ export const RunLogDetails: React.FC = () => {
         // Client-side fallback: if no events for 45s while run is "running",
         // surface a "stream stalled" warning even before the server detects it.
         const stallCheck = setInterval(() => {
-            if (run?.status === 'running' && Date.now() - lastEventAt > 45000) {
-                setStreamStalled(prev => prev ?? { at: lastEventAt, message: 'No log activity for 45+ seconds' });
+            if (run?.status === 'running' && Date.now() - lastEventAtRef.current > 45000) {
+                setStreamStalled(prev => prev ?? { at: lastEventAtRef.current, message: 'No log activity for 45+ seconds' });
             }
         }, 5000);
 
         return () => {
             clearInterval(stallCheck);
         };
-    }, [id, run?.status, lastEventAt]);
+    }, [id, run?.status]);
 
     const runIdInt = parseInt(id || '0');
     useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
         if (msg.type === 'run_log' && msg.payload.run_id === runIdInt) {
-            setLastEventAt(Date.now());
+            lastEventAtRef.current = Date.now();
             setStreamStalled(null);
             if (msg.payload.entry) {
                 setLogMessages(prev => [...prev, { id: prev.length, entry: msg.payload.entry }]);
@@ -130,7 +130,7 @@ export const RunLogDetails: React.FC = () => {
         } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
             setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
         } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
-            setLastEventAt(Date.now());
+            lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
         }
     });

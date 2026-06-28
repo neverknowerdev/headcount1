@@ -17,18 +17,26 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 
 // ListMCPServers returns all MCP servers with their accounts preloaded.
 // For non-builtin servers, Enabled is computed from account presence.
-func (q *Queries) ListMCPServers(ctx context.Context) ([]MCPServer, error) {
+// When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
+// to only those whose project belongs to the given company.
+func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPServer, error) {
 	var servers []MCPServer
-	// Exclude codegraph servers whose project has been deleted (project_id is a soft ref with no FK).
-	err := q.db.WithContext(ctx).Order("id").Preload("Accounts").
-		Where("project_id IS NULL OR project_id IN (SELECT id FROM projects)").
-		Find(&servers).Error
+	db := q.db.WithContext(ctx).Order("id").Preload("Accounts").Preload("Project")
+	if companyID > 0 {
+		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE company_id = ?)", companyID)
+	} else {
+		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects)")
+	}
+	err := db.Find(&servers).Error
 	if err != nil {
 		return nil, err
 	}
 	for i := range servers {
 		for j := range servers[i].Accounts {
 			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
+		}
+		if servers[i].Project != nil {
+			servers[i].RepositoryURL = servers[i].Project.RepositoryUrl
 		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
 		// for codegraph servers (ProjectID set) which are managed by init_status,

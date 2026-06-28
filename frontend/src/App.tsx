@@ -15,6 +15,7 @@ import { Settings } from './pages/Settings';
 import { Backup } from './pages/Backup';
 import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
+import { TaskPage } from './pages/TaskPage';
 
 function App() {
   return (
@@ -24,6 +25,7 @@ function App() {
           <Route path="/add-company" element={<AddCompany />} />
           <Route path="/companies/:shortName" element={<Dashboard />} />
           <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
+          <Route path="/companies/:shortName/tasks/:taskId" element={<TaskPage />} />
           <Route path="/companies/:shortName/sprints" element={<SprintsManager />} />
           <Route path="/companies/:shortName/projects" element={<CompanyView />} />
           <Route path="/companies/:shortName/projects/:id" element={<ProjectSettings />} />

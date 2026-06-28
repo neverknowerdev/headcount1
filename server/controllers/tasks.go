@@ -197,6 +197,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	statusChanged := false
+	prevStatus := task.Status
 	if req.Status != "" && req.Status != task.Status {
 		task.Status = req.Status
 		statusChanged = true
@@ -242,6 +243,18 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEvent("task_updated", task)
+
+	if statusChanged {
+		content, _ := json.Marshal(map[string]string{"from": prevStatus, "to": task.Status})
+		if sc, err := api.q.CreateComment(r.Context(), db.Comment{
+			TaskID:      task.ID,
+			AuthorType:  "human",
+			CommentType: "status_change",
+			Content:     string(content),
+		}); err == nil {
+			api.hub.BroadcastEvent("comment_created", sc)
+		}
+	}
 
 	var taskComp db.Company
 	if api.db.First(&taskComp, task.CompanyID).Error == nil {

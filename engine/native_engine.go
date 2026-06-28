@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -61,29 +62,35 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	switch task.Status {
 	case "to-do":
 		if task.TaskType == db.TaskTypeImplement {
+			prevStatus := task.Status
 			task.Status = "in-progress"
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
 			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+			e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 			go e.run(context.Background(), task, "implement")
 		} else {
+			prevStatus := task.Status
 			task.Status = "refinement"
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
 			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
+			e.emitStatusChange(ctx, task.ID, prevStatus, "refinement")
 			go e.run(context.Background(), task, "plan")
 		}
 	case "in-progress":
 		go e.run(context.Background(), task, "implement")
 	case "in-review", "blocked", "done", "refinement":
 		// Re-run triggered by a user comment (Run Agent flag). Move back to in-progress.
+		prevStatus := task.Status
 		task.Status = "in-progress"
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {
 			return err
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 		go e.run(context.Background(), task, "implement")
 	}
 
@@ -262,7 +269,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
 	pastRuns, _ := e.q.ListCompletedRunsByTask(ctx, task.ID)
-
 	// Build initial messages: task description as the first user message,
 	// then past run results and human/agent comments interleaved chronologically.
 	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, task.Description, mode)
@@ -295,7 +301,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		timeline = append(timeline, timelineEntry{t: ts, role: "assistant", text: msg})
 	}
 
-	// Add human comments and non-task_done agent comments.
+	// Add human comments and non-task_done agent comments; format status changes readably.
 	for _, c := range comments {
 		if c.AuthorType == "agent" && c.CommentType == "task_done" {
 			continue // already represented by the run result JSON above
@@ -304,8 +310,31 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		if c.AuthorType == "agent" || c.AuthorType == "system" {
 			role = "assistant"
 		}
-		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: c.Content})
+		text := c.Content
+		switch c.CommentType {
+		case "status_change":
+			var meta struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			}
+			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
+				actor := "User"
+				if c.AuthorType != "human" {
+					actor = "System"
+				}
+				text = fmt.Sprintf("[%s changed task status: %s → %s]", actor, meta.From, meta.To)
+			}
+		case "artifact_created":
+			var meta struct {
+				Filename string `json:"filename"`
+			}
+			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
+				text = fmt.Sprintf(`[Artifact created: "%s"]`, meta.Filename)
+			}
+		}
+		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: text})
 	}
+
 
 	// Sort chronologically.
 	for i := 1; i < len(timeline); i++ {
@@ -331,6 +360,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		if err != nil {
 			return err
 		}
+		prevStatus := t.Status
 		t.Status = status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
 			return err
@@ -340,11 +370,12 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
 		runID := run.ID
+		content, _ := json.Marshal(map[string]string{"msg": finishStatus, "from": prevStatus, "to": status})
 		comment, cErr := e.q.CreateComment(finCtx, db.Comment{
 			TaskID:      task.ID,
 			AuthorType:  "agent",
 			CommentType: "task_done",
-			Content:     finishStatus,
+			Content:     string(content),
 			RunID:       &runID,
 		})
 		if cErr == nil {
@@ -382,6 +413,19 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			return nil
 		}
 		e.hub.BroadcastEvent("artifact_created", artifact)
+		commentContent, _ := json.Marshal(map[string]string{
+			"artifact_id": fmt.Sprintf("%d", artifact.ID),
+			"filename":    filename,
+			"content":     content,
+		})
+		if ac, cErr := e.q.CreateComment(wCtx, db.Comment{
+			TaskID:      task.ID,
+			AuthorType:  "system",
+			CommentType: "artifact_created",
+			Content:     string(commentContent),
+		}); cErr == nil {
+			e.hub.BroadcastEvent("comment_created", ac)
+		}
 		return nil
 	}))
 	var agentNames []string
@@ -467,7 +511,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	// Load MCP accounts enabled for this agent and register external servers in the store.
 	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
-		allServers, _ := e.q.ListMCPServers(ctx)
+		allServers, _ := e.q.ListMCPServers(ctx, 0) // 0 = all companies
 		serverByID := make(map[int32]db.MCPServer, len(allServers))
 		for _, s := range allServers {
 			serverByID[s.ID] = s
@@ -546,7 +590,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
 	}
 
-	finalText, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
+	_, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
 
 	status := "completed"
 
@@ -562,15 +606,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
-	// If the agent returned plain text (not via finish_task), save it as a comment.
-	if finalText != "" {
-		comment, _ := e.q.CreateComment(ctx, db.Comment{
-			TaskID:     task.ID,
-			AuthorType: "agent",
-			Content:    finalText,
-		})
-		e.hub.BroadcastEvent("comment_created", comment)
-	}
 
 	// If finish_task was not called, force a follow-up turn.
 	if agentErr == nil && !taskFinished {
@@ -693,6 +728,20 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 		}
 
 		return subtask.ID, nil
+	}
+}
+
+// emitStatusChange creates a status_change comment and broadcasts it.
+func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from, to string) {
+	content, _ := json.Marshal(map[string]string{"from": from, "to": to})
+	comment, err := e.q.CreateComment(ctx, db.Comment{
+		TaskID:      taskID,
+		AuthorType:  "system",
+		CommentType: "status_change",
+		Content:     string(content),
+	})
+	if err == nil {
+		e.hub.BroadcastEvent("comment_created", comment)
 	}
 }
 

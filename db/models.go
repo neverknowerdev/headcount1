@@ -193,12 +193,13 @@ type MCPServer struct {
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
 	InitStatus    string       `json:"init_status" gorm:"default:''"` // codegraph lifecycle: "initializing", "ready", "error: ..."
-	DepsInstalled bool         `json:"deps_installed" gorm:"-"`    // computed at runtime
-	Enabled       bool         `json:"enabled" gorm:"not null;default:true"`
-	Builtin       bool         `json:"builtin" gorm:"not null;default:false"`
-	WorkDir       string       `json:"work_dir"`                   // working directory for stdio servers (e.g. project repo path)
-	ProjectID     *int32       `json:"project_id" gorm:"index"`
-	Project       *Project     `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	DepsInstalled  bool         `json:"deps_installed" gorm:"-"`    // computed at runtime
+	RepositoryURL  string       `json:"repository_url,omitempty" gorm:"-"` // populated from Project for codegraph servers
+	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
+	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
+	WorkDir        string       `json:"work_dir"`                   // working directory for stdio servers (e.g. project repo path)
+	ProjectID      *int32       `json:"project_id" gorm:"index"`
+	Project        *Project     `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
 	Accounts      []MCPAccount `json:"accounts,omitempty" gorm:"foreignKey:MCPServerID"`
 	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt     time.Time    `json:"created_at"`

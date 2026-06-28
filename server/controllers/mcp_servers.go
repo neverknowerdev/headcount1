@@ -124,7 +124,7 @@ func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account
 func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 	installMCPDependencies(ctx)
 
-	servers, err := api.q.ListMCPServers(ctx)
+	servers, err := api.q.ListMCPServers(ctx, 0) // 0 = all companies
 	if err != nil {
 		log.Printf("MCP cache: failed to list servers: %v", err)
 		return
@@ -187,7 +187,8 @@ func (api *API) sortToolsByPopularity(ctx context.Context, serverID int32, tools
 }
 
 func (api *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
-	servers, err := api.q.ListMCPServers(r.Context())
+	companyID, _ := strconv.Atoi(r.URL.Query().Get("company_id"))
+	servers, err := api.q.ListMCPServers(r.Context(), int32(companyID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
