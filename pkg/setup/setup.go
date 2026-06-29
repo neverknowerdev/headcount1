@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 )
@@ -78,14 +79,22 @@ func runOnce() {
 	cmd.Stderr = &out
 
 	log.Println("[setup] Running setup script...")
-	if err := cmd.Run(); err != nil {
-		msg := fmt.Sprintf("setup script failed: %v\n%s", err, out.String())
+	runErr := cmd.Run()
+	output := out.String()
+
+	// markitdown availability is determined by the script output, independent of
+	// whether other dependencies (e.g. github-mcp-server) failed to install.
+	if strings.Contains(output, "[setup] markitdown: OK") || strings.Contains(output, "[setup] markitdown: installed") {
+		ready.Store(true)
+	}
+
+	if runErr != nil {
+		msg := fmt.Sprintf("setup script failed: %v\n%s", runErr, output)
 		store(msg)
 		return
 	}
 
-	log.Print(out.String())
-	ready.Store(true)
+	log.Print(output)
 }
 
 func store(msg string) {

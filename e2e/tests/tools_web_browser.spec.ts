@@ -248,7 +248,9 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
 
             // At least one tool result must contain both the HTTP status line
             // and the marker text from the served HTML.
-            const fetchResult = toolResults.find((r) => r.includes('FETCH_OK_42'));
+            // The marker may arrive with markdown-escaped underscores (FETCH\_OK\_42) depending
+            // on how the web_fetch tool renders markdown.
+            const fetchResult = toolResults.find((r) => r.includes('FETCH_OK_42') || r.includes('FETCH\\_OK\\_42'));
             expect(fetchResult, `expected web_fetch result with "FETCH_OK_42" in:\n${JSON.stringify(toolResults, null, 2)}`).toBeTruthy();
             expect(fetchResult).toContain('HTTP 200');
         } finally {
@@ -520,13 +522,13 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
 
-            const htmlResult = toolResults.find((r) => r.includes('HTML_SECTION_33'));
+            // navigate result also contains HTML_SECTION_33 as text; look specifically for the
+            // get_html result which should include both the text and the surrounding HTML tags.
+            const htmlResult = toolResults.find((r) => r.includes('HTML_SECTION_33') && r.includes('<section'));
             expect(
                 htmlResult,
-                `expected get_html result with "HTML_SECTION_33" in:\n${JSON.stringify(toolResults, null, 2)}`,
+                `expected get_html result with "<section" and "HTML_SECTION_33" in:\n${JSON.stringify(toolResults, null, 2)}`,
             ).toBeTruthy();
-            // Should contain HTML tags
-            expect(htmlResult).toContain('<section');
             expect(htmlResult).toContain('<span>');
         } finally {
             await server.stop();

@@ -1,9 +1,11 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 
+	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/utils"
 )
 
@@ -23,17 +25,26 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"attachments",
 		"tasks",
 		"skills",
+		"agent_mcp_accounts",
 		"agents",
 		"llm_providers",
 		"sprints",
 		"projects",
 		"companies",
+		// MCP tables — clear dependents before mcp_servers (FK order)
+		"mcp_tool_stats",
+		"agent_mcp_servers",
+		"mcp_accounts",
+		"mcp_servers",
 	}
 	for _, table := range tables {
 		api.db.Exec("DELETE FROM " + table)
 	}
 	// Reset SQLite autoincrement so test IDs start at 1
 	api.db.Exec("DELETE FROM sqlite_sequence")
+
+	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
+	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

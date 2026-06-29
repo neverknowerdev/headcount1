@@ -160,19 +160,22 @@ test.describe.serial('Backup & Restore', () => {
         ]);
         await expect(page.getByRole('heading', { name: 'Backup & Restore' })).toBeVisible();
 
-        // Handle the alert dialog that appears on backup success
-        page.on('dialog', async dialog => {
-            await dialog.accept();
-        });
+        // Wait for the page to finish loading (the "Backup Now" button only renders after the
+        // async status fetch completes, so waiting for it ensures the backup list is populated).
+        await expect(page.getByRole('button', { name: 'Backup Now' })).toBeVisible({ timeout: 10000 });
 
-        // Click Backup Now button
-        await page.click('button:has-text("Backup Now")');
+        // Count how many backups exist before clicking so we can wait for a NEW one.
+        const countBefore = await page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).count();
 
-        // Wait for the backup to complete and the status to refresh.
-        // page.getByText() is avoided: it resolves to <option> elements inside the
-        // restore <select> dropdown first, and <option> elements in a closed select
-        // are always hidden in Playwright. Target <li> elements in the backup list.
-        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).first()).toBeVisible({ timeout: 30000 });
+        // Click Backup Now and accept the success dialog in parallel.
+        const [dialog] = await Promise.all([
+            page.waitForEvent('dialog'),
+            page.click('button:has-text("Backup Now")'),
+        ]);
+        await dialog.accept();
+
+        // Wait for the backup list to grow (a new entry appears after the dialog is dismissed).
+        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ })).toHaveCount(countBefore + 1, { timeout: 30000 });
     });
 
     test.afterAll(async () => {
