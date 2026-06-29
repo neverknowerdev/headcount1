@@ -15,5 +15,6 @@ func DefaultRegistry(workspacePath string) *aicli.Registry {
 	r.Register(NewExecCommand(workspacePath))
 	r.Register(NewGrep(workspacePath))
 	r.Register(NewWebFetch())
+	r.Register(NewBrowserUse())
 	return r
 }
