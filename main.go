@@ -114,11 +114,6 @@ func main() {
 		log.Printf("Warning: MCP account migration failed: %v", err)
 	}
 
-	// Run the platform setup script (checks / installs Python deps such as markitdown).
-	if err := setup.Run(); err != nil {
-		log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
-	}
-
 	hub := eventhub.NewHub()
 
 	eng := engine.NewNativeEngine(database, hub)
@@ -132,9 +127,11 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
-	// Install npm packages declared in MCP server Deps fields, then cache tools.
-	// InstallMCPNpmDeps must run after setup.Run() so npm is available.
+	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
+		if err := setup.Run(); err != nil {
+			log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
+		}
 		srv.InstallMCPNpmDeps(context.Background())
 		srv.CacheMCPTools(context.Background())
 	}()
