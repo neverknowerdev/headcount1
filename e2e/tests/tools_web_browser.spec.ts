@@ -102,7 +102,7 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
     expect(compRes.ok(), `create company: ${await compRes.text()}`).toBeTruthy();
     const company = await compRes.json();
 
-    const provRes = await request.post('/api/llm-providers', {
+    const provRes = await request.post('/api/providers', {
         data: {
             name: 'Mock Provider',
             base_url: env.E2E_MOCK_PROVIDER_URL,
