@@ -184,7 +184,17 @@ if (Test-Command github-mcp-server) {
 if (Test-Command codegraph) {
     Write-Host "[setup] codegraph: OK"
 } else {
-    Add-Failure 'codegraph' 'not found — code intelligence features will be unavailable (install codegraph and add it to PATH)'
+    Write-Host "[setup] codegraph: not found — installing via npm..."
+    if (Test-Command npm) {
+        & npm install -g @colbymchenry/codegraph 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0 -and (Test-Command codegraph)) {
+            Write-Host "[setup] codegraph: installed"
+        } else {
+            Add-Failure 'codegraph' 'could not be installed — run: npm install -g @colbymchenry/codegraph'
+        }
+    } else {
+        Add-Failure 'codegraph' 'npm not available — install Node.js first, then run: npm install -g @colbymchenry/codegraph'
+    }
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────

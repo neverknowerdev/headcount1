@@ -143,7 +143,14 @@ fi
 if command -v codegraph >/dev/null 2>&1; then
     echo "[setup] codegraph: OK"
 else
-    add_failure "codegraph" "not found — code intelligence features will be unavailable (install codegraph and add it to PATH)"
+    echo "[setup] codegraph: not found — installing via npm..."
+    if command -v npm >/dev/null 2>&1 && \
+       npm install -g @colbymchenry/codegraph >/dev/null 2>&1 && \
+       command -v codegraph >/dev/null 2>&1; then
+        echo "[setup] codegraph: installed"
+    else
+        add_failure "codegraph" "could not be installed — run: npm install -g @colbymchenry/codegraph"
+    fi
 fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
