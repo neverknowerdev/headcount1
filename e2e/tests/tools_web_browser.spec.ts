@@ -95,12 +95,25 @@ async function getMockRequests(request: APIRequestContext): Promise<any[]> {
 async function setupWorkspace(request: APIRequestContext, shortName: string): Promise<{
     companyId: number;
     agentId: number;
+    sprintId: number;
 }> {
     const compRes = await request.post('/api/companies', {
         data: { name: `Tool Test Co (${shortName})`, short_name: shortName, color: '#0ea5e9' },
     });
     expect(compRes.ok(), `create company: ${await compRes.text()}`).toBeTruthy();
     const company = await compRes.json();
+
+    const sprintRes = await request.post('/api/sprints', {
+        data: {
+            company_id: company.id,
+            name: 'Test Sprint',
+            goal: '',
+            start_date: '2024-01-01T00:00:00Z',
+            end_date: '2024-12-31T00:00:00Z',
+        },
+    });
+    expect(sprintRes.ok(), `create sprint: ${await sprintRes.text()}`).toBeTruthy();
+    const sprint = await sprintRes.json();
 
     const provRes = await request.post('/api/providers', {
         data: {
@@ -126,7 +139,7 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
     expect(agentRes.ok(), `create agent: ${await agentRes.text()}`).toBeTruthy();
     const agent = await agentRes.json();
 
-    return { companyId: company.id, agentId: agent.id };
+    return { companyId: company.id, agentId: agent.id, sprintId: sprint.id };
 }
 
 /**
@@ -138,10 +151,12 @@ async function runTask(
     companyId: number,
     agentId: number,
     title: string,
+    sprintId: number,
 ): Promise<number> {
     const taskRes = await request.post('/api/tasks', {
         data: {
             company_id: companyId,
+            sprint_id: sprintId,
             title,
             task_type: 'implement',
             agent_id: agentId,
@@ -184,12 +199,14 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
     const SHORT = 'tool-test';
     let companyId: number;
     let agentId: number;
+    let sprintId: number;
 
     test.beforeAll(async ({ request }) => {
         await request.post('/api/e2e/wipe-db');
         const ws = await setupWorkspace(request, SHORT);
         companyId = ws.companyId;
         agentId = ws.agentId;
+        sprintId = ws.sprintId;
     });
 
     test.beforeEach(async ({ request }) => {
@@ -223,7 +240,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Task complete.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: fetch test page');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: fetch test page', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
@@ -262,7 +279,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             { text: 'Done.' },
         ]);
 
-        const taskId = await runTask(request, companyId, agentId, 'web_fetch: connection error');
+        const taskId = await runTask(request, companyId, agentId, 'web_fetch: connection error', sprintId);
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
         const reqs = await getMockRequests(request);
@@ -297,7 +314,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: large body truncation');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: large body truncation', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
@@ -345,7 +362,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: navigate to test page');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: navigate to test page', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -400,7 +417,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_text from selector');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_text from selector', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -446,7 +463,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: execute_js');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: execute_js', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -497,7 +514,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_html');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_html', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -568,7 +585,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: click and type');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: click and type', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -615,7 +632,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: screenshot');
+            const taskId = await runTask(request, companyId, agentId, 'browser_use: screenshot', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -655,7 +672,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             { text: 'Done.' },
         ]);
 
-        const taskId = await runTask(request, companyId, agentId, 'browser_use: unknown host error');
+        const taskId = await runTask(request, companyId, agentId, 'browser_use: unknown host error', sprintId);
         await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
         const reqs = await getMockRequests(request);
@@ -701,7 +718,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'dual tool: web_fetch + browser_use');
+            const taskId = await runTask(request, companyId, agentId, 'dual tool: web_fetch + browser_use', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
@@ -758,7 +775,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
@@ -806,7 +823,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
@@ -849,7 +866,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
@@ -888,7 +905,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text');
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text', sprintId);
             await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
