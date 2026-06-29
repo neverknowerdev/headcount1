@@ -18,6 +18,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/deps"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -112,6 +113,9 @@ func main() {
 	if err := db.New(database).MigrateServerTokensToAccounts(context.Background()); err != nil {
 		log.Printf("Warning: MCP account migration failed: %v", err)
 	}
+
+	// Check and install Python dependencies (markitdown for web_fetch markdown conversion).
+	deps.EnsurePythonDeps()
 
 	hub := eventhub.NewHub()
 
