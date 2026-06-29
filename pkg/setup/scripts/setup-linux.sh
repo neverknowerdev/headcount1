@@ -1,37 +1,165 @@
 #!/bin/sh
-set -e
+# Paperclip setup script — Linux
+# Checks and installs all runtime dependencies.
+# Exits 1 with a summary if any dependency could not be installed.
 
-# ── python3 ──────────────────────────────────────────────────────────────────
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "[setup] python3 not found — attempting to install..."
+FAILED=""
+
+add_failure() {
+    echo "[setup] WARNING: $1 — $2"
+    FAILED="${FAILED}
+  • $1: $2"
+}
+
+try_install_pkg() {
+    PKG="$1"
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get install -y python3 python3-pip
+        apt-get install -y "$PKG" >/dev/null 2>&1
     elif command -v dnf >/dev/null 2>&1; then
-        dnf install -y python3 python3-pip
+        dnf install -y "$PKG" >/dev/null 2>&1
     elif command -v yum >/dev/null 2>&1; then
-        yum install -y python3 python3-pip
+        yum install -y "$PKG" >/dev/null 2>&1
     elif command -v pacman >/dev/null 2>&1; then
-        pacman -Sy --noconfirm python python-pip
+        pacman -Sy --noconfirm "$PKG" >/dev/null 2>&1
     else
-        echo "[setup] ERROR: python3 not found and no supported package manager available (apt-get, dnf, yum, pacman)" >&2
-        exit 1
+        return 1
+    fi
+}
+
+# ── git ──────────────────────────────────────────────────────────────────────
+if command -v git >/dev/null 2>&1; then
+    echo "[setup] git: OK"
+else
+    echo "[setup] git: not found — installing..."
+    if try_install_pkg git && command -v git >/dev/null 2>&1; then
+        echo "[setup] git: installed"
+    else
+        add_failure "git" "not found and could not be installed — install it manually"
     fi
 fi
 
-# ── pip3 / pip ───────────────────────────────────────────────────────────────
-if ! command -v pip3 >/dev/null 2>&1 && ! python3 -m pip --version >/dev/null 2>&1; then
-    echo "[setup] pip not found — attempting ensurepip..."
-    python3 -m ensurepip --upgrade || true
+# ── python3 ──────────────────────────────────────────────────────────────────
+if command -v python3 >/dev/null 2>&1; then
+    echo "[setup] python3: OK"
+else
+    echo "[setup] python3: not found — installing..."
+    if try_install_pkg python3 && command -v python3 >/dev/null 2>&1; then
+        echo "[setup] python3: installed"
+    else
+        add_failure "python3" "not found and could not be installed — install it manually"
+    fi
+fi
+
+# ── pip ──────────────────────────────────────────────────────────────────────
+if command -v python3 >/dev/null 2>&1; then
+    if ! python3 -m pip --version >/dev/null 2>&1; then
+        echo "[setup] pip: not found — trying ensurepip..."
+        python3 -m ensurepip --upgrade >/dev/null 2>&1 || try_install_pkg python3-pip >/dev/null 2>&1
+        if ! python3 -m pip --version >/dev/null 2>&1; then
+            add_failure "pip" "not available — run: python3 -m ensurepip --upgrade"
+        else
+            echo "[setup] pip: installed"
+        fi
+    else
+        echo "[setup] pip: OK"
+    fi
 fi
 
 # ── markitdown ───────────────────────────────────────────────────────────────
-if ! python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
-    echo "[setup] markitdown not found — installing..."
-    python3 -m pip install --quiet markitdown
-    if ! python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
-        echo "[setup] ERROR: markitdown install reported success but import still fails" >&2
-        exit 1
+if command -v python3 >/dev/null 2>&1; then
+    if python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
+        echo "[setup] markitdown: OK"
+    else
+        echo "[setup] markitdown: not found — installing..."
+        if python3 -m pip install --quiet markitdown >/dev/null 2>&1 && \
+           python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
+            echo "[setup] markitdown: installed"
+        else
+            add_failure "markitdown" "pip install failed — web_fetch markdown conversion will be unavailable"
+        fi
     fi
+fi
+
+# ── chromium ─────────────────────────────────────────────────────────────────
+chromium_ok=0
+for p in /opt/pw-browsers/chromium-*/chrome-linux/chrome \
+         /usr/bin/chromium /usr/bin/chromium-browser \
+         /usr/bin/google-chrome /usr/local/bin/chromium; do
+    # expand glob
+    for f in $p; do
+        if [ -x "$f" ]; then
+            chromium_ok=1
+            echo "[setup] chromium: OK ($f)"
+            break 2
+        fi
+    done
+done
+if [ "$chromium_ok" -eq 0 ]; then
+    echo "[setup] chromium: not found — installing..."
+    if try_install_pkg chromium-browser >/dev/null 2>&1 || try_install_pkg chromium >/dev/null 2>&1; then
+        if command -v chromium-browser >/dev/null 2>&1 || command -v chromium >/dev/null 2>&1; then
+            echo "[setup] chromium: installed"
+        else
+            add_failure "chromium" "install attempted but binary not found — browser_use tool will be unavailable"
+        fi
+    else
+        add_failure "chromium" "could not be installed — install chromium-browser manually for browser_use support"
+    fi
+fi
+
+# ── gh CLI ───────────────────────────────────────────────────────────────────
+if command -v gh >/dev/null 2>&1; then
+    echo "[setup] gh CLI: OK"
+else
+    echo "[setup] gh CLI: not found — installing..."
+    installed=0
+    # Try GitHub's official apt repo on Debian/Ubuntu
+    if command -v apt-get >/dev/null 2>&1; then
+        (curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
+              -o /usr/share/keyrings/githubcli-archive-keyring.gpg 2>/dev/null && \
+         echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/githubcli-archive-keyring.gpg] https://cli.github.com/packages stable main" \
+              > /etc/apt/sources.list.d/github-cli.list 2>/dev/null && \
+         apt-get update -qq 2>/dev/null && \
+         apt-get install -y gh 2>/dev/null) && installed=1
+    elif command -v dnf >/dev/null 2>&1; then
+        (dnf install -y 'dnf-command(config-manager)' 2>/dev/null && \
+         dnf config-manager --add-repo https://cli.github.com/packages/rpm/gh-cli.repo 2>/dev/null && \
+         dnf install -y gh 2>/dev/null) && installed=1
+    fi
+    if [ "$installed" -eq 1 ] && command -v gh >/dev/null 2>&1; then
+        echo "[setup] gh CLI: installed"
+    else
+        add_failure "gh CLI" "could not be installed — install manually from https://cli.github.com for GitHub MCP server support"
+    fi
+fi
+
+# ── github-mcp-server ────────────────────────────────────────────────────────
+if command -v github-mcp-server >/dev/null 2>&1; then
+    echo "[setup] github-mcp-server: OK"
+else
+    echo "[setup] github-mcp-server: not found — installing..."
+    installed=0
+    if command -v go >/dev/null 2>&1; then
+        go install github.com/github/github-mcp-server@latest >/dev/null 2>&1 && installed=1
+    fi
+    if [ "$installed" -eq 1 ] && command -v github-mcp-server >/dev/null 2>&1; then
+        echo "[setup] github-mcp-server: installed"
+    else
+        add_failure "github-mcp-server" "could not be installed — install via: go install github.com/github/github-mcp-server@latest"
+    fi
+fi
+
+# ── codegraph ────────────────────────────────────────────────────────────────
+if command -v codegraph >/dev/null 2>&1; then
+    echo "[setup] codegraph: OK"
+else
+    add_failure "codegraph" "not found — code intelligence features will be unavailable (install codegraph and add it to PATH)"
+fi
+
+# ── summary ──────────────────────────────────────────────────────────────────
+if [ -n "$FAILED" ]; then
+    printf '\n[setup] Some dependencies are missing or could not be installed:%s\n' "$FAILED" >&2
+    exit 1
 fi
 
 echo "[setup] All dependencies OK"
