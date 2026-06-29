@@ -714,4 +714,190 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await server.stop();
         }
     });
+
+    // -----------------------------------------------------------------------
+    // web_fetch to_markdown tests
+    // -----------------------------------------------------------------------
+
+    test('web_fetch to_markdown=true (default): returns Markdown instead of raw HTML', async ({ request }) => {
+        // Note: markitdown escapes underscores in plain text, so markers use only
+        // alphanumeric characters to avoid needing to match the escaped form.
+        const html = `
+            <html>
+              <head><title>Markdown Test Page</title></head>
+              <body>
+                <h1>Top Heading</h1>
+                <p>A paragraph with <strong>bold text</strong> and a
+                   <a href="https://example.com">link</a>.</p>
+                <ul>
+                  <li>Item one</li>
+                  <li>Item two</li>
+                </ul>
+                <p>Marker: MDDEFAULT88</p>
+              </body>
+            </html>`;
+        const server = await startTestServer(html);
+
+        try {
+            // to_markdown is omitted — the tool should default to true
+            await setScenario(request, [
+                {
+                    tool_call: {
+                        id: 'md1',
+                        name: 'web_fetch',
+                        arguments: { url: server.url },
+                    },
+                },
+                {
+                    tool_call: {
+                        id: 'ftmd1',
+                        name: 'finish_task',
+                        arguments: { task_status: 'in-review', finish_status: 'Got markdown.' },
+                    },
+                },
+                { text: 'Done.' },
+            ]);
+
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default');
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+
+            const reqs = await getMockRequests(request);
+            const toolResults = extractToolResults(reqs);
+            const result = toolResults.find((r) => r.includes('MDDEFAULT88'));
+            expect(result, `expected result containing "MDDEFAULT88":\n${JSON.stringify(toolResults)}`).toBeTruthy();
+
+            // Markdown output should use # headings, not <h1> tags.
+            expect(result).toContain('# Top Heading');
+            expect(result).not.toContain('<h1>');
+            // Bold should be ** not <strong>.
+            expect(result).toContain('**bold text**');
+            expect(result).not.toContain('<strong>');
+        } finally {
+            await server.stop();
+        }
+    });
+
+    test('web_fetch to_markdown=true (explicit): returns Markdown', async ({ request }) => {
+        const html = `
+            <html>
+              <body>
+                <h2>Section</h2>
+                <p>Marker: MDEXPLICIT77</p>
+              </body>
+            </html>`;
+        const server = await startTestServer(html);
+
+        try {
+            await setScenario(request, [
+                {
+                    tool_call: {
+                        id: 'md2',
+                        name: 'web_fetch',
+                        arguments: { url: server.url, to_markdown: true },
+                    },
+                },
+                {
+                    tool_call: {
+                        id: 'ftmd2',
+                        name: 'finish_task',
+                        arguments: { task_status: 'in-review', finish_status: 'Got markdown.' },
+                    },
+                },
+                { text: 'Done.' },
+            ]);
+
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true');
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+
+            const reqs = await getMockRequests(request);
+            const toolResults = extractToolResults(reqs);
+            const result = toolResults.find((r) => r.includes('MDEXPLICIT77'));
+            expect(result, `expected result containing "MDEXPLICIT77"`).toBeTruthy();
+            expect(result).toContain('## Section');
+            expect(result).not.toContain('<h2>');
+        } finally {
+            await server.stop();
+        }
+    });
+
+    test('web_fetch to_markdown=false: returns raw HTML body', async ({ request }) => {
+        const html = `
+            <html>
+              <body>
+                <h1>Raw HTML</h1>
+                <p>Marker: RAWHTML66</p>
+              </body>
+            </html>`;
+        const server = await startTestServer(html);
+
+        try {
+            await setScenario(request, [
+                {
+                    tool_call: {
+                        id: 'md3',
+                        name: 'web_fetch',
+                        arguments: { url: server.url, to_markdown: false },
+                    },
+                },
+                {
+                    tool_call: {
+                        id: 'ftmd3',
+                        name: 'finish_task',
+                        arguments: { task_status: 'in-review', finish_status: 'Got raw HTML.' },
+                    },
+                },
+                { text: 'Done.' },
+            ]);
+
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML');
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+
+            const reqs = await getMockRequests(request);
+            const toolResults = extractToolResults(reqs);
+            const result = toolResults.find((r) => r.includes('RAWHTML66'));
+            expect(result, `expected result containing "RAWHTML66"`).toBeTruthy();
+            // Raw mode must preserve HTML tags.
+            expect(result).toContain('<h1>');
+            expect(result).toContain('<p>');
+            expect(result).not.toContain('# Raw HTML');
+        } finally {
+            await server.stop();
+        }
+    });
+
+    test('web_fetch to_markdown: plain-text content is returned without crashing', async ({ request }) => {
+        // markitdown receives plain text (no HTML tags) and should still return content.
+        const server = await startTestServer('Plain text content: NOHTMLTAGS55');
+
+        try {
+            await setScenario(request, [
+                {
+                    tool_call: {
+                        id: 'md4',
+                        name: 'web_fetch',
+                        arguments: { url: server.url },
+                    },
+                },
+                {
+                    tool_call: {
+                        id: 'ftmd4',
+                        name: 'finish_task',
+                        arguments: { task_status: 'in-review', finish_status: 'Got content.' },
+                    },
+                },
+                { text: 'Done.' },
+            ]);
+
+            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text');
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+
+            const reqs = await getMockRequests(request);
+            const toolResults = extractToolResults(reqs);
+            // Content must be present regardless of conversion success.
+            const result = toolResults.find((r) => r.includes('NOHTMLTAGS55') || r.includes('HTTP'));
+            expect(result, `expected a result with content:\n${JSON.stringify(toolResults)}`).toBeTruthy();
+        } finally {
+            await server.stop();
+        }
+    });
 });
