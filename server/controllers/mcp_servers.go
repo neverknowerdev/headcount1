@@ -17,6 +17,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/setup"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -191,6 +192,13 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.saveMCPServerToDisk(s)
+	if s.Deps != "" {
+		go func() {
+			if err := setup.InstallNpmDeps(context.Background(), s.Deps); err != nil {
+				log.Printf("mcp npm deps (create %q): %v", s.Name, err)
+			}
+		}()
+	}
 	api.respondJSON(w, http.StatusCreated, s)
 }
 
@@ -250,6 +258,13 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.saveMCPServerToDisk(s)
+	if s.Deps != "" {
+		go func() {
+			if err := setup.InstallNpmDeps(context.Background(), s.Deps); err != nil {
+				log.Printf("mcp npm deps (update %q): %v", s.Name, err)
+			}
+		}()
+	}
 	api.respondJSON(w, http.StatusOK, s)
 }
 
