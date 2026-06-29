@@ -194,6 +194,7 @@ type MCPServer struct {
 	LastError     string       `json:"last_error" gorm:"type:text"`
 	InitStatus    string       `json:"init_status" gorm:"default:''"` // codegraph lifecycle: "initializing", "ready", "error: ..."
 	DepsInstalled  bool         `json:"deps_installed" gorm:"-"` // computed at runtime
+	Deps           string       `json:"deps" gorm:"type:text"`   // JSON array of npm packages to pre-install, e.g. ["@modelcontextprotocol/server-gdrive"]
 	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
 	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
 	WorkDir        string       `json:"work_dir"` // working directory for stdio servers (e.g. project repo path)

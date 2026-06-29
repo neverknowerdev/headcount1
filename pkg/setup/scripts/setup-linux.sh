@@ -80,6 +80,20 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# ── Node.js / npm ────────────────────────────────────────────────────────────
+if command -v npm >/dev/null 2>&1; then
+    echo "[setup] npm: OK"
+else
+    echo "[setup] npm: not found — installing Node.js..."
+    if try_install_pkg nodejs npm && command -v npm >/dev/null 2>&1; then
+        echo "[setup] npm: installed"
+    elif try_install_pkg nodejs && command -v npm >/dev/null 2>&1; then
+        echo "[setup] npm: installed"
+    else
+        add_failure "npm" "could not be installed — install Node.js from https://nodejs.org for MCP server npm packages"
+    fi
+fi
+
 # ── chromium ─────────────────────────────────────────────────────────────────
 chromium_ok=0
 for p in /opt/pw-browsers/chromium-*/chrome-linux/chrome \

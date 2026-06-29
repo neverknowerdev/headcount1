@@ -105,6 +105,23 @@ if ($pythonCmd) {
     }
 }
 
+# ── Node.js / npm ────────────────────────────────────────────────────────────
+if (Test-Command npm) {
+    Write-Host "[setup] npm: OK"
+} else {
+    Write-Host "[setup] npm: not found — installing Node.js..."
+    if (Invoke-Winget 'OpenJS.NodeJS') {
+        $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'User')
+        if (Test-Command npm) {
+            Write-Host "[setup] npm: installed"
+        } else {
+            Add-Failure 'npm' 'installed but not yet on PATH — restart or install Node.js from https://nodejs.org'
+        }
+    } else {
+        Add-Failure 'npm' 'could not be installed — download Node.js from https://nodejs.org for MCP server npm packages'
+    }
+}
+
 # ── chromium ─────────────────────────────────────────────────────────────────
 $chromiumPaths = @(
     "$env:LOCALAPPDATA\Chromium\Application\chrome.exe",

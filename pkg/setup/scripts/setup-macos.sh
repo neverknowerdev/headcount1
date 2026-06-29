@@ -75,6 +75,18 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
+# ── Node.js / npm ────────────────────────────────────────────────────────────
+if command -v npm >/dev/null 2>&1; then
+    echo "[setup] npm: OK"
+else
+    echo "[setup] npm: not found — installing Node.js via Homebrew..."
+    if command -v brew >/dev/null 2>&1 && brew_install node && command -v npm >/dev/null 2>&1; then
+        echo "[setup] npm: installed"
+    else
+        add_failure "npm" "could not be installed — install Node.js from https://nodejs.org or: brew install node"
+    fi
+fi
+
 # ── chromium ─────────────────────────────────────────────────────────────────
 chromium_ok=0
 for p in "/Applications/Chromium.app/Contents/MacOS/Chromium" \

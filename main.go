@@ -132,8 +132,12 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
-	// Discover and cache tools for all enabled MCP servers in the background.
-	go srv.CacheMCPTools(context.Background())
+	// Install npm packages declared in MCP server Deps fields, then cache tools.
+	// InstallMCPNpmDeps must run after setup.Run() so npm is available.
+	go func() {
+		srv.InstallMCPNpmDeps(context.Background())
+		srv.CacheMCPTools(context.Background())
+	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 
 	// Resume codegraph init for any project whose knowledge graph isn't ready yet.

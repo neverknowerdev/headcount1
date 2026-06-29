@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"os/exec"
 	"time"
 
 	"agent-orchestrator/db"
@@ -63,6 +64,42 @@ func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
 			s.CacheMCPTools(ctx)
 		case <-ctx.Done():
 			return
+		}
+	}
+}
+
+// InstallMCPNpmDeps reads the Deps field from every MCP server in the database
+// and installs any npm packages that are not already present globally.
+// Runs after the platform setup script so npm is guaranteed to exist.
+func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
+	pkgs, err := db.New(s.db).ListAllMCPNpmDeps(ctx)
+	if err != nil {
+		log.Printf("mcp npm deps: failed to query deps: %v", err)
+		return
+	}
+	if len(pkgs) == 0 {
+		return
+	}
+
+	npmPath, err := exec.LookPath("npm")
+	if err != nil {
+		log.Println("mcp npm deps: npm not found — skipping package pre-installation")
+		return
+	}
+
+	for _, pkg := range pkgs {
+		// Fast check: npm list -g returns 0 if the package is already installed.
+		check := exec.CommandContext(ctx, npmPath, "list", "-g", "--depth=0", pkg)
+		if check.Run() == nil {
+			log.Printf("mcp npm deps: %s already installed", pkg)
+			continue
+		}
+		log.Printf("mcp npm deps: installing %s...", pkg)
+		install := exec.CommandContext(ctx, npmPath, "install", "-g", pkg)
+		if out, err := install.CombinedOutput(); err != nil {
+			log.Printf("mcp npm deps: failed to install %s: %v\n%s", pkg, err, out)
+		} else {
+			log.Printf("mcp npm deps: %s installed", pkg)
 		}
 	}
 }
