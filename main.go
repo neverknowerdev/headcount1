@@ -18,7 +18,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
-	"agent-orchestrator/pkg/deps"
+	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -114,8 +114,10 @@ func main() {
 		log.Printf("Warning: MCP account migration failed: %v", err)
 	}
 
-	// Check and install Python dependencies (markitdown for web_fetch markdown conversion).
-	deps.EnsurePythonDeps()
+	// Run the platform setup script (checks / installs Python deps such as markitdown).
+	if err := setup.Run(); err != nil {
+		log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
+	}
 
 	hub := eventhub.NewHub()
 

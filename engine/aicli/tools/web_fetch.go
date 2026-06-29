@@ -12,7 +12,7 @@ import (
 	"time"
 
 	"agent-orchestrator/engine/aicli"
-	"agent-orchestrator/pkg/deps"
+	"agent-orchestrator/pkg/setup"
 )
 
 // WebFetch fetches the content of a URL, optionally converting HTML to Markdown.
@@ -86,7 +86,7 @@ func (t *WebFetch) Execute(ctx context.Context, args json.RawMessage) (string, e
 		return fmt.Sprintf("HTTP %d\n%s", resp.StatusCode, string(body)), nil
 	}
 
-	if !deps.MarkitdownAvailable() {
+	if !setup.MarkitdownAvailable() {
 		return fmt.Sprintf("HTTP %d\n(markdown conversion unavailable — markitdown not installed)\n%s", resp.StatusCode, string(body)), nil
 	}
 

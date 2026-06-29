@@ -10,6 +10,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/server/controllers"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -150,6 +151,15 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{id}", api.UpdateProvider)
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
+	})
+
+	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
+		errMsg := setup.StartupError()
+		if errMsg == "" {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+		} else {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": errMsg})
+		}
 	})
 
 	r.Route("/backup", func(r chi.Router) {
