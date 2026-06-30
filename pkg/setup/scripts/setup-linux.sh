@@ -147,22 +147,6 @@ else
     fi
 fi
 
-# ── github-mcp-server ────────────────────────────────────────────────────────
-if command -v github-mcp-server >/dev/null 2>&1; then
-    echo "[setup] github-mcp-server: OK"
-else
-    echo "[setup] github-mcp-server: not found — installing..."
-    installed=0
-    if command -v go >/dev/null 2>&1; then
-        go install github.com/github/github-mcp-server@latest >/dev/null 2>&1 && installed=1
-    fi
-    if [ "$installed" -eq 1 ] && command -v github-mcp-server >/dev/null 2>&1; then
-        echo "[setup] github-mcp-server: installed"
-    else
-        add_failure "github-mcp-server" "could not be installed — install via: go install github.com/github/github-mcp-server@latest"
-    fi
-fi
-
 # ── codegraph ────────────────────────────────────────────────────────────────
 if command -v codegraph >/dev/null 2>&1; then
     echo "[setup] codegraph: OK"

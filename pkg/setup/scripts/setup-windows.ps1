@@ -162,24 +162,6 @@ if (Test-Command gh) {
     }
 }
 
-# ── github-mcp-server ────────────────────────────────────────────────────────
-if (Test-Command github-mcp-server) {
-    Write-Host "[setup] github-mcp-server: OK"
-} else {
-    Write-Host "[setup] github-mcp-server: not found — installing..."
-    $installed = $false
-    if (Test-Command go) {
-        go install github.com/github/github-mcp-server@latest 2>&1 | Out-Null
-        $installed = $LASTEXITCODE -eq 0
-    }
-    if (-not $installed) { $installed = Invoke-Winget 'GitHub.mcp-server' }
-    if ($installed -and (Test-Command github-mcp-server)) {
-        Write-Host "[setup] github-mcp-server: installed"
-    } else {
-        Add-Failure 'github-mcp-server' 'could not be installed — run: go install github.com/github/github-mcp-server@latest'
-    }
-}
-
 # ── codegraph ────────────────────────────────────────────────────────────────
 if (Test-Command codegraph) {
     Write-Host "[setup] codegraph: OK"

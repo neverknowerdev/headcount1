@@ -125,20 +125,6 @@ else
     fi
 fi
 
-# ── github-mcp-server ────────────────────────────────────────────────────────
-if command -v github-mcp-server >/dev/null 2>&1; then
-    echo "[setup] github-mcp-server: OK"
-else
-    echo "[setup] github-mcp-server: not found — installing via Homebrew..."
-    if command -v brew >/dev/null 2>&1 && \
-       HOMEBREW_NO_AUTO_UPDATE=1 brew install github-mcp-server >/dev/null 2>&1 && \
-       command -v github-mcp-server >/dev/null 2>&1; then
-        echo "[setup] github-mcp-server: installed"
-    else
-        add_failure "github-mcp-server" "could not be installed — run: brew install github-mcp-server"
-    fi
-fi
-
 # ── codegraph ────────────────────────────────────────────────────────────────
 if command -v codegraph >/dev/null 2>&1; then
     echo "[setup] codegraph: OK"
