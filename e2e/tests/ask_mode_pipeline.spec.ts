@@ -12,6 +12,8 @@
 
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
+import * as fs from 'fs';
+import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
 import type { ScenarioEntry } from '../fixtures/mock-provider-server';
@@ -180,6 +182,15 @@ test.describe.serial('AskMode pipeline: refinement → implementation → testin
     let sprintId: number;
 
     test.beforeAll(async ({ request }) => {
+        // Remove any leftover folder from a prior failed run before wiping the DB,
+        // so this company's directory doesn't pollute other tests' filesystem-sync
+        // scans (CreateCompany writes companies/{shortName}/ to disk immediately).
+        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        for (const subDir of [`data/${SHORT}`, `companies/${SHORT}`]) {
+            const fullPath = path.join(paperclipBase, subDir);
+            if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+        }
+
         await request.post('/api/e2e/wipe-db');
         const ws = await setupWorkspace(request, SHORT);
         companyId = ws.companyId;
@@ -189,6 +200,16 @@ test.describe.serial('AskMode pipeline: refinement → implementation → testin
 
     test.beforeEach(async ({ request }) => {
         await resetMockProvider(request);
+    });
+
+    test.afterAll(async () => {
+        // Clean up this suite's on-disk company folder so it doesn't leak into
+        // later test files' filesystem-sync scans.
+        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        for (const subDir of [`data/${SHORT}`, `companies/${SHORT}`]) {
+            const fullPath = path.join(paperclipBase, subDir);
+            if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+        }
     });
 
     test('full pipeline: batched research questions feed refinement, then implementation and testing complete the task', async ({ request }) => {
