@@ -510,7 +510,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	toolResultStore := aicli.NewToolResultStore()
 	registry.Register(tools.NewMinimizeToolResult(toolResultStore.Minimize))
 	registry.Register(tools.NewExpandToolResult(toolResultStore.Expand))
-	systemPrompt += aicli.ToolCompressionPrompt
 
 	// MCP listing token costs — set if any external MCP servers are active for this run.
 	var listingCostTotal int

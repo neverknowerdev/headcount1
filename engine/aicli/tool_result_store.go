@@ -2,17 +2,17 @@ package aicli
 
 import (
 	"fmt"
+	"sort"
 	"strings"
 )
 
 // toolResultEntry holds the original and minimized versions of a single tool call.
 type toolResultEntry struct {
-	toolName    string
-	fullArgs    string
-	fullOutput  string
-	summary     string
-	keyFindings []string
-	minimized   bool
+	toolName  string
+	fullArgs  string
+	fullOutput string
+	summary   string
+	minimized bool
 }
 
 // ToolResultStore tracks tool call results and their model-provided summaries so
@@ -40,17 +40,29 @@ func (s *ToolResultStore) Store(toolCallID, toolName, fullArgs, fullOutput strin
 	}
 }
 
-// Minimize records the model's compact summary and key findings for a tool call
-// and marks it as minimized. Future history sends use the compact form.
-func (s *ToolResultStore) Minimize(toolCallID, summary string, keyFindings []string) error {
+// Minimize records the model's compact summary for a tool call and marks it as
+// minimized. Future history sends use the compact form.
+func (s *ToolResultStore) Minimize(toolCallID, summary string) error {
 	e, ok := s.entries[toolCallID]
 	if !ok {
 		return fmt.Errorf("tool_call_id %q not found in store", toolCallID)
 	}
 	e.summary = summary
-	e.keyFindings = keyFindings
 	e.minimized = true
 	return nil
+}
+
+// UnminimizedIDs returns the tool_call_ids of all entries not yet minimized,
+// sorted for stable output.
+func (s *ToolResultStore) UnminimizedIDs() []string {
+	var ids []string
+	for id, e := range s.entries {
+		if !e.minimized {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	return ids
 }
 
 // HasUnminimized reports whether any stored tool call has not yet been minimized.
@@ -147,16 +159,7 @@ func (s *ToolResultStore) TransformHistory(history []Message, expandedIDs map[st
 	return result
 }
 
-// compactContent formats the key findings for a minimized tool result entry.
+// compactContent returns the model-provided summary for a minimized entry.
 func compactContent(e *toolResultEntry) string {
-	var sb strings.Builder
-	sb.WriteString(e.summary)
-	if len(e.keyFindings) > 0 {
-		sb.WriteString("\nKey findings:")
-		for _, f := range e.keyFindings {
-			sb.WriteString("\n- ")
-			sb.WriteString(f)
-		}
-	}
-	return sb.String()
+	return e.summary
 }

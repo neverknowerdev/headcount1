@@ -12,13 +12,21 @@ import (
 	"sync/atomic"
 )
 
+type lineResult struct {
+	line string
+	err  error
+}
+
 // stdioClient communicates with an MCP server via a subprocess's stdin/stdout.
 type stdioClient struct {
-	cmd    *exec.Cmd
-	stdin  io.WriteCloser
-	stdout *bufio.Reader
-	mu     sync.Mutex
-	nextID atomic.Int32
+	cmd     *exec.Cmd
+	stdin   io.WriteCloser
+	stdout  *bufio.Reader
+	mu      sync.Mutex
+	nextID  atomic.Int32
+	linesCh chan lineResult // fed by background reader goroutine
+	closeOnce sync.Once
+	doneCh  chan struct{} // closed to stop the background reader
 }
 
 // newStdioClient spawns the MCP server subprocess. extraEnv is a list of
@@ -46,11 +54,39 @@ func newStdioClient(command string, args []string, extraEnv []string, dir string
 		return nil, fmt.Errorf("stdio mcp: start %q: %w", command, err)
 	}
 
-	return &stdioClient{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewReader(stdoutPipe),
-	}, nil
+	c := &stdioClient{
+		cmd:     cmd,
+		stdin:   stdin,
+		stdout:  bufio.NewReader(stdoutPipe),
+		linesCh: make(chan lineResult, 64),
+		doneCh:  make(chan struct{}),
+	}
+	go c.readLoop()
+	return c, nil
+}
+
+// readLoop reads lines from the subprocess stdout and forwards them to linesCh.
+// It runs for the lifetime of the client and exits when the pipe is closed or
+// doneCh is signalled.
+func (c *stdioClient) readLoop() {
+	defer close(c.linesCh)
+	for {
+		line, err := c.stdout.ReadString('\n')
+		if line != "" {
+			select {
+			case c.linesCh <- lineResult{line: line}:
+			case <-c.doneCh:
+				return
+			}
+		}
+		if err != nil {
+			select {
+			case c.linesCh <- lineResult{err: err}:
+			case <-c.doneCh:
+			}
+			return
+		}
+	}
 }
 
 func (c *stdioClient) send(ctx context.Context, method string, params any) (*Response, error) {
@@ -85,26 +121,30 @@ func (c *stdioClient) send(ctx context.Context, method string, params any) (*Res
 		return nil, fmt.Errorf("stdio mcp: write: %w", err)
 	}
 
-	// Read responses until we find the one with our ID (skip notifications).
+	// Read from the background reader, respecting context cancellation.
 	for {
-		if ctx.Err() != nil {
+		select {
+		case <-ctx.Done():
 			return nil, ctx.Err()
+		case r, ok := <-c.linesCh:
+			if !ok {
+				return nil, fmt.Errorf("stdio mcp: reader closed")
+			}
+			if r.err != nil {
+				return nil, fmt.Errorf("stdio mcp: read: %w", r.err)
+			}
+			var resp Response
+			if err := json.Unmarshal([]byte(r.line), &resp); err != nil {
+				continue // skip unparseable lines (e.g. server log output)
+			}
+			if resp.ID != id {
+				continue // notification or response for a different request
+			}
+			if resp.Error != nil {
+				return nil, resp.Error
+			}
+			return &resp, nil
 		}
-		line, err := c.stdout.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("stdio mcp: read: %w", err)
-		}
-		var resp Response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			continue // skip unparseable lines (e.g. server log output)
-		}
-		if resp.ID != id {
-			continue // notification or response for a different request
-		}
-		if resp.Error != nil {
-			return nil, resp.Error
-		}
-		return &resp, nil
 	}
 }
 
@@ -159,6 +199,9 @@ func (c *stdioClient) CallTool(ctx context.Context, name string, args json.RawMe
 }
 
 func (c *stdioClient) Close() error {
+	c.closeOnce.Do(func() {
+		close(c.doneCh)
+	})
 	c.stdin.Close()
 	return c.cmd.Wait()
 }

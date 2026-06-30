@@ -228,7 +228,12 @@ func (t *cgProxyTool) Execute(ctx context.Context, args json.RawMessage) (string
 		return "", err
 	}
 
-	result, err := client.CallTool(ctx, t.mcpTool, fwdArgs)
+	// Cap individual tool calls to 20 s so a slow or hung codegraph server
+	// never stalls the entire agent loop indefinitely.
+	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
+	result, err := client.CallTool(callCtx, t.mcpTool, fwdArgs)
 	if err != nil {
 		return "", fmt.Errorf("codegraph (%s): %w", entry.project.Name, err)
 	}

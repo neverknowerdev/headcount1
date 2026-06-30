@@ -105,17 +105,17 @@ func toolCallResp(toolCallID, toolName, arguments string) string {
 // TestAgentToolMinimization_HistoryIsCollapsedAfterMinimize verifies the core
 // minimization flow:
 //  1. Model calls bash → gets full output
-//  2. Model calls minimize_tool_result → result stored compactly
+//  2. Agent injects dynamic directive → model calls minimize_tool_result
 //  3. Model gives final answer → history sent to LLM has minimized content
 func TestAgentToolMinimization_HistoryIsCollapsedAfterMinimize(t *testing.T) {
 	const bashOutput = "hello world\n"
 	const minimizeSummary = "Echo returned greeting"
-	const minimizeArgs = `{"tool_call_id":"call_bash_1","summary":"Echo returned greeting","key_findings":["Output: hello world"]}`
+	const minimizeArgs = `{"tool_call_id":"call_bash_1","summary":"Echo returned greeting"}`
 
 	cs := newCaptureServer(t, []string{
 		// Turn 1: model calls bash
 		toolCallResp("call_bash_1", "bash", `{"command":"echo hello world"}`),
-		// Turn 2: model calls minimize_tool_result
+		// Turn 2: model calls minimize_tool_result (prompted by dynamic directive)
 		toolCallResp("call_min_1", "minimize_tool_result", minimizeArgs),
 		// Turn 3: model gives final answer
 		chatResp("Done. The output was: hello world"),
@@ -144,25 +144,31 @@ func TestAgentToolMinimization_HistoryIsCollapsedAfterMinimize(t *testing.T) {
 	reqs := cs.Requests()
 	require.Len(t, reqs, 3, "expected exactly 3 LLM calls")
 
-	// Turn 1 (index 0): bash tool result is NOT yet minimized — full content.
-	// The history at this point only has the initial user message.
-	// (No tool call in history yet.)
-
 	// Turn 2 (index 1): history includes the bash tool call and full result.
-	// The bash output should still be full here (minimization hasn't happened yet).
+	// The dynamic directive asking to minimize should be the last message.
 	req2 := reqs[1]
 	var bashResultFull string
+	var directiveMsg string
 	for _, msg := range req2.Messages {
 		if msg.Role == "tool" && msg.ToolCallID == "call_bash_1" {
 			bashResultFull = msg.Content
 		}
+		if msg.Role == "user" && strings.Contains(msg.Content, "minimize_tool_result") {
+			directiveMsg = msg.Content
+		}
 	}
 	assert.Equal(t, bashOutput, bashResultFull, "bash result should be full before minimization")
+	assert.Contains(t, directiveMsg, "call_bash_1",
+		"dynamic directive should list the unminimized tool_call_id")
+	assert.Contains(t, directiveMsg, "YOU MUST",
+		"dynamic directive should use mandatory language")
 
 	// Turn 3 (index 2): history now includes the minimized bash result.
+	// No directive should be injected since all results are minimized.
 	req3 := reqs[2]
 	var bashResultMinimized string
 	var bashArgsMinimized string
+	var hasDirective bool
 	for _, msg := range req3.Messages {
 		if msg.Role == "tool" && msg.ToolCallID == "call_bash_1" {
 			bashResultMinimized = msg.Content
@@ -174,6 +180,9 @@ func TestAgentToolMinimization_HistoryIsCollapsedAfterMinimize(t *testing.T) {
 				}
 			}
 		}
+		if msg.Role == "user" && strings.Contains(msg.Content, "minimize_tool_result") {
+			hasDirective = true
+		}
 	}
 	assert.Contains(t, bashResultMinimized, minimizeSummary,
 		"bash result in turn 3 should be the compact summary")
@@ -181,13 +190,15 @@ func TestAgentToolMinimization_HistoryIsCollapsedAfterMinimize(t *testing.T) {
 		"full bash output should not appear in turn 3 history")
 	assert.Equal(t, `{"_minimized":true}`, bashArgsMinimized,
 		"bash args in turn 3 should be the minimized placeholder")
+	assert.False(t, hasDirective,
+		"no directive should be injected in turn 3 — all results already minimized")
 }
 
 // TestAgentToolMinimization_MinimizeExcludedWhenNothingPending verifies that
 // minimize_tool_result is absent from the tools list when there are no
 // unminimized results.
 func TestAgentToolMinimization_MinimizeExcludedWhenNothingPending(t *testing.T) {
-	const minimizeArgs = `{"tool_call_id":"call_bash_1","summary":"Echo returned hi","key_findings":["Output: hi"]}`
+	const minimizeArgs = `{"tool_call_id":"call_bash_1","summary":"Echo returned hi"}`
 
 	cs := newCaptureServer(t, []string{
 		toolCallResp("call_bash_1", "bash", `{"command":"echo hi"}`),
@@ -248,7 +259,7 @@ func TestAgentToolMinimization_MinimizeExcludedWhenNothingPending(t *testing.T) 
 //  4. after that turn, collapses again
 func TestAgentToolExpand_RestoresFullContent(t *testing.T) {
 	const bashOutput = "hello world\n"
-	const minArgs = `{"tool_call_id":"call_bash_1","summary":"Echo greeting","key_findings":["Output: hello world"]}`
+	const minArgs = `{"tool_call_id":"call_bash_1","summary":"Echo greeting"}`
 	const expArgs = `{"tool_call_ids":["call_bash_1"]}`
 
 	cs := newCaptureServer(t, []string{
@@ -329,31 +340,28 @@ func TestAgentToolExpand_RestoresFullContent(t *testing.T) {
 // TestMinimizeToolResult_Execute verifies the tool wrapper in isolation.
 func TestMinimizeToolResult_Execute(t *testing.T) {
 	var gotID, gotSummary string
-	var gotFindings []string
 
-	tool := tools.NewMinimizeToolResult(func(id, summary string, findings []string) error {
+	tool := tools.NewMinimizeToolResult(func(id, summary string) error {
 		gotID = id
 		gotSummary = summary
-		gotFindings = findings
 		return nil
 	})
 
 	result, err := tool.Execute(context.Background(),
-		json.RawMessage(`{"tool_call_id":"call_1","summary":"foo bar","key_findings":["a","b"]}`))
+		json.RawMessage(`{"tool_call_id":"call_1","summary":"foo bar"}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "Minimized")
 	assert.Equal(t, "call_1", gotID)
 	assert.Equal(t, "foo bar", gotSummary)
-	assert.Equal(t, []string{"a", "b"}, gotFindings)
 }
 
 // TestMinimizeToolResult_Execute_MissingID verifies that a missing tool_call_id
 // returns an error.
 func TestMinimizeToolResult_Execute_MissingID(t *testing.T) {
-	tool := tools.NewMinimizeToolResult(func(id, summary string, findings []string) error {
+	tool := tools.NewMinimizeToolResult(func(id, summary string) error {
 		return nil
 	})
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{"summary":"foo","key_findings":[]}`))
+	_, err := tool.Execute(context.Background(), json.RawMessage(`{"summary":"foo"}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "tool_call_id")
 }

@@ -45,12 +45,6 @@ type RunLogger interface {
 	FilePath() string
 }
 
-// ToolCompressionPrompt is appended to the system prompt when token-minimization
-// tools are registered. It instructs the model to call minimize_tool_result after
-// every tool result and to use expand_tool_result when it needs full content back.
-const ToolCompressionPrompt = `
-Tool result compression: After every tool call returns a result (except minimize_tool_result and expand_tool_result themselves), you MUST immediately call minimize_tool_result with a concise summary and key_findings array before taking any other action. If you need the full output of a previous tool call later, use expand_tool_result with the relevant tool_call_ids.`
-
 // Agent runs a message-history agentic loop against an OpenAI-compatible
 // LLM provider.  It supports tool calling, retry (via Client.Complete), and
 // structured logging into the existing RunLog infrastructure.
@@ -167,18 +161,27 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 
 		// Take expanded IDs (reset after this turn) and transform history.
 		var expanded map[string]bool
+		var unminimizedIDs []string
 		if a.Store != nil {
 			expanded = a.Store.TakeExpanded()
+			unminimizedIDs = a.Store.UnminimizedIDs()
 		}
 		msgs := pruneMCPHistory(history)
 		if a.Store != nil {
 			msgs = a.Store.TransformHistory(msgs, expanded)
+			if len(unminimizedIDs) > 0 {
+				// Inject a per-turn directive with the exact IDs that need
+				// compressing. This is ephemeral — not appended to history.
+				directive := "YOU MUST call minimize_tool_result for each of these tool_call_ids before taking any other action: " +
+					strings.Join(unminimizedIDs, ", ")
+				msgs = append(msgs, Message{Role: "user", Content: directive})
+			}
 		}
 
 		// Exclude minimize_tool_result from the tools list when nothing needs
 		// minimizing — the model should only see it when there is work to do.
 		toolDefs := a.Registry.Defs()
-		if a.Store != nil && !a.Store.HasUnminimized() {
+		if a.Store != nil && len(unminimizedIDs) == 0 {
 			toolDefs = excludeTool(toolDefs, "minimize_tool_result")
 		}
 
@@ -434,10 +437,16 @@ func excludeTool(defs []ToolDef, name string) []ToolDef {
 	return out
 }
 
-// isMetaTool reports whether name is an internal token-management tool that
-// should not itself be stored in the ToolResultStore or be subject to minimization.
+// isMetaTool reports whether name is a tool whose result should not be stored
+// in the ToolResultStore or appear in the minimize directive. This covers the
+// token-management meta-tools and finish_task (whose result has no content worth
+// compressing and asking the model to minimize it after task completion is noise).
 func isMetaTool(name string) bool {
-	return name == "minimize_tool_result" || name == "expand_tool_result"
+	switch name {
+	case "minimize_tool_result", "expand_tool_result", "finish_task":
+		return true
+	}
+	return false
 }
 
 // msgsToMap converts []Message to []map[string]interface{} so the proxy

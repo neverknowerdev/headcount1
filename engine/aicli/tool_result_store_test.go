@@ -18,15 +18,31 @@ func TestToolResultStore_StoreAndHasUnminimized(t *testing.T) {
 	s.Store("tc_1", "bash", `{"command":"echo hi"}`, "hi\n")
 	assert.True(t, s.HasUnminimized())
 
-	require.NoError(t, s.Minimize("tc_1", "Echo returned hi", []string{"Output: hi"}))
+	require.NoError(t, s.Minimize("tc_1", "Echo returned hi"))
 	assert.False(t, s.HasUnminimized())
+}
+
+// TestToolResultStore_UnminimizedIDs verifies that UnminimizedIDs returns only
+// entries not yet minimized, sorted stably.
+func TestToolResultStore_UnminimizedIDs(t *testing.T) {
+	s := aicli.NewToolResultStore()
+	assert.Empty(t, s.UnminimizedIDs())
+
+	s.Store("tc_2", "bash", `{}`, "b")
+	s.Store("tc_1", "bash", `{}`, "a")
+	ids := s.UnminimizedIDs()
+	assert.Equal(t, []string{"tc_1", "tc_2"}, ids, "IDs should be sorted")
+
+	require.NoError(t, s.Minimize("tc_1", "summary a"))
+	ids = s.UnminimizedIDs()
+	assert.Equal(t, []string{"tc_2"}, ids)
 }
 
 // TestToolResultStore_MinimizeUnknownID verifies an error is returned for an
 // unknown tool_call_id.
 func TestToolResultStore_MinimizeUnknownID(t *testing.T) {
 	s := aicli.NewToolResultStore()
-	err := s.Minimize("no_such_id", "summary", nil)
+	err := s.Minimize("no_such_id", "summary")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "no_such_id")
 }
@@ -53,7 +69,7 @@ func TestToolResultStore_TransformHistory_CollapseMinimized(t *testing.T) {
 	const rawOutput = "UNIQUE_RAW_OUTPUT_12345\n"
 	s := aicli.NewToolResultStore()
 	s.Store("tc_1", "bash", `{"command":"echo hello"}`, rawOutput)
-	require.NoError(t, s.Minimize("tc_1", "Echo returned greeting", []string{"Output: greeting"}))
+	require.NoError(t, s.Minimize("tc_1", "Echo returned greeting"))
 
 	history := []aicli.Message{
 		{
@@ -69,9 +85,8 @@ func TestToolResultStore_TransformHistory_CollapseMinimized(t *testing.T) {
 
 	// Tool call args should be replaced with the minimized placeholder.
 	assert.Equal(t, `{"_minimized":true}`, transformed[0].ToolCalls[0].Function.Arguments)
-	// Tool result content should be the compact form (summary + key findings).
-	assert.Contains(t, transformed[1].Content, "Echo returned greeting")
-	assert.Contains(t, transformed[1].Content, "Output: greeting")
+	// Tool result content should be the compact summary.
+	assert.Equal(t, "Echo returned greeting", transformed[1].Content)
 	// The raw output must not appear in the compact form.
 	assert.NotContains(t, transformed[1].Content, rawOutput)
 }
@@ -81,7 +96,7 @@ func TestToolResultStore_TransformHistory_CollapseMinimized(t *testing.T) {
 func TestToolResultStore_TransformHistory_ExpandedNotCollapsed(t *testing.T) {
 	s := aicli.NewToolResultStore()
 	s.Store("tc_1", "bash", `{"command":"echo hi"}`, "hi\n")
-	require.NoError(t, s.Minimize("tc_1", "Echo returned hi", []string{"Output: hi"}))
+	require.NoError(t, s.Minimize("tc_1", "Echo returned hi"))
 
 	expanded := map[string]bool{"tc_1": true}
 
@@ -142,7 +157,7 @@ func TestToolResultStore_TakeExpanded(t *testing.T) {
 func TestToolResultStore_Expand_MarksExpandedAndReturnsContent(t *testing.T) {
 	s := aicli.NewToolResultStore()
 	s.Store("tc_1", "bash", `{"command":"echo hi"}`, "hi\n")
-	require.NoError(t, s.Minimize("tc_1", "summary", nil))
+	require.NoError(t, s.Minimize("tc_1", "summary"))
 
 	result, err := s.Expand([]string{"tc_1"})
 	require.NoError(t, err)
@@ -171,10 +186,10 @@ func TestToolResultStore_MultipleEntries(t *testing.T) {
 	s.Store("tc_2", "bash", `{"command":"echo b"}`, "b\n")
 
 	// Minimize only tc_1.
-	require.NoError(t, s.Minimize("tc_1", "Echo returned a", []string{"Output: a"}))
+	require.NoError(t, s.Minimize("tc_1", "Echo returned a"))
 	assert.True(t, s.HasUnminimized(), "tc_2 is still unminimized")
 
-	require.NoError(t, s.Minimize("tc_2", "Echo returned b", []string{"Output: b"}))
+	require.NoError(t, s.Minimize("tc_2", "Echo returned b"))
 	assert.False(t, s.HasUnminimized())
 
 	history := []aicli.Message{
@@ -192,6 +207,6 @@ func TestToolResultStore_MultipleEntries(t *testing.T) {
 	transformed := s.TransformHistory(history, nil)
 	assert.Equal(t, `{"_minimized":true}`, transformed[0].ToolCalls[0].Function.Arguments)
 	assert.Equal(t, `{"_minimized":true}`, transformed[0].ToolCalls[1].Function.Arguments)
-	assert.Contains(t, transformed[1].Content, "Echo returned a")
-	assert.Contains(t, transformed[2].Content, "Echo returned b")
+	assert.Equal(t, "Echo returned a", transformed[1].Content)
+	assert.Equal(t, "Echo returned b", transformed[2].Content)
 }
