@@ -88,9 +88,16 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.Session{},
+		&db.PendingQuestion{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
+	}
+
+	// Migrate task_type: rename old values to "tech" for existing rows.
+	if err := database.Exec("UPDATE tasks SET task_type = 'tech' WHERE task_type IN ('plan and implement', 'implement')").Error; err != nil {
+		log.Printf("Warning: task_type migration: %v", err)
 	}
 
 	recoverStaleRuns(database)

@@ -3,6 +3,28 @@ import axios from 'axios';
 import { useStore } from '../store';
 import { useNavigate } from 'react-router-dom';
 
+interface Provider {
+    id: number;
+    name: string;
+    default_model: string;
+    supported_models: string;
+}
+
+interface RoleModelConfig {
+    smart_planner_provider_id: number;
+    smart_planner_model: string;
+    tech_researcher_provider_id: number;
+    tech_researcher_model: string;
+    writing_researcher_provider_id: number;
+    writing_researcher_model: string;
+    design_researcher_provider_id: number;
+    design_researcher_model: string;
+    coder_provider_id: number;
+    coder_model: string;
+    tester_provider_id: number;
+    tester_model: string;
+}
+
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
     const { selectedCompanyId, companies, setCompanies } = useStore();
@@ -23,6 +45,15 @@ export const Settings: React.FC = () => {
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
     const [githubPat, setGithubPat] = useState('');
     const [systemLlmModel, setSystemLlmModel] = useState('');
+    const [roleModels, setRoleModels] = useState<RoleModelConfig>({
+        smart_planner_provider_id: 0, smart_planner_model: '',
+        tech_researcher_provider_id: 0, tech_researcher_model: '',
+        writing_researcher_provider_id: 0, writing_researcher_model: '',
+        design_researcher_provider_id: 0, design_researcher_model: '',
+        coder_provider_id: 0, coder_model: '',
+        tester_provider_id: 0, tester_model: '',
+    });
+    const [providers, setProviders] = useState<Provider[]>([]);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
@@ -30,20 +61,27 @@ export const Settings: React.FC = () => {
     const sshFileInputRef = useRef<HTMLInputElement>(null);
 
     useEffect(() => {
-        const fetchSettings = async () => {
+        const fetchAll = async () => {
             try {
-                const res = await axios.get('/api/settings');
-                if (res.data) {
-                    setBasePath(res.data.base_path || '');
-                    setGitRemoteUrl(res.data.git_remote_url || '');
-                    setGithubPat(res.data.github_pat || '');
-                    setSystemLlmModel(res.data.system_llm_model || '');
+                const [settingsRes, providersRes] = await Promise.all([
+                    axios.get('/api/settings'),
+                    axios.get('/api/providers'),
+                ]);
+                if (settingsRes.data) {
+                    setBasePath(settingsRes.data.base_path || '');
+                    setGitRemoteUrl(settingsRes.data.git_remote_url || '');
+                    setGithubPat(settingsRes.data.github_pat || '');
+                    setSystemLlmModel(settingsRes.data.system_llm_model || '');
+                    if (settingsRes.data.role_models) {
+                        setRoleModels(prev => ({ ...prev, ...settingsRes.data.role_models }));
+                    }
                 }
+                setProviders(providersRes.data || []);
             } catch (e) {
                 console.error(e);
             }
         };
-        fetchSettings();
+        fetchAll();
     }, []);
 
     const handleSave = async (e: React.FormEvent) => {
@@ -54,7 +92,8 @@ export const Settings: React.FC = () => {
                 base_path: basePath,
                 git_remote_url: gitRemoteUrl,
                 github_pat: githubPat,
-                system_llm_model: systemLlmModel
+                system_llm_model: systemLlmModel,
+                role_models: roleModels,
             });
 
             if (sshKey) {
@@ -204,6 +243,42 @@ export const Settings: React.FC = () => {
                             placeholder="gpt-4o-mini"
                         />
                     </div>
+                    <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4 mt-8">Role Model Configuration</h2>
+                    <p className="text-xs text-gray-500 mb-4">
+                        Assign a provider and model to each AI role used in the task pipeline. Leave provider at 0 to use the first available provider.
+                    </p>
+                    {([
+                        { label: 'Smart Planner', provKey: 'smart_planner_provider_id' as const, modelKey: 'smart_planner_model' as const },
+                        { label: 'Tech Researcher', provKey: 'tech_researcher_provider_id' as const, modelKey: 'tech_researcher_model' as const },
+                        { label: 'Writing Researcher', provKey: 'writing_researcher_provider_id' as const, modelKey: 'writing_researcher_model' as const },
+                        { label: 'Design Researcher', provKey: 'design_researcher_provider_id' as const, modelKey: 'design_researcher_model' as const },
+                        { label: 'Coder', provKey: 'coder_provider_id' as const, modelKey: 'coder_model' as const },
+                        { label: 'Tester', provKey: 'tester_provider_id' as const, modelKey: 'tester_model' as const },
+                    ] as const).map(({ label, provKey, modelKey }) => (
+                        <div key={label} className="mb-3">
+                            <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
+                            <div className="flex gap-2">
+                                <select
+                                    value={roleModels[provKey] || 0}
+                                    onChange={e => setRoleModels(prev => ({ ...prev, [provKey]: parseInt(e.target.value) }))}
+                                    className="w-48 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
+                                >
+                                    <option value={0}>— default provider —</option>
+                                    {providers.map(p => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                                <input
+                                    type="text"
+                                    value={roleModels[modelKey] || ''}
+                                    onChange={e => setRoleModels(prev => ({ ...prev, [modelKey]: e.target.value }))}
+                                    className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                                    placeholder="model name (blank = provider default)"
+                                />
+                            </div>
+                        </div>
+                    ))}
+
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                             SSH Private Key

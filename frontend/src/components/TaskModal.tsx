@@ -38,6 +38,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [formData, setFormData] = useState({
         title: '',
         description: '',
+        user_input: '',
+        task_type: 'tech',
         project_id: projectId?.toString() || '',
         sprint_id: '',
         agent_id: '',
@@ -111,6 +113,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 setFormData({
                     title: t.title,
                     description: t.description || '',
+                    user_input: t.user_input || '',
+                    task_type: t.task_type || 'tech',
                     project_id: t.project_id ? t.project_id.toString() : '',
                     sprint_id: t.sprint_id ? t.sprint_id.toString() : '',
                     agent_id: t.agent_id ? t.agent_id.toString() : '',
@@ -187,6 +191,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             const payload: any = {
                 title: formData.title,
                 description: formData.description,
+                user_input: formData.user_input,
+                task_type: formData.task_type,
                 priority: formData.priority,
             };
             if (!taskId) {
@@ -280,13 +286,28 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     {/* Left content area */}
                     <div className="flex-1 p-6 bg-gray-50 flex flex-col min-w-0">
                         <form id="task-form" onSubmit={handleSaveTask} className="space-y-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
-                                <input required type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task title" />
+                            <div className="flex gap-4">
+                                <div className="flex-1">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
+                                    <input required type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task title" />
+                                </div>
+                                <div className="w-36">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Task Type</label>
+                                    <select value={formData.task_type} onChange={e => setFormData({...formData, task_type: e.target.value})} className="w-full border rounded p-2 shadow-sm bg-white">
+                                        <option value="tech">Tech</option>
+                                        <option value="writing">Writing</option>
+                                        <option value="design">Design</option>
+                                    </select>
+                                </div>
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                                <textarea rows={5} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task details..." />
+                                <textarea rows={3} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task details..." />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">User Input</label>
+                                <p className="text-xs text-gray-500 mb-1">Additional context or requirements for the AI agent</p>
+                                <textarea rows={3} value={formData.user_input} onChange={e => setFormData({...formData, user_input: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Any specific requirements, constraints, or context..." />
                             </div>
                         </form>
 

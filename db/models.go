@@ -80,8 +80,9 @@ type Skill struct {
 }
 
 const (
-	TaskTypePlanAndImplement = "plan and implement"
-	TaskTypeImplement        = "implement"
+	TaskTypeTech    = "tech"
+	TaskTypeWriting = "writing"
+	TaskTypeDesign  = "design"
 )
 
 type Task struct {
@@ -97,16 +98,49 @@ type Task struct {
 	ParentID        *int32     `json:"parent_id"`
 	Parent          *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
 	Title           string     `json:"title" gorm:"not null"`
-	TaskType        string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
+	TaskType        string     `json:"task_type" gorm:"not null;default:'tech'"`
 	Description     string     `json:"description"`
 	Priority        string     `json:"priority" gorm:"not null;default:'Normal'"`
 	Status          string     `json:"status" gorm:"not null;default:'backlog'"`
 	DueDate         *time.Time `json:"due_date"`
 	IsArchived      bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID           *int32     `json:"run_id"`
-	AgentConfigName string     `json:"agent_config_name" gorm:"default:''"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
+	MainSessionID      *int32     `json:"main_session_id"`
+	UserInput          string     `json:"user_input" gorm:"type:text"`
+	DetailedDescription string    `json:"detailed_description" gorm:"type:text"`
+	Specifications     string     `json:"specifications" gorm:"type:text"`
+	AcceptanceCriteria string     `json:"acceptance_criteria" gorm:"type:text"`
+	TestCases          string     `json:"test_cases" gorm:"type:text"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+type Session struct {
+	ID              int32     `json:"id" gorm:"primaryKey"`
+	TaskID          int32     `json:"task_id" gorm:"not null;index"`
+	Task            Task      `json:"task,omitempty" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	ParentSessionID *int32    `json:"parent_session_id" gorm:"index"`
+	Parent          *Session  `json:"parent,omitempty" gorm:"foreignKey:ParentSessionID;constraint:OnDelete:CASCADE;"`
+	SessionType     string    `json:"session_type"` // "orchestration" | "qa-research" | "implementation" | "testing"
+	AgentConfigName string    `json:"agent_config_name"`
+	Status          string    `json:"status" gorm:"default:'queued'"` // "queued" | "running" | "waiting_for_answer" | "completed" | "failed"
+	MessageHistory  string    `json:"message_history" gorm:"type:text"`
+	ResultSummary   string    `json:"result_summary" gorm:"type:text"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
+}
+
+type PendingQuestion struct {
+	ID            int32     `json:"id" gorm:"primaryKey"`
+	TaskID        int32     `json:"task_id" gorm:"not null;index"`
+	FromSessionID int32     `json:"from_session_id" gorm:"not null"`
+	ToSessionID   int32     `json:"to_session_id" gorm:"not null"`
+	Question      string    `json:"question" gorm:"type:text"`
+	Answer        string    `json:"answer" gorm:"type:text"`
+	Status        string    `json:"status" gorm:"default:'pending'"` // "pending" | "answered"
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 type Comment struct {

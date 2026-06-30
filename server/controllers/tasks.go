@@ -77,6 +77,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Title       string  `json:"title"`
 		TaskType    string  `json:"task_type"`
 		Description string  `json:"description"`
+		UserInput   string  `json:"user_input"`
 		Priority    string  `json:"priority"`
 		DueDate     *string `json:"due_date"`
 	}
@@ -98,7 +99,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	taskType := req.TaskType
 	if taskType == "" {
-		taskType = db.TaskTypePlanAndImplement
+		taskType = db.TaskTypeTech
 	}
 
 	if req.CompanyID == 0 {
@@ -116,6 +117,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID:    req.SprintID,
 		ParentID:    req.ParentID,
 		Description: req.Description,
+		UserInput:   req.UserInput,
 		Priority:    priority,
 		DueDate:     dueDate,
 	}
@@ -180,6 +182,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		Title       string  `json:"title"`
 		TaskType    string  `json:"task_type"`
 		Description string  `json:"description"`
+		UserInput   string  `json:"user_input"`
 		Priority    string  `json:"priority"`
 		DueDate     *string `json:"due_date"`
 		Status      string  `json:"status"`
@@ -211,6 +214,9 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Description != "" {
 		task.Description = req.Description
+	}
+	if req.UserInput != "" {
+		task.UserInput = req.UserInput
 	}
 	if req.Priority != "" {
 		task.Priority = req.Priority

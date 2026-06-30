@@ -59,9 +59,13 @@ type Agent struct {
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
 	MCPListingCostPerTurn    int
 	MCPServerListingCosts    map[string]int
-	q                        *db.Queries
-	runID                    int32
-	logger                   RunLogger
+	// AskQuestionBatcher intercepts ask_question tool calls and processes them
+	// as a batch. Set this when running in ask_mode to enable parallel question
+	// batching through a researcher sub-session.
+	AskQuestionBatcher *AskQuestionBatcher
+	q                  *db.Queries
+	runID              int32
+	logger             RunLogger
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -73,12 +77,16 @@ type Config struct {
 	AgentName      string
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
-	ReasoningLevel           string
-	MCPListingCostPerTurn    int
-	MCPServerListingCosts    map[string]int
-	Queries                  *db.Queries
-	RunID                    int32
-	Logger                   RunLogger
+	ReasoningLevel        string
+	MCPListingCostPerTurn int
+	MCPServerListingCosts map[string]int
+	// AskQuestionBatcher enables ask_mode batching. When set, ask_question tool
+	// calls from a single LLM turn are collected and dispatched together via
+	// RunBatch rather than executed individually through the Registry.
+	AskQuestionBatcher *AskQuestionBatcher
+	Queries            *db.Queries
+	RunID              int32
+	Logger             RunLogger
 }
 
 // New creates an Agent from a Config.
@@ -96,6 +104,7 @@ func New(cfg Config) *Agent {
 		ReasoningLevel:        cfg.ReasoningLevel,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
+		AskQuestionBatcher:    cfg.AskQuestionBatcher,
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
@@ -123,6 +132,20 @@ func (a *Agent) RunWithMessages(ctx context.Context, systemPrompt string, initia
 	}
 }
 
+// RunWithHistory continues the agent loop from an already-built message
+// history. The history must include the system message (if any) and all prior
+// turns. This is used to resume a session after a crash or handoff.
+func (a *Agent) RunWithHistory(ctx context.Context, history []Message) (string, error) {
+	switch a.Mode {
+	case ModeMessageHistory, "":
+		return a.continueHistory(ctx, history, "")
+	case ModeCompactThinking:
+		return a.continueHistory(ctx, history, a.reasoningEffort())
+	default:
+		return "", fmt.Errorf("unsupported agent mode: %s", a.Mode)
+	}
+}
+
 // reasoningEffort maps the agent's ReasoningLevel to the OpenAI API value.
 func (a *Agent) reasoningEffort() string {
 	switch a.ReasoningLevel {
@@ -137,16 +160,20 @@ func (a *Agent) reasoningEffort() string {
 	}
 }
 
-// runMessageHistory maintains a rolling conversation history and sends the
-// full history to the LLM on every turn. reasoningEffort is passed verbatim
-// as the request's reasoning_effort field when non-empty.
+// runMessageHistory builds the initial history from systemPrompt and
+// initialMessages, then delegates to continueHistory.
 func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, initialMessages []Message, reasoningEffort string) (string, error) {
 	history := []Message{}
 	if systemPrompt != "" {
 		history = append(history, Message{Role: "system", Content: systemPrompt})
 	}
 	history = append(history, initialMessages...)
+	return a.continueHistory(ctx, history, reasoningEffort)
+}
 
+// continueHistory runs the agentic loop starting from an already-assembled
+// history slice. reasoningEffort is passed verbatim to the LLM when non-empty.
+func (a *Agent) continueHistory(ctx context.Context, history []Message, reasoningEffort string) (string, error) {
 	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
@@ -239,13 +266,6 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 			return "", fmt.Errorf("turn %d: tool execution failed: %w", turn, err)
 		}
 
-		// Log tool results from the messages we're about to append (so the
-		// proxy logger can pair them with the prior tool_call entries).
-		if a.logger != nil {
-			toolMsgsAsMap := msgsToMap(toolMessages)
-			a.logger.LogToolResultsFromRequest(a.Client.Model, a.ProviderName, toolMsgsAsMap)
-		}
-
 		history = append(history, toolMessages...)
 	}
 
@@ -253,13 +273,85 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 }
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each
-// invocation and result, and returns the corresponding tool-result Messages.
+// invocation and result, and returns the corresponding tool-result Messages in
+// the same order as calls. When AskQuestionBatcher is set, all ask_question
+// calls in a single turn are batched into one RunBatch invocation.
 func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Message, error) {
-	results := make([]Message, 0, len(calls))
+	results := make([]Message, len(calls))
+
+	// Separate ask_question calls from all others when a batcher is configured.
+	type indexedCall struct {
+		idx int
+		tc  ToolCall
+	}
+	var askCalls []indexedCall
+	var otherCalls []indexedCall
+
+	if a.AskQuestionBatcher != nil {
+		for i, tc := range calls {
+			if tc.Function.Name == "ask_question" {
+				askCalls = append(askCalls, indexedCall{i, tc})
+			} else {
+				otherCalls = append(otherCalls, indexedCall{i, tc})
+			}
+		}
+	} else {
+		for i, tc := range calls {
+			otherCalls = append(otherCalls, indexedCall{i, tc})
+		}
+	}
+
+	// Run ask_question batch if any.
+	if len(askCalls) > 0 {
+		questions := make([]string, len(askCalls))
+		for i, ic := range askCalls {
+			var p struct {
+				Question string `json:"question"`
+			}
+			json.Unmarshal([]byte(ic.tc.Function.Arguments), &p) //nolint:errcheck
+			questions[i] = p.Question
+		}
+
+		answers, err := a.AskQuestionBatcher.RunBatch(ctx, questions)
+		if err != nil {
+			// On batch error, fill all ask_question results with the error message.
+			for _, ic := range askCalls {
+				results[ic.idx] = Message{
+					Role:       "tool",
+					ToolCallID: ic.tc.ID,
+					Name:       ic.tc.Function.Name,
+					Content:    fmt.Sprintf("error: %v", err),
+				}
+			}
+		} else {
+			for i, ic := range askCalls {
+				answer := ""
+				if i < len(answers) {
+					answer = answers[i]
+				}
+				a.appendRunLog("tool_call", ic.tc.Function.Arguments, map[string]interface{}{
+					"tool_name": ic.tc.Function.Name,
+				})
+				a.appendRunLog("tool_response", answer, map[string]interface{}{
+					"tool_name":     ic.tc.Function.Name,
+					"output_tokens": tokens.Estimate(answer),
+				})
+				results[ic.idx] = Message{
+					Role:       "tool",
+					ToolCallID: ic.tc.ID,
+					Name:       ic.tc.Function.Name,
+					Content:    answer,
+				}
+			}
+		}
+	}
+
+	// Run remaining (non-ask_question) tools with the standard logic.
 	mcpServerTokens := map[string]int{}
 	mcpTotalTokens := 0
 
-	for _, tc := range calls {
+	for _, ic := range otherCalls {
+		tc := ic.tc
 		argsRaw := json.RawMessage(tc.Function.Arguments)
 		argTokens := tokens.EstimateBytes(argsRaw)
 
@@ -312,12 +404,12 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			}
 		}
 
-		results = append(results, Message{
+		results[ic.idx] = Message{
 			Role:       "tool",
 			ToolCallID: tc.ID,
 			Name:       tc.Function.Name,
 			Content:    output,
-		})
+		}
 	}
 
 	// Roll up MCP token stats as a single delta after all tool calls.
@@ -332,6 +424,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 				time.Sleep(100 * time.Millisecond)
 			}
 		}()
+	}
+
+	// Log all tool results for the proxy logger so it can pair them with the
+	// prior tool_call entries in its request log.
+	if a.logger != nil {
+		msgs := make([]Message, 0, len(results))
+		for _, r := range results {
+			if r.Role != "" {
+				msgs = append(msgs, r)
+			}
+		}
+		a.logger.LogToolResultsFromRequest(a.Client.Model, a.ProviderName, msgsToMap(msgs))
 	}
 
 	return results, nil

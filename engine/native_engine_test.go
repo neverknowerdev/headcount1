@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -15,7 +16,6 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
-	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/eventhub"
 
 	"github.com/glebarez/sqlite"
@@ -23,6 +23,57 @@ import (
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+// ---- pipeline-aware test helpers --------------------------------------------
+
+// hasFinishRefinementTool returns true when the LLM request lists finish_refinement
+// as an available tool, identifying the caller as the SmartPlanner agent.
+func hasFinishRefinementTool(r *http.Request) bool {
+	body, _ := io.ReadAll(r.Body)
+	r.Body = io.NopCloser(bytes.NewReader(body))
+	return bytes.Contains(body, []byte(`"finish_refinement"`))
+}
+
+// writeJSON encodes v as JSON to w.
+func writeJSON(w http.ResponseWriter, v interface{}) {
+	w.Header().Set("Content-Type", "application/json")
+	json.NewEncoder(w).Encode(v)
+}
+
+// pipelineSmartPlannerResp returns a finish_refinement tool call response.
+func pipelineSmartPlannerResp() map[string]interface{} {
+	return map[string]interface{}{
+		"id": "chatcmpl-sp", "model": "test-model",
+		"choices": []map[string]interface{}{{
+			"index": 0,
+			"message": map[string]interface{}{
+				"role": "assistant", "content": "",
+				"tool_calls": []map[string]interface{}{{
+					"id": "call_fr", "type": "function",
+					"function": map[string]interface{}{
+						"name":      "finish_refinement",
+						"arguments": `{"detailed_description":"test task","specifications":"implement as described","acceptance_criteria":"works correctly","test_cases":"[]"}`,
+					},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+}
+
+// pipelineTextResp returns a plain text stop response.
+func pipelineTextResp(content string) map[string]interface{} {
+	return map[string]interface{}{
+		"id": "chatcmpl-text", "model": "test-model",
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"message":       map[string]interface{}{"role": "assistant", "content": content},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+	}
+}
 
 // ---- test helpers -----------------------------------------------------------
 
@@ -50,6 +101,9 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Run{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.Session{},
+		&db.PendingQuestion{},
+		&db.MCPServer{},
 	))
 	return database
 }
@@ -108,7 +162,7 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 		SprintID:  sprint.ID,
 		AgentID:   &agentID,
 		Title:     "Test Task",
-		TaskType:  db.TaskTypeImplement,
+		TaskType:  db.TaskTypeTech,
 		Status:    "to-do",
 	}).Error)
 	require.NoError(t, database.First(&task, "company_id = ?", company.ID).Error)
@@ -158,44 +212,17 @@ func waitForRunCreated(t *testing.T, database *gorm.DB, taskID int32, timeout ti
 
 // ---- mock LLM handler -------------------------------------------------------
 
-// toolCallThenTextHandler returns a finish_task tool call on the first
-// chat-completions request, then a plain text response on subsequent requests.
+// toolCallThenTextHandler returns a finish_refinement tool call when the SmartPlanner
+// is asking (detected by finish_refinement in the tools list), and a plain text "done"
+// response for all Coder/Tester turns, completing the 3-stage pipeline.
 func toolCallThenTextHandler(t *testing.T) http.Handler {
 	t.Helper()
-	var count atomic.Int32
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := count.Add(1)
-		if n == 1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-001", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role": "assistant", "content": "",
-						"tool_calls": []map[string]interface{}{{
-							"id": "call_001", "type": "function",
-							"function": map[string]interface{}{
-								"name":      "finish_task",
-								"arguments": `{"task_status":"in-review","finish_status":"Task completed and ready for review"}`,
-							},
-						}},
-					},
-					"finish_reason": "tool_calls",
-				}},
-				"usage": map[string]int{"prompt_tokens": 50, "completion_tokens": 20, "total_tokens": 70},
-			})
-			return
+		if hasFinishRefinementTool(r) {
+			writeJSON(w, pipelineSmartPlannerResp())
+		} else {
+			writeJSON(w, pipelineTextResp("done"))
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": "Task completed and marked in-review."},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 80, "completion_tokens": 12, "total_tokens": 92},
-		})
 	})
 }
 
@@ -313,14 +340,10 @@ func TestNativeEngineDeduplication(t *testing.T) {
 	assert.Equal(t, int32(1), callCount.Load(), "second ProcessTask should not have started a new LLM call")
 }
 
-// TestNativeEngineFixtureRun verifies the engine using the pre-recorded fixture
-// that encodes a tool_call-then-text interaction.
+// TestNativeEngineFixtureRun verifies the full 3-stage pipeline using the
+// pipeline-aware handler (SmartPlanner → finish_refinement, Coder/Tester → text).
 func TestNativeEngineFixtureRun(t *testing.T) {
-	fixturePath := filepath.Join("aicli", "testdata", "fixtures", "tool_call.json")
-	ft := aicli.NewFixtureTransport(fixturePath, nil)
-
-	// Wrap the fixture transport in an HTTP handler so the engine can talk to it.
-	mockSrv := startTestServer(t, fixtureHandler(ft))
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
 
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
@@ -338,22 +361,24 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 
 	updatedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "in-review", updatedTask.Status, "fixture encodes a finish_task(in-review) call")
+	assert.Equal(t, "in-review", updatedTask.Status, "pipeline finalizeTask should set status to in-review")
 }
 
 // ---- subtask tests ----------------------------------------------------------
 
-// createSubtaskHandler returns a mock LLM that first calls create_subtask directly,
-// then acknowledges the result with a text response.
+// createSubtaskHandler returns a finish_refinement call for the SmartPlanner phase,
+// then a create_subtask call on the first Coder turn, then text for everything else.
 func createSubtaskHandler(t *testing.T) http.Handler {
 	t.Helper()
-	var count atomic.Int32
+	var coderCalled atomic.Bool
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := count.Add(1)
-		switch n {
-		case 1:
-			json.NewEncoder(w).Encode(map[string]interface{}{
+		if hasFinishRefinementTool(r) {
+			writeJSON(w, pipelineSmartPlannerResp())
+			return
+		}
+		// First Coder turn: create a subtask.
+		if coderCalled.CompareAndSwap(false, true) {
+			writeJSON(w, map[string]interface{}{
 				"id": "chatcmpl-sub-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
 					"index": 0,
@@ -371,17 +396,9 @@ func createSubtaskHandler(t *testing.T) http.Handler {
 				}},
 				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
 			})
-		default:
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-sub-002", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index":         0,
-					"message":       map[string]interface{}{"role": "assistant", "content": "Subtask delegated."},
-					"finish_reason": "stop",
-				}},
-				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
-			})
+			return
 		}
+		writeJSON(w, pipelineTextResp("Subtask delegated."))
 	})
 }
 
@@ -412,31 +429,26 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 // TestNativeEngineSubtaskBlocksDuplicate verifies that create_subtask returns an
 // error when a subtask is already running, preventing a second one from starting.
 func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
-	// The first call from the LLM will create a subtask; the second call
-	// (same turn, different tool_call) should be blocked because the first
-	// subtask is already running.
-	var callCount atomic.Int32
-	blockCh := make(chan struct{})
-
-	// Handler for the parent agent: tries to create two subtasks in one turn.
-	parentHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := callCount.Add(1)
-		if n == 1 {
-			json.NewEncoder(w).Encode(map[string]interface{}{
+	// Handler: SmartPlanner → finish_refinement; first Coder turn → create_subtask; rest → text.
+	var coderCalled atomic.Bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if hasFinishRefinementTool(r) {
+			writeJSON(w, pipelineSmartPlannerResp())
+			return
+		}
+		if coderCalled.CompareAndSwap(false, true) {
+			writeJSON(w, map[string]interface{}{
 				"id": "chatcmpl-dup-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
 					"message": map[string]interface{}{
 						"role": "assistant", "content": "",
-						"tool_calls": []map[string]interface{}{
-							{
-								"id": "call_d1", "type": "function",
-								"function": map[string]interface{}{
-									"name":      "create_subtask",
-									"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
-								},
+						"tool_calls": []map[string]interface{}{{
+							"id": "call_d1", "type": "function",
+							"function": map[string]interface{}{
+								"name":      "create_subtask",
+								"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
 							},
-						},
+						}},
 					},
 					"finish_reason": "tool_calls",
 				}},
@@ -444,57 +456,10 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 			})
 			return
 		}
-		// Subsequent parent turns: text response.
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-dup-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"message":       map[string]interface{}{"role": "assistant", "content": "done"},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
-		})
+		writeJSON(w, pipelineTextResp("done"))
 	})
 
-	// Handler for the subtask agent: blocks until test unblocks it.
-	subtaskHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-blockCh
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-sub", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"message": map[string]interface{}{
-					"role": "assistant", "content": "",
-					"tool_calls": []map[string]interface{}{{
-						"id": "call_ft", "type": "function",
-						"function": map[string]interface{}{
-							"name":      "finish_task",
-							"arguments": `{"task_status":"in-review","finish_status":"done"}`,
-						},
-					}},
-				},
-				"finish_reason": "tool_calls",
-			}},
-			"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-		})
-	})
-
-	// Both parent and subtask hit the same mock server; route by call count.
-	combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If the subtask's run is active, route to the subtask handler.
-		// For simplicity, route by overall call count: first two parent, rest subtask.
-		n := callCount.Load()
-		if n <= 1 {
-			parentHandler.ServeHTTP(w, r)
-		} else if n == 2 {
-			parentHandler.ServeHTTP(w, r) // second parent turn (after tool result)
-		} else {
-			subtaskHandler.ServeHTTP(w, r)
-		}
-	})
-	_ = combined // suppress unused warning
-
-	mockSrv := startTestServer(t, parentHandler)
-	t.Cleanup(func() { close(blockCh) })
+	mockSrv := startTestServer(t, handler)
 
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
@@ -533,7 +498,7 @@ func TestNativeEngineSubtaskNotifiesParent(t *testing.T) {
 		AgentID:   &agentID,
 		ParentID:  &parentID,
 		Title:     "child task",
-		TaskType:  db.TaskTypeImplement,
+		TaskType:  db.TaskTypeTech,
 		Status:    "to-do",
 	}).Error)
 	require.NoError(t, database.First(&subtask, "parent_id = ?", parentTask.ID).Error)
@@ -569,11 +534,20 @@ func TestNativeEngineExpandRunResult(t *testing.T) {
 	var count atomic.Int32
 
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
+		// hasFinishRefinementTool reads and restores the body.
+		isSP := hasFinishRefinementTool(r)
 		n := count.Add(1)
+
+		if !isSP {
+			// Coder or Tester turn — pipeline continuation.
+			writeJSON(w, pipelineTextResp("done"))
+			return
+		}
+
 		if n == 1 {
+			// SmartPlanner first turn: ask it to fetch the past run.
 			runID := pastRunID.Load()
-			json.NewEncoder(w).Encode(map[string]interface{}{
+			writeJSON(w, map[string]interface{}{
 				"id": "chatcmpl-exp-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
 					"index": 0,
@@ -593,32 +567,23 @@ func TestNativeEngineExpandRunResult(t *testing.T) {
 			})
 			return
 		}
-		if n == 2 {
-			// Capture the tool result from the request messages.
-			bodyBytes, _ := io.ReadAll(r.Body)
-			var req struct {
-				Messages []struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				} `json:"messages"`
-			}
-			if json.Unmarshal(bodyBytes, &req) == nil {
-				for _, msg := range req.Messages {
-					if msg.Role == "tool" {
-						capturedToolResult.Store(msg.Content)
-					}
+
+		// SmartPlanner subsequent turns: capture tool result then call finish_refinement.
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(bodyBytes, &req) == nil {
+			for _, msg := range req.Messages {
+				if msg.Role == "tool" {
+					capturedToolResult.Store(msg.Content)
 				}
 			}
 		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-exp-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": "I read the run details."},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35},
-		})
+		writeJSON(w, pipelineSmartPlannerResp())
 	})
 
 	mockSrv := startTestServer(t, handler)
@@ -659,21 +624,3 @@ func TestNativeEngineExpandRunResult(t *testing.T) {
 	assert.Contains(t, toolResult, "Detailed explanation of the past run.")
 }
 
-// fixtureHandler wraps a FixtureTransport as an HTTP handler.
-func fixtureHandler(ft *aicli.FixtureTransport) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		resp, err := ft.RoundTrip(r)
-		if err != nil {
-			http.Error(w, fmt.Sprintf("fixture error: %v", err), 500)
-			return
-		}
-		defer resp.Body.Close()
-		for k, vv := range resp.Header {
-			for _, v := range vv {
-				w.Header().Add(k, v)
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		io.Copy(w, resp.Body)
-	})
-}

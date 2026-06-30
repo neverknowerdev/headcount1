@@ -10,12 +10,28 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
+type RoleModelConfig struct {
+	SmartPlannerProviderID      int32  `json:"smart_planner_provider_id" yaml:"smart_planner_provider_id"`
+	SmartPlannerModel           string `json:"smart_planner_model" yaml:"smart_planner_model"`
+	TechResearcherProviderID    int32  `json:"tech_researcher_provider_id" yaml:"tech_researcher_provider_id"`
+	TechResearcherModel         string `json:"tech_researcher_model" yaml:"tech_researcher_model"`
+	WritingResearcherProviderID int32  `json:"writing_researcher_provider_id" yaml:"writing_researcher_provider_id"`
+	WritingResearcherModel      string `json:"writing_researcher_model" yaml:"writing_researcher_model"`
+	DesignResearcherProviderID  int32  `json:"design_researcher_provider_id" yaml:"design_researcher_provider_id"`
+	DesignResearcherModel       string `json:"design_researcher_model" yaml:"design_researcher_model"`
+	CoderProviderID             int32  `json:"coder_provider_id" yaml:"coder_provider_id"`
+	CoderModel                  string `json:"coder_model" yaml:"coder_model"`
+	TesterProviderID            int32  `json:"tester_provider_id" yaml:"tester_provider_id"`
+	TesterModel                 string `json:"tester_model" yaml:"tester_model"`
+}
+
 type Settings struct {
-	BasePath         string   `json:"base_path" yaml:"base_path"`
-	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
-	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
-	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-	SystemLLMModel   string   `json:"system_llm_model" yaml:"system_llm_model"`
+	BasePath         string          `json:"base_path" yaml:"base_path"`
+	WorkspaceFolders []string        `json:"workspace_folders" yaml:"workspace_folders"`
+	GitRemoteURL     string          `json:"git_remote_url" yaml:"git_remote_url"`
+	GitHubPAT        string          `json:"github_pat" yaml:"github_pat"`
+	SystemLLMModel   string          `json:"system_llm_model" yaml:"system_llm_model"`
+	RoleModels       RoleModelConfig `json:"role_models" yaml:"role_models"`
 }
 
 type SSHKeyPayload struct {

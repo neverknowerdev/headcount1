@@ -61,27 +61,16 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 
 	switch task.Status {
 	case "to-do":
-		if task.TaskType == db.TaskTypeImplement {
-			prevStatus := task.Status
-			task.Status = "in-progress"
-			if _, err := e.q.UpdateTask(ctx, task); err != nil {
-				return err
-			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
-			e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
-			go e.run(context.Background(), task, "implement")
-		} else {
-			prevStatus := task.Status
-			task.Status = "refinement"
-			if _, err := e.q.UpdateTask(ctx, task); err != nil {
-				return err
-			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
-			e.emitStatusChange(ctx, task.ID, prevStatus, "refinement")
-			go e.run(context.Background(), task, "plan")
+		prevStatus := task.Status
+		task.Status = "in-progress"
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			return err
 		}
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
+		go e.run(context.Background(), task, "orchestrate")
 	case "in-progress":
-		go e.run(context.Background(), task, "implement")
+		go e.run(context.Background(), task, "orchestrate")
 	case "in-review", "blocked", "done", "refinement":
 		// Re-run triggered by a user comment (Run Agent flag). Move back to in-progress.
 		prevStatus := task.Status
@@ -91,7 +80,7 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
 		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
-		go e.run(context.Background(), task, "implement")
+		go e.run(context.Background(), task, "orchestrate")
 	}
 
 	return nil
@@ -604,7 +593,16 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
 	}
 
-	_, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
+	var agentErr error
+	if mode == "orchestrate" {
+		orch := newAskModeOrchestrator(e.q, e.hub, e.agentFactory, loadSettings())
+		orch.processTask = func(pCtx context.Context, taskID int32) error {
+			return e.ProcessTask(pCtx, taskID)
+		}
+		taskFinished, agentErr = orch.ExecuteTask(runCtx, task, run, workspacePath, proxyLogger)
+	} else {
+		_, agentErr = aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
+	}
 
 	status := "completed"
 
@@ -721,7 +719,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 			ParentID:        &parentID,
 			Title:           title,
 			Description:     description,
-			TaskType:        db.TaskTypeImplement,
+			TaskType:        db.TaskTypeTech,
 			Status:          "to-do",
 			Priority:        "Normal",
 			AgentConfigName: configName,

@@ -23,9 +23,25 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 	return &defaultSystemPromptBuilder{q: q}
 }
 
+type RoleModelConfig struct {
+	SmartPlannerProviderID      int32  `yaml:"smart_planner_provider_id"`
+	SmartPlannerModel           string `yaml:"smart_planner_model"`
+	TechResearcherProviderID    int32  `yaml:"tech_researcher_provider_id"`
+	TechResearcherModel         string `yaml:"tech_researcher_model"`
+	WritingResearcherProviderID int32  `yaml:"writing_researcher_provider_id"`
+	WritingResearcherModel      string `yaml:"writing_researcher_model"`
+	DesignResearcherProviderID  int32  `yaml:"design_researcher_provider_id"`
+	DesignResearcherModel       string `yaml:"design_researcher_model"`
+	CoderProviderID             int32  `yaml:"coder_provider_id"`
+	CoderModel                  string `yaml:"coder_model"`
+	TesterProviderID            int32  `yaml:"tester_provider_id"`
+	TesterModel                 string `yaml:"tester_model"`
+}
+
 type Settings struct {
-	BasePath         string   `yaml:"base_path"`
-	WorkspaceFolders []string `yaml:"workspace_folders"`
+	BasePath         string          `yaml:"base_path"`
+	WorkspaceFolders []string        `yaml:"workspace_folders"`
+	RoleModels       RoleModelConfig `yaml:"role_models"`
 }
 
 func loadSettings() Settings {
