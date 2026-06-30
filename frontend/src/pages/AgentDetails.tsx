@@ -54,10 +54,10 @@ export const AgentDetails: React.FC = () => {
     }, [id]);
 
     const fetchMCPData = useCallback(async () => {
-        if (!id) return;
+        if (!id || !agent?.company_id) return;
         try {
             const [serversRes, assignRes, toolFilterRes] = await Promise.all([
-                axios.get('/api/mcp-servers'),
+                axios.get(`/api/mcp-servers?company_id=${agent.company_id}`),
                 axios.get(`/api/agents/${id}/mcp-accounts`),
                 axios.get(`/api/agents/${id}/mcp-tool-filters`),
             ]);
@@ -83,7 +83,7 @@ export const AgentDetails: React.FC = () => {
         } catch (e) {
             console.error(e);
         }
-    }, [id]);
+    }, [id, agent?.company_id]);
 
     useEffect(() => {
         fetchData();
