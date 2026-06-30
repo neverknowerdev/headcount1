@@ -21,12 +21,13 @@ type mcpSession struct {
 
 // MCPSessionStore manages live MCP connections shared across the MCP tools.
 type MCPSessionStore struct {
-	mu          sync.Mutex
-	sessions    map[string]*mcpSession
-	servers     map[string]db.MCPServer
-	cachedTools map[string][]mcp.Tool // parsed from ToolsCache at startup
-	onAuthError func(serverName, errMsg string)
-	onToolCall  func(serverName, toolName string)
+	mu            sync.Mutex
+	sessions      map[string]*mcpSession
+	servers       map[string]db.MCPServer
+	cachedTools   map[string][]mcp.Tool    // parsed from ToolsCache at startup
+	disabledTools map[string]map[string]bool // serverName → toolName → disabled
+	onAuthError   func(serverName, errMsg string)
+	onToolCall    func(serverName, toolName string)
 }
 
 // NewMCPSessionStore creates a session store with the given server configs.
@@ -44,11 +45,12 @@ func NewMCPSessionStore(servers []db.MCPServer, onAuthError func(string, string)
 		}
 	}
 	return &MCPSessionStore{
-		sessions:    make(map[string]*mcpSession),
-		servers:     srvMap,
-		cachedTools: toolCache,
-		onAuthError: onAuthError,
-		onToolCall:  onToolCall,
+		sessions:      make(map[string]*mcpSession),
+		servers:       srvMap,
+		cachedTools:   toolCache,
+		disabledTools: make(map[string]map[string]bool),
+		onAuthError:   onAuthError,
+		onToolCall:    onToolCall,
 	}
 }
 
@@ -63,6 +65,32 @@ func (s *MCPSessionStore) AddExternalServer(srv db.MCPServer) {
 			s.cachedTools[srv.Name] = cached
 		}
 	}
+}
+
+// SetDisabledTools records which tools are disabled for a given server name.
+// Disabled tools are hidden from listings and blocked at call time.
+func (s *MCPSessionStore) SetDisabledTools(serverName string, disabled map[string]bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.disabledTools == nil {
+		s.disabledTools = make(map[string]map[string]bool)
+	}
+	s.disabledTools[serverName] = disabled
+}
+
+// filterEnabled returns only the tools that are not in the disabled set for this server.
+func (s *MCPSessionStore) filterEnabled(serverName string, tools []mcp.Tool) []mcp.Tool {
+	disabled, ok := s.disabledTools[serverName]
+	if !ok || len(disabled) == 0 {
+		return tools
+	}
+	out := make([]mcp.Tool, 0, len(tools))
+	for _, t := range tools {
+		if !disabled[t.Name] {
+			out = append(out, t)
+		}
+	}
+	return out
 }
 
 // ServerNames returns the sorted list of available server names.
@@ -82,7 +110,7 @@ func (s *MCPSessionStore) ListingCostByServer() map[string]int {
 	defer s.mu.Unlock()
 	result := make(map[string]int, len(s.servers))
 	for name := range s.servers {
-		cached := s.cachedTools[name]
+		cached := s.filterEnabled(name, s.cachedTools[name])
 		var line string
 		if len(cached) == 0 {
 			line = "* " + name + "\n"
@@ -109,7 +137,7 @@ func (s *MCPSessionStore) CompactListing() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	for _, name := range names {
-		cached := s.cachedTools[name]
+		cached := s.filterEnabled(name, s.cachedTools[name])
 		if len(cached) == 0 {
 			fmt.Fprintf(&sb, "* %s\n", name)
 		} else {
@@ -164,26 +192,33 @@ func (s *MCPSessionStore) getOrConnect(ctx context.Context, serverName string) (
 }
 
 // toolsForServer returns the tool list, using cache or connecting as needed.
+// Disabled tools are filtered out before returning.
 func (s *MCPSessionStore) toolsForServer(ctx context.Context, serverName string) ([]mcp.Tool, error) {
 	s.mu.Lock()
 	sess, hasSess := s.sessions[serverName]
 	cached, hasCached := s.cachedTools[serverName]
 	s.mu.Unlock()
+	var tools []mcp.Tool
 	if hasSess {
-		return sess.tools, nil
+		tools = sess.tools
+	} else if hasCached {
+		tools = cached
+	} else {
+		// Nothing in memory; connect to get a fresh list.
+		if _, ok := s.servers[serverName]; !ok {
+			return nil, fmt.Errorf("unknown MCP server %q", serverName)
+		}
+		var err error
+		sess, err = s.connect(ctx, serverName)
+		if err != nil {
+			return nil, err
+		}
+		tools = sess.tools
 	}
-	if hasCached {
-		return cached, nil
-	}
-	// Nothing in memory; connect to get a fresh list.
-	if _, ok := s.servers[serverName]; !ok {
-		return nil, fmt.Errorf("unknown MCP server %q", serverName)
-	}
-	sess, err := s.connect(ctx, serverName)
-	if err != nil {
-		return nil, err
-	}
-	return sess.tools, nil
+	s.mu.Lock()
+	filtered := s.filterEnabled(serverName, tools)
+	s.mu.Unlock()
+	return filtered, nil
 }
 
 // isMCPAuthError detects authentication failures in MCP tool call errors.
@@ -273,6 +308,14 @@ func (t *CallMCPTool) Execute(ctx context.Context, args json.RawMessage) (string
 	}
 	if len(p.Input) == 0 {
 		p.Input = json.RawMessage("{}")
+	}
+
+	// Block calls to disabled tools.
+	t.store.mu.Lock()
+	disabled := t.store.disabledTools[p.Server]
+	t.store.mu.Unlock()
+	if disabled[p.Tool] {
+		return "", fmt.Errorf("[%s/%s] tool is disabled for this agent", p.Server, p.Tool)
 	}
 
 	sess, err := t.store.getOrConnect(ctx, p.Server)

@@ -516,6 +516,8 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		for _, s := range allServers {
 			serverByID[s.ID] = s
 		}
+		// Load per-agent, per-server tool filters.
+		toolFilters, _ := e.q.GetAgentMCPToolFilters(ctx, agent.ID)
 		for _, acc := range accounts {
 			srv, ok := serverByID[acc.MCPServerID]
 			if !ok || srv.Transport == "builtin" {
@@ -540,6 +542,18 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
 			serverIDByName[synthetic.Name] = synthetic.ID
+			// Apply per-tool filters: build a disabled map for this server.
+			if serverFilters, ok := toolFilters[srv.ID]; ok {
+				disabledMap := make(map[string]bool, len(serverFilters))
+				for toolName, enabled := range serverFilters {
+					if !enabled {
+						disabledMap[toolName] = true
+					}
+				}
+				if len(disabledMap) > 0 {
+					store.SetDisabledTools(synthetic.Name, disabledMap)
+				}
+			}
 		}
 		mcpNames := store.ServerNames()
 		if len(mcpNames) > 0 {

@@ -32,6 +32,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"projects",
 		"companies",
 		// MCP tables — clear dependents before mcp_servers (FK order)
+		"agent_mcp_tool_filters",
 		"mcp_tool_stats",
 		"agent_mcp_servers",
 		"mcp_accounts",

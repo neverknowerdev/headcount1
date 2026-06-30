@@ -428,6 +428,19 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 			Enabled:     false,
 			Builtin:     true,
 		},
+		{
+			Name:        "brave-search",
+			DisplayName: "Brave Search",
+			Description: "Search the web, images, videos, news and local places via Brave Search API.",
+			Transport:   "stdio",
+			Command:     "npx",
+			Args:        `["-y", "@brave/brave-search-mcp-server"]`,
+			Deps:        `["@brave/brave-search-mcp-server"]`,
+			AuthType:    "bearer",
+			AuthEnvVar:  "BRAVE_API_KEY",
+			Enabled:     false,
+			Builtin:     true,
+		},
 	}
 
 	for _, s := range predefined {
@@ -519,4 +532,43 @@ func (q *Queries) MigrateAddProjectFKToMCPServers(ctx context.Context) error {
 	}
 	// GORM's SQLite migrator implements CreateConstraint via the 12-step table rebuild.
 	return q.db.WithContext(ctx).Migrator().CreateConstraint(&MCPServer{}, "Project")
+}
+
+// ── AgentMCPToolFilter ───────────────────────────────────────────────────────
+
+// GetAgentMCPToolFilters returns all tool filter rows for a given agent,
+// grouped as serverID → toolName → enabled.
+func (q *Queries) GetAgentMCPToolFilters(ctx context.Context, agentID int32) (map[int32]map[string]bool, error) {
+	var rows []AgentMCPToolFilter
+	if err := q.db.WithContext(ctx).Where("agent_id = ?", agentID).Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	result := make(map[int32]map[string]bool, len(rows))
+	for _, r := range rows {
+		if result[r.MCPServerID] == nil {
+			result[r.MCPServerID] = make(map[string]bool)
+		}
+		result[r.MCPServerID][r.ToolName] = r.Enabled
+	}
+	return result, nil
+}
+
+// SetAgentMCPToolFilters replaces all tool filter rows for a given agent.
+func (q *Queries) SetAgentMCPToolFilters(ctx context.Context, agentID int32, filters []AgentMCPToolFilter) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("agent_id = ?", agentID).Delete(&AgentMCPToolFilter{}).Error; err != nil {
+			return err
+		}
+		for _, f := range filters {
+			// Use raw SQL so Enabled=false is never silently replaced by the column default.
+			// GORM's struct-based Create skips zero-value bool fields that have a default tag.
+			if err := tx.Exec(
+				"INSERT INTO agent_mcp_tool_filters (agent_id, mcp_server_id, tool_name, enabled) VALUES (?, ?, ?, ?)",
+				agentID, f.MCPServerID, f.ToolName, f.Enabled,
+			).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
