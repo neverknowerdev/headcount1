@@ -371,6 +371,24 @@ export const AgentDetails: React.FC = () => {
                                                                     </button>
                                                                     {toolsExpanded && (
                                                                         <div className="px-3 pb-2 space-y-1">
+                                                                            <div className="flex gap-3 pb-1 border-b border-gray-100 mb-1">
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setToolFilters(prev => ({
+                                                                                        ...prev,
+                                                                                        [srv.id]: Object.fromEntries(cachedTools.map((t: any) => [t.name, true])),
+                                                                                    }))}
+                                                                                    className="text-xs text-indigo-600 hover:text-indigo-800"
+                                                                                >Select all</button>
+                                                                                <button
+                                                                                    type="button"
+                                                                                    onClick={() => setToolFilters(prev => ({
+                                                                                        ...prev,
+                                                                                        [srv.id]: Object.fromEntries(cachedTools.map((t: any) => [t.name, false])),
+                                                                                    }))}
+                                                                                    className="text-xs text-gray-500 hover:text-gray-700"
+                                                                                >Unselect all</button>
+                                                                            </div>
                                                                             {cachedTools.map((tool: any) => {
                                                                                 const isEnabled = serverToolFilters[tool.name] !== false;
                                                                                 return (

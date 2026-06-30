@@ -561,7 +561,9 @@ func (q *Queries) SetAgentMCPToolFilters(ctx context.Context, agentID int32, fil
 		}
 		for _, f := range filters {
 			f.AgentID = agentID
-			if err := tx.Create(&f).Error; err != nil {
+			// Select("*") forces GORM to write all fields including Enabled=false,
+			// which would otherwise be skipped as the zero value when the column has default:true.
+			if err := tx.Select("*").Create(&f).Error; err != nil {
 				return err
 			}
 		}
