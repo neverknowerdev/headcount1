@@ -560,10 +560,12 @@ func (q *Queries) SetAgentMCPToolFilters(ctx context.Context, agentID int32, fil
 			return err
 		}
 		for _, f := range filters {
-			f.AgentID = agentID
-			// Select("*") forces GORM to write all fields including Enabled=false,
-			// which would otherwise be skipped as the zero value when the column has default:true.
-			if err := tx.Select("*").Create(&f).Error; err != nil {
+			// Use raw SQL so Enabled=false is never silently replaced by the column default.
+			// GORM's struct-based Create skips zero-value bool fields that have a default tag.
+			if err := tx.Exec(
+				"INSERT INTO agent_mcp_tool_filters (agent_id, mcp_server_id, tool_name, enabled) VALUES (?, ?, ?, ?)",
+				agentID, f.MCPServerID, f.ToolName, f.Enabled,
+			).Error; err != nil {
 				return err
 			}
 		}
