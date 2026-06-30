@@ -187,7 +187,7 @@ test.describe.serial('MCP Servers', () => {
         await expect(page.getByRole('heading', { name: 'MCP Servers' })).toBeVisible();
 
         // Brave Search should appear in the predefined integrations section.
-        await expect(page.getByText('Brave Search')).toBeVisible({ timeout: 5_000 });
+        await expect(page.getByRole('heading', { name: 'Brave Search' })).toBeVisible({ timeout: 5_000 });
     });
 
     test('can set and get per-tool filters for an agent', async ({ request }) => {
