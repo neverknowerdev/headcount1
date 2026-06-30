@@ -244,6 +244,15 @@ type MCPToolStat struct {
 	CallCount   int64  `json:"call_count" gorm:"not null;default:0"`
 }
 
+// AgentMCPToolFilter stores per-agent, per-server tool enable/disable settings.
+// When no row exists for a (agent, server, tool) triple, the tool is enabled by default.
+type AgentMCPToolFilter struct {
+	AgentID     int32  `json:"agent_id" gorm:"primaryKey"`
+	MCPServerID int32  `json:"mcp_server_id" gorm:"primaryKey"`
+	ToolName    string `json:"tool_name" gorm:"primaryKey"`
+	Enabled     bool   `json:"enabled" gorm:"not null;default:true"`
+}
+
 type Artifact struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	CompanyID *int32    `json:"company_id" gorm:"index"`

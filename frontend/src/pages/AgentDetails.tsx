@@ -2,7 +2,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
-import { ArrowLeft, Save } from 'lucide-react';
+import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -13,6 +13,9 @@ export const AgentDetails: React.FC = () => {
     const [mcpServers, setMcpServers] = useState<any[]>([]);
     const [mcpAccountAssignments, setMcpAccountAssignments] = useState<Record<number, boolean>>({});
     const [codegraphAssignments, setCodegraphAssignments] = useState<Record<number, boolean>>({}); // serverID → enabled (default true)
+    // toolFilters: serverID → toolName → enabled (undefined = enabled by default)
+    const [toolFilters, setToolFilters] = useState<Record<number, Record<string, boolean>>>({});
+    const [expandedToolServers, setExpandedToolServers] = useState<Record<number, boolean>>({});
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [saveError, setSaveError] = useState<string | null>(null);
     const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -51,9 +54,10 @@ export const AgentDetails: React.FC = () => {
     const fetchMCPData = useCallback(async () => {
         if (!id) return;
         try {
-            const [serversRes, assignRes] = await Promise.all([
+            const [serversRes, assignRes, toolFilterRes] = await Promise.all([
                 axios.get('/api/mcp-servers'),
                 axios.get(`/api/agents/${id}/mcp-accounts`),
+                axios.get(`/api/agents/${id}/mcp-tool-filters`),
             ]);
             setMcpServers(serversRes.data || []);
             const data = assignRes.data || {};
@@ -67,6 +71,13 @@ export const AgentDetails: React.FC = () => {
                 cgMap[cg.server_id] = cg.enabled;
             }
             setCodegraphAssignments(cgMap);
+            // toolFilterRes.data is map[serverID]map[toolName]enabled (numbers as string keys from JSON)
+            const rawFilters = toolFilterRes.data || {};
+            const parsedFilters: Record<number, Record<string, boolean>> = {};
+            for (const [serverIdStr, toolMap] of Object.entries(rawFilters)) {
+                parsedFilters[parseInt(serverIdStr)] = toolMap as Record<string, boolean>;
+            }
+            setToolFilters(parsedFilters);
         } catch (e) {
             console.error(e);
         }
@@ -92,7 +103,18 @@ export const AgentDetails: React.FC = () => {
                 server_id: parseInt(serverId),
                 enabled,
             }));
-            await axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph });
+            // Build tool filter payload: array of {mcp_server_id, tool_name, enabled}
+            const toolFilterPayload: {mcp_server_id: number; tool_name: string; enabled: boolean}[] = [];
+            for (const [serverIdStr, toolMap] of Object.entries(toolFilters)) {
+                const serverId = parseInt(serverIdStr);
+                for (const [toolName, enabled] of Object.entries(toolMap)) {
+                    toolFilterPayload.push({ mcp_server_id: serverId, tool_name: toolName, enabled });
+                }
+            }
+            await Promise.all([
+                axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph }),
+                axios.put(`/api/agents/${id}/mcp-tool-filters`, toolFilterPayload),
+            ]);
             setMcpSaveState('saved');
             setTimeout(() => setMcpSaveState('idle'), 2000);
         } catch (e: any) {
@@ -284,7 +306,7 @@ export const AgentDetails: React.FC = () => {
                                 );
                             })()}
 
-                            {/* Optional connected MCPs — grouped by server, per-account checkboxes */}
+                            {/* Optional connected MCPs — grouped by server, per-account checkboxes + per-tool filters */}
                             {(() => {
                                 const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin && !s.project_id);
                                 const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin && !s.project_id);
@@ -296,6 +318,12 @@ export const AgentDetails: React.FC = () => {
                                     <div className="space-y-3">
                                         {allExternal.map((srv: any) => {
                                             const accounts: any[] = srv.accounts || [];
+                                            const hasEnabledAccount = accounts.some((acc: any) => !!mcpAccountAssignments[acc.id]);
+                                            // Parse cached tools for this server
+                                            let cachedTools: {name: string; description?: string}[] = [];
+                                            try { if (srv.tools_cache) cachedTools = JSON.parse(srv.tools_cache); } catch {}
+                                            const serverToolFilters = toolFilters[srv.id] || {};
+                                            const toolsExpanded = !!expandedToolServers[srv.id];
                                             return (
                                                 <div key={srv.id} className="border border-gray-100 rounded-lg overflow-hidden">
                                                     <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-100">
@@ -307,22 +335,74 @@ export const AgentDetails: React.FC = () => {
                                                     {accounts.length === 0 ? (
                                                         <p className="px-3 py-2 text-xs text-gray-400 italic">No accounts configured. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-500 hover:underline">Authorize</Link>.</p>
                                                     ) : (
-                                                        <div className="divide-y divide-gray-50">
-                                                            {accounts.map((acc: any) => (
-                                                                <label key={acc.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                                                                    <input
-                                                                        type="checkbox"
-                                                                        checked={!!mcpAccountAssignments[acc.id]}
-                                                                        onChange={e => setMcpAccountAssignments(prev => ({ ...prev, [acc.id]: e.target.checked }))}
-                                                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
-                                                                    />
-                                                                    <div className="min-w-0">
-                                                                        <span className="text-sm text-gray-900 font-medium">{acc.name}</span>
-                                                                        {!acc.has_token && <span className="ml-2 text-xs text-amber-500">No token</span>}
-                                                                    </div>
-                                                                </label>
-                                                            ))}
-                                                        </div>
+                                                        <>
+                                                            <div className="divide-y divide-gray-50">
+                                                                {accounts.map((acc: any) => (
+                                                                    <label key={acc.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
+                                                                        <input
+                                                                            type="checkbox"
+                                                                            checked={!!mcpAccountAssignments[acc.id]}
+                                                                            onChange={e => setMcpAccountAssignments(prev => ({ ...prev, [acc.id]: e.target.checked }))}
+                                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
+                                                                        />
+                                                                        <div className="min-w-0">
+                                                                            <span className="text-sm text-gray-900 font-medium">{acc.name}</span>
+                                                                            {!acc.has_token && <span className="ml-2 text-xs text-amber-500">No token</span>}
+                                                                        </div>
+                                                                    </label>
+                                                                ))}
+                                                            </div>
+                                                            {hasEnabledAccount && cachedTools.length > 0 && (
+                                                                <div className="border-t border-gray-100">
+                                                                    <button
+                                                                        type="button"
+                                                                        onClick={() => setExpandedToolServers(prev => ({ ...prev, [srv.id]: !prev[srv.id] }))}
+                                                                        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-50"
+                                                                    >
+                                                                        {toolsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+                                                                        <span>
+                                                                            {cachedTools.length} tool{cachedTools.length !== 1 ? 's' : ''}
+                                                                            {Object.values(serverToolFilters).some(v => !v) && (
+                                                                                <span className="ml-1 text-amber-600">
+                                                                                    ({Object.values(serverToolFilters).filter(v => !v).length} disabled)
+                                                                                </span>
+                                                                            )}
+                                                                        </span>
+                                                                    </button>
+                                                                    {toolsExpanded && (
+                                                                        <div className="px-3 pb-2 space-y-1">
+                                                                            {cachedTools.map((tool: any) => {
+                                                                                const isEnabled = serverToolFilters[tool.name] !== false;
+                                                                                return (
+                                                                                    <label key={tool.name} className="flex items-start gap-2 cursor-pointer py-0.5">
+                                                                                        <input
+                                                                                            type="checkbox"
+                                                                                            checked={isEnabled}
+                                                                                            onChange={e => {
+                                                                                                setToolFilters(prev => ({
+                                                                                                    ...prev,
+                                                                                                    [srv.id]: {
+                                                                                                        ...(prev[srv.id] || {}),
+                                                                                                        [tool.name]: e.target.checked,
+                                                                                                    },
+                                                                                                }));
+                                                                                            }}
+                                                                                            className="h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded flex-shrink-0 mt-0.5"
+                                                                                        />
+                                                                                        <div className="min-w-0">
+                                                                                            <span className="text-xs font-mono text-gray-800">{tool.name}</span>
+                                                                                            {tool.description && (
+                                                                                                <p className="text-xs text-gray-400 truncate">{tool.description}</p>
+                                                                                            )}
+                                                                                        </div>
+                                                                                    </label>
+                                                                                );
+                                                                            })}
+                                                                        </div>
+                                                                    )}
+                                                                </div>
+                                                            )}
+                                                        </>
                                                     )}
                                                 </div>
                                             );

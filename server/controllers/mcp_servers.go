@@ -685,6 +685,42 @@ func (api *API) SetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
+// GetAgentMCPToolFilters returns all per-tool enable/disable settings for an agent.
+// Response: map[serverID]map[toolName]enabled
+func (api *API) GetAgentMCPToolFilters(w http.ResponseWriter, r *http.Request) {
+	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	filters, err := api.q.GetAgentMCPToolFilters(r.Context(), int32(agentID))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, filters)
+}
+
+// SetAgentMCPToolFilters replaces all per-tool enable/disable settings for an agent.
+// Request body: array of {mcp_server_id, tool_name, enabled}
+func (api *API) SetAgentMCPToolFilters(w http.ResponseWriter, r *http.Request) {
+	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	var filters []db.AgentMCPToolFilter
+	if err := json.NewDecoder(r.Body).Decode(&filters); err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if err := api.q.SetAgentMCPToolFilters(r.Context(), int32(agentID), filters); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
 func (api *API) saveMCPServerToDisk(s db.MCPServer) {
 	settings := LoadSettings()
 	fm := filesystem.NewManager(settings.BasePath)

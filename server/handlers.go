@@ -214,6 +214,11 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/", api.GetAgentMCPAccounts)
 		r.Put("/", api.SetAgentMCPAccounts)
 	})
+
+	r.Route("/agents/{id}/mcp-tool-filters", func(r chi.Router) {
+		r.Get("/", api.GetAgentMCPToolFilters)
+		r.Put("/", api.SetAgentMCPToolFilters)
+	})
 }
 
 func respondJSON(w http.ResponseWriter, status int, payload interface{}) {

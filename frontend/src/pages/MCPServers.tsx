@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
-import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2 } from 'lucide-react';
+import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2, SearchIcon } from 'lucide-react';
 
 interface MCPAccount {
     id: number;
@@ -61,6 +61,7 @@ const serverIcon = (name: string) => {
     if (name === 'google-docs') return <FileText size={20} />;
     if (name === 'paperclip2') return <Cpu size={20} />;
     if (name === 'postiz') return <Share2 size={20} />;
+    if (name === 'brave-search') return <SearchIcon size={20} />;
     return <Globe size={20} />;
 };
 
@@ -750,6 +751,15 @@ export const MCPServers: React.FC = () => {
                                             In your Postiz dashboard go to <strong>Settings → MCP</strong>, copy the full personal URL (looks like <code>https://mcp.postiz.com/mcp/...</code>) and paste it above.
                                         </p>
                                     )}
+                                    {accountModal.serverDisplayName === 'Brave Search' && (
+                                        <p className="text-xs text-gray-400 mt-1">
+                                            Get your API key at{' '}
+                                            <a href="https://brave.com/search/api/" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline inline-flex items-center gap-0.5">
+                                                brave.com/search/api<ExternalLink size={10} className="ml-0.5" />
+                                            </a>
+                                            . Free tier includes 2,000 queries/month.
+                                        </p>
+                                    )}
                                 </div>
                             ) : null}
                             {accountError && <p className="text-sm text-red-600">{accountError}</p>}
@@ -783,6 +793,15 @@ const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; 
             { before: 'Go to ', link: { text: 'github.com/settings/tokens/new', url: 'https://github.com/settings/tokens/new' }, after: ' and create a classic Personal Access Token.' },
             { before: 'Select these scopes:', code: 'repo  read:user  read:org' },
             { before: 'Click Authorize below and paste the token.' },
+        ],
+    },
+    'brave-search': {
+        docsUrl: 'https://brave.com/search/api/',
+        docsLabel: 'Brave Search API',
+        steps: [
+            { before: 'Go to ', link: { text: 'brave.com/search/api', url: 'https://brave.com/search/api/' }, after: ' and sign up for a Brave Search API key.' },
+            { before: 'Choose a plan (Free tier includes 2,000 searches/month).' },
+            { before: 'Click Authorize below and paste your API key.' },
         ],
     },
     postiz: {
