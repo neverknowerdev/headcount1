@@ -16,6 +16,8 @@ export const AgentDetails: React.FC = () => {
     // toolFilters: serverID → toolName → enabled (undefined = enabled by default)
     const [toolFilters, setToolFilters] = useState<Record<number, Record<string, boolean>>>({});
     const [expandedToolServers, setExpandedToolServers] = useState<Record<number, boolean>>({});
+    // key: `${serverId}:${toolName}` → whether description is expanded
+    const [expandedToolDesc, setExpandedToolDesc] = useState<Record<string, boolean>>({});
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [saveError, setSaveError] = useState<string | null>(null);
     const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -391,8 +393,10 @@ export const AgentDetails: React.FC = () => {
                                                                             </div>
                                                                             {cachedTools.map((tool: any) => {
                                                                                 const isEnabled = serverToolFilters[tool.name] !== false;
+                                                                                const descKey = `${srv.id}:${tool.name}`;
+                                                                                const descExpanded = !!expandedToolDesc[descKey];
                                                                                 return (
-                                                                                    <label key={tool.name} className="flex items-start gap-2 cursor-pointer py-0.5">
+                                                                                    <div key={tool.name} className="flex items-start gap-2 py-0.5">
                                                                                         <input
                                                                                             type="checkbox"
                                                                                             checked={isEnabled}
@@ -405,15 +409,18 @@ export const AgentDetails: React.FC = () => {
                                                                                                     },
                                                                                                 }));
                                                                                             }}
-                                                                                            className="h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded flex-shrink-0 mt-0.5"
+                                                                                            className="h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded flex-shrink-0 mt-0.5 cursor-pointer"
                                                                                         />
-                                                                                        <div className="min-w-0">
+                                                                                        <div
+                                                                                            className="min-w-0 flex-1 cursor-pointer"
+                                                                                            onClick={() => tool.description && setExpandedToolDesc(prev => ({ ...prev, [descKey]: !prev[descKey] }))}
+                                                                                        >
                                                                                             <span className="text-xs font-mono text-gray-800">{tool.name}</span>
                                                                                             {tool.description && (
-                                                                                                <p className="text-xs text-gray-400 truncate">{tool.description}</p>
+                                                                                                <p className={`text-xs text-gray-400 ${descExpanded ? '' : 'truncate'}`}>{tool.description}</p>
                                                                                             )}
                                                                                         </div>
-                                                                                    </label>
+                                                                                    </div>
                                                                                 );
                                                                             })}
                                                                         </div>
