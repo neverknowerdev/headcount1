@@ -21,6 +21,7 @@ interface MCPServer {
     transport: 'stdio' | 'http' | 'builtin';
     command: string;
     args: string;
+    deps: string; // JSON array of npm packages to pre-install
     url: string;
     headers: string;
     auth_type: string;
@@ -75,6 +76,8 @@ const emptyForm = {
     transport: 'stdio' as MCPServer['transport'],
     command: '', args: '[]', url: '', headers: '{}',
     auth_type: 'none', auth_token: '', enabled: true,
+    // npm packages stored as newline-separated for the textarea, serialised to JSON on submit
+    depsText: '',
 };
 
 export const MCPServers: React.FC = () => {
@@ -150,12 +153,14 @@ export const MCPServers: React.FC = () => {
         setError(null);
         if (s) {
             setEditingId(s.id);
+            let depsText = '';
+            try { depsText = JSON.parse(s.deps || '[]').join('\n'); } catch {}
             setFormData({
                 name: s.name, display_name: s.display_name || '', description: s.description || '',
                 transport: (s.transport === 'builtin' ? 'stdio' : s.transport) as MCPServer['transport'],
                 command: s.command || '', args: s.args || '[]', url: s.url || '',
                 headers: s.headers || '{}', auth_type: s.auth_type || 'none',
-                auth_token: '', enabled: s.enabled,
+                auth_token: '', enabled: s.enabled, depsText,
             });
         } else {
             setEditingId(null);
@@ -167,11 +172,16 @@ export const MCPServers: React.FC = () => {
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setError(null);
+        const { depsText, ...rest } = formData;
+        const deps = JSON.stringify(
+            depsText.split('\n').map(s => s.trim()).filter(Boolean)
+        );
+        const payload = { ...rest, deps };
         try {
             if (editingId) {
-                await axios.put(`/api/mcp-servers/${editingId}`, formData);
+                await axios.put(`/api/mcp-servers/${editingId}`, payload);
             } else {
-                await axios.post('/api/mcp-servers', formData);
+                await axios.post('/api/mcp-servers', payload);
             }
             setIsModalOpen(false);
             fetchServers();
@@ -569,6 +579,19 @@ export const MCPServers: React.FC = () => {
                                             onChange={e => setFormData({ ...formData, args: e.target.value })}
                                             placeholder='["stdio"]'
                                             className="w-full border rounded p-2 text-sm font-mono" />
+                                    </div>
+                                    <div>
+                                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                                            npm packages to install
+                                        </label>
+                                        <textarea
+                                            value={formData.depsText}
+                                            onChange={e => setFormData({ ...formData, depsText: e.target.value })}
+                                            placeholder={"@modelcontextprotocol/server-github\n@my-org/my-mcp-server"}
+                                            rows={3}
+                                            className="w-full border rounded p-2 text-sm font-mono resize-none"
+                                        />
+                                        <p className="text-xs text-gray-400 mt-1">One package per line. Installed globally via npm when the server is saved.</p>
                                     </div>
                                 </>
                             )}

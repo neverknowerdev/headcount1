@@ -10,6 +10,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/server/controllers"
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
@@ -63,6 +64,24 @@ func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		}
+	}
+}
+
+// InstallMCPNpmDeps reads the Deps field from every MCP server in the database
+// and installs any npm packages that are not already present globally.
+// Runs after the platform setup script so npm is guaranteed to exist.
+func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
+	pkgs, err := db.New(s.db).ListAllMCPNpmDeps(ctx)
+	if err != nil {
+		log.Printf("mcp npm deps: failed to query deps: %v", err)
+		return
+	}
+	if len(pkgs) == 0 {
+		return
+	}
+	depsJSON, _ := json.Marshal(pkgs)
+	if err := setup.InstallNpmDeps(ctx, string(depsJSON)); err != nil {
+		log.Printf("mcp npm deps: %v", err)
 	}
 }
 
@@ -150,6 +169,15 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{id}", api.UpdateProvider)
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
+	})
+
+	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
+		errMsg := setup.StartupError()
+		if errMsg == "" {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+		} else {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": errMsg})
+		}
 	})
 
 	r.Route("/backup", func(r chi.Router) {

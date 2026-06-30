@@ -18,6 +18,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
 	endpoints "agent-orchestrator/server/controllers"
@@ -126,8 +127,14 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
-	// Discover and cache tools for all enabled MCP servers in the background.
-	go srv.CacheMCPTools(context.Background())
+	// Run setup script and npm installs in the background so the HTTP server starts immediately.
+	go func() {
+		if err := setup.Run(); err != nil {
+			log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
+		}
+		srv.InstallMCPNpmDeps(context.Background())
+		srv.CacheMCPTools(context.Background())
+	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 
 	// Resume codegraph init for any project whose knowledge graph isn't ready yet.

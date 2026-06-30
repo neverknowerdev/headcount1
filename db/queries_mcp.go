@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os/exec"
@@ -394,7 +395,7 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 		{
 			Name:        "github",
 			DisplayName: "GitHub",
-			Description: "Access GitHub repos, issues, pull requests, and code search. Auto-installs via brew on first use.",
+			Description: "Access GitHub repos, issues, pull requests, and code search.",
 			Transport:   "stdio",
 			Command:     "github-mcp-server",
 			Args:        `["stdio"]`,
@@ -410,6 +411,7 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 			Transport:   "stdio",
 			Command:     "npx",
 			Args:        `["-y", "@modelcontextprotocol/server-gdrive"]`,
+			Deps:        `["@modelcontextprotocol/server-gdrive"]`,
 			AuthType:    "google-oauth",
 			AuthEnvVar:  "GDRIVE_CREDENTIALS_PATH",
 			Enabled:     false,
@@ -448,6 +450,9 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 			if existing.AuthEnvVar != s.AuthEnvVar {
 				updates["auth_env_var"] = s.AuthEnvVar
 			}
+			if existing.Deps != s.Deps {
+				updates["deps"] = s.Deps
+			}
 			if len(updates) > 0 {
 				q.db.WithContext(ctx).Model(&existing).Updates(updates)
 			}
@@ -458,6 +463,35 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// ListAllMCPNpmDeps returns the deduplicated set of npm packages declared in
+// the Deps field across all MCP servers.
+func (q *Queries) ListAllMCPNpmDeps(ctx context.Context) ([]string, error) {
+	var rows []MCPServer
+	if err := q.db.WithContext(ctx).
+		Where("deps != '' AND deps IS NOT NULL").
+		Select("deps").
+		Find(&rows).Error; err != nil {
+		return nil, err
+	}
+	seen := map[string]bool{}
+	var result []string
+	for _, row := range rows {
+		var pkgs []string
+		if err := json.Unmarshal([]byte(row.Deps), &pkgs); err != nil {
+			log.Printf("db: invalid deps JSON for MCP server: %v", err)
+			continue
+		}
+		for _, pkg := range pkgs {
+			pkg = strings.TrimSpace(pkg)
+			if pkg != "" && !seen[pkg] {
+				seen[pkg] = true
+				result = append(result, pkg)
+			}
+		}
+	}
+	return result, nil
 }
 
 // MigrateAddProjectFKToMCPServers adds a proper FK constraint from

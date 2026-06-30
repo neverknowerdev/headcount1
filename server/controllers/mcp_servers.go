@@ -17,28 +17,9 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/setup"
 	"github.com/go-chi/chi/v5"
 )
-
-// installMCPDependencies installs missing CLI tools required by built-in MCP servers.
-func installMCPDependencies(ctx context.Context) {
-	if _, err := exec.LookPath("github-mcp-server"); err != nil {
-		if brewPath, err := exec.LookPath("brew"); err == nil {
-			log.Println("MCP deps: github-mcp-server not found, installing via brew...")
-			cmd := exec.CommandContext(ctx, brewPath, "install", "github-mcp-server")
-			// Suppress brew's auto-update to avoid network failures in CI/server envs.
-			cmd.Env = append(os.Environ(), "HOMEBREW_NO_AUTO_UPDATE=1")
-			if out, err := cmd.CombinedOutput(); err != nil {
-				log.Printf("MCP deps: brew install github-mcp-server failed: %v\n%s", err, out)
-			} else {
-				log.Println("MCP deps: github-mcp-server installed")
-			}
-		} else {
-			log.Println("MCP deps: brew not found, skipping github-mcp-server auto-install")
-		}
-	}
-	// Google Docs MCP: npx -y handles auto-install on first run.
-}
 
 // categorizeMCPError returns a human-readable reason for a discovery failure.
 func categorizeMCPError(serverName, raw string) string {
@@ -119,11 +100,9 @@ func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account
 	return discoverServerTools(ctx, s)
 }
 
-// DiscoverAndCacheAllMCPTools installs missing deps, then discovers and caches
-// tools for every enabled MCP server via its accounts. Called in a background goroutine on startup.
+// DiscoverAndCacheAllMCPTools discovers and caches tools for every enabled MCP
+// server via its accounts. Called in a background goroutine on startup.
 func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
-	installMCPDependencies(ctx)
-
 	servers, err := api.q.ListMCPServers(ctx, 0) // 0 = all companies
 	if err != nil {
 		log.Printf("MCP cache: failed to list servers: %v", err)
@@ -213,6 +192,13 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.saveMCPServerToDisk(s)
+	if s.Deps != "" {
+		go func() {
+			if err := setup.InstallNpmDeps(context.Background(), s.Deps); err != nil {
+				log.Printf("mcp npm deps (create %q): %v", s.Name, err)
+			}
+		}()
+	}
 	api.respondJSON(w, http.StatusCreated, s)
 }
 
@@ -272,6 +258,13 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.saveMCPServerToDisk(s)
+	if s.Deps != "" {
+		go func() {
+			if err := setup.InstallNpmDeps(context.Background(), s.Deps); err != nil {
+				log.Printf("mcp npm deps (update %q): %v", s.Name, err)
+			}
+		}()
+	}
 	api.respondJSON(w, http.StatusOK, s)
 }
 
@@ -309,9 +302,6 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
-	}
-	if s.Transport == "stdio" {
-		installMCPDependencies(r.Context())
 	}
 	if len(s.Accounts) == 0 {
 		api.respondError(w, http.StatusBadRequest, "no accounts configured — add an account first")
@@ -468,9 +458,6 @@ func (api *API) DiscoverMCPAccountTools(w http.ResponseWriter, r *http.Request) 
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "server not found")
 		return
-	}
-	if s.Transport == "stdio" {
-		installMCPDependencies(r.Context())
 	}
 	toolsJSON, discErr := discoverServerToolsWithAccount(r.Context(), s, acc)
 	if discErr != nil {
