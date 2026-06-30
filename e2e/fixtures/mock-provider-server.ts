@@ -3,9 +3,6 @@ import * as net from 'net';
 import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
-const TOOL_NAME = 'finish_task';
-const TOOL_CALL_ID = 'call_e2e_1';
-const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
 const COMPLETION_TEXT = 'Task is now in review. All done.';
 
 interface ReceivedRequest {
@@ -28,8 +25,10 @@ export interface ScenarioToolCall {
 }
 
 export interface ScenarioEntry {
-    /** Emit a tool call. */
+    /** Emit a single tool call. */
     tool_call?: ScenarioToolCall;
+    /** Emit multiple tool calls in the same assistant turn (e.g. batched ask_question). */
+    tool_calls?: ScenarioToolCall[];
     /** Emit a plain text completion. */
     text?: string;
 }
@@ -42,8 +41,23 @@ interface ScenarioState {
 interface ChatCompletionRequest {
     model?: string;
     messages?: Array<{ role: string; content: string }>;
+    tools?: Array<{ type: string; function?: { name?: string } }>;
     stream?: boolean;
     [key: string]: unknown;
+}
+
+const FINISH_REFINEMENT_TOOL = 'finish_refinement';
+const DEFAULT_REFINEMENT_ARGS = {
+    detailed_description: 'E2E default-mode task.',
+    specifications: 'Implement as described.',
+    acceptance_criteria: 'Works correctly.',
+    test_cases: '[]',
+};
+
+/** True when the request's tool list includes finish_refinement, identifying
+ *  the caller as the SmartPlanner orchestrator (refinement stage). */
+function isSmartPlannerRequest(request: ChatCompletionRequest): boolean {
+    return (request.tools ?? []).some((t) => t.function?.name === FINISH_REFINEMENT_TOOL);
 }
 
 interface ChatChunkDelta {
@@ -76,8 +90,10 @@ interface ChatChunk {
  * tests.
  *
  * Endpoints:
- *   - POST /v1/chat/completions   -> returns a tool call to `finish_task`
- *                                   on the first request, then a text completion.
+ *   - POST /v1/chat/completions   -> in default mode, pipeline-aware: SmartPlanner
+ *                                   calls (tools include finish_refinement) get a
+ *                                   finish_refinement tool call; all other calls
+ *                                   (Coder, Tester, researchers) get a text reply.
  *   - GET  /v1/models             -> returns one model so `TestProvider` succeeds.
  *   - GET  /__test/requests       -> returns the log of received requests (test introspection).
  *   - POST /__test/reset          -> clears the request log.
@@ -204,22 +220,32 @@ function handleChatCompletionsRoute(
         return true;
     }
 
-    // Default mode: first call returns finish_task, subsequent calls return text.
-    const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
-    const hasToolResult = messages.some((m: any) => m.role === 'tool');
-    const isFirstCall = !hasToolResult;
+    // Default mode (AskMode pipeline-aware, no scenario configured):
+    //  - SmartPlanner calls (tools include finish_refinement) get a finish_refinement
+    //    tool call immediately, completing the refinement stage in one turn.
+    //  - All other calls (Coder, Tester, researchers, escalation one-shots) get a
+    //    plain text reply, which ends that stage's agent loop successfully.
+    if (isSmartPlannerRequest(request)) {
+        if (wantsStream) {
+            writeStreamingScenarioEntry(res, { tool_call: { id: 'default_fr', name: FINISH_REFINEMENT_TOOL, arguments: DEFAULT_REFINEMENT_ARGS } });
+        } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(buildScenarioResponse({ tool_call: { id: 'default_fr', name: FINISH_REFINEMENT_TOOL, arguments: DEFAULT_REFINEMENT_ARGS } })));
+        }
+        return true;
+    }
 
     if (wantsStream) {
-        writeStreamingChatCompletion(res, isFirstCall);
+        writeStreamingChatCompletion(res);
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall)));
+        res.end(JSON.stringify(buildChatCompletionResponse()));
     }
     return true;
 }
 
 function buildScenarioResponse(entry: ScenarioEntry | null): object {
-    if (!entry || entry.text !== undefined) {
+    if (!entry || (entry.text !== undefined && !entry.tool_call && !entry.tool_calls)) {
         const text = entry?.text ?? 'Done.';
         return {
             id: `chatcmpl-sc-${Date.now()}`,
@@ -234,7 +260,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const tc = entry.tool_call!;
+    const tcs = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -245,11 +271,11 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             message: {
                 role: 'assistant' as const,
                 content: null,
-                tool_calls: [{
+                tool_calls: tcs.map((tc) => ({
                     id: tc.id,
                     type: 'function',
                     function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-                }],
+                })),
             },
             finish_reason: 'tool_calls',
         }],
@@ -267,18 +293,20 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
     const chunk = createChunkFactory();
     res.write(formatSSE(chunk({ role: 'assistant' }, null)));
 
-    if (!entry || entry.text !== undefined) {
+    const tcs = entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : []);
+    if (tcs.length === 0) {
         const text = entry?.text ?? 'Done.';
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const tc = entry.tool_call!;
-        res.write(formatSSE(chunk({
-            tool_calls: [{ index: 0, id: tc.id, function: { name: tc.name, arguments: '' } }],
-        }, null)));
-        res.write(formatSSE(chunk({
-            tool_calls: [{ index: 0, function: { arguments: JSON.stringify(tc.arguments) } }],
-        }, null)));
+        tcs.forEach((tc, index) => {
+            res.write(formatSSE(chunk({
+                tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
+            }, null)));
+            res.write(formatSSE(chunk({
+                tool_calls: [{ index, function: { arguments: JSON.stringify(tc.arguments) } }],
+            }, null)));
+        });
         res.write(formatSSE(chunk({}, 'tool_calls')));
     }
 
@@ -286,25 +314,7 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
     res.end();
 }
 
-function buildChatCompletionResponse(withToolCall: boolean): object {
-    const message = withToolCall
-        ? {
-            role: 'assistant' as const,
-            content: 'I have analyzed the E2E task and completed it successfully.',
-            tool_calls: [{
-                id: TOOL_CALL_ID,
-                type: 'function',
-                function: {
-                    name: TOOL_NAME,
-                    arguments: JSON.stringify(TOOL_ARGS),
-                },
-            }],
-        }
-        : {
-            role: 'assistant' as const,
-            content: COMPLETION_TEXT,
-        };
-
+function buildChatCompletionResponse(): object {
     return {
         id: `chatcmpl-e2e-${Date.now()}`,
         object: 'chat.completion',
@@ -312,8 +322,8 @@ function buildChatCompletionResponse(withToolCall: boolean): object {
         model: MOCK_MODEL_ID,
         choices: [{
             index: 0,
-            message,
-            finish_reason: withToolCall ? 'tool_calls' : 'stop',
+            message: { role: 'assistant' as const, content: COMPLETION_TEXT },
+            finish_reason: 'stop',
         }],
         usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
     };
@@ -332,7 +342,7 @@ function getFreePort(): Promise<number> {
     });
 }
 
-function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean): void {
+function writeStreamingChatCompletion(res: http.ServerResponse): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -342,28 +352,8 @@ function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: bo
     const chunk = createChunkFactory();
 
     res.write(formatSSE(chunk({ role: 'assistant' }, null)));
-
-    if (withToolCall) {
-        res.write(formatSSE(chunk({
-            tool_calls: [{
-                index: 0,
-                id: TOOL_CALL_ID,
-                function: { name: TOOL_NAME, arguments: '' },
-            }],
-        }, null)));
-
-        res.write(formatSSE(chunk({
-            tool_calls: [{
-                index: 0,
-                function: { arguments: JSON.stringify(TOOL_ARGS) },
-            }],
-        }, null)));
-
-        res.write(formatSSE(chunk({}, 'tool_calls')));
-    } else {
-        res.write(formatSSE(chunk({ content: COMPLETION_TEXT }, null)));
-        res.write(formatSSE(chunk({}, 'stop')));
-    }
+    res.write(formatSSE(chunk({ content: COMPLETION_TEXT }, null)));
+    res.write(formatSSE(chunk({}, 'stop')));
 
     res.write('data: [DONE]\n\n');
     res.end();

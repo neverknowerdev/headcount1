@@ -68,10 +68,35 @@ function getFreePort(): Promise<number> {
     });
 }
 
-/** Configure the mock LLM provider to run a specific scenario. */
+/**
+ * Configure the mock LLM provider to run a specific scenario.
+ *
+ * Tasks now run through the 3-stage AskMode pipeline (refinement →
+ * implementation → testing), so the entries a test writes here represent the
+ * Coder (implementation) phase's actions. This wraps them with a
+ * finish_refinement entry to complete the SmartPlanner refinement phase
+ * first, and a trailing text entry to complete the Tester phase after the
+ * Coder's actions run.
+ */
 async function setScenario(request: APIRequestContext, entries: ScenarioEntry[]): Promise<void> {
+    const wrapped: ScenarioEntry[] = [
+        {
+            tool_call: {
+                id: 'auto_finish_refinement',
+                name: 'finish_refinement',
+                arguments: {
+                    detailed_description: 'Tool test task.',
+                    specifications: 'Exercise the tool under test.',
+                    acceptance_criteria: 'The tool call succeeds and its result reaches the LLM.',
+                    test_cases: '[]',
+                },
+            },
+        },
+        ...entries,
+        { text: 'Testing complete.' },
+    ];
     const res = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-        data: { entries },
+        data: { entries: wrapped },
     });
     expect(res.ok(), `set-scenario failed: ${await res.text()}`).toBeTruthy();
 }
@@ -158,7 +183,7 @@ async function runTask(
             company_id: companyId,
             sprint_id: sprintId,
             title,
-            task_type: 'implement',
+            task_type: 'tech',
             agent_id: agentId,
         },
     });

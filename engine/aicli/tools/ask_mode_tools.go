@@ -199,10 +199,14 @@ type QuestionAnswer struct {
 // questions it was assigned and signal that the session is complete.
 type SubAgentAnswerTool struct {
 	completeCh chan<- []QuestionAnswer
+	// cancel, when set, is called after the answers are submitted to stop the
+	// researcher's agent loop immediately instead of letting it make another
+	// (unnecessary) LLM turn.
+	cancel context.CancelFunc
 }
 
-func NewSubAgentAnswer(completeCh chan<- []QuestionAnswer) *SubAgentAnswerTool {
-	return &SubAgentAnswerTool{completeCh: completeCh}
+func NewSubAgentAnswer(completeCh chan<- []QuestionAnswer, cancel context.CancelFunc) *SubAgentAnswerTool {
+	return &SubAgentAnswerTool{completeCh: completeCh, cancel: cancel}
 }
 
 func (t *SubAgentAnswerTool) Def() aicli.ToolDef {
@@ -250,6 +254,9 @@ func (t *SubAgentAnswerTool) Execute(ctx context.Context, args json.RawMessage) 
 	case t.completeCh <- p.Answers:
 	case <-ctx.Done():
 		return "", ctx.Err()
+	}
+	if t.cancel != nil {
+		t.cancel() // stop the researcher loop after capturing the result
 	}
 	return "Answers submitted.", nil
 }

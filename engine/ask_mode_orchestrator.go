@@ -264,9 +264,15 @@ func (o *AskModeOrchestrator) runResearchBatch(
 		fmt.Fprintf(&sb, "%d. %s\n", i+1, q)
 	}
 
+	// researchCtx is canceled as soon as answer_question is called, so the
+	// researcher's agent loop stops immediately instead of making another
+	// (unnecessary) LLM turn.
+	researchCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
 	completeCh := make(chan []tools.QuestionAnswer, 1)
 	registry := tools.DefaultRegistry(workspacePath)
-	registry.Register(tools.NewSubAgentAnswer(completeCh))
+	registry.Register(tools.NewSubAgentAnswer(completeCh, cancel))
 
 	agentCfg, _ := o.agentFactory.GetConfig(configName)
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
@@ -290,7 +296,7 @@ func (o *AskModeOrchestrator) runResearchBatch(
 
 	doneCh := make(chan error, 1)
 	go func() {
-		_, runErr := researchAgent.Run(ctx, systemPrompt, sb.String())
+		_, runErr := researchAgent.Run(researchCtx, systemPrompt, sb.String())
 		doneCh <- runErr
 	}()
 

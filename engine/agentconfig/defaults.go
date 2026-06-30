@@ -142,7 +142,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(testerPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			AllowedTools:   []string{"browser_use", "read", "list", "grep", "exec", "call_mcp_tool", "discover_mcp_tool", "ask_task_owner", "answer_question"},
+			AllowedTools:   []string{"browser_use", "read", "list", "grep", "exec", "call_mcp_tool", "discover_mcp_tool", "ask_task_owner", "answer_question", "finish_task"},
 		},
 	}
 }
