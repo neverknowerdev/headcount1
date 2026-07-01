@@ -141,6 +141,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
 		r.Post("/", api.CreateAgent)
+		r.Get("/builtin", api.ListBuiltinAgents)
 		r.Get("/{id}", api.GetAgent)
 		r.Put("/{id}", api.UpdateAgent)
 		r.Get("/{id}/stats", api.GetAgentStats)

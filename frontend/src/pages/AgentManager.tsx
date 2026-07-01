@@ -8,6 +8,8 @@ export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
+    const [builtinAgents, setBuiltinAgents] = useState<any[]>([]);
+    const [expandedBuiltin, setExpandedBuiltin] = useState<string | null>(null);
     const [showModal, setShowModal] = useState(false);
     const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
     const [saving, setSaving] = useState(false);
@@ -27,6 +29,10 @@ export const AgentManager: React.FC = () => {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         fetchAgents();
     }, [fetchAgents]);
+
+    useEffect(() => {
+        axios.get('/api/agents/builtin').then(res => setBuiltinAgents(res.data || [])).catch(e => console.error(e));
+    }, []);
 
     const openModal = () => {
         setForm({ name: '', description: '', system_prompt: '' });
@@ -65,23 +71,63 @@ export const AgentManager: React.FC = () => {
                 </button>
             </div>
 
-            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                {agents.map(agent => (
-                    <div key={agent.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col">
-                        <div className="flex justify-between items-start mb-4">
-                            <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</h3>
-                            <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
-                        </div>
-                        {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
+            {builtinAgents.length > 0 && (
+                <div>
+                    <div className="mb-3">
+                        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Built-in Agents</h2>
+                        <p className="text-xs text-gray-400">System roles used by the task pipeline (refinement, implementation, testing). Read-only.</p>
+                    </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                        {builtinAgents.map(agent => {
+                            const isExpanded = expandedBuiltin === agent.name;
+                            return (
+                                <div key={agent.name} className="bg-slate-50 p-6 rounded-lg border border-slate-200 flex flex-col">
+                                    <div className="flex justify-between items-start mb-2">
+                                        <h3 className="text-lg font-bold text-gray-900">{agent.name}</h3>
+                                        <span className="bg-slate-200 text-slate-700 text-xs px-2 py-1 rounded-full">Built-in</span>
+                                    </div>
+                                    {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
 
-                        <div className="mt-auto">
-                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
-                            <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">
-                                {agent.system_prompt}
+                                    <div className="mt-auto">
+                                        <button
+                                            className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-indigo-600"
+                                            onClick={() => setExpandedBuiltin(isExpanded ? null : agent.name)}
+                                        >
+                                            System Prompt {isExpanded ? '▲' : '▼'}
+                                        </button>
+                                        {isExpanded && (
+                                            <div className="text-xs text-gray-700 bg-white p-3 rounded border overflow-y-auto max-h-64 whitespace-pre-wrap font-mono">
+                                                {agent.prompt}
+                                            </div>
+                                        )}
+                                    </div>
+                                </div>
+                            );
+                        })}
+                    </div>
+                </div>
+            )}
+
+            <div>
+                <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider mb-3">Your Agents</h2>
+                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                    {agents.map(agent => (
+                        <div key={agent.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col">
+                            <div className="flex justify-between items-start mb-4">
+                                <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</h3>
+                                <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
+                            </div>
+                            {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
+
+                            <div className="mt-auto">
+                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
+                                <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">
+                                    {agent.system_prompt}
+                                </div>
                             </div>
                         </div>
-                    </div>
-                ))}
+                    ))}
+                </div>
             </div>
             {agents.length === 0 && (
                 <div className="text-center mt-16">
