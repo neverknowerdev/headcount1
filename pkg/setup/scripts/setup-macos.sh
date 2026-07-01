@@ -107,13 +107,17 @@ if command -v python3 >/dev/null 2>&1; then
         if ! python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
             # Homebrew's Python (and most modern Linux distros) mark
             # themselves "externally managed" (PEP 668) and refuse a plain
-            # `pip install`. This script is the intended place to manage
-            # this Python's packages, so bypassing that guard here is safe —
-            # retry with it before giving up.
-            retry_output=$(python3 -m pip install --break-system-packages markitdown 2>&1)
+            # `pip install`. Retry bypassing that guard, but pair it with
+            # --user (as Homebrew's own error message recommends) so this
+            # installs to the per-user site-packages instead of the
+            # system-wide one shared with other Homebrew-managed tools —
+            # same python3 interpreter can still import it, without risking
+            # a shared dependency (e.g. requests, beautifulsoup4) getting
+            # upgraded out from under some other brewed tool.
+            retry_output=$(python3 -m pip install --break-system-packages --user markitdown 2>&1)
             install_output="${install_output}
 
---- retry with --break-system-packages ---
+--- retry with --break-system-packages --user ---
 ${retry_output}"
         fi
         if python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
