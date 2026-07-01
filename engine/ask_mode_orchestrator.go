@@ -43,6 +43,14 @@ func (o *AskModeOrchestrator) ExecuteTask(
 ) (taskFinished bool, err error) {
 	o.logInfo(logger, "AskMode: starting 3-stage pipeline (refinement → implementation → testing)")
 
+	// Validate that every role this task will need has a resolvable
+	// provider/model *before* doing any work — a role misconfigured deep in
+	// the pipeline (e.g. Coder) shouldn't be discovered only after refinement
+	// has already run.
+	if valErr := o.validateRoleModels(ctx, task); valErr != nil {
+		return false, valErr
+	}
+
 	// Create the main orchestrator session.
 	session, sessionErr := o.q.CreateSession(ctx, db.Session{
 		TaskID:          task.ID,
@@ -520,6 +528,26 @@ func (o *AskModeOrchestrator) handleEscalation(
 	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
 	o.logInfo(logger, fmt.Sprintf("AskMode: escalation answered: %q", truncate(answer, 80)))
 	return answer, nil
+}
+
+// validateRoleModels checks that every role this task's pipeline will invoke
+// (SmartPlanner, the task-type researcher, Coder, Tester) resolves to a
+// usable provider and model, returning a single combined error naming every
+// misconfigured role if not. This is the only case that should ever surface
+// as "no model set for role" — as long as at least one LLM provider exists,
+// every role should resolve to something.
+func (o *AskModeOrchestrator) validateRoleModels(ctx context.Context, task db.Task) error {
+	roles := []string{"SmartPlanner", o.researcherConfigName(task.TaskType), "Coder", "Tester"}
+	var problems []string
+	for _, role := range roles {
+		if _, _, err := o.resolveRoleProvider(ctx, role); err != nil {
+			problems = append(problems, fmt.Sprintf("%s: %v", role, err))
+		}
+	}
+	if len(problems) > 0 {
+		return fmt.Errorf("no model configured for role(s) — set a provider for each in Role Model Configuration (LLM Providers page): %s", strings.Join(problems, "; "))
+	}
+	return nil
 }
 
 // resolveRoleProvider looks up the LLM provider and model for a given agent role.

@@ -31,15 +31,46 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	deletedID := int32(id)
 
-	err = api.q.DeleteLLMProvider(r.Context(), int32(id))
+	err = api.q.DeleteLLMProvider(r.Context(), deletedID)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).DeleteLLMProviderFile(int32(id))
+	filesystem.NewManager(settings.BasePath).DeleteLLMProviderFile(deletedID)
+
+	// Any role pointing at the deleted provider must be reassigned so it never
+	// dangles: fall back to another remaining provider if one exists, or to
+	// "unset" (0) if none do — the only situation where a role legitimately
+	// has no resolvable model is when every provider has been removed.
+	if remaining, listErr := api.q.ListLLMProviders(r.Context()); listErr == nil {
+		if reassignRolesAwayFromProvider(&settings.RoleModels, deletedID, remaining) {
+			SaveSettings(settings) //nolint:errcheck
+		}
+	}
+
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// reassignRolesAwayFromProvider clears any role's provider/model that pointed
+// at deletedID, reassigning it to the first remaining provider if one exists.
+// Returns true if any role was changed (so the caller knows to persist).
+func reassignRolesAwayFromProvider(rm *RoleModelConfig, deletedID int32, remaining []db.LLMProvider) bool {
+	var fallbackID int32
+	if len(remaining) > 0 {
+		fallbackID = remaining[0].ID
+	}
+	changed := false
+	for _, ref := range roleModelRefs(rm) {
+		if *ref.providerID == deletedID {
+			*ref.providerID = fallbackID
+			*ref.model = ""
+			changed = true
+		}
+	}
+	return changed
 }
 
 func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
@@ -102,6 +133,14 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
+
+	// Was this the first provider in the system? If so, every role should
+	// default to it — otherwise roles would sit unset until someone visits
+	// the Role Model Configuration section, and task execution should never
+	// have to guess which provider to use when exactly one exists.
+	existing, _ := api.q.ListLLMProviders(r.Context())
+	isFirstProvider := len(existing) == 0
+
 	p := db.LLMProvider{
 		Name:            req.Name,
 		BaseUrl:         req.BaseUrl,
@@ -116,7 +155,40 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := LoadSettings()
 	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
+
+	if isFirstProvider {
+		assignAllRolesToProvider(&settings.RoleModels, p.ID)
+		SaveSettings(settings) //nolint:errcheck
+	}
+
 	api.respondJSON(w, http.StatusCreated, p)
+}
+
+// assignAllRolesToProvider points every AI role at providerID with no model
+// override (blank = that provider's default model).
+func assignAllRolesToProvider(rm *RoleModelConfig, providerID int32) {
+	for _, ref := range roleModelRefs(rm) {
+		*ref.providerID = providerID
+		*ref.model = ""
+	}
+}
+
+// roleModelRef pairs a role's provider ID and model override fields so they
+// can be iterated over uniformly.
+type roleModelRef struct {
+	providerID *int32
+	model      *string
+}
+
+func roleModelRefs(rm *RoleModelConfig) []roleModelRef {
+	return []roleModelRef{
+		{&rm.SmartPlannerProviderID, &rm.SmartPlannerModel},
+		{&rm.TechResearcherProviderID, &rm.TechResearcherModel},
+		{&rm.WritingResearcherProviderID, &rm.WritingResearcherModel},
+		{&rm.DesignResearcherProviderID, &rm.DesignResearcherModel},
+		{&rm.CoderProviderID, &rm.CoderModel},
+		{&rm.TesterProviderID, &rm.TesterModel},
+	}
 }
 
 func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
