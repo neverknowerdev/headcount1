@@ -50,6 +50,15 @@ type ProxyLogger struct {
 	curFile     *os.File
 	curFilePath string
 
+	// mainSessionID is the DB session ID of the run's root session.
+	// curSessionID/curParentSessionID track whichever session is currently
+	// active and get stamped onto every broadcast/persisted log entry, so
+	// the Run Log UI can group entries by session and render sub-sessions
+	// as collapsible sub-timelines.
+	mainSessionID      int32
+	curSessionID       int32
+	curParentSessionID *int32
+
 	basePath string
 	hub      interface{ BroadcastEvent(string, interface{}) }
 	q        *db.Queries
@@ -146,13 +155,35 @@ func (l *ProxyLogger) StartSession(info SessionInfo) error {
 	if l.mainFile == nil {
 		l.mainFile = f
 		l.mainFilePath = filePath
+		l.mainSessionID = info.SessionID
 	} else {
 		fmt.Fprintf(l.mainFile, "[%s] -> starting new session: %s (session #%d, role=%s)\n",
 			ts, info.AgentName, info.SessionID, info.Role)
+
+		// Emit a "session_start" entry into the CURRENTLY active session's
+		// timeline (still the parent's at this point — curSessionID isn't
+		// updated until below), so the Run Log UI can render it as a
+		// collapsible marker in the parent's flat list. started_session_id
+		// tells the UI which session's own entries (tagged separately below)
+		// belong to the expanded view.
+		sessionData := map[string]interface{}{
+			"started_session_id": info.SessionID,
+			"agent_name":         info.AgentName,
+			"role":               info.Role,
+			"model":              info.Model,
+			"provider":           info.Provider,
+			"tools":              info.Tools,
+			"mcps":               info.MCPs,
+		}
+		contentBytes, _ := json.Marshal(sessionData)
+		l.broadcastLog("session_start", string(contentBytes), nil)
+		l.persistLog("session_start", string(contentBytes), nil)
 	}
 
 	l.curFile = f
 	l.curFilePath = filePath
+	l.curSessionID = info.SessionID
+	l.curParentSessionID = info.ParentSessionID
 	return nil
 }
 
@@ -166,10 +197,26 @@ func (l *ProxyLogger) EndSession() {
 	if l.curFile != nil && l.curFile != l.mainFile {
 		ts := time.Now().UTC().Format(time.RFC3339)
 		fmt.Fprintf(l.curFile, "\n=== Session ended [%s] ===\n", ts)
+		l.broadcastLog("session_end", "", nil)
+		l.persistLog("session_end", "", nil)
 		l.curFile.Close()
 	}
 	l.curFile = l.mainFile
 	l.curFilePath = l.mainFilePath
+	l.curSessionID = l.mainSessionID
+	l.curParentSessionID = nil
+}
+
+// injectSessionFields stamps the currently active session's identity onto a
+// log entry so the frontend can group entries by session and pair
+// sub-session markers with their own timelines.
+func (l *ProxyLogger) injectSessionFields(entry map[string]interface{}) {
+	if l.curSessionID != 0 {
+		entry["session_id"] = l.curSessionID
+	}
+	if l.curParentSessionID != nil {
+		entry["parent_session_id"] = *l.curParentSessionID
+	}
 }
 
 // out returns the writer that Log* calls should use: the current session's
@@ -192,6 +239,7 @@ func (l *ProxyLogger) broadcastLog(entryType, content string, extra map[string]i
 		"content": content,
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	l.injectSessionFields(entry)
 	for k, v := range extra {
 		entry[k] = v
 	}
@@ -210,6 +258,7 @@ func (l *ProxyLogger) persistLog(entryType, content string, extra map[string]int
 		"content": content,
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
 	}
+	l.injectSessionFields(entry)
 	for k, v := range extra {
 		entry[k] = v
 	}
@@ -559,7 +608,7 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 			"tool_name":     name,
 			"output_tokens": outTokens,
 		})
-		go l.persistToolResponse(name, preview, outTokens)
+		go l.persistToolResponse(name, preview, outTokens, l.curSessionID, l.curParentSessionID)
 
 		// Roll into the run-level aggregate so the header bar picks
 		// it up.
@@ -634,13 +683,19 @@ func (l *ProxyLogger) recentToolCalls(n int) []toolCallSnapshot {
 // persistToolResponse is a fire-and-forget DB writer for tool_response
 // entries. Kept separate from broadcastLog/persistLog so the file write
 // and broadcast stay in the critical section.
-func (l *ProxyLogger) persistToolResponse(toolName, content string, outputTokens int) {
+func (l *ProxyLogger) persistToolResponse(toolName, content string, outputTokens int, sessionID int32, parentSessionID *int32) {
 	entry := map[string]interface{}{
 		"type":          "tool_response",
 		"content":       content,
 		"ts":            time.Now().UTC().Format(time.RFC3339Nano),
 		"tool_name":     toolName,
 		"output_tokens": outputTokens,
+	}
+	if sessionID != 0 {
+		entry["session_id"] = sessionID
+	}
+	if parentSessionID != nil {
+		entry["parent_session_id"] = *parentSessionID
 	}
 	for i := 0; i < 3; i++ {
 		if err := l.q.AppendRunLogEntry(context.Background(), l.runID, entry); err == nil {

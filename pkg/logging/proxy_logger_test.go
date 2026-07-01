@@ -1,6 +1,7 @@
 package logging
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -15,6 +16,28 @@ func newTestLogger(t *testing.T) *ProxyLogger {
 	}
 	t.Cleanup(func() { l.Close() })
 	return l
+}
+
+// fakeHub records every event broadcast through it, for asserting on the
+// shape of entries the frontend would receive over the WebSocket.
+type fakeHub struct {
+	events []map[string]interface{}
+}
+
+func (h *fakeHub) BroadcastEvent(name string, payload interface{}) {
+	entry := payload.(map[string]interface{})["entry"].(map[string]interface{})
+	h.events = append(h.events, entry)
+}
+
+func newTestLoggerWithHub(t *testing.T) (*ProxyLogger, *fakeHub) {
+	t.Helper()
+	hub := &fakeHub{}
+	l, err := NewProxyLoggerWithHub(t.TempDir(), "acme", 1, 100, hub, nil)
+	if err != nil {
+		t.Fatalf("NewProxyLoggerWithHub: %v", err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return l, hub
 }
 
 func readFile(t *testing.T, path string) string {
@@ -107,6 +130,79 @@ func TestStartSession_SubSessionGetsOwnFileAndMarksMain(t *testing.T) {
 	}
 	if !strings.Contains(subContent, "Session ended") {
 		t.Errorf("sub-session file missing 'Session ended' trailer after EndSession; got:\n%s", subContent)
+	}
+}
+
+func TestBroadcast_TagsEntriesWithSessionID(t *testing.T) {
+	l, hub := newTestLoggerWithHub(t)
+
+	if err := l.StartSession(SessionInfo{SessionID: 1, AgentName: "SmartPlanner", Role: "orchestration"}); err != nil {
+		t.Fatalf("StartSession(main): %v", err)
+	}
+	l.LogInfo("main activity")
+
+	parent := int32(1)
+	if err := l.StartSession(SessionInfo{
+		SessionID:       2,
+		ParentSessionID: &parent,
+		AgentName:       "Coder",
+		Role:            "implementation",
+		Model:           "gpt-5",
+	}); err != nil {
+		t.Fatalf("StartSession(sub): %v", err)
+	}
+	l.LogInfo("sub activity")
+	l.EndSession()
+
+	var mainInfo, sessionStart, subInfo, sessionEnd map[string]interface{}
+	for _, e := range hub.events {
+		switch e["type"] {
+		case "info":
+			if e["content"] == "main activity" {
+				mainInfo = e
+			} else if e["content"] == "sub activity" {
+				subInfo = e
+			}
+		case "session_start":
+			sessionStart = e
+		case "session_end":
+			sessionEnd = e
+		}
+	}
+
+	if mainInfo == nil || mainInfo["session_id"] != int32(1) {
+		t.Fatalf("main info entry missing session_id=1: %+v", mainInfo)
+	}
+	if mainInfo["parent_session_id"] != nil {
+		t.Errorf("main info entry should have no parent_session_id: %+v", mainInfo)
+	}
+
+	// The session_start marker itself is tagged with the PARENT's session_id
+	// (so it renders inline in the main session's timeline), while carrying
+	// started_session_id for the child it announces.
+	if sessionStart == nil || sessionStart["session_id"] != int32(1) {
+		t.Fatalf("session_start entry should be tagged with parent session_id=1: %+v", sessionStart)
+	}
+	var meta map[string]interface{}
+	if err := json.Unmarshal([]byte(sessionStart["content"].(string)), &meta); err != nil {
+		t.Fatalf("session_start content not valid JSON: %v", err)
+	}
+	if int32(meta["started_session_id"].(float64)) != 2 {
+		t.Errorf("session_start content missing started_session_id=2: %+v", meta)
+	}
+	if meta["agent_name"] != "Coder" || meta["model"] != "gpt-5" {
+		t.Errorf("session_start content missing agent/model: %+v", meta)
+	}
+
+	if subInfo == nil || subInfo["session_id"] != int32(2) {
+		t.Fatalf("sub info entry missing session_id=2: %+v", subInfo)
+	}
+	if subInfo["parent_session_id"] != int32(1) {
+		t.Errorf("sub info entry missing parent_session_id=1: %+v", subInfo)
+	}
+
+	if sessionEnd == nil || sessionEnd["session_id"] != int32(2) {
+		t.Fatalf("session_end entry should be tagged with the ending session_id=2: %+v", sessionEnd)
 	}
 }
 

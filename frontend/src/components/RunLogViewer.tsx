@@ -3,7 +3,7 @@ import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp, MessageSquare, XCircle
+  Wrench, Brain, ChevronUp, MessageSquare, XCircle, Layers
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,7 +30,7 @@ interface RunTokenStats {
 }
 
 interface LogEntry {
-  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error';
+  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_start' | 'session_end';
   content: string;
   model?: string;
   status_code?: number;
@@ -40,6 +40,8 @@ interface LogEntry {
   prompt_tokens?: number;
   output_tokens?: number;
   input_tokens?: number;
+  session_id?: number;
+  parent_session_id?: number;
 }
 
 interface LogMessage {
@@ -62,6 +64,16 @@ interface ToolPair {
   response: LogMessage | null;
 }
 
+interface SessionMeta {
+  startedSessionId: number;
+  agentName?: string;
+  role?: string;
+  model?: string;
+  provider?: string;
+  tools?: string[];
+  mcps?: string[];
+}
+
 type GroupedItem =
   | { kind: 'in';             key: number; msg: LogMessage }
   | { kind: 'out';            key: number; msg: LogMessage; toolPairs: ToolPair[] }
@@ -70,9 +82,64 @@ type GroupedItem =
   | { kind: 'system';         key: number; content: string; ts?: string }
   | { kind: 'init-user';      key: number; content: string; ts?: string }
   | { kind: 'init-human';     key: number; content: string; ts?: string }
-  | { kind: 'init-assistant'; key: number; content: string; ts?: string };
+  | { kind: 'init-assistant'; key: number; content: string; ts?: string }
+  | { kind: 'session';        key: number; msg: LogMessage; meta: SessionMeta; childMessages: LogMessage[] };
 
-function groupMessages(messages: LogMessage[]): GroupedItem[] {
+// computeSessionGroups partitions a run's flat entry list by session_id. A
+// session_start entry (tagged with its PARENT's session_id) announces a
+// child session and carries that child's own session_id in
+// started_session_id — entries tagged with that id belong to the child's
+// own sub-timeline. The "main" session is whichever session_id is never
+// referenced as a started_session_id (i.e. nobody's child).
+function computeSessionGroups(messages: LogMessage[]): {
+  mainId: number | undefined;
+  bySession: Map<number, LogMessage[]>;
+  sessionMeta: Map<number, SessionMeta>;
+} {
+  const bySession = new Map<number, LogMessage[]>();
+  const sessionMeta = new Map<number, SessionMeta>();
+  const childIds = new Set<number>();
+  const allIds = new Set<number>();
+
+  for (const m of messages) {
+    const sid = m.entry.session_id;
+    if (sid === undefined) continue;
+    allIds.add(sid);
+    if (!bySession.has(sid)) bySession.set(sid, []);
+    bySession.get(sid)!.push(m);
+
+    if (m.entry.type === 'session_start') {
+      try {
+        const parsed = JSON.parse(m.entry.content);
+        if (typeof parsed.started_session_id === 'number') {
+          childIds.add(parsed.started_session_id);
+          sessionMeta.set(parsed.started_session_id, {
+            startedSessionId: parsed.started_session_id,
+            agentName: parsed.agent_name,
+            role: parsed.role,
+            model: parsed.model,
+            provider: parsed.provider,
+            tools: parsed.tools,
+            mcps: parsed.mcps,
+          });
+        }
+      } catch { /* malformed session_start content — skip */ }
+    }
+  }
+
+  let mainId: number | undefined;
+  for (const sid of allIds) {
+    if (!childIds.has(sid)) { mainId = sid; break; }
+  }
+
+  return { mainId, bySession, sessionMeta };
+}
+
+function groupMessages(
+  messages: LogMessage[],
+  childMessagesBySession?: Map<number, LogMessage[]>,
+  sessionMeta?: Map<number, SessionMeta>,
+): GroupedItem[] {
   const items: GroupedItem[] = [];
   let key = 0;
   let lastOut: (GroupedItem & { kind: 'out' }) | null = null;
@@ -152,6 +219,20 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
       case 'error': {
         lastOut = null;
         items.push({ kind: 'error', key: key++, msg });
+        break;
+      }
+      case 'session_start': {
+        lastOut = null;
+        let startedId: number | undefined;
+        try { startedId = JSON.parse(msg.entry.content).started_session_id; } catch {}
+        const meta: SessionMeta = (startedId !== undefined && sessionMeta?.get(startedId)) || { startedSessionId: startedId ?? -1 };
+        const childMessages = startedId !== undefined ? (childMessagesBySession?.get(startedId) ?? []) : [];
+        items.push({ kind: 'session', key: key++, msg, meta, childMessages });
+        break;
+      }
+      case 'session_end': {
+        // No row of its own — EndSession already trails the sub-session's
+        // own timeline; the parent's marker (session_start) is what's shown.
         break;
       }
       default: {
@@ -967,6 +1048,92 @@ function InfoRow({ msg }: { msg: LogMessage }) {
   );
 }
 
+// ─── SessionRow: collapsed-by-default sub-session marker ─────────────────────
+// Rendered inline in a parent session's timeline whenever a sub-session
+// (researcher/Coder/Tester) starts. Collapsed by default so the main
+// timeline stays readable; expanding it reveals that sub-session's own
+// request/response/tool activity, rendered the same way as the top level.
+
+function SessionRow({
+  meta, childMessages, ts, rawMode, childMessagesBySession, sessionMeta,
+}: {
+  meta: SessionMeta;
+  childMessages: LogMessage[];
+  ts?: string;
+  rawMode: boolean;
+  childMessagesBySession: Map<number, LogMessage[]>;
+  sessionMeta: Map<number, SessionMeta>;
+}) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const nested = useMemo(
+    () => groupMessages(childMessages, childMessagesBySession, sessionMeta),
+    [childMessages, childMessagesBySession, sessionMeta]
+  );
+
+  return (
+    <div className="border-b border-violet-100 bg-violet-50/40">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-violet-100/60 text-left"
+      >
+        <span className="shrink-0 text-violet-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <Layers size={13} className="text-violet-600 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-violet-700">New session</span>
+        <span className="shrink-0 text-xs font-medium text-violet-800 bg-violet-100 px-1.5 py-0.5 rounded">
+          {meta.agentName || 'agent'}
+        </span>
+        {meta.role && <span className="shrink-0 text-xs text-violet-500">{meta.role}</span>}
+        {meta.model && <span className="shrink-0 text-xs text-gray-400 font-mono">{meta.model}</span>}
+        <span className="shrink-0 text-xs text-gray-300 font-mono">#{meta.startedSessionId}</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono ml-auto">{time}</span>}
+      </button>
+      {expanded && (
+        <div className="ml-4 mb-2 pl-2 border-l-2 border-violet-200">
+          {nested.length === 0 ? (
+            <div className="text-xs text-gray-400 italic px-3 py-2">No activity recorded for this session yet.</div>
+          ) : (
+            nested.map(item => renderGroupedItem(item, rawMode, childMessagesBySession, sessionMeta))
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Shared mapping from a GroupedItem to its rendered row — used both at the
+// top level and recursively inside SessionRow's expanded sub-timeline.
+function renderGroupedItem(
+  item: GroupedItem,
+  rawMode: boolean,
+  childMessagesBySession: Map<number, LogMessage[]>,
+  sessionMeta: Map<number, SessionMeta>,
+): React.ReactNode {
+  if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} />;
+  if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
+  if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
+  if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+  if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+  if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+  if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+  if (item.kind === 'session') {
+    return (
+      <SessionRow
+        key={item.key}
+        meta={item.meta}
+        childMessages={item.childMessages}
+        ts={item.msg.entry.ts}
+        rawMode={rawMode}
+        childMessagesBySession={childMessagesBySession}
+        sessionMeta={sessionMeta}
+      />
+    );
+  }
+  return <InfoRow key={item.key} msg={item.msg} />;
+}
+
 // ─── ToolResultRow (inside InRow expanded) ────────────────────────────────────
 
 function ToolResultRow({ name, content, preview, callArgs }: { name: string; content: string; preview: string; callArgs?: any }) {
@@ -1249,21 +1416,34 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
-  const grouped = useMemo(() => groupMessages(messages || []), [messages]);
+  // Partition the run's flat entry list by session: the main/root session
+  // (SmartPlanner for AskMode tasks, or the single agent for direct-mode
+  // tasks) is shown inline by default, while every sub-session
+  // (researcher/Coder/Tester) shows up as a collapsed marker in its
+  // parent's timeline — expand it to see that session's own activity.
+  const { mainId, bySession, sessionMeta } = useMemo(() => computeSessionGroups(messages || []), [messages]);
+  const mainMessages = useMemo(
+    () => (mainId !== undefined ? bySession.get(mainId) ?? [] : (messages || [])),
+    [mainId, bySession, messages]
+  );
+  const grouped = useMemo(() => groupMessages(mainMessages, bySession, sessionMeta), [mainMessages, bySession, sessionMeta]);
   const visibleItems = compact ? grouped.slice(-10) : grouped;
 
+  // Counts reflect the whole run (every session), not just the main
+  // timeline, since they're a run-level summary in the header.
   const counts = useMemo(() => {
     let req = 0, res = 0, tools = 0;
-    grouped.forEach(item => {
-      if (item.kind === 'in') req++;
-      else if (item.kind === 'out') { res++; tools += item.toolPairs.length; }
-    });
+    for (const m of (messages || [])) {
+      if (m.entry.type === 'request') req++;
+      else if (m.entry.type === 'response') res++;
+      else if (m.entry.type === 'tool_call') tools++;
+    }
     return { req, res, tools };
-  }, [grouped]);
+  }, [messages]);
 
   const hasErrors = useMemo(
-    () => grouped.some(item => item.kind === 'error'),
-    [grouped]
+    () => (messages || []).some(m => m.entry.type === 'error'),
+    [messages]
   );
 
   useEffect(() => {
@@ -1290,16 +1470,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           </div>
         ) : (
           <div>
-            {visibleItems.map(item => {
-              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} />;
-              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} />;
-              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
-              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
-              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
-              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
-              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
-              return <InfoRow key={item.key} msg={item.msg} />;
-            })}
+            {visibleItems.map(item => renderGroupedItem(item, false, bySession, sessionMeta))}
           </div>
         )}
       </div>
@@ -1366,16 +1537,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           </div>
         ) : (
           <div>
-            {grouped.map(item => {
-              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} />;
-              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
-              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
-              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
-              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
-              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
-              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
-              return <InfoRow key={item.key} msg={item.msg} />;
-            })}
+            {grouped.map(item => renderGroupedItem(item, rawMode, bySession, sessionMeta))}
           </div>
         )}
         <div ref={bottomRef} />
