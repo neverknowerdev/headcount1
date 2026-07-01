@@ -38,7 +38,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [formData, setFormData] = useState({
         title: '',
         description: '',
-        user_input: '',
         task_type: 'tech',
         project_id: projectId?.toString() || '',
         sprint_id: '',
@@ -112,8 +111,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 setTask(t);
                 setFormData({
                     title: t.title,
-                    description: t.description || '',
-                    user_input: t.user_input || '',
+                    description: t.description || t.user_input || '',
                     task_type: t.task_type || 'tech',
                     project_id: t.project_id ? t.project_id.toString() : '',
                     sprint_id: t.sprint_id ? t.sprint_id.toString() : '',
@@ -191,7 +189,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             const payload: any = {
                 title: formData.title,
                 description: formData.description,
-                user_input: formData.user_input,
+                user_input: formData.description,
                 task_type: formData.task_type,
                 priority: formData.priority,
             };
@@ -302,12 +300,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                                <textarea rows={3} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task details..." />
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">User Input</label>
-                                <p className="text-xs text-gray-500 mb-1">Additional context or requirements for the AI agent</p>
-                                <textarea rows={3} value={formData.user_input} onChange={e => setFormData({...formData, user_input: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Any specific requirements, constraints, or context..." />
+                                <p className="text-xs text-gray-500 mb-1">What you want done — this is what the AI agent uses as its input</p>
+                                <textarea rows={5} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Describe the task, requirements, or context for the AI agent..." />
                             </div>
                         </form>
 
