@@ -324,7 +324,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: text})
 	}
 
-
 	// Sort chronologically.
 	for i := 1; i < len(timeline); i++ {
 		for j := i; j > 0 && timeline[j].t.Before(timeline[j-1].t); j-- {
@@ -497,6 +496,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	// MCP listing token costs — set if any external MCP servers are active for this run.
 	var listingCostTotal int
 	var listingCostByServer map[string]int
+	var mcpNames []string
 
 	// Load MCP accounts enabled for this agent and register external servers in the store.
 	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
@@ -544,7 +544,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 				}
 			}
 		}
-		mcpNames := store.ServerNames()
+		mcpNames = store.ServerNames()
 		if len(mcpNames) > 0 {
 			e.logInfo(proxyLogger, "MCP: "+strings.Join(mcpNames, ", "))
 			listing := store.CompactListing()
@@ -587,6 +587,25 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 	aiAgent := aicli.New(agentCfgObj)
 
+	// Open the run's root/main session log file. This becomes the "main
+	// file" for the whole run: for orchestrate mode, the SmartPlanner
+	// pipeline keeps writing to it directly (its own sub-sessions each get
+	// their own file, see AskModeOrchestrator), and for direct mode it's
+	// simply the one and only session.
+	if proxyLogger != nil {
+		if sessErr := proxyLogger.StartSession(logging.SessionInfo{
+			SessionID: run.ID,
+			AgentName: agent.Name,
+			Role:      mode,
+			Model:     model,
+			Provider:  provider.Name,
+			Tools:     registry.Names(),
+			MCPs:      mcpNames,
+		}); sessErr != nil {
+			fmt.Printf("Warning: failed to start session log: %v\n", sessErr)
+		}
+	}
+
 	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
 	if agentCfg != nil {
@@ -617,7 +636,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		status = "failed"
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
-
 
 	// If finish_task was not called, force a follow-up turn.
 	if agentErr == nil && !taskFinished {
@@ -679,9 +697,9 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	}
 	e.hub.BroadcastEvent("comment_created", comment)
 	e.hub.BroadcastEvent("subtask_completed", map[string]interface{}{
-		"subtask_id":  subtask.ID,
-		"parent_id":   *subtask.ParentID,
-		"status":      status,
+		"subtask_id":    subtask.ID,
+		"parent_id":     *subtask.ParentID,
+		"status":        status,
 		"subtask_title": subtask.Title,
 	})
 }
@@ -851,4 +869,3 @@ Changes:
 
 	return msg, nil
 }
-

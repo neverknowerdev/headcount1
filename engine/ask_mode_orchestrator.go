@@ -288,8 +288,27 @@ func (o *AskModeOrchestrator) runResearchBatch(
 	}
 
 	var systemPrompt string
-	if agentCfg != nil && agentCfg.Prompt != "" {
-		systemPrompt = agentCfg.Prompt
+	var allowedMCPs []string
+	if agentCfg != nil {
+		if agentCfg.Prompt != "" {
+			systemPrompt = agentCfg.Prompt
+		}
+		allowedMCPs = agentCfg.AllowedMCPs
+	}
+
+	if logger != nil {
+		if sessErr := logger.StartSession(logging.SessionInfo{
+			SessionID:       subSession.ID,
+			ParentSessionID: &psID,
+			AgentName:       configName,
+			Role:            "qa-research",
+			Model:           model,
+			Provider:        provider.Name,
+			Tools:           registry.Names(),
+			MCPs:            allowedMCPs,
+		}); sessErr == nil {
+			defer logger.EndSession()
+		}
 	}
 
 	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
@@ -439,10 +458,29 @@ func (o *AskModeOrchestrator) runSubAgent(
 	}
 
 	var systemPrompt string
-	if agentCfg != nil && agentCfg.Prompt != "" {
-		systemPrompt = agentCfg.Prompt
+	var allowedMCPs []string
+	if agentCfg != nil {
+		if agentCfg.Prompt != "" {
+			systemPrompt = agentCfg.Prompt
+		}
+		allowedMCPs = agentCfg.AllowedMCPs
 	}
 	systemPrompt += "\n\n" + o.buildSubAgentContext(task, sessionType)
+
+	if logger != nil {
+		if sessErr := logger.StartSession(logging.SessionInfo{
+			SessionID:       subSession.ID,
+			ParentSessionID: &psID,
+			AgentName:       configName,
+			Role:            sessionType,
+			Model:           model,
+			Provider:        provider.Name,
+			Tools:           registry.Names(),
+			MCPs:            allowedMCPs,
+		}); sessErr == nil {
+			defer logger.EndSession()
+		}
+	}
 
 	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
 	agent := aicli.New(aicli.Config{

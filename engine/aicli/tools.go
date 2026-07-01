@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 )
 
 // Tool is the interface every agent tool must implement.
@@ -34,6 +35,16 @@ func (r *Registry) Defs() []ToolDef {
 		defs = append(defs, t.Def())
 	}
 	return defs
+}
+
+// Names returns the sorted list of tool names currently registered.
+func (r *Registry) Names() []string {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
 }
 
 // Execute runs the named tool with the given JSON arguments.

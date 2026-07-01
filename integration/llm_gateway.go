@@ -93,20 +93,27 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
 			if err == nil && run.Task.Company.ID > 0 {
 				var loggerErr error
-			proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-				g.basePath,
-				run.Task.Company.ShortName,
-				run.TaskID,
-				run.ID,
-				g.hub,
-				g.q,
-			)
+				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+					g.hub,
+					g.q,
+				)
 				if loggerErr != nil {
 					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 				} else {
 					defer proxyLogger.Close()
+					proxyLogger.StartSession(logging.SessionInfo{ //nolint:errcheck
+						SessionID: run.ID,
+						AgentName: "llm-proxy",
+						Role:      "proxy",
+						Model:     reqPayload.Model,
+						Provider:  provider.Name,
+					})
 					proxyLogger.LogRequest(reqPayload.Model, "llm-proxy", provider.Name, bodyBytes)
-					// Save log file path on the run
+					// Save log folder path on the run
 					g.q.UpdateRunLogFilePath(r.Context(), int32(runID), proxyLogger.FilePath())
 					// Extract tool results from the request body. OpenAI's
 					// chat-completions dialect represents them as
@@ -186,9 +193,9 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 				} `json:"message"`
 			} `json:"choices"`
 			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
+				PromptTokens        int `json:"prompt_tokens"`
+				CompletionTokens    int `json:"completion_tokens"`
+				TotalTokens         int `json:"total_tokens"`
 				PromptTokensDetails struct {
 					CachedTokens int `json:"cached_tokens"`
 				} `json:"prompt_tokens_details"`
@@ -351,20 +358,27 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
 			if err == nil && run.Task.Company.ID > 0 {
 				var loggerErr error
-			proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-				g.basePath,
-				run.Task.Company.ShortName,
-				run.TaskID,
-				run.ID,
-				g.hub,
-				g.q,
-			)
+				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+					g.hub,
+					g.q,
+				)
 				if loggerErr != nil {
 					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 				} else {
 					defer proxyLogger.Close()
+					proxyLogger.StartSession(logging.SessionInfo{ //nolint:errcheck
+						SessionID: run.ID,
+						AgentName: agent.Name,
+						Role:      "proxy",
+						Model:     reqPayload.Model,
+						Provider:  provider.Name,
+					})
 					proxyLogger.LogRequest(reqPayload.Model, agent.Name, provider.Name, bodyBytes)
-					// Save log file path on the run
+					// Save log folder path on the run
 					g.q.UpdateRunLogFilePath(r.Context(), int32(runID), proxyLogger.FilePath())
 					proxyLogger.LogToolResultsFromRequest(reqPayload.Model, provider.Name, reqPayload.Messages)
 				}
@@ -427,9 +441,9 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 				} `json:"message"`
 			} `json:"choices"`
 			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
+				PromptTokens        int `json:"prompt_tokens"`
+				CompletionTokens    int `json:"completion_tokens"`
+				TotalTokens         int `json:"total_tokens"`
 				PromptTokensDetails struct {
 					CachedTokens int `json:"cached_tokens"`
 				} `json:"prompt_tokens_details"`
@@ -694,9 +708,9 @@ func proxySSEStream(
 	type chunkData struct {
 		Choices []chunkChoice `json:"choices"`
 		Usage   *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
@@ -803,9 +817,9 @@ func proxySSEStream(
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			}
 			collectedToolCalls = append(collectedToolCalls, map[string]interface{}{
-				"id":   tc.ID,
-				"type": tc.Type,
-				"name": tc.Function.Name,
+				"id":        tc.ID,
+				"type":      tc.Type,
+				"name":      tc.Function.Name,
 				"arguments": args,
 			})
 		}
@@ -826,20 +840,20 @@ func proxySSEStream(
 			var d time.Duration
 			select {
 			case d = <-stallDuration:
+			default:
+				d = 0
+			}
+			if proxyLogger != nil {
+				proxyLogger.LogStall(model, agentName, providerName, d)
+			}
+			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
 		default:
-			d = 0
+			if proxyLogger != nil {
+				proxyLogger.LogError(model, agentName, providerName, err)
+			}
+			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
 		}
-		if proxyLogger != nil {
-			proxyLogger.LogStall(model, agentName, providerName, d)
-		}
-		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
-	default:
-		if proxyLogger != nil {
-			proxyLogger.LogError(model, agentName, providerName, err)
-		}
-		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
 	}
-}
 
 	select {
 	case stalled := <-stallErr:
