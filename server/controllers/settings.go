@@ -31,7 +31,12 @@ type Settings struct {
 	GitRemoteURL     string          `json:"git_remote_url" yaml:"git_remote_url"`
 	GitHubPAT        string          `json:"github_pat" yaml:"github_pat"`
 	SystemLLMModel   string          `json:"system_llm_model" yaml:"system_llm_model"`
-	RoleModels       RoleModelConfig `json:"role_models" yaml:"role_models"`
+	// DefaultProviderID is the system-wide fallback provider used by any AI
+	// role that doesn't have an explicit provider set in RoleModels. It should
+	// never be 0 while at least one LLM provider exists — see CreateProvider/
+	// DeleteProvider, which keep it pointed at a valid provider automatically.
+	DefaultProviderID int32           `json:"default_provider_id" yaml:"default_provider_id"`
+	RoleModels        RoleModelConfig `json:"role_models" yaml:"role_models"`
 }
 
 type SSHKeyPayload struct {

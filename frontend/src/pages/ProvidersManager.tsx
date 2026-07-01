@@ -38,9 +38,12 @@ export const ProvidersManager: React.FC = () => {
     const [testingProgress, setTestingProgress] = useState<string>('');
 
     // Role Model Configuration — which provider/model powers each AI role in the task pipeline.
-    // fullSettings holds the complete /api/settings payload so saving role_models doesn't
-    // clobber unrelated fields (POST /api/settings fully overwrites settings.yaml).
+    // fullSettings holds the complete /api/settings payload so saving role_models or the
+    // default provider doesn't clobber unrelated fields (POST /api/settings fully overwrites
+    // settings.yaml rather than merging).
     const [fullSettings, setFullSettings] = useState<any>(null);
+    const [defaultProviderId, setDefaultProviderId] = useState<number>(0);
+    const [defaultProviderSaveState, setDefaultProviderSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [roleModels, setRoleModels] = useState<RoleModelConfig>({
         smart_planner_provider_id: 0, smart_planner_model: '',
         tech_researcher_provider_id: 0, tech_researcher_model: '',
@@ -49,7 +52,7 @@ export const ProvidersManager: React.FC = () => {
         coder_provider_id: 0, coder_model: '',
         tester_provider_id: 0, tester_model: '',
     });
-    const [roleModelsSaving, setRoleModelsSaving] = useState(false);
+    const [roleModelsSaveState, setRoleModelsSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
 
     const fetchProviders = async () => {
         try {
@@ -64,6 +67,7 @@ export const ProvidersManager: React.FC = () => {
         try {
             const res = await axios.get('/api/settings');
             setFullSettings(res.data || {});
+            setDefaultProviderId(res.data?.default_provider_id || 0);
             if (res.data?.role_models) {
                 setRoleModels(prev => ({ ...prev, ...res.data.role_models }));
             }
@@ -77,16 +81,37 @@ export const ProvidersManager: React.FC = () => {
         fetchSettings();
     }, []);
 
-    const handleSaveRoleModels = async () => {
-        setRoleModelsSaving(true);
+    // Defensive fallback for setups that had providers configured before the
+    // default-provider invariant existed: if no default is set yet but a
+    // provider is available, default the (unsaved) selection to the first one
+    // rather than showing a blank/mismatched dropdown.
+    useEffect(() => {
+        if (!defaultProviderId && providers.length > 0) {
+            setDefaultProviderId(providers[0].id);
+        }
+    }, [providers, defaultProviderId]);
+
+    const handleSaveDefaultProvider = async () => {
+        setDefaultProviderSaveState('saving');
         try {
-            await axios.post('/api/settings', { ...fullSettings, role_models: roleModels });
-            alert('Role Model Configuration saved!');
+            await axios.post('/api/settings', { ...fullSettings, default_provider_id: defaultProviderId });
+            setDefaultProviderSaveState('saved');
+            setTimeout(() => setDefaultProviderSaveState('idle'), 2000);
         } catch (e) {
             console.error(e);
-            alert('Failed to save Role Model Configuration');
-        } finally {
-            setRoleModelsSaving(false);
+            setDefaultProviderSaveState('error');
+        }
+    };
+
+    const handleSaveRoleModels = async () => {
+        setRoleModelsSaveState('saving');
+        try {
+            await axios.post('/api/settings', { ...fullSettings, role_models: roleModels });
+            setRoleModelsSaveState('saved');
+            setTimeout(() => setRoleModelsSaveState('idle'), 2000);
+        } catch (e) {
+            console.error(e);
+            setRoleModelsSaveState('error');
         }
     };
 
@@ -263,6 +288,36 @@ export const ProvidersManager: React.FC = () => {
                 ))}
             </div>
 
+            {providers.length > 0 && (
+                <div className="bg-white p-6 rounded-lg shadow-sm border">
+                    <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Default Provider</h2>
+                    <p className="text-xs text-gray-500 mb-4">
+                        Used by any AI role that doesn't have a specific provider set below in Role Model Configuration.
+                    </p>
+                    <div className="flex items-center gap-3 max-w-md">
+                        <select
+                            value={defaultProviderId || 0}
+                            onChange={e => setDefaultProviderId(parseInt(e.target.value))}
+                            className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
+                        >
+                            {providers.map(p => (
+                                <option key={p.id} value={p.id}>{p.name}</option>
+                            ))}
+                        </select>
+                        <button
+                            type="button"
+                            onClick={handleSaveDefaultProvider}
+                            disabled={defaultProviderSaveState === 'saving'}
+                            className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400 shrink-0"
+                        >
+                            {defaultProviderSaveState === 'saving' ? 'Saving...' : 'Save'}
+                        </button>
+                        {defaultProviderSaveState === 'saved' && <span className="text-sm text-green-600 shrink-0">Saved</span>}
+                        {defaultProviderSaveState === 'error' && <span className="text-sm text-red-600 shrink-0">Failed to save</span>}
+                    </div>
+                </div>
+            )}
+
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
                     <p className="text-sm font-semibold">{testingProgress}</p>
@@ -354,35 +409,38 @@ export const ProvidersManager: React.FC = () => {
             <div className="bg-white p-6 rounded-lg shadow-sm border">
                 <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Role Model Configuration</h2>
                 <p className="text-xs text-gray-500 mb-4">
-                    Assign a provider and model to each AI role used in the task pipeline. Leave provider at "default provider" to use the first available provider.
+                    Assign a provider and model to each AI role used in the task pipeline. Leave provider at "default provider" to use the Default Provider set above.
                 </p>
                 <div className="space-y-3 max-w-2xl">
                     {ROLE_MODEL_ROWS.map(({ label, provKey, modelKey }) => {
-                        const selectedProvider = providers.find(p => p.id === roleModels[provKey]);
-                        const modelOptions = selectedProvider?.supported_models
-                            ? selectedProvider.supported_models.split(',').map((m: string) => m.trim()).filter((m: string) => m)
+                        const roleProviderId = roleModels[provKey];
+                        // When the role has no explicit provider, it resolves to the
+                        // Default Provider — show that provider's models, not a blank state.
+                        const effectiveProvider = providers.find(p => p.id === (roleProviderId || defaultProviderId));
+                        const modelOptions = effectiveProvider?.supported_models
+                            ? effectiveProvider.supported_models.split(',').map((m: string) => m.trim()).filter((m: string) => m)
                             : [];
                         return (
                             <div key={label}>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
                                 <div className="flex gap-2">
                                     <select
-                                        value={roleModels[provKey] || 0}
+                                        value={roleProviderId || 0}
                                         onChange={e => setRoleModels(prev => ({ ...prev, [provKey]: parseInt(e.target.value) }))}
                                         className="w-48 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
                                     >
-                                        <option value={0}>— default provider —</option>
+                                        <option value={0}>default provider</option>
                                         {providers.map(p => (
                                             <option key={p.id} value={p.id}>{p.name}</option>
                                         ))}
                                     </select>
-                                    {selectedProvider && modelOptions.length > 0 ? (
+                                    {effectiveProvider && modelOptions.length > 0 ? (
                                         <select
                                             value={roleModels[modelKey] || ''}
                                             onChange={e => setRoleModels(prev => ({ ...prev, [modelKey]: e.target.value }))}
                                             className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
                                         >
-                                            <option value="">— provider default{selectedProvider.default_model ? ` (${selectedProvider.default_model})` : ''} —</option>
+                                            <option value="">provider's default{effectiveProvider.default_model ? ` (${effectiveProvider.default_model})` : ''}</option>
                                             {modelOptions.map((m: string) => (
                                                 <option key={m} value={m}>{m}</option>
                                             ))}
@@ -392,9 +450,9 @@ export const ProvidersManager: React.FC = () => {
                                             type="text"
                                             value={roleModels[modelKey] || ''}
                                             onChange={e => setRoleModels(prev => ({ ...prev, [modelKey]: e.target.value }))}
-                                            disabled={!selectedProvider}
+                                            disabled={!effectiveProvider}
                                             className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border disabled:bg-gray-50 disabled:text-gray-400"
-                                            placeholder={selectedProvider ? 'model name (no supported models configured for this provider)' : 'select a provider first'}
+                                            placeholder={effectiveProvider ? "model name (provider's default used if blank)" : 'select a provider first'}
                                         />
                                     )}
                                 </div>
@@ -402,15 +460,17 @@ export const ProvidersManager: React.FC = () => {
                         );
                     })}
                 </div>
-                <div className="mt-5">
+                <div className="mt-5 flex items-center gap-3">
                     <button
                         type="button"
                         onClick={handleSaveRoleModels}
-                        disabled={roleModelsSaving}
+                        disabled={roleModelsSaveState === 'saving'}
                         className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
                     >
-                        {roleModelsSaving ? 'Saving...' : 'Save Role Model Configuration'}
+                        {roleModelsSaveState === 'saving' ? 'Saving...' : 'Save Role Model Configuration'}
                     </button>
+                    {roleModelsSaveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
+                    {roleModelsSaveState === 'error' && <span className="text-sm text-red-600">Failed to save</span>}
                 </div>
             </div>
         </div>

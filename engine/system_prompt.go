@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"log"
 	"os"
-	"path/filepath"
 	"text/template"
 
 	"agent-orchestrator/db"
@@ -41,15 +40,18 @@ type RoleModelConfig struct {
 type Settings struct {
 	BasePath         string          `yaml:"base_path"`
 	WorkspaceFolders []string        `yaml:"workspace_folders"`
-	RoleModels       RoleModelConfig `yaml:"role_models"`
+	// DefaultProviderID is the system-wide fallback provider for any AI role
+	// without an explicit provider set. Kept non-zero automatically as long
+	// as at least one LLM provider exists (see server/controllers/providers.go).
+	DefaultProviderID int32           `yaml:"default_provider_id"`
+	RoleModels        RoleModelConfig `yaml:"role_models"`
 }
 
+// loadSettings reads settings.yaml from the same location the Settings/LLM
+// Providers UI writes to (db.SettingsFilePath), so RoleModels/DefaultProviderID
+// configured there actually reach the orchestrator.
 func loadSettings() Settings {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
-	}
-	settingsPath := filepath.Join(homeDir, ".paperclip2_settings.yaml")
+	settingsPath := db.SettingsFilePath()
 	data, err := os.ReadFile(settingsPath)
 	if err != nil {
 		return Settings{BasePath: db.PaperclipHome()}

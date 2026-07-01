@@ -33,6 +33,7 @@ func setupProvidersRouter(database *gorm.DB) chi.Router {
 	r.Post("/providers", api.CreateProvider)
 	r.Delete("/providers/{id}", api.DeleteProvider)
 	r.Get("/settings", api.GetSettings)
+	r.Post("/settings", api.UpdateSettings)
 	return r
 }
 
@@ -65,10 +66,21 @@ func getSettings(t *testing.T, r chi.Router) endpoints.Settings {
 	return out
 }
 
-// TestCreateProvider_FirstProviderDefaultsAllRoles verifies that creating the
-// very first LLM provider in the system automatically assigns it to every AI
-// role, so no role is ever left unset while a provider exists.
-func TestCreateProvider_FirstProviderDefaultsAllRoles(t *testing.T) {
+func saveSettings(t *testing.T, r chi.Router, settings endpoints.Settings) {
+	t.Helper()
+	payload, err := json.Marshal(settings)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/settings", bytes.NewReader(payload))
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+}
+
+// TestCreateProvider_FirstProviderBecomesDefault verifies that creating the
+// very first LLM provider in the system automatically becomes the system-wide
+// default provider, so no role is ever left unresolvable while a provider
+// exists — individual roles stay unset (0) and fall back to it.
+func TestCreateProvider_FirstProviderBecomesDefault(t *testing.T) {
 	database := setupProvidersTestDB(t)
 	r := setupProvidersRouter(database)
 
@@ -76,22 +88,16 @@ func TestCreateProvider_FirstProviderDefaultsAllRoles(t *testing.T) {
 	providerID := int32(created["id"].(float64))
 
 	settings := getSettings(t, r)
-	rm := settings.RoleModels
-	assert.Equal(t, providerID, rm.SmartPlannerProviderID)
-	assert.Equal(t, providerID, rm.TechResearcherProviderID)
-	assert.Equal(t, providerID, rm.WritingResearcherProviderID)
-	assert.Equal(t, providerID, rm.DesignResearcherProviderID)
-	assert.Equal(t, providerID, rm.CoderProviderID)
-	assert.Equal(t, providerID, rm.TesterProviderID)
-	// Model overrides left blank — resolves to the provider's own default.
-	assert.Empty(t, rm.SmartPlannerModel)
-	assert.Empty(t, rm.CoderModel)
+	assert.Equal(t, providerID, settings.DefaultProviderID)
+	// Individual roles are left unset — they resolve via DefaultProviderID.
+	assert.Equal(t, int32(0), settings.RoleModels.SmartPlannerProviderID)
+	assert.Equal(t, int32(0), settings.RoleModels.CoderProviderID)
 }
 
-// TestCreateProvider_SecondProviderDoesNotOverrideRoles verifies that adding
-// an additional provider (when one already exists and roles are configured)
-// leaves existing role assignments untouched.
-func TestCreateProvider_SecondProviderDoesNotOverrideRoles(t *testing.T) {
+// TestCreateProvider_SecondProviderDoesNotOverrideDefault verifies that
+// adding an additional provider leaves the existing default provider
+// untouched.
+func TestCreateProvider_SecondProviderDoesNotOverrideDefault(t *testing.T) {
 	database := setupProvidersTestDB(t)
 	r := setupProvidersRouter(database)
 
@@ -101,39 +107,34 @@ func TestCreateProvider_SecondProviderDoesNotOverrideRoles(t *testing.T) {
 	createProviderReq(t, r, "Second Provider", "model-b")
 
 	settings := getSettings(t, r)
-	assert.Equal(t, firstID, settings.RoleModels.SmartPlannerProviderID, "existing role assignment should not change when a second provider is added")
+	assert.Equal(t, firstID, settings.DefaultProviderID, "default provider should not change when a second provider is added")
 }
 
-// TestDeleteProvider_ReassignsRolesToRemainingProvider verifies that deleting
-// a provider currently assigned to roles reassigns them to another remaining
-// provider instead of leaving them dangling.
-func TestDeleteProvider_ReassignsRolesToRemainingProvider(t *testing.T) {
+// TestDeleteProvider_DefaultReassignsToRemainingProvider verifies that
+// deleting the current default provider reassigns the default to another
+// remaining provider instead of leaving the system without one.
+func TestDeleteProvider_DefaultReassignsToRemainingProvider(t *testing.T) {
 	database := setupProvidersTestDB(t)
 	r := setupProvidersRouter(database)
 
-	first := createProviderReq(t, r, "First Provider", "model-a")
-	firstID := int32(first["id"].(float64))
+	createProviderReq(t, r, "First Provider", "model-a")
 	second := createProviderReq(t, r, "Second Provider", "model-b")
 	secondID := int32(second["id"].(float64))
 
-	// Delete the provider all roles currently point to (the first one).
+	// Delete the default provider (the first one, ID 1).
 	req := httptest.NewRequest(http.MethodDelete, "/providers/1", nil)
 	rr := httptest.NewRecorder()
 	r.ServeHTTP(rr, req)
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	settings := getSettings(t, r)
-	rm := settings.RoleModels
-	assert.NotEqual(t, firstID, rm.SmartPlannerProviderID)
-	assert.Equal(t, secondID, rm.SmartPlannerProviderID, "role should fall back to the remaining provider")
-	assert.Equal(t, secondID, rm.CoderProviderID)
-	assert.Empty(t, rm.SmartPlannerModel, "model override should reset since it may not apply to the new provider")
+	assert.Equal(t, secondID, settings.DefaultProviderID, "default provider should fall back to the remaining provider")
 }
 
-// TestDeleteProvider_LastProviderClearsRoles verifies that deleting the only
-// remaining provider clears role assignments to 0 (unset) — the one
-// legitimate situation where a role has no resolvable model.
-func TestDeleteProvider_LastProviderClearsRoles(t *testing.T) {
+// TestDeleteProvider_LastProviderClearsDefault verifies that deleting the
+// only remaining provider clears the default to 0 (unset) — the one
+// legitimate situation where nothing can resolve to a model.
+func TestDeleteProvider_LastProviderClearsDefault(t *testing.T) {
 	database := setupProvidersTestDB(t)
 	r := setupProvidersRouter(database)
 
@@ -145,6 +146,33 @@ func TestDeleteProvider_LastProviderClearsRoles(t *testing.T) {
 	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
 
 	settings := getSettings(t, r)
-	assert.Equal(t, int32(0), settings.RoleModels.SmartPlannerProviderID)
-	assert.Equal(t, int32(0), settings.RoleModels.TesterProviderID)
+	assert.Equal(t, int32(0), settings.DefaultProviderID)
+}
+
+// TestDeleteProvider_ResetsExplicitRoleAssignment verifies that deleting a
+// provider a role was *explicitly* pointed at (via Role Model Configuration)
+// resets that role to unset rather than leaving it dangling on a deleted ID.
+func TestDeleteProvider_ResetsExplicitRoleAssignment(t *testing.T) {
+	database := setupProvidersTestDB(t)
+	r := setupProvidersRouter(database)
+
+	first := createProviderReq(t, r, "First Provider", "model-a")
+	firstID := int32(first["id"].(float64))
+	createProviderReq(t, r, "Second Provider", "model-b")
+
+	// Explicitly point Coder at the first provider (simulating a manual
+	// Role Model Configuration choice), distinct from the default provider.
+	settings := getSettings(t, r)
+	settings.RoleModels.CoderProviderID = firstID
+	settings.RoleModels.CoderModel = "custom-model"
+	saveSettings(t, r, settings)
+
+	req := httptest.NewRequest(http.MethodDelete, "/providers/1", nil)
+	rr := httptest.NewRecorder()
+	r.ServeHTTP(rr, req)
+	require.Equal(t, http.StatusOK, rr.Code, rr.Body.String())
+
+	after := getSettings(t, r)
+	assert.Equal(t, int32(0), after.RoleModels.CoderProviderID, "explicit role assignment to a deleted provider should reset to unset")
+	assert.Empty(t, after.RoleModels.CoderModel)
 }

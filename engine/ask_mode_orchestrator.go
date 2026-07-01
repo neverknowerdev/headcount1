@@ -551,7 +551,9 @@ func (o *AskModeOrchestrator) validateRoleModels(ctx context.Context, task db.Ta
 }
 
 // resolveRoleProvider looks up the LLM provider and model for a given agent role.
-// Falls back to the first available provider if the role is not explicitly configured.
+// Falls back to the system-wide default provider (Settings.DefaultProviderID)
+// if the role is not explicitly configured, and to the first available
+// provider as a last-resort safety net if no default provider is set either.
 func (o *AskModeOrchestrator) resolveRoleProvider(ctx context.Context, configName string) (db.LLMProvider, string, error) {
 	rm := o.settings.RoleModels
 	var providerID int32
@@ -570,6 +572,10 @@ func (o *AskModeOrchestrator) resolveRoleProvider(ctx context.Context, configNam
 		providerID, model = rm.CoderProviderID, rm.CoderModel
 	case "Tester":
 		providerID, model = rm.TesterProviderID, rm.TesterModel
+	}
+
+	if providerID == 0 {
+		providerID = o.settings.DefaultProviderID
 	}
 
 	if providerID == 0 {

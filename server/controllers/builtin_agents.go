@@ -59,6 +59,9 @@ func (api *API) ListBuiltinAgents(w http.ResponseWriter, r *http.Request) {
 			ParentAgent:    cfg.ParentAgent,
 		}
 		if providerID, model, ok := roleModelFor(name, settings.RoleModels); ok {
+			if providerID == 0 {
+				providerID = settings.DefaultProviderID
+			}
 			resp.ResolvedProvider, resp.ResolvedModel = resolveProviderAndModel(providerID, model, providers)
 		}
 		out = append(out, resp)
