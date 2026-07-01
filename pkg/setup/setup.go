@@ -18,9 +18,11 @@ import (
 var scripts embed.FS
 
 var (
-	ready    atomic.Bool
-	errStore atomic.Value // holds string
-	once     sync.Once
+	ready     atomic.Bool
+	finished  atomic.Bool
+	errStore  atomic.Value // holds string
+	warnStore atomic.Value // holds string
+	once      sync.Once
 )
 
 // Run executes the platform-appropriate setup script exactly once, blocking
@@ -48,7 +50,23 @@ func StartupError() string {
 	return s
 }
 
+// Status reports setup progress without blocking on the setup script. While
+// the script is still running (or hasn't been started yet), pending is true.
+// Once it has finished, ok reports whether it succeeded and errMsg describes
+// the failure otherwise. warning describes any optional dependencies (e.g.
+// gh CLI) that failed to install — these never block the app from starting.
+func Status() (pending bool, ok bool, errMsg string, warning string) {
+	if !finished.Load() {
+		return true, false, "", ""
+	}
+	s, _ := errStore.Load().(string)
+	w, _ := warnStore.Load().(string)
+	return false, s == "", s, w
+}
+
 func runOnce() {
+	defer finished.Store(true)
+
 	scriptData, scriptName, err := selectScript()
 	if err != nil {
 		store(err.Error())
@@ -88,6 +106,11 @@ func runOnce() {
 		ready.Store(true)
 	}
 
+	if w := extractSoftFailures(output); w != "" {
+		log.Printf("[setup] WARNING: %s", w)
+		warnStore.Store(w)
+	}
+
 	if runErr != nil {
 		msg := fmt.Sprintf("setup script failed: %v\n%s", runErr, output)
 		store(msg)
@@ -95,6 +118,19 @@ func runOnce() {
 	}
 
 	log.Print(output)
+}
+
+// extractSoftFailures collects "[setup] SOFT_FAIL: ..." lines emitted for
+// optional dependencies (currently just gh CLI) that failed to install but
+// shouldn't block the app from starting.
+func extractSoftFailures(output string) string {
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		if msg, ok := strings.CutPrefix(line, "[setup] SOFT_FAIL: "); ok {
+			lines = append(lines, msg)
+		}
+	}
+	return strings.Join(lines, "; ")
 }
 
 func store(msg string) {

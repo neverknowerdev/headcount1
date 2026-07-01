@@ -4,10 +4,19 @@
 # Exits 1 with a summary if any dependency could not be installed.
 
 FAILED=""
+SOFT_FAILED=""
 
 add_failure() {
     echo "[setup] WARNING: $1 — $2"
     FAILED="${FAILED}
+  • $1: $2"
+}
+
+# add_soft_failure is for optional dependencies (currently: gh CLI) whose
+# absence should not block the app from starting — only surface a warning.
+add_soft_failure() {
+    echo "[setup] SOFT_FAIL: $1 — $2"
+    SOFT_FAILED="${SOFT_FAILED}
   • $1: $2"
 }
 
@@ -143,7 +152,7 @@ else
     if [ "$installed" -eq 1 ] && command -v gh >/dev/null 2>&1; then
         echo "[setup] gh CLI: installed"
     else
-        add_failure "gh CLI" "could not be installed — install manually from https://cli.github.com for GitHub MCP server support"
+        add_soft_failure "gh CLI" "could not be installed — install manually from https://cli.github.com for GitHub MCP server support"
     fi
 fi
 
@@ -162,6 +171,10 @@ else
 fi
 
 # ── summary ──────────────────────────────────────────────────────────────────
+if [ -n "$SOFT_FAILED" ]; then
+    printf '\n[setup] Some optional dependencies are missing or could not be installed:%s\n' "$SOFT_FAILED"
+fi
+
 if [ -n "$FAILED" ]; then
     printf '\n[setup] Some dependencies are missing or could not be installed:%s\n' "$FAILED" >&2
     exit 1

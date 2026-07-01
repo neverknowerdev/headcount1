@@ -178,11 +178,13 @@ func (s *Server) Mount(r chi.Router) {
 	})
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
-		errMsg := setup.StartupError()
-		if errMsg == "" {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": true})
+		pending, ok, errMsg, warning := setup.Status()
+		if pending {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": true})
+		} else if ok {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": true, "warning": warning})
 		} else {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"ok": false, "error": errMsg})
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning})
 		}
 	})
 

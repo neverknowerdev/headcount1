@@ -5,10 +5,18 @@
 
 $ErrorActionPreference = 'Continue'
 $Failed = @()
+$SoftFailed = @()
 
 function Add-Failure($Name, $Reason) {
     Write-Warning "[setup] $Name — $Reason"
     $script:Failed += "  • ${Name}: ${Reason}"
+}
+
+# Add-SoftFailure is for optional dependencies (currently: gh CLI) whose
+# absence should not block the app from starting — only surface a warning.
+function Add-SoftFailure($Name, $Reason) {
+    Write-Host "[setup] SOFT_FAIL: $Name — $Reason"
+    $script:SoftFailed += "  • ${Name}: ${Reason}"
 }
 
 function Test-Command($Cmd) {
@@ -155,10 +163,10 @@ if (Test-Command gh) {
         if (Test-Command gh) {
             Write-Host "[setup] gh CLI: installed"
         } else {
-            Add-Failure 'gh CLI' 'installed but not yet on PATH — restart or run: winget install GitHub.cli'
+            Add-SoftFailure 'gh CLI' 'installed but not yet on PATH — restart or run: winget install GitHub.cli'
         }
     } else {
-        Add-Failure 'gh CLI' 'could not be installed — download from https://cli.github.com'
+        Add-SoftFailure 'gh CLI' 'could not be installed — download from https://cli.github.com'
     }
 }
 
@@ -180,6 +188,11 @@ if (Test-Command codegraph) {
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────
+if ($SoftFailed.Count -gt 0) {
+    $softList = $SoftFailed -join "`n"
+    Write-Host "[setup] Some optional dependencies are missing or could not be installed:`n$softList"
+}
+
 if ($Failed.Count -gt 0) {
     $list = $Failed -join "`n"
     Write-Error "[setup] Some dependencies are missing or could not be installed:`n$list"
