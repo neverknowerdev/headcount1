@@ -149,6 +149,10 @@ test.describe.serial('Backup & Restore', () => {
     });
 
     test('backup via Settings UI button', async ({ page }) => {
+        // Archiving the whole .paperclip2 home can take a while once the e2e suite has
+        // accumulated many companies/tasks/workspaces, so give this more than the default budget.
+        test.setTimeout(150_000);
+
         // Navigate to settings for 'bt' company (exists after restore from roundtrip test)
         await page.goto('/companies/bt/settings');
         await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible({ timeout: 10000 });
@@ -175,7 +179,9 @@ test.describe.serial('Backup & Restore', () => {
         await dialog.accept();
 
         // Wait for the backup list to grow (a new entry appears after the dialog is dismissed).
-        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ })).toHaveCount(countBefore + 1, { timeout: 30000 });
+        // Archiving the whole .paperclip2 home gets slower as the e2e suite accumulates more
+        // companies/tasks/workspaces across spec files, so this needs generous headroom.
+        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ })).toHaveCount(countBefore + 1, { timeout: 100_000 });
     });
 
     test.afterAll(async () => {
