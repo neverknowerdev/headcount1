@@ -181,12 +181,42 @@ interface ParsedRequestContent {
   latestText: string | null;
   messageCount: number;
   toolResultCount: number;
-  toolResults: { name: string; content: string; preview: string }[];
+  toolResults: { name: string; content: string; preview: string; callArgs?: any }[];
   historyMessageCount: number;
   estimatedTotalTokens: number;
   currentTurnTokens: number;  // tokens for just the new messages in this turn
   toolResultTokens: number;   // estimated tokens from tool results in this turn
   mcpToolTokens: number;      // subset of toolResultTokens from MCP dispatcher tools
+}
+
+// Scan every message for tool calls (OpenAI-style tool_calls[] on assistant
+// messages, or Anthropic-style tool_use content blocks) and index them by
+// call id, so a later tool result can be matched back to what it was called
+// with.
+function collectToolCallArgs(msgs: any[]): Record<string, { name: string; args: any }> {
+  const map: Record<string, { name: string; args: any }> = {};
+  for (const m of msgs) {
+    if (m.role !== 'assistant') continue;
+    if (Array.isArray(m.tool_calls)) {
+      for (const tc of m.tool_calls) {
+        if (!tc.id) continue;
+        const name = tc.function?.name || tc.name || 'tool';
+        let args: any = tc.function?.arguments ?? tc.arguments ?? {};
+        if (typeof args === 'string') {
+          try { args = JSON.parse(args); } catch { /* leave as raw string */ }
+        }
+        map[tc.id] = { name, args };
+      }
+    }
+    if (Array.isArray(m.content)) {
+      for (const block of m.content) {
+        if (block.type === 'tool_use' && block.id) {
+          map[block.id] = { name: block.name || 'tool', args: block.input || {} };
+        }
+      }
+    }
+  }
+  return map;
 }
 
 // Try to extract readable text from a tool result value that may be JSON.
@@ -250,17 +280,30 @@ function parseRequestContent(content: string): ParsedRequestContent {
       const currentTurnMsgs = msgs.slice(lastAssistantIdx + 1);
       const currentTurnTokens = Math.ceil(JSON.stringify(currentTurnMsgs).length / 4);
 
-      const toolResults: { name: string; content: string; preview: string }[] = [];
+      const callsById = collectToolCallArgs(msgs);
+      const toolResults: { name: string; content: string; preview: string; callArgs?: any }[] = [];
       for (const m of currentTurnMsgs) {
         if (m.role === 'tool') {
           const raw = renderAsText(stringifyMessageContent(m.content));
-          toolResults.push({ name: m.name || 'tool', content: raw, preview: raw.length > 120 ? raw.slice(0, 120) + '…' : raw });
+          const call = m.tool_call_id ? callsById[m.tool_call_id] : undefined;
+          toolResults.push({
+            name: call?.name || m.name || 'tool',
+            content: raw,
+            preview: raw.length > 120 ? raw.slice(0, 120) + '…' : raw,
+            callArgs: call?.args,
+          });
         }
         if (m.role === 'user' && Array.isArray(m.content)) {
           for (const block of m.content) {
             if (block.type === 'tool_result') {
               const raw = renderAsText(stringifyMessageContent(block.content));
-              toolResults.push({ name: 'tool', content: raw, preview: raw.length > 120 ? raw.slice(0, 120) + '…' : raw });
+              const call = block.tool_use_id ? callsById[block.tool_use_id] : undefined;
+              toolResults.push({
+                name: call?.name || 'tool',
+                content: raw,
+                preview: raw.length > 120 ? raw.slice(0, 120) + '…' : raw,
+                callArgs: call?.args,
+              });
             }
           }
         }
@@ -640,7 +683,7 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
               </div>
               <div className="divide-y divide-green-50">
                 {parsed.toolResults.map((tr, i) => (
-                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} />
+                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} callArgs={tr.callArgs} />
                 ))}
               </div>
             </div>
@@ -926,9 +969,12 @@ function InfoRow({ msg }: { msg: LogMessage }) {
 
 // ─── ToolResultRow (inside InRow expanded) ────────────────────────────────────
 
-function ToolResultRow({ name, content, preview }: { name: string; content: string; preview: string }) {
+function ToolResultRow({ name, content, preview, callArgs }: { name: string; content: string; preview: string; callArgs?: any }) {
   const [expanded, setExpanded] = useState(false);
   const { Icon, color, bg } = getToolIcon(name);
+  const argsStr = callArgs !== undefined
+    ? (typeof callArgs === 'string' ? callArgs : JSON.stringify(callArgs, null, 2))
+    : null;
   return (
     <div>
       <button
@@ -943,10 +989,21 @@ function ToolResultRow({ name, content, preview }: { name: string; content: stri
         <span className="text-gray-500 truncate flex-1">{preview}</span>
       </button>
       {expanded && (
-        <div className="px-3 pb-2">
-          <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
-            {renderAsText(content)}
-          </pre>
+        <div className="px-3 pb-2 space-y-1.5">
+          {argsStr && argsStr !== '{}' && (
+            <div>
+              <div className="text-xs font-medium text-amber-700 mb-1">Called with:</div>
+              <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100 max-h-40 overflow-y-auto">
+                {argsStr}
+              </pre>
+            </div>
+          )}
+          <div>
+            {argsStr && argsStr !== '{}' && <div className="text-xs font-medium text-green-700 mb-1">Result:</div>}
+            <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+              {renderAsText(content)}
+            </pre>
+          </div>
         </div>
       )}
     </div>
