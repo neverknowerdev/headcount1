@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
@@ -17,12 +18,23 @@ import (
 //go:embed scripts
 var scripts embed.FS
 
+// Failure describes one dependency that the setup script could not install.
+// Detail, when present, is the raw command output explaining why — meant to
+// be shown behind an expandable disclosure rather than inline.
+type Failure struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+}
+
 var (
-	ready     atomic.Bool
-	finished  atomic.Bool
-	errStore  atomic.Value // holds string
-	warnStore atomic.Value // holds string
-	once      sync.Once
+	ready         atomic.Bool
+	finished      atomic.Bool
+	errStore      atomic.Value // holds string
+	warnStore     atomic.Value // holds string
+	failuresStore atomic.Value // holds []Failure — blocking failures
+	warningsStore atomic.Value // holds []Failure — non-blocking (e.g. gh CLI)
+	once          sync.Once
 )
 
 // Run executes the platform-appropriate setup script exactly once, blocking
@@ -62,6 +74,20 @@ func Status() (pending bool, ok bool, errMsg string, warning string) {
 	s, _ := errStore.Load().(string)
 	w, _ := warnStore.Load().(string)
 	return false, s == "", s, w
+}
+
+// Failures returns the structured list of blocking dependency failures from
+// the last setup run, each with a raw-output Detail where one was captured.
+func Failures() []Failure {
+	f, _ := failuresStore.Load().([]Failure)
+	return f
+}
+
+// Warnings returns the structured list of non-blocking dependency failures
+// (currently just gh CLI) from the last setup run.
+func Warnings() []Failure {
+	f, _ := warningsStore.Load().([]Failure)
+	return f
 }
 
 func runOnce() {
@@ -110,10 +136,16 @@ func runOnce() {
 		log.Printf("[setup] WARNING: %s", w)
 		warnStore.Store(w)
 	}
+	if softFailures := parseSoftFailures(output); len(softFailures) > 0 {
+		warningsStore.Store(softFailures)
+	}
 
 	if runErr != nil {
 		msg := fmt.Sprintf("setup script failed: %v\n%s", runErr, output)
 		store(msg)
+		if hardFailures := parseFailures(output); len(hardFailures) > 0 {
+			failuresStore.Store(hardFailures)
+		}
 		return
 	}
 
@@ -131,6 +163,59 @@ func extractSoftFailures(output string) string {
 		}
 	}
 	return strings.Join(lines, "; ")
+}
+
+var (
+	detailBlockRe = regexp.MustCompile(`(?s)\[setup\] DETAIL_BEGIN (\S+)\n(.*?)\n\[setup\] DETAIL_END`)
+	bulletRe      = regexp.MustCompile(`(?m)^\s*•\s*([^:]+):\s*(.+)$`)
+	softFailRe    = regexp.MustCompile(`(?m)^\[setup\] SOFT_FAIL: (.+?) — (.+)$`)
+)
+
+const hardFailureHeader = "[setup] Some dependencies are missing or could not be installed:"
+
+// parseDetails extracts the raw per-dependency command output the setup
+// scripts emit between "[setup] DETAIL_BEGIN <id>" / "[setup] DETAIL_END"
+// markers, keyed by id (the dependency name with spaces replaced by "_").
+func parseDetails(output string) map[string]string {
+	details := map[string]string{}
+	for _, m := range detailBlockRe.FindAllStringSubmatch(output, -1) {
+		details[m[1]] = strings.TrimSpace(m[2])
+	}
+	return details
+}
+
+// parseFailures extracts the structured list of blocking dependency failures
+// from the setup script's final summary block, attaching each one's raw
+// command output (if captured) from parseDetails.
+func parseFailures(output string) []Failure {
+	idx := strings.Index(output, hardFailureHeader)
+	if idx == -1 {
+		return nil
+	}
+	details := parseDetails(output)
+	section := output[idx+len(hardFailureHeader):]
+	var failures []Failure
+	for _, m := range bulletRe.FindAllStringSubmatch(section, -1) {
+		name := strings.TrimSpace(m[1])
+		reason := strings.TrimSpace(m[2])
+		id := strings.ReplaceAll(name, " ", "_")
+		failures = append(failures, Failure{Name: name, Reason: reason, Detail: details[id]})
+	}
+	return failures
+}
+
+// parseSoftFailures extracts the structured list of non-blocking dependency
+// failures (currently just gh CLI) from "[setup] SOFT_FAIL: ..." lines.
+func parseSoftFailures(output string) []Failure {
+	details := parseDetails(output)
+	var failures []Failure
+	for _, m := range softFailRe.FindAllStringSubmatch(output, -1) {
+		name := strings.TrimSpace(m[1])
+		reason := strings.TrimSpace(m[2])
+		id := strings.ReplaceAll(name, " ", "_")
+		failures = append(failures, Failure{Name: name, Reason: reason, Detail: details[id]})
+	}
+	return failures
 }
 
 func store(msg string) {

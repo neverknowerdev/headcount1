@@ -6,28 +6,43 @@
 $ErrorActionPreference = 'Continue'
 $Failed = @()
 $SoftFailed = @()
+$Details = @()
 
-function Add-Failure($Name, $Reason) {
+# Add-Failure records a blocking dependency failure. $Detail, if given, is the
+# raw command output that explains why the install failed — surfaced in the
+# UI as an expandable detail alongside the summary reason in $Reason.
+function Add-Failure($Name, $Reason, $Detail) {
     Write-Warning "[setup] $Name — $Reason"
     $script:Failed += "  • ${Name}: ${Reason}"
+    if ($Detail) {
+        $id = $Name -replace ' ', '_'
+        $script:Details += "[setup] DETAIL_BEGIN $id`n$Detail`n[setup] DETAIL_END"
+    }
 }
 
 # Add-SoftFailure is for optional dependencies (currently: gh CLI) whose
 # absence should not block the app from starting — only surface a warning.
-function Add-SoftFailure($Name, $Reason) {
+function Add-SoftFailure($Name, $Reason, $Detail) {
     Write-Host "[setup] SOFT_FAIL: $Name — $Reason"
     $script:SoftFailed += "  • ${Name}: ${Reason}"
+    if ($Detail) {
+        $id = $Name -replace ' ', '_'
+        $script:Details += "[setup] DETAIL_BEGIN $id`n$Detail`n[setup] DETAIL_END"
+    }
 }
 
 function Test-Command($Cmd) {
     return $null -ne (Get-Command $Cmd -ErrorAction SilentlyContinue)
 }
 
+$script:LastWingetOutput = ''
+
 function Invoke-Winget($Id) {
     if (Test-Command winget) {
-        winget install --id $Id --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-Null
+        $script:LastWingetOutput = winget install --id $Id --silent --accept-package-agreements --accept-source-agreements 2>&1 | Out-String
         return $LASTEXITCODE -eq 0
     }
+    $script:LastWingetOutput = 'winget not available on this system'
     return $false
 }
 
@@ -36,16 +51,18 @@ if (Test-Command git) {
     Write-Host "[setup] git: OK"
 } else {
     Write-Host "[setup] git: not found — installing..."
-    if (Invoke-Winget 'Git.Git') {
+    $installed = Invoke-Winget 'Git.Git'
+    $installOutput = $script:LastWingetOutput
+    if ($installed) {
         # Refresh PATH and check again
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-        if (Test-Command git) {
-            Write-Host "[setup] git: installed"
-        } else {
-            Add-Failure 'git' 'installed but not yet on PATH — restart the application or add Git to PATH manually'
-        }
+    }
+    if (Test-Command git) {
+        Write-Host "[setup] git: installed"
+    } elseif ($installed) {
+        Add-Failure 'git' 'installed but not yet on PATH — restart the application or add Git to PATH manually' $installOutput
     } else {
-        Add-Failure 'git' 'could not be installed — download from https://git-scm.com/download/win'
+        Add-Failure 'git' 'could not be installed — download from https://git-scm.com/download/win' $installOutput
     }
 }
 
@@ -66,7 +83,9 @@ if ($pythonCmd) {
     Write-Host "[setup] python3: OK ($pythonCmd)"
 } else {
     Write-Host "[setup] python3: not found — installing..."
-    if (Invoke-Winget 'Python.Python.3') {
+    $installed = Invoke-Winget 'Python.Python.3'
+    $installOutput = $script:LastWingetOutput
+    if ($installed) {
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'User')
         foreach ($candidate in @('python3', 'python')) {
             if (Test-Command $candidate) { $pythonCmd = (Get-Command $candidate).Source; break }
@@ -75,7 +94,7 @@ if ($pythonCmd) {
     if ($pythonCmd) {
         Write-Host "[setup] python3: installed"
     } else {
-        Add-Failure 'python3' 'not found — download from https://python.org (check "Add to PATH" during install)'
+        Add-Failure 'python3' 'not found — download from https://python.org (check "Add to PATH" during install)' $installOutput
     }
 }
 
@@ -84,10 +103,10 @@ if ($pythonCmd) {
     $pipOk = & $pythonCmd -m pip --version 2>&1
     if ($LASTEXITCODE -ne 0) {
         Write-Host "[setup] pip: not found — trying ensurepip..."
-        & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-Null
+        $ensureOutput = & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-String
         $pipOk = & $pythonCmd -m pip --version 2>&1
         if ($LASTEXITCODE -ne 0) {
-            Add-Failure 'pip' 'not available — run: python -m ensurepip --upgrade'
+            Add-Failure 'pip' 'not available — run: python -m ensurepip --upgrade' $ensureOutput
         } else {
             Write-Host "[setup] pip: installed"
         }
@@ -103,12 +122,12 @@ if ($pythonCmd) {
         Write-Host "[setup] markitdown: OK"
     } else {
         Write-Host "[setup] markitdown: not found — installing..."
-        & $pythonCmd -m pip install --quiet markitdown 2>&1 | Out-Null
+        $pipOutput = & $pythonCmd -m pip install markitdown 2>&1 | Out-String
         & $pythonCmd -c "from markitdown import MarkItDown" 2>&1 | Out-Null
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[setup] markitdown: installed"
         } else {
-            Add-Failure 'markitdown' 'pip install failed — web_fetch markdown conversion will be unavailable'
+            Add-Failure 'markitdown' 'pip install failed — web_fetch markdown conversion will be unavailable' $pipOutput
         }
     }
 }
@@ -118,15 +137,17 @@ if (Test-Command npm) {
     Write-Host "[setup] npm: OK"
 } else {
     Write-Host "[setup] npm: not found — installing Node.js..."
-    if (Invoke-Winget 'OpenJS.NodeJS') {
+    $installed = Invoke-Winget 'OpenJS.NodeJS'
+    $installOutput = $script:LastWingetOutput
+    if ($installed) {
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-        if (Test-Command npm) {
-            Write-Host "[setup] npm: installed"
-        } else {
-            Add-Failure 'npm' 'installed but not yet on PATH — restart or install Node.js from https://nodejs.org'
-        }
+    }
+    if (Test-Command npm) {
+        Write-Host "[setup] npm: installed"
+    } elseif ($installed) {
+        Add-Failure 'npm' 'installed but not yet on PATH — restart or install Node.js from https://nodejs.org' $installOutput
     } else {
-        Add-Failure 'npm' 'could not be installed — download Node.js from https://nodejs.org for MCP server npm packages'
+        Add-Failure 'npm' 'could not be installed — download Node.js from https://nodejs.org for MCP server npm packages' $installOutput
     }
 }
 
@@ -145,11 +166,15 @@ if ($chromiumFound) {
 } else {
     Write-Host "[setup] chromium: not found — installing..."
     $installed = Invoke-Winget 'Chromium.Chromium'
-    if (-not $installed) { $installed = Invoke-Winget 'Google.Chrome' }
+    $installOutput = $script:LastWingetOutput
+    if (-not $installed) {
+        $installed = Invoke-Winget 'Google.Chrome'
+        $installOutput = "$installOutput`n$($script:LastWingetOutput)"
+    }
     if ($installed) {
         Write-Host "[setup] chromium: installed (restart may be required to locate binary)"
     } else {
-        Add-Failure 'chromium' 'could not be installed — download from https://www.chromium.org for browser_use support'
+        Add-Failure 'chromium' 'could not be installed — download from https://www.chromium.org for browser_use support' $installOutput
     }
 }
 
@@ -158,15 +183,17 @@ if (Test-Command gh) {
     Write-Host "[setup] gh CLI: OK"
 } else {
     Write-Host "[setup] gh CLI: not found — installing..."
-    if (Invoke-Winget 'GitHub.cli') {
+    $installed = Invoke-Winget 'GitHub.cli'
+    $installOutput = $script:LastWingetOutput
+    if ($installed) {
         $env:PATH = [System.Environment]::GetEnvironmentVariable('PATH', 'Machine') + ';' + [System.Environment]::GetEnvironmentVariable('PATH', 'User')
-        if (Test-Command gh) {
-            Write-Host "[setup] gh CLI: installed"
-        } else {
-            Add-SoftFailure 'gh CLI' 'installed but not yet on PATH — restart or run: winget install GitHub.cli'
-        }
+    }
+    if (Test-Command gh) {
+        Write-Host "[setup] gh CLI: installed"
+    } elseif ($installed) {
+        Add-SoftFailure 'gh CLI' 'installed but not yet on PATH — restart or run: winget install GitHub.cli' $installOutput
     } else {
-        Add-SoftFailure 'gh CLI' 'could not be installed — download from https://cli.github.com'
+        Add-SoftFailure 'gh CLI' 'could not be installed — download from https://cli.github.com' $installOutput
     }
 }
 
@@ -176,18 +203,22 @@ if (Test-Command codegraph) {
 } else {
     Write-Host "[setup] codegraph: not found — installing via npm..."
     if (Test-Command npm) {
-        & npm install -g @colbymchenry/codegraph 2>&1 | Out-Null
+        $installOutput = & npm install -g @colbymchenry/codegraph 2>&1 | Out-String
         if ($LASTEXITCODE -eq 0 -and (Test-Command codegraph)) {
             Write-Host "[setup] codegraph: installed"
         } else {
-            Add-Failure 'codegraph' 'could not be installed — run: npm install -g @colbymchenry/codegraph'
+            Add-Failure 'codegraph' 'could not be installed — run: npm install -g @colbymchenry/codegraph' $installOutput
         }
     } else {
-        Add-Failure 'codegraph' 'npm not available — install Node.js first, then run: npm install -g @colbymchenry/codegraph'
+        Add-Failure 'codegraph' 'npm not available — install Node.js first, then run: npm install -g @colbymchenry/codegraph' ''
     }
 }
 
 # ── summary ──────────────────────────────────────────────────────────────────
+if ($Details.Count -gt 0) {
+    Write-Host ($Details -join "`n")
+}
+
 if ($SoftFailed.Count -gt 0) {
     $softList = $SoftFailed -join "`n"
     Write-Host "[setup] Some optional dependencies are missing or could not be installed:`n$softList"

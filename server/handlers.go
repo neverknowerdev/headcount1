@@ -182,9 +182,9 @@ func (s *Server) Mount(r chi.Router) {
 		if pending {
 			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": true})
 		} else if ok {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": true, "warning": warning})
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": true, "warning": warning, "warnings": setup.Warnings()})
 		} else {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning})
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning, "failures": setup.Failures(), "warnings": setup.Warnings()})
 		}
 	})
 
