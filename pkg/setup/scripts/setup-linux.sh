@@ -100,33 +100,34 @@ $(try_install_pkg python3-pip)"
 fi
 
 # ── markitdown ───────────────────────────────────────────────────────────────
+# Installed into a dedicated virtualenv (per markitdown's own docs, which
+# recommend a venv) rather than the system Python. A venv is never
+# "externally managed" under PEP 668, so this sidesteps that guard entirely
+# and never risks upgrading some shared system/Homebrew-managed dependency.
+VENV_DIR="${PAPERCLIP_VENV_DIR:-$HOME/.paperclip2/venv}"
 if command -v python3 >/dev/null 2>&1; then
-    if python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
+    if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        venv_output=$(python3 -m venv "$VENV_DIR" 2>&1)
+        if [ ! -x "$VENV_DIR/bin/python3" ]; then
+            # Debian/Ubuntu split the venv module into its own package.
+            pkg_output=$(try_install_pkg python3-venv)
+            venv_output="${venv_output}
+${pkg_output}
+$(python3 -m venv "$VENV_DIR" 2>&1)"
+        fi
+    fi
+    if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        add_failure "markitdown" "could not create virtualenv at $VENV_DIR — web_fetch markdown conversion will be unavailable" "$venv_output"
+    elif "$VENV_DIR/bin/python3" -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
         echo "[setup] markitdown: OK"
     else
         echo "[setup] markitdown: not found — installing..."
-        install_output=$(python3 -m pip install markitdown 2>&1)
-        if ! python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
-            # Most modern distros (Debian/Ubuntu 23.04+, and Homebrew's Python)
-            # mark their system Python as "externally managed" (PEP 668) and
-            # refuse a plain `pip install`. Retry bypassing that guard, but
-            # pair it with --user (as Homebrew's own error message recommends)
-            # so this installs to the per-user site-packages instead of the
-            # system-wide one shared with OS/Homebrew-managed tools — same
-            # python3 interpreter can still import it, without risking a
-            # shared dependency (e.g. requests, beautifulsoup4) getting
-            # upgraded out from under some other tool.
-            retry_output=$(python3 -m pip install --break-system-packages --user markitdown 2>&1)
-            install_output="${install_output}
-
---- retry with --break-system-packages --user ---
-${retry_output}"
-        fi
-        if python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
+        install_output=$("$VENV_DIR/bin/python3" -m pip install markitdown 2>&1)
+        if "$VENV_DIR/bin/python3" -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
             echo "[setup] markitdown: installed"
         else
             reason="pip install failed — web_fetch markdown conversion will be unavailable"
-            pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+            pyver=$("$VENV_DIR/bin/python3" -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
             case "$pyver" in
                 2.*|3.0|3.1|3.2|3.3|3.4|3.5|3.6|3.7|3.8|3.9)
                     reason="python $pyver is too old — markitdown requires Python >=3.10; install a newer python3 and retry"

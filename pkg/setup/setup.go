@@ -13,6 +13,8 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"agent-orchestrator/db"
 )
 
 //go:embed scripts
@@ -90,6 +92,25 @@ func Warnings() []Failure {
 	return f
 }
 
+// PythonInterpreter returns the path to the python3 interpreter that has
+// markitdown installed and ready to use. On Linux/macOS this is a dedicated
+// virtualenv created by the setup script — isolated from the system Python,
+// so it never runs into PEP 668's "externally managed environment" guard
+// and never risks upgrading a shared dependency out from under some other
+// system/Homebrew-managed tool. On Windows, PEP 668 doesn't apply (the
+// official installer's Python isn't shared with OS package management), so
+// this is just the system python3.
+func PythonInterpreter() string {
+	if runtime.GOOS == "windows" {
+		return "python3"
+	}
+	return filepath.Join(venvDir(), "bin", "python3")
+}
+
+func venvDir() string {
+	return filepath.Join(db.PaperclipHome(), "venv")
+}
+
 func runOnce() {
 	defer finished.Store(true)
 
@@ -117,6 +138,7 @@ func runOnce() {
 		store(err.Error())
 		return
 	}
+	cmd.Env = append(os.Environ(), "PAPERCLIP_VENV_DIR="+venvDir())
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
