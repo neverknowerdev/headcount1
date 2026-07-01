@@ -127,7 +127,12 @@ if ($pythonCmd) {
         if ($LASTEXITCODE -eq 0) {
             Write-Host "[setup] markitdown: installed"
         } else {
-            Add-Failure 'markitdown' 'pip install failed — web_fetch markdown conversion will be unavailable' $pipOutput
+            $reason = 'pip install failed — web_fetch markdown conversion will be unavailable'
+            $pyver = & $pythonCmd -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>&1
+            if ($pyver -match '^(2\.|3\.[0-9]$)') {
+                $reason = "python $pyver is too old — markitdown requires Python >=3.10; install a newer python3 and retry"
+            }
+            Add-Failure 'markitdown' $reason $pipOutput
         }
     }
 }

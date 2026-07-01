@@ -104,10 +104,29 @@ if command -v python3 >/dev/null 2>&1; then
     else
         echo "[setup] markitdown: not found — installing..."
         install_output=$(python3 -m pip install markitdown 2>&1)
+        if ! python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
+            # Homebrew's Python (and most modern Linux distros) mark
+            # themselves "externally managed" (PEP 668) and refuse a plain
+            # `pip install`. This script is the intended place to manage
+            # this Python's packages, so bypassing that guard here is safe —
+            # retry with it before giving up.
+            retry_output=$(python3 -m pip install --break-system-packages markitdown 2>&1)
+            install_output="${install_output}
+
+--- retry with --break-system-packages ---
+${retry_output}"
+        fi
         if python3 -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
             echo "[setup] markitdown: installed"
         else
-            add_failure "markitdown" "pip install failed — web_fetch markdown conversion will be unavailable" "$install_output"
+            reason="pip install failed — web_fetch markdown conversion will be unavailable"
+            pyver=$(python3 -c 'import sys; print("%d.%d" % sys.version_info[:2])' 2>/dev/null)
+            case "$pyver" in
+                2.*|3.0|3.1|3.2|3.3|3.4|3.5|3.6|3.7|3.8|3.9)
+                    reason="python $pyver is too old — markitdown requires Python >=3.10; brew install python3 and retry"
+                    ;;
+            esac
+            add_failure "markitdown" "$reason" "$install_output"
         fi
     fi
 fi
