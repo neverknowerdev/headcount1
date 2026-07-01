@@ -5,6 +5,7 @@ import { CompanyView } from './pages/CompanyView';
 import { ProjectBoard } from './pages/ProjectBoard';
 import { AgentManager } from './pages/AgentManager';
 import { AgentDetails } from './pages/AgentDetails';
+import { BuiltinAgentDetails } from './pages/BuiltinAgentDetails';
 import { RunLogs } from './pages/RunLogs';
 import { RunLogDetails } from './pages/RunLogDetails';
 import { ProvidersManager } from './pages/ProvidersManager';
@@ -30,6 +31,7 @@ function App() {
           <Route path="/companies/:shortName/projects" element={<CompanyView />} />
           <Route path="/companies/:shortName/projects/:id" element={<ProjectSettings />} />
           <Route path="/companies/:shortName/agents" element={<AgentManager />} />
+          <Route path="/companies/:shortName/agents/builtin/:name" element={<BuiltinAgentDetails />} />
           <Route path="/companies/:shortName/agents/:id" element={<AgentDetails />} />
           <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
           <Route path="/companies/:shortName/skills" element={<SkillsManager />} />

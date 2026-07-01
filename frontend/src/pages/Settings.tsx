@@ -1,29 +1,7 @@
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
-import { useNavigate } from 'react-router-dom';
-
-interface Provider {
-    id: number;
-    name: string;
-    default_model: string;
-    supported_models: string;
-}
-
-interface RoleModelConfig {
-    smart_planner_provider_id: number;
-    smart_planner_model: string;
-    tech_researcher_provider_id: number;
-    tech_researcher_model: string;
-    writing_researcher_provider_id: number;
-    writing_researcher_model: string;
-    design_researcher_provider_id: number;
-    design_researcher_model: string;
-    coder_provider_id: number;
-    coder_model: string;
-    tester_provider_id: number;
-    tester_model: string;
-}
+import { useNavigate, Link } from 'react-router-dom';
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
@@ -45,38 +23,27 @@ export const Settings: React.FC = () => {
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
     const [githubPat, setGithubPat] = useState('');
     const [systemLlmModel, setSystemLlmModel] = useState('');
-    const [roleModels, setRoleModels] = useState<RoleModelConfig>({
-        smart_planner_provider_id: 0, smart_planner_model: '',
-        tech_researcher_provider_id: 0, tech_researcher_model: '',
-        writing_researcher_provider_id: 0, writing_researcher_model: '',
-        design_researcher_provider_id: 0, design_researcher_model: '',
-        coder_provider_id: 0, coder_model: '',
-        tester_provider_id: 0, tester_model: '',
-    });
-    const [providers, setProviders] = useState<Provider[]>([]);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
     const sshFileInputRef = useRef<HTMLInputElement>(null);
+    // Holds the full /api/settings payload so saving doesn't clobber fields this page
+    // doesn't edit (e.g. role_models, which now lives on the LLM Providers page) —
+    // POST /api/settings fully overwrites settings.yaml rather than merging.
+    const [fullSettings, setFullSettings] = useState<any>(null);
 
     useEffect(() => {
         const fetchAll = async () => {
             try {
-                const [settingsRes, providersRes] = await Promise.all([
-                    axios.get('/api/settings'),
-                    axios.get('/api/providers'),
-                ]);
+                const settingsRes = await axios.get('/api/settings');
                 if (settingsRes.data) {
+                    setFullSettings(settingsRes.data);
                     setBasePath(settingsRes.data.base_path || '');
                     setGitRemoteUrl(settingsRes.data.git_remote_url || '');
                     setGithubPat(settingsRes.data.github_pat || '');
                     setSystemLlmModel(settingsRes.data.system_llm_model || '');
-                    if (settingsRes.data.role_models) {
-                        setRoleModels(prev => ({ ...prev, ...settingsRes.data.role_models }));
-                    }
                 }
-                setProviders(providersRes.data || []);
             } catch (e) {
                 console.error(e);
             }
@@ -89,11 +56,11 @@ export const Settings: React.FC = () => {
         setSaving(true);
         try {
             await axios.post('/api/settings', {
+                ...fullSettings,
                 base_path: basePath,
                 git_remote_url: gitRemoteUrl,
                 github_pat: githubPat,
                 system_llm_model: systemLlmModel,
-                role_models: roleModels,
             });
 
             if (sshKey) {
@@ -244,40 +211,13 @@ export const Settings: React.FC = () => {
                         />
                     </div>
                     <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4 mt-8">Role Model Configuration</h2>
-                    <p className="text-xs text-gray-500 mb-4">
-                        Assign a provider and model to each AI role used in the task pipeline. Leave provider at 0 to use the first available provider.
-                    </p>
-                    {([
-                        { label: 'Smart Planner', provKey: 'smart_planner_provider_id' as const, modelKey: 'smart_planner_model' as const },
-                        { label: 'Tech Researcher', provKey: 'tech_researcher_provider_id' as const, modelKey: 'tech_researcher_model' as const },
-                        { label: 'Writing Researcher', provKey: 'writing_researcher_provider_id' as const, modelKey: 'writing_researcher_model' as const },
-                        { label: 'Design Researcher', provKey: 'design_researcher_provider_id' as const, modelKey: 'design_researcher_model' as const },
-                        { label: 'Coder', provKey: 'coder_provider_id' as const, modelKey: 'coder_model' as const },
-                        { label: 'Tester', provKey: 'tester_provider_id' as const, modelKey: 'tester_model' as const },
-                    ] as const).map(({ label, provKey, modelKey }) => (
-                        <div key={label} className="mb-3">
-                            <label className="block text-sm font-medium text-gray-700 mb-1">{label}</label>
-                            <div className="flex gap-2">
-                                <select
-                                    value={roleModels[provKey] || 0}
-                                    onChange={e => setRoleModels(prev => ({ ...prev, [provKey]: parseInt(e.target.value) }))}
-                                    className="w-48 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
-                                >
-                                    <option value={0}>— default provider —</option>
-                                    {providers.map(p => (
-                                        <option key={p.id} value={p.id}>{p.name}</option>
-                                    ))}
-                                </select>
-                                <input
-                                    type="text"
-                                    value={roleModels[modelKey] || ''}
-                                    onChange={e => setRoleModels(prev => ({ ...prev, [modelKey]: e.target.value }))}
-                                    className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                                    placeholder="model name (blank = provider default)"
-                                />
-                            </div>
-                        </div>
-                    ))}
+                    <div className="p-3 bg-indigo-50 border border-indigo-100 rounded-md text-sm text-indigo-800">
+                        Assigning a provider and model to each AI role used in the task pipeline (Smart Planner, researchers, Coder, Tester)
+                        now lives on the{' '}
+                        <Link to={`/companies/${companyShortName}/providers`} className="underline font-medium hover:text-indigo-900">
+                            LLM Providers page
+                        </Link>.
+                    </div>
 
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">

@@ -1,15 +1,17 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
+import { ChevronDown, ChevronRight } from 'lucide-react';
 import { useStore } from '../store';
 
 export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
+    const navigate = useNavigate();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
     const [builtinAgents, setBuiltinAgents] = useState<any[]>([]);
-    const [expandedBuiltin, setExpandedBuiltin] = useState<string | null>(null);
+    const [builtinExpanded, setBuiltinExpanded] = useState(false);
     const [showModal, setShowModal] = useState(false);
     const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
     const [saving, setSaving] = useState(false);
@@ -72,39 +74,53 @@ export const AgentManager: React.FC = () => {
             </div>
 
             {builtinAgents.length > 0 && (
-                <div>
-                    <div className="mb-3">
-                        <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wider">Built-in Agents</h2>
-                        <p className="text-xs text-gray-400">System roles used by the task pipeline (refinement, implementation, testing). Read-only.</p>
-                    </div>
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {builtinAgents.map(agent => {
-                            const isExpanded = expandedBuiltin === agent.name;
-                            return (
-                                <div key={agent.name} className="bg-slate-50 p-6 rounded-lg border border-slate-200 flex flex-col">
-                                    <div className="flex justify-between items-start mb-2">
-                                        <h3 className="text-lg font-bold text-gray-900">{agent.name}</h3>
-                                        <span className="bg-slate-200 text-slate-700 text-xs px-2 py-1 rounded-full">Built-in</span>
-                                    </div>
-                                    {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
+                <div className="bg-slate-50 border border-slate-200 rounded-lg">
+                    <button
+                        onClick={() => setBuiltinExpanded(v => !v)}
+                        className="w-full flex items-center gap-2 px-4 py-3 text-left hover:bg-slate-100 rounded-lg"
+                    >
+                        {builtinExpanded ? <ChevronDown size={16} className="text-slate-500" /> : <ChevronRight size={16} className="text-slate-500" />}
+                        <h2 className="text-sm font-semibold text-gray-700 uppercase tracking-wider">Built-in Agents</h2>
+                        <span className="text-xs text-gray-400">({builtinAgents.length})</span>
+                        <span className="text-xs text-gray-400 ml-auto hidden sm:inline">System roles used by the task pipeline. Read-only.</span>
+                    </button>
+                    {builtinExpanded && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4 pt-0">
+                            {builtinAgents.map(agent => {
+                                const toolCount = Array.isArray(agent.allowed_tools) && agent.allowed_tools.length > 0
+                                    ? agent.allowed_tools.length
+                                    : null; // null/empty = all tools allowed
+                                const mcpCount = Array.isArray(agent.allowed_mcps) ? agent.allowed_mcps.length : 0;
+                                return (
+                                    <div
+                                        key={agent.name}
+                                        className="bg-white p-4 rounded-lg border border-slate-200 flex flex-col cursor-pointer hover:border-indigo-300 hover:shadow-sm transition-colors"
+                                        onClick={() => navigate(`/companies/${shortName}/agents/builtin/${agent.name}`)}
+                                    >
+                                        <div className="flex justify-between items-start mb-1">
+                                            <h3 className="text-base font-bold text-gray-900">{agent.name}</h3>
+                                            <span className="bg-slate-200 text-slate-700 text-xs px-2 py-0.5 rounded-full shrink-0">Built-in</span>
+                                        </div>
+                                        {agent.description && <p className="text-xs text-gray-500 mb-3 line-clamp-2">{agent.description}</p>}
 
-                                    <div className="mt-auto">
-                                        <button
-                                            className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 hover:text-indigo-600"
-                                            onClick={() => setExpandedBuiltin(isExpanded ? null : agent.name)}
-                                        >
-                                            System Prompt {isExpanded ? '▲' : '▼'}
-                                        </button>
-                                        {isExpanded && (
-                                            <div className="text-xs text-gray-700 bg-white p-3 rounded border overflow-y-auto max-h-64 whitespace-pre-wrap font-mono">
-                                                {agent.prompt}
+                                        <div className="mt-auto space-y-1 text-xs text-gray-500">
+                                            <div>
+                                                <span className="font-medium text-gray-600">Model:</span>{' '}
+                                                {agent.resolved_model
+                                                    ? `${agent.resolved_model}${agent.resolved_provider ? ` (${agent.resolved_provider})` : ''}`
+                                                    : 'Uses assigned agent\'s model'}
                                             </div>
-                                        )}
+                                            <div>
+                                                <span className="font-medium text-gray-600">Tools:</span>{' '}
+                                                {toolCount === null ? 'All tools' : `${toolCount} tool${toolCount !== 1 ? 's' : ''}`}
+                                                {mcpCount > 0 && ` · ${mcpCount} MCP${mcpCount !== 1 ? 's' : ''}`}
+                                            </div>
+                                        </div>
                                     </div>
-                                </div>
-                            );
-                        })}
-                    </div>
+                                );
+                            })}
+                        </div>
+                    )}
                 </div>
             )}
 
