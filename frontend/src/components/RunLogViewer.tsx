@@ -352,6 +352,40 @@ function getToolIcon(toolName: string): { Icon: any; color: string; bg: string }
   }
 }
 
+// ─── RoleBadge: shows which agent role and model produced a turn ─────────────
+// Distinct colors per role make it easier to scan a log with several roles
+// (SmartPlanner, researchers, Coder, Tester) working on the same task.
+const ROLE_COLORS: Record<string, string> = {
+  SmartPlanner: 'bg-violet-100 text-violet-700',
+  TechSpecResearcher: 'bg-cyan-100 text-cyan-700',
+  WritingSpecResearcher: 'bg-cyan-100 text-cyan-700',
+  DesignSpecResearcher: 'bg-cyan-100 text-cyan-700',
+  Coder: 'bg-orange-100 text-orange-700',
+  Tester: 'bg-rose-100 text-rose-700',
+};
+
+function roleColor(role: string): string {
+  return ROLE_COLORS[role] || 'bg-slate-100 text-slate-700';
+}
+
+function RoleBadge({ agentName, model }: { agentName?: string; model?: string }) {
+  if (!agentName && !model) return null;
+  return (
+    <span className="shrink-0 flex items-center gap-1">
+      {agentName && (
+        <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${roleColor(agentName)}`}>
+          {agentName}
+        </span>
+      )}
+      {model && (
+        <span className="text-xs font-mono text-gray-400 bg-gray-50 px-1.5 py-0.5 rounded border border-gray-100">
+          {model}
+        </span>
+      )}
+    </span>
+  );
+}
+
 function getToolCallPreview(entry: LogEntry): string {
   try {
     const args = JSON.parse(entry.content);
@@ -541,6 +575,7 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
         </span>
         <User size={13} className="text-blue-500 shrink-0" />
         <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
+        <RoleBadge agentName={entry.agent_name} model={entry.model} />
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-400 italic" title={previewText || ''}>
           {previewText || ''}
@@ -659,6 +694,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
         </span>
         <Bot size={13} className="text-indigo-500 shrink-0" />
         <span className="shrink-0 text-xs font-semibold text-indigo-600">AI Model</span>
+        <RoleBadge agentName={entry.agent_name} model={entry.model} />
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-600" title={previewText}>
           {previewText}
@@ -968,8 +1004,54 @@ interface TokenSegment {
   isSub?: boolean;
 }
 
+interface RoleTokenSummary {
+  role: string;
+  model: string;
+  promptTokens: number;
+  completionTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  calls: number;
+}
+
+// Groups response-turn tokens by the agent role (SmartPlanner, a researcher,
+// Coder, Tester, ...) that produced them, so a task worked on by several
+// roles/models shows where the tokens actually went instead of one opaque total.
+function computeByRole(messages: LogMessage[]): RoleTokenSummary[] {
+  const map = new Map<string, RoleTokenSummary>();
+  let currentRole = 'unknown';
+  let currentModel = '';
+  for (const m of messages) {
+    const e = m.entry;
+    if (e.type === 'request' || e.type === 'response') {
+      if (e.agent_name) currentRole = e.agent_name;
+      if (e.model) currentModel = e.model;
+    }
+    if (e.type !== 'response') continue;
+    const { tokens } = getAgentMessage(e.content);
+    if (!tokens) continue;
+    let summary = map.get(currentRole);
+    if (!summary) {
+      summary = { role: currentRole, model: currentModel, promptTokens: 0, completionTokens: 0, reasoningTokens: 0, totalTokens: 0, calls: 0 };
+      map.set(currentRole, summary);
+    }
+    summary.model = currentModel || summary.model;
+    summary.promptTokens += tokens.prompt || 0;
+    summary.completionTokens += tokens.completion || 0;
+    summary.reasoningTokens += tokens.reasoning || 0;
+    summary.totalTokens += (tokens.prompt || 0) + (tokens.completion || 0) + (tokens.reasoning || 0);
+    summary.calls += 1;
+  }
+  return Array.from(map.values())
+    .filter(s => s.totalTokens > 0)
+    .sort((a, b) => b.totalTokens - a.totalTokens);
+}
+
 function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
   const [expanded, setExpanded] = useState(false);
+
+  const byRole = useMemo(() => computeByRole(messages || []), [messages]);
+  const hasRoleBreakdown = byRole.some(s => s.role !== 'unknown');
 
   const aggregate: RunTokenStats = useMemo(() => {
     if (stats && (stats.prompt_tokens || 0) + (stats.completion_tokens || 0) +
@@ -1075,6 +1157,25 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
                     {server}: {formatTokens(count)}
                   </span>
                 ))}
+            </div>
+          )}
+          {hasRoleBreakdown && (
+            <div className="w-full pt-1 mt-1 border-t border-gray-100">
+              <div className="text-xs text-gray-400 font-semibold uppercase tracking-wide mb-1">By Role</div>
+              <div className="flex flex-col gap-1">
+                {byRole.map(s => (
+                  <div key={s.role} className="flex items-center gap-2">
+                    <span className={`text-xs font-semibold px-1.5 py-0.5 rounded shrink-0 ${roleColor(s.role)}`}>
+                      {s.role}
+                    </span>
+                    {s.model && (
+                      <span className="text-xs font-mono text-gray-400 truncate">{s.model}</span>
+                    )}
+                    <span className="text-xs text-gray-400 ml-auto shrink-0">{s.calls} call{s.calls !== 1 ? 's' : ''}</span>
+                    <span className="text-xs text-gray-700 font-mono shrink-0">{formatTokens(s.totalTokens)} tok</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </div>

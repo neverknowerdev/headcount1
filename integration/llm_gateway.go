@@ -246,6 +246,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		if proxyLogger != nil {
 			proxyLogger.LogResponse(
 				reqPayload.Model,
+				"llm-proxy",
 				provider.Name,
 				resp.StatusCode,
 				respBodyBytes,
@@ -304,7 +305,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		if lastUsage != nil {
 			usage = *lastUsage
 		}
-		proxyLogger.LogStreamResponse(reqPayload.Model, provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
+		proxyLogger.LogStreamResponse(reqPayload.Model, "llm-proxy", provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
 	}
 }
 
@@ -488,6 +489,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		if proxyLogger != nil {
 			proxyLogger.LogResponse(
 				reqPayload.Model,
+				agent.Name,
 				provider.Name,
 				resp.StatusCode,
 				respBodyBytes,
@@ -524,6 +526,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	if proxyLogger != nil && lastUsage != nil {
 		proxyLogger.LogStreamResponse(
 			reqPayload.Model,
+			agent.Name,
 			provider.Name,
 			fullContent,
 			fullReasoning,

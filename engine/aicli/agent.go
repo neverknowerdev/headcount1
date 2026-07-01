@@ -40,7 +40,7 @@ const (
 // It is satisfied by *logging.ProxyLogger plus a few extra methods.
 type RunLogger interface {
 	LogRequest(model, agentName, providerName string, body []byte)
-	LogResponse(model, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
+	LogResponse(model, agentName, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
 	LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{})
 	FilePath() string
 }
@@ -206,7 +206,7 @@ func (a *Agent) continueHistory(ctx context.Context, history []Message, reasonin
 				CachedTokens:     resp.Usage.PromptTokensDetails.CachedTokens,
 				ReasoningTokens:  resp.Usage.CompletionTokensDetails.ReasoningTokens,
 			}
-			a.logger.LogResponse(a.Client.Model, a.ProviderName, 200, rawBody, "", usage)
+			a.logger.LogResponse(a.Client.Model, a.AgentName, a.ProviderName, 200, rawBody, "", usage)
 		}
 
 		// Persist token stats to the run record.

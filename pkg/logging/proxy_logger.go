@@ -130,13 +130,14 @@ func (l *ProxyLogger) LogRequest(model, agentName, providerName string, requestB
 	})
 }
 
-func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, responseBody []byte, reasoningContent string, usage Usage) {
+func (l *ProxyLogger) LogResponse(model, agentName, providerName string, statusCode int, responseBody []byte, reasoningContent string, usage Usage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	l.file.WriteString(fmt.Sprintf("\n=== LLM Response [%s] ===\n", ts))
 	l.file.WriteString(fmt.Sprintf("Model: %s\n", model))
+	l.file.WriteString(fmt.Sprintf("Agent: %s\n", agentName))
 	l.file.WriteString(fmt.Sprintf("Provider: %s\n", providerName))
 	l.file.WriteString(fmt.Sprintf("Status: %d\n", statusCode))
 	l.file.WriteString(fmt.Sprintf("Tokens: prompt=%d completion=%d total=%d reasoning=%d\n",
@@ -173,21 +174,24 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 
 	l.broadcastLog("response", string(respBytes), map[string]interface{}{
 		"model":       model,
+		"agent_name":  agentName,
 		"status_code": statusCode,
 	})
 	l.persistLog("response", string(respBytes), map[string]interface{}{
 		"model":       model,
+		"agent_name":  agentName,
 		"status_code": statusCode,
 	})
 }
 
-func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, reasoningContent string, toolCalls []map[string]interface{}, rawBody []byte, usage Usage) {
+func (l *ProxyLogger) LogStreamResponse(model, agentName, providerName string, content, reasoningContent string, toolCalls []map[string]interface{}, rawBody []byte, usage Usage) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	l.file.WriteString(fmt.Sprintf("\n=== LLM Response [%s] ===\n", ts))
 	l.file.WriteString(fmt.Sprintf("Model: %s\n", model))
+	l.file.WriteString(fmt.Sprintf("Agent: %s\n", agentName))
 	l.file.WriteString(fmt.Sprintf("Provider: %s\n", providerName))
 	l.file.WriteString(fmt.Sprintf("Tokens: prompt=%d completion=%d total=%d reasoning=%d tool_in=%d\n",
 		usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, usage.ReasoningTokens, usage.ToolInputTokens))
@@ -246,10 +250,12 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 	respBytes, _ := json.Marshal(respData)
 	l.broadcastLog("response", string(respBytes), map[string]interface{}{
 		"model":       model,
+		"agent_name":  agentName,
 		"status_code": 200,
 	})
 	l.persistLog("response", string(respBytes), map[string]interface{}{
 		"model":       model,
+		"agent_name":  agentName,
 		"status_code": 200,
 	})
 
