@@ -110,7 +110,12 @@ type retryableError struct {
 	body   string
 }
 
-func (e *retryableError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.status, e.body) }
+func (e *retryableError) Error() string {
+	if e.status == 0 {
+		return fmt.Sprintf("transport error: %s", e.body)
+	}
+	return fmt.Sprintf("HTTP %d: %s", e.status, e.body)
+}
 
 // Client makes non-streaming OpenAI-compatible chat-completion requests.
 type Client struct {
@@ -193,6 +198,12 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 
 	httpResp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
+		// Transport-level failures (connection reset, client timeout,
+		// DNS blips) are transient the same way 5xx responses are —
+		// retry them unless the caller's context was canceled.
+		if ctx.Err() == nil {
+			return nil, nil, &retryableError{status: 0, body: err.Error()}
+		}
 		return nil, nil, err
 	}
 	defer httpResp.Body.Close()

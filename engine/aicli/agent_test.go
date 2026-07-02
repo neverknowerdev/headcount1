@@ -412,3 +412,52 @@ func TestAgentWithLiveProvider(t *testing.T) {
 	t.Logf("Live provider response: %q", result)
 	assert.True(t, strings.Contains(result, "42"), "expected response to contain 42, got: %s", result)
 }
+
+// TestClientRetryOnTransportError verifies that a network-level failure
+// (connection refused/reset, client timeout) is retried like a 5xx rather
+// than aborting the turn on the first attempt.
+func TestClientRetryOnTransportError(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			// Kill the connection mid-request to simulate a transport error.
+			hj, ok := w.(http.Hijacker)
+			require.True(t, ok)
+			conn, _, err := hj.Hijack()
+			require.NoError(t, err)
+			conn.Close()
+			return
+		}
+		json.NewEncoder(w).Encode(map[string]interface{}{
+			"choices": []map[string]interface{}{
+				{"message": map[string]string{"role": "assistant", "content": "ok"}},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	client := aicli.NewClient(srv.URL, "", "test-model")
+	client.MaxRetries = 2
+
+	resp, _, err := client.Complete(context.Background(), aicli.ChatRequest{
+		Messages: []aicli.Message{{Role: "user", Content: "hi"}},
+	})
+	require.NoError(t, err)
+	require.Len(t, resp.Choices, 1)
+	assert.Equal(t, "ok", resp.Choices[0].Message.Content)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
+}
+
+// TestClientTransportErrorNotRetriedOnCanceledContext verifies we don't spin
+// retries after the caller has given up.
+func TestClientTransportErrorNotRetriedOnCanceledContext(t *testing.T) {
+	client := aicli.NewClient("http://127.0.0.1:1", "", "test-model") // nothing listens here
+	client.MaxRetries = 3
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, _, err := client.Complete(ctx, aicli.ChatRequest{
+		Messages: []aicli.Message{{Role: "user", Content: "hi"}},
+	})
+	require.Error(t, err)
+}

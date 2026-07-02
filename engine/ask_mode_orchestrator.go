@@ -284,6 +284,7 @@ func (o *AskModeOrchestrator) runResearchBatch(
 
 	agentCfg, _ := o.agentFactory.GetConfig(configName)
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
+		o.warnMissingTools(logger, configName, registry, agentCfg.AllowedTools)
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
@@ -454,6 +455,7 @@ func (o *AskModeOrchestrator) runSubAgent(
 
 	agentCfg, _ := o.agentFactory.GetConfig(configName)
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
+		o.warnMissingTools(logger, configName, registry, agentCfg.AllowedTools)
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
@@ -694,6 +696,24 @@ func (o *AskModeOrchestrator) buildSubAgentMessage(task db.Task, sessionType str
 	default:
 		return fmt.Sprintf("Please implement task '%s' according to the specifications.", task.Title)
 	}
+}
+
+// warnMissingTools logs a warning when an agent config's allowed-tools list
+// names tools that aren't registered — Filter would drop them silently,
+// leaving the agent without a capability its prompt may still advertise
+// (e.g. a prompt telling the Tester to use a tool the registry doesn't have).
+func (o *AskModeOrchestrator) warnMissingTools(logger *logging.ProxyLogger, configName string, registry *aicli.Registry, allowed []string) {
+	missing := registry.Missing(allowed)
+	if len(missing) == 0 {
+		return
+	}
+	msg := fmt.Sprintf("%s: allowed_tools names unknown tool(s) %s — not registered, agent will not have them (registered: %s)",
+		configName, strings.Join(missing, ", "), strings.Join(registry.Names(), ", "))
+	if logger == nil {
+		fmt.Println("WARN:", msg)
+		return
+	}
+	logger.LogWarn(msg)
 }
 
 func (o *AskModeOrchestrator) logInfo(logger *logging.ProxyLogger, msg string) {

@@ -110,7 +110,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(techSpecResearcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			AllowedTools:   []string{"read", "write", "list", "grep", "exec", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
+			AllowedTools:   []string{"read", "write", "ls", "grep", "bash", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
 		},
 		{
 			Name:           "WritingSpecResearcher",
@@ -118,7 +118,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(writingSpecResearcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			AllowedTools:   []string{"read", "write", "list", "grep", "exec", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
+			AllowedTools:   []string{"read", "write", "ls", "grep", "bash", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
 		},
 		{
 			Name:           "DesignSpecResearcher",
@@ -126,7 +126,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(designSpecResearcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			AllowedTools:   []string{"read", "write", "list", "grep", "exec", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
+			AllowedTools:   []string{"read", "write", "ls", "grep", "bash", "web_fetch", "call_mcp_tool", "discover_mcp_tool", "answer_question"},
 		},
 		{
 			Name:           "Coder",
@@ -142,7 +142,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(testerPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			AllowedTools:   []string{"browser_use", "read", "list", "grep", "exec", "call_mcp_tool", "discover_mcp_tool", "ask_task_owner", "answer_question", "finish_task"},
+			AllowedTools:   []string{"browser_use", "read", "ls", "grep", "bash", "call_mcp_tool", "discover_mcp_tool", "ask_task_owner", "answer_question", "finish_task"},
 		},
 	}
 }

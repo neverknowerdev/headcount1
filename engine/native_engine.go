@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -490,6 +491,11 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
+		if missing := registry.Missing(agentCfg.AllowedTools); len(missing) > 0 {
+			e.logWarn(proxyLogger, fmt.Sprintf(
+				"%s: allowed_tools names unknown tool(s) %s — not registered, agent will not have them (registered: %s)",
+				agentCfg.Name, strings.Join(missing, ", "), strings.Join(registry.Names(), ", ")))
+		}
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
 
@@ -649,7 +655,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == "completed" {
-		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
+		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, run.StartedAt)
 	}
 
 	// Emit final token summary.
@@ -790,6 +796,15 @@ func (e *NativeEngine) logInfo(logger *logging.ProxyLogger, msg string) {
 	logger.LogInfo(msg)
 }
 
+// logWarn writes a warning entry to the proxy logger (if non-nil).
+func (e *NativeEngine) logWarn(logger *logging.ProxyLogger, msg string) {
+	if logger == nil {
+		fmt.Println("WARN:", msg)
+		return
+	}
+	logger.LogWarn(msg)
+}
+
 // logError writes an error entry to the proxy logger (if non-nil).
 func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 	if logger == nil {
@@ -800,16 +815,35 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) {
+// It checks `git status` (not just `git diff`) so untracked files an agent
+// created are committed too; when the tree is clean it reports the last
+// commit if the agent made one itself during the run, so the run log doesn't
+// misleadingly claim nothing was produced.
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, runStartedAt time.Time) {
 	e.logInfo(logger, "Checking for changes to commit in worktree...")
-	diff, err := gitMgr.GetDiffInDir(ctx, workspacePath)
+	status, err := gitMgr.GetStatusInDir(ctx, workspacePath)
 	if err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to get diff: %v", err))
+		e.logInfo(logger, fmt.Sprintf("Warning: failed to get git status: %v", err))
 		return
 	}
-	if strings.TrimSpace(diff) == "" {
+	if strings.TrimSpace(status) == "" {
+		// Nothing uncommitted — but the agent may have committed its work
+		// itself (e.g. after running `git init` in the workspace).
+		if last, lastErr := gitMgr.GetLastCommitInDir(ctx, workspacePath); lastErr == nil && last != "" {
+			if sha, ts, subject, ok := parseLastCommit(last); ok && ts.After(runStartedAt) {
+				e.logInfo(logger, fmt.Sprintf("No uncommitted changes; agent committed during this run: %s %s", sha, subject))
+				return
+			}
+		}
 		e.logInfo(logger, "No changes to commit")
 		return
+	}
+
+	diff, diffErr := gitMgr.GetDiffInDir(ctx, workspacePath)
+	if diffErr != nil || strings.TrimSpace(diff) == "" {
+		// New untracked files produce no `git diff` output; fall back to the
+		// status listing so the commit-message LLM still sees what changed.
+		diff = status
 	}
 
 	// Generate commit message via LLM.
@@ -824,6 +858,23 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 	} else {
 		e.logInfo(logger, fmt.Sprintf("Committed changes: %s", commitMsg))
 	}
+}
+
+// parseLastCommit splits GetLastCommitInDir's "<short-sha> <unix-ts> <subject>"
+// format into its parts.
+func parseLastCommit(s string) (sha string, ts time.Time, subject string, ok bool) {
+	parts := strings.SplitN(s, " ", 3)
+	if len(parts) < 2 {
+		return "", time.Time{}, "", false
+	}
+	unix, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return "", time.Time{}, "", false
+	}
+	if len(parts) == 3 {
+		subject = parts[2]
+	}
+	return parts[0], time.Unix(unix, 0), subject, true
 }
 
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.

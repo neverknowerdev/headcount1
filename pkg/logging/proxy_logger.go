@@ -68,6 +68,25 @@ type ProxyLogger struct {
 	// messages[] (the conversation history keeps growing), but we only
 	// want to log it once.
 	loggedToolResults map[string]bool
+	// toolCallNames maps tool_call_id → tool name, harvested from assistant
+	// messages as requests/responses pass through, so tool results can be
+	// labelled with the tool that actually produced them.
+	toolCallNames map[string]string
+
+	// sessionUsageByID accumulates token usage per session (keyed by the
+	// session ID stamped in the header) so EndSession/Close can write a
+	// per-session totals footer into each session's own file.
+	sessionUsageByID map[int32]*sessionUsage
+}
+
+// sessionUsage aggregates token counts for one session's log footer.
+type sessionUsage struct {
+	prompt     int
+	completion int
+	reasoning  int
+	cached     int
+	toolOut    int
+	llmCalls   int
 }
 
 func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32) (*ProxyLogger, error) {
@@ -91,6 +110,8 @@ func NewProxyLoggerWithHub(basePath, companyShortName string, taskID int32, runI
 		q:                 q,
 		runID:             runID,
 		loggedToolResults: map[string]bool{},
+		toolCallNames:     map[string]string{},
+		sessionUsageByID:  map[int32]*sessionUsage{},
 	}, nil
 }
 
@@ -132,6 +153,7 @@ func (l *ProxyLogger) StartSession(info SessionInfo) error {
 
 	ts := time.Now().UTC().Format(time.RFC3339)
 	fmt.Fprintf(f, "=== Session started [%s] ===\n", ts)
+	fmt.Fprintf(f, "Run ID: %d\n", l.runID)
 	fmt.Fprintf(f, "Session ID: %d\n", info.SessionID)
 	if info.ParentSessionID != nil {
 		fmt.Fprintf(f, "Parent session ID: %d\n", *info.ParentSessionID)
@@ -187,6 +209,33 @@ func (l *ProxyLogger) StartSession(info SessionInfo) error {
 	return nil
 }
 
+// addSessionUsage rolls token counts into the currently active session's
+// aggregate. Callers must hold l.mu.
+func (l *ProxyLogger) addSessionUsage(u Usage, llmCalls int) {
+	su := l.sessionUsageByID[l.curSessionID]
+	if su == nil {
+		su = &sessionUsage{}
+		l.sessionUsageByID[l.curSessionID] = su
+	}
+	su.prompt += u.PromptTokens
+	su.completion += u.CompletionTokens
+	su.reasoning += u.ReasoningTokens
+	su.cached += u.CachedTokens
+	su.llmCalls += llmCalls
+}
+
+// writeSessionUsageFooter writes the per-session token totals into w for the
+// given session ID, if any usage was recorded. Callers must hold l.mu.
+func (l *ProxyLogger) writeSessionUsageFooter(w io.Writer, sessionID int32) {
+	su := l.sessionUsageByID[sessionID]
+	if su == nil {
+		return
+	}
+	fmt.Fprintf(w, "\n=== Session Token Totals === llm_calls=%d prompt=%d completion=%d reasoning=%d cached=%d tool_out=%d total=%d\n",
+		su.llmCalls, su.prompt, su.completion, su.reasoning, su.cached, su.toolOut,
+		su.prompt+su.completion)
+}
+
 // EndSession closes the current sub-session's file (if one is active) and
 // switches subsequent Log* calls back to the main session's file. Safe to
 // call even if the current session is already the main one.
@@ -196,6 +245,7 @@ func (l *ProxyLogger) EndSession() {
 
 	if l.curFile != nil && l.curFile != l.mainFile {
 		ts := time.Now().UTC().Format(time.RFC3339)
+		l.writeSessionUsageFooter(l.curFile, l.curSessionID)
 		fmt.Fprintf(l.curFile, "\n=== Session ended [%s] ===\n", ts)
 		l.broadcastLog("session_end", "", nil)
 		l.persistLog("session_end", "", nil)
@@ -309,6 +359,7 @@ func (l *ProxyLogger) LogResponse(model, agentName, providerName string, statusC
 	io.WriteString(l.out(), fmt.Sprintf("Status: %d\n", statusCode))
 	io.WriteString(l.out(), fmt.Sprintf("Tokens: prompt=%d completion=%d total=%d reasoning=%d\n",
 		usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, usage.ReasoningTokens))
+	l.addSessionUsage(usage, 1)
 	io.WriteString(l.out(), "---\n")
 	// Write the raw response body unmodified, same as LogRequest.
 	// The reasoning field is also folded into respData below so the
@@ -362,6 +413,7 @@ func (l *ProxyLogger) LogStreamResponse(model, agentName, providerName string, c
 	io.WriteString(l.out(), fmt.Sprintf("Provider: %s\n", providerName))
 	io.WriteString(l.out(), fmt.Sprintf("Tokens: prompt=%d completion=%d total=%d reasoning=%d tool_in=%d\n",
 		usage.PromptTokens, usage.CompletionTokens, usage.TotalTokens, usage.ReasoningTokens, usage.ToolInputTokens))
+	l.addSessionUsage(usage, 1)
 	io.WriteString(l.out(), "---\n")
 	// Write the raw SSE response body unmodified, the same way
 	// LogRequest writes the raw request body. This makes the log file
@@ -433,6 +485,11 @@ func (l *ProxyLogger) LogStreamResponse(model, agentName, providerName string, c
 		name, _ := tc["name"].(string)
 		if name == "" {
 			name = "unknown"
+		}
+		// Remember the id → name mapping so the matching tool result (seen
+		// in a later request's messages) can be labelled correctly.
+		if id, _ := tc["id"].(string); id != "" {
+			l.toolCallNames[id] = name
 		}
 		argsJSON, _ := json.Marshal(tc["arguments"])
 		inTokens := tokens.EstimateBytes(argsJSON)
@@ -506,7 +563,10 @@ func mustJSON(v interface{}) string {
 // user messages (some providers model the result as a content block
 // list rather than a separate message role).
 func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{}) {
-	if l.q == nil || l.runID <= 0 || len(messages) == 0 {
+	// Note: no l.q guard here — the file record must be written even when
+	// there's no DB to persist to; DB-dependent steps below check l.q
+	// themselves.
+	if len(messages) == 0 {
 		return
 	}
 
@@ -517,10 +577,44 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 	}
 	var results []toolResult
 
+	// First pass: harvest tool_call_id → tool name from assistant messages,
+	// so each result can be labelled with the tool that actually produced it
+	// (pairing positionally against recent tool_call log entries mislabels
+	// results whenever calls interleave or fail).
+	for _, msg := range messages {
+		if role, _ := msg["role"].(string); role != "assistant" {
+			continue
+		}
+		tcs, ok := msg["tool_calls"].([]interface{})
+		if !ok {
+			continue
+		}
+		for _, tcRaw := range tcs {
+			tc, ok := tcRaw.(map[string]interface{})
+			if !ok {
+				continue
+			}
+			id, _ := tc["id"].(string)
+			if id == "" {
+				continue
+			}
+			if fn, ok := tc["function"].(map[string]interface{}); ok {
+				if name, _ := fn["name"].(string); name != "" {
+					l.toolCallNames[id] = name
+				}
+			}
+		}
+	}
+
 	for _, msg := range messages {
 		role, _ := msg["role"].(string)
 		if role == "tool" {
 			id, _ := msg["tool_call_id"].(string)
+			// The engine's tool-result messages carry the tool name directly.
+			name, _ := msg["name"].(string)
+			if name == "" && id != "" {
+				name = l.toolCallNames[id]
+			}
 			if id == "" {
 				// Some providers omit tool_call_id on tool messages;
 				// hash the content to still dedupe across requests.
@@ -530,7 +624,7 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 				continue
 			}
 			content := stringifyToolContent(msg["content"])
-			results = append(results, toolResult{id: id, name: "", content: content})
+			results = append(results, toolResult{id: id, name: name, content: content})
 			continue
 		}
 		// Anthropic-style: role:"user" with content:[{type:"tool_result", tool_use_id, content}]
@@ -541,6 +635,10 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 						btype, _ := m["type"].(string)
 						if btype == "tool_result" {
 							id, _ := m["tool_use_id"].(string)
+							name := ""
+							if id != "" {
+								name = l.toolCallNames[id]
+							}
 							if id == "" {
 								id = "hash:" + contentHash(stringifyToolContent(m["content"]))
 							}
@@ -548,7 +646,7 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 								continue
 							}
 							content := stringifyToolContent(m["content"])
-							results = append(results, toolResult{id: id, name: "", content: content})
+							results = append(results, toolResult{id: id, name: name, content: content})
 						}
 					}
 				}
@@ -576,20 +674,27 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 	io.WriteString(l.out(), fmt.Sprintf("Count: %d\n", len(results)))
 	io.WriteString(l.out(), "---\n")
 
-	// Look up the engine-logged tool_call entries for this run so we
-	// can pair each result with the tool name. If we can't find a
-	// matching tool_call we still log the response — the name will
-	// fall back to "tool".
-	priorCalls := l.recentToolCalls(len(results) * 4)
-	callIdx := 0
+	// Fallback for results whose name couldn't be resolved from the
+	// messages themselves: look up the engine-logged tool_call entries for
+	// this run and match by tool_call_id. If nothing matches we still log
+	// the response — the name falls back to "tool".
+	var priorCalls []toolCallSnapshot
+	for _, r := range results {
+		if r.name == "" && !strings.HasPrefix(r.id, "hash:") {
+			priorCalls = l.recentToolCalls(len(results) * 4)
+			break
+		}
+	}
 
 	for _, r := range results {
 		name := r.name
 		if name == "" {
-			if callIdx < len(priorCalls) {
-				name = priorCalls[callIdx].toolName
+			for _, pc := range priorCalls {
+				if pc.id != "" && pc.id == r.id {
+					name = pc.toolName
+					break
+				}
 			}
-			callIdx++
 		}
 		if name == "" {
 			name = "tool"
@@ -601,6 +706,12 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 		}
 		io.WriteString(l.out(), fmt.Sprintf("[%s] (%d tok)\n%s\n", name, outTokens, preview))
 
+		if su := l.sessionUsageByID[l.curSessionID]; su != nil {
+			su.toolOut += outTokens
+		} else {
+			l.sessionUsageByID[l.curSessionID] = &sessionUsage{toolOut: outTokens}
+		}
+
 		// Emit a log entry. We don't pair by tool_call_id (the engine's
 		// tool_call entries may not have it), we just append after the
 		// prior tool_call entries; the frontend pairs them by name.
@@ -608,20 +719,22 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 			"tool_name":     name,
 			"output_tokens": outTokens,
 		})
-		go l.persistToolResponse(name, preview, outTokens, l.curSessionID, l.curParentSessionID)
+		if l.q != nil && l.runID > 0 {
+			go l.persistToolResponse(name, preview, outTokens, l.curSessionID, l.curParentSessionID)
 
-		// Roll into the run-level aggregate so the header bar picks
-		// it up.
-		delta := db.RunTokenStats{ToolOutputTokens: outTokens}
-		runID := l.runID
-		go func() {
-			for i := 0; i < 3; i++ {
-				if err := l.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
-					break
+			// Roll into the run-level aggregate so the header bar picks
+			// it up.
+			delta := db.RunTokenStats{ToolOutputTokens: outTokens}
+			runID := l.runID
+			go func() {
+				for i := 0; i < 3; i++ {
+					if err := l.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+						break
+					}
+					time.Sleep(100 * time.Millisecond)
 				}
-				time.Sleep(100 * time.Millisecond)
-			}
-		}()
+			}()
+		}
 	}
 }
 
@@ -774,6 +887,18 @@ func (l *ProxyLogger) LogInfo(msg string) {
 	l.persistLog("info", msg, nil)
 }
 
+// LogWarn writes a warning line to the log file and persists a "warn" entry.
+func (l *ProxyLogger) LogWarn(msg string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	io.WriteString(l.out(), fmt.Sprintf("[WARN %s] %s\n", ts, msg))
+
+	l.broadcastLog("warn", msg, nil)
+	l.persistLog("warn", msg, nil)
+}
+
 // LogErrorMsg writes a plain error string to the log file and persists an
 // "error" entry. Used by the NativeEngine when there is no model/agent context.
 func (l *ProxyLogger) LogErrorMsg(msg string) {
@@ -793,11 +918,13 @@ func (l *ProxyLogger) Close() error {
 
 	var firstErr error
 	if l.curFile != nil && l.curFile != l.mainFile {
+		l.writeSessionUsageFooter(l.curFile, l.curSessionID)
 		if err := l.curFile.Close(); err != nil {
 			firstErr = err
 		}
 	}
 	if l.mainFile != nil {
+		l.writeSessionUsageFooter(l.mainFile, l.mainSessionID)
 		if err := l.mainFile.Close(); err != nil && firstErr == nil {
 			firstErr = err
 		}

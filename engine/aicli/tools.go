@@ -56,6 +56,23 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 	return t.Execute(ctx, args)
 }
 
+// Missing returns the names in allowed that do not exist in the registry.
+// Used to warn about config drift: an allowed-tools list naming a tool that
+// isn't registered means Filter will silently drop it, leaving the agent
+// without a capability its prompt may still advertise.
+func (r *Registry) Missing(allowed []string) []string {
+	var missing []string
+	for _, a := range allowed {
+		if a == "*" {
+			return nil
+		}
+		if _, ok := r.tools[a]; !ok {
+			missing = append(missing, a)
+		}
+	}
+	return missing
+}
+
 // Filter returns a new Registry containing only tools whose names appear in
 // allowed. An empty allowed list or one containing "*" returns r unchanged.
 func (r *Registry) Filter(allowed []string) *Registry {

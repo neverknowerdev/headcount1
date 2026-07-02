@@ -227,3 +227,68 @@ func TestSanitizeFileName(t *testing.T) {
 		}
 	}
 }
+
+func TestLogToolResults_LabelsByToolMessageName(t *testing.T) {
+	l := newTestLogger(t)
+	if err := l.StartSession(SessionInfo{SessionID: 1, AgentName: "Tester", Role: "testing"}); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Engine-style call: only tool-result messages, each carrying its name.
+	l.LogToolResultsFromRequest("m", "p", []map[string]interface{}{
+		{"role": "tool", "tool_call_id": "id-1", "name": "bash", "content": "exit ok"},
+		{"role": "tool", "tool_call_id": "id-2", "name": "finish_task", "content": "Task status set to done."},
+	})
+
+	content := readFile(t, filepath.Join(l.FilePath(), "Tester-1.log"))
+	if !strings.Contains(content, "[bash] ") || !strings.Contains(content, "exit ok") {
+		t.Errorf("bash result not labelled [bash]; got:\n%s", content)
+	}
+	if !strings.Contains(content, "[finish_task] ") {
+		t.Errorf("finish_task result not labelled [finish_task]; got:\n%s", content)
+	}
+	if strings.Contains(content, "[tool] ") {
+		t.Errorf("no result should fall back to generic [tool]; got:\n%s", content)
+	}
+}
+
+func TestLogToolResults_LabelsByAssistantToolCallID(t *testing.T) {
+	l := newTestLogger(t)
+	if err := l.StartSession(SessionInfo{SessionID: 2, AgentName: "Coder", Role: "implementation"}); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+
+	// Gateway-style call: full history including the assistant message that
+	// declares the tool calls; tool messages carry no name.
+	l.LogToolResultsFromRequest("m", "p", []map[string]interface{}{
+		{"role": "assistant", "tool_calls": []interface{}{
+			map[string]interface{}{"id": "id-9", "type": "function",
+				"function": map[string]interface{}{"name": "grep", "arguments": "{}"}},
+		}},
+		{"role": "tool", "tool_call_id": "id-9", "content": "3 matches"},
+	})
+
+	content := readFile(t, filepath.Join(l.FilePath(), "Coder-2.log"))
+	if !strings.Contains(content, "[grep] ") {
+		t.Errorf("result not labelled [grep] via tool_call_id map; got:\n%s", content)
+	}
+}
+
+func TestEndSession_WritesSessionTokenTotals(t *testing.T) {
+	l := newTestLogger(t)
+	if err := l.StartSession(SessionInfo{SessionID: 1, AgentName: "CEO", Role: "orchestrate"}); err != nil {
+		t.Fatalf("StartSession: %v", err)
+	}
+	p := int32(1)
+	if err := l.StartSession(SessionInfo{SessionID: 2, ParentSessionID: &p, AgentName: "Coder", Role: "implementation"}); err != nil {
+		t.Fatalf("StartSession sub: %v", err)
+	}
+	l.LogResponse("m", "Coder", "p", 200, []byte(`{}`), "", Usage{PromptTokens: 100, CompletionTokens: 20, TotalTokens: 120})
+	l.LogResponse("m", "Coder", "p", 200, []byte(`{}`), "", Usage{PromptTokens: 200, CompletionTokens: 30, TotalTokens: 230})
+	l.EndSession()
+
+	content := readFile(t, filepath.Join(l.FilePath(), "Coder-2.log"))
+	if !strings.Contains(content, "=== Session Token Totals === llm_calls=2 prompt=300 completion=50") {
+		t.Errorf("sub-session missing token totals footer; got:\n%s", content)
+	}
+}

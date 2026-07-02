@@ -253,6 +253,35 @@ func (g *GitManager) GetDiffInDir(ctx context.Context, dir string) (string, erro
 	return string(out), nil
 }
 
+// GetStatusInDir returns `git status --porcelain` output for dir. Unlike
+// GetDiffInDir it also reports untracked files, so it detects new files an
+// agent created without staging them.
+func (g *GitManager) GetStatusInDir(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git status failed: %v, output: %s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// GetLastCommitInDir returns the most recent commit of the repository that
+// dir belongs to, as "<short-sha> <unix-ts> <subject>", or "" if the repo has
+// no commits yet. Used to report commits an agent made itself during a run.
+func (g *GitManager) GetLastCommitInDir(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "log", "-1", "--format=%h %ct %s")
+	cmd.Dir = dir
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		if strings.Contains(string(out), "does not have any commits yet") {
+			return "", nil
+		}
+		return "", fmt.Errorf("git log failed: %v, output: %s", err, string(out))
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
