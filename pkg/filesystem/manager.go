@@ -429,6 +429,9 @@ type TaskRecord struct {
 	Title       string     `json:"title"`
 	TaskType    string     `json:"task_type"`
 	Description string     `json:"description"`
+	RefinedDescription string `json:"refined_description,omitempty"`
+	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
+	TestCases          string `json:"test_cases,omitempty"`
 	Priority    string     `json:"priority"`
 	Status      string     `json:"status"`
 	DueDate     *time.Time `json:"due_date"`
@@ -469,6 +472,9 @@ func (m *Manager) SaveTask(company db.Company, task db.Task) error {
 		Title:       task.Title,
 		TaskType:    task.TaskType,
 		Description: task.Description,
+		RefinedDescription: task.RefinedDescription,
+		AcceptanceCriteria: task.AcceptanceCriteria,
+		TestCases:          task.TestCases,
 		Priority:    task.Priority,
 		Status:      task.Status,
 		DueDate:     task.DueDate,

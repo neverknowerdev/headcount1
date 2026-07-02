@@ -96,9 +96,15 @@ type Task struct {
 	Agent           *Agent     `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
 	ParentID        *int32     `json:"parent_id"`
 	Parent          *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
-	Title           string     `json:"title" gorm:"not null"`
-	TaskType        string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
-	Description     string     `json:"description"`
+	Title    string `json:"title" gorm:"not null"`
+	TaskType string `json:"task_type" gorm:"not null;default:'plan and implement'"`
+	// Description holds the user's original input, untouched. The three
+	// fields below are produced by the CEO orchestrator during refinement
+	// (via the update_task_details tool) and shown separately in the UI.
+	Description        string     `json:"description"`
+	RefinedDescription string     `json:"refined_description" gorm:"type:text;default:''"`
+	AcceptanceCriteria string     `json:"acceptance_criteria" gorm:"type:text;default:''"`
+	TestCases          string     `json:"test_cases" gorm:"type:text;default:''"`
 	Priority        string     `json:"priority" gorm:"not null;default:'Normal'"`
 	Status          string     `json:"status" gorm:"not null;default:'backlog'"`
 	DueDate         *time.Time `json:"due_date"`

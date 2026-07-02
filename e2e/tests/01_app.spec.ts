@@ -133,7 +133,9 @@ test.describe.serial('Paperclip2 App', () => {
         await page.click('text=Write E2E Tests');
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
         await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
-        await expect(page.getByText('Let us see if the agent works')).toBeVisible();
+        // Scope to the comments list: the text can also appear in the run-log
+        // preview of the agent run this comment triggers.
+        await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
 
         // Verify Agent Run Logs
         await expect(page.getByText(/Run #\d/).first()).toBeVisible();

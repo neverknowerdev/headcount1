@@ -44,6 +44,7 @@ var ceoAllowedTools = []string{
 	"delegate_task",
 	"ask_human",
 	"report_status",
+	"update_task_details",
 	"expand_run_result",
 	"write_artifact",
 	"finish_task",

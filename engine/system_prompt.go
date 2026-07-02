@@ -68,8 +68,14 @@ Working directory: {{.WorkingDirectory}}
 
 Task name: {{.TaskName}}
 Task status: {{.TaskStatus}}
-Task: {{.TaskDescription}}
-`
+Task (user input): {{.TaskDescription}}
+{{if .RefinedDescription}}Refined task description:
+{{.RefinedDescription}}
+{{end}}{{if .AcceptanceCriteria}}Acceptance criteria:
+{{.AcceptanceCriteria}}
+{{end}}{{if .TestCases}}Test cases:
+{{.TestCases}}
+{{end}}`
 
 type PromptData struct {
 	CompanyName        string
@@ -82,13 +88,19 @@ type PromptData struct {
 	TaskName           string
 	TaskStatus         string
 	TaskDescription    string
+	RefinedDescription string
+	AcceptanceCriteria string
+	TestCases          string
 }
 
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
-		TaskName:        task.Title,
-		TaskStatus:      task.Status,
-		TaskDescription: task.Description,
+		TaskName:           task.Title,
+		TaskStatus:         task.Status,
+		TaskDescription:    task.Description,
+		RefinedDescription: task.RefinedDescription,
+		AcceptanceCriteria: task.AcceptanceCriteria,
+		TestCases:          task.TestCases,
 	}
 
 	if task.CompanyID != 0 {

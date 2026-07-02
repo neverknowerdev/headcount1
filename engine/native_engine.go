@@ -528,6 +528,34 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return e.askHuman(qCtx, task.ID, run.ID, question)
 	}))
 
+	registry.Register(tools.NewUpdateTaskDetails(func(uCtx context.Context, refinedDescription, acceptanceCriteria, testCases string) error {
+		t, err := e.q.GetTask(uCtx, task.ID)
+		if err != nil {
+			return err
+		}
+		if refinedDescription != "" {
+			t.RefinedDescription = refinedDescription
+		}
+		if acceptanceCriteria != "" {
+			t.AcceptanceCriteria = acceptanceCriteria
+		}
+		if testCases != "" {
+			t.TestCases = testCases
+		}
+		if _, err := e.q.UpdateTask(uCtx, t); err != nil {
+			return err
+		}
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{
+			"id":                  task.ID,
+			"status":              t.Status,
+			"refined_description": t.RefinedDescription,
+			"acceptance_criteria": t.AcceptanceCriteria,
+			"test_cases":          t.TestCases,
+		})
+		e.logInfo(proxyLogger, "Task details updated (refined description / acceptance criteria / test cases)")
+		return nil
+	}))
+
 	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
 		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
 			return err
