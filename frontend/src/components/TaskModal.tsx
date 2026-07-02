@@ -7,7 +7,7 @@ import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { RunLogViewer } from './RunLogViewer';
-import { useWebSocket } from '../useWebSocket';
+import { useWebSocket, wsUrl } from '../useWebSocket';
 
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
@@ -130,7 +130,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [taskId]);
 
-    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+    // Re-sync after a (re)connect: recover comments/runs/status changes whose
+    // WS events were missed while disconnected. Deliberately does not touch
+    // formData so in-progress edits are never clobbered.
+    const resyncAfterReconnect = useCallback(async () => {
+        if (!taskId) return;
+        fetchActivity();
+        try {
+            const res = await axios.get(`/api/tasks/${taskId}`);
+            setTask((prev: any) => prev ? { ...prev, ...res.data } : res.data);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [taskId, fetchActivity]);
+
+    useWebSocket(wsUrl(), (msg) => {
         if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
             setComments(prev => {
                 // deduplicate: ignore if we already have this comment (e.g. from a recent re-fetch)
@@ -162,7 +176,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
             }
         }
-    }, !!taskId);
+    }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
 
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();

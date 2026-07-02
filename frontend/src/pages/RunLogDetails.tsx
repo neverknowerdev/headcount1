@@ -1,9 +1,9 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer } from '../components/RunLogViewer';
-import { useWebSocket } from '../useWebSocket';
+import { useWebSocket, wsUrl } from '../useWebSocket';
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -56,8 +56,7 @@ export const RunLogDetails: React.FC = () => {
     const lastEventAtRef = useRef<number>(Date.now());
     const [tokenStats, setTokenStats] = useState<any>(null);
 
-    useEffect(() => {
-        const fetchRun = async () => {
+    const fetchRun = useCallback(async () => {
             try {
                 const res = await axios.get(`/api/runs/${id}`);
                 setRun(res.data);
@@ -100,8 +99,10 @@ export const RunLogDetails: React.FC = () => {
             } catch (e) {
                 console.error(e);
             }
-        };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
 
+    useEffect(() => {
         fetchRun();
 
         // Client-side fallback: if no events for 45s while run is "running",
@@ -115,10 +116,11 @@ export const RunLogDetails: React.FC = () => {
         return () => {
             clearInterval(stallCheck);
         };
-    }, [id, run?.status]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [fetchRun, run?.status]);
 
     const runIdInt = parseInt(id || '0');
-    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+    useWebSocket(wsUrl(), (msg) => {
         if (msg.type === 'run_log' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setStreamStalled(null);
@@ -133,6 +135,11 @@ export const RunLogDetails: React.FC = () => {
             lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
         }
+    }, {
+        // Re-fetch the full run on every (re)connect: the log stream is
+        // rebuilt from the database, so log lines missed while disconnected
+        // are recovered rather than lost.
+        onConnect: fetchRun,
     });
 
     const handleStopRun = async () => {

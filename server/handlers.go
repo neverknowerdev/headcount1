@@ -248,9 +248,5 @@ func (s *Server) serveWs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	client := &eventhub.Client{Hub: s.hub, Conn: conn, Send: make(chan []byte, 256)}
-	client.Hub.Register <- client
-
-	go client.WritePump()
-	go client.ReadPump()
+	s.hub.Serve(conn)
 }
