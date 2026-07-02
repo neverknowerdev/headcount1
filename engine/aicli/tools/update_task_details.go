@@ -28,21 +28,22 @@ func (t *UpdateTaskDetails) Def() aicli.ToolDef {
 			Name: "update_task_details",
 			Description: "Record refinement results on the task as separate fields, without touching the user's original " +
 				"description. Set refined_description after the refinement stage, and acceptance_criteria / test_cases " +
-				"after they are defined. Fields left empty are not changed.",
+				"after they are defined. Fields left empty are not changed. Keep every field short and precise — " +
+				"these are shown to the user at a glance, not full reports.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
 					"refined_description":{
 						"type":"string",
-						"description":"The refined, unambiguous task description produced by the refinement stage (markdown)"
+						"description":"The refined, unambiguous task description: a few sentences of markdown, no headings or preamble"
 					},
 					"acceptance_criteria":{
 						"type":"string",
-						"description":"Acceptance criteria as a checklist of verifiable statements (markdown)"
+						"description":"3-7 verifiable one-line items as a markdown numbered list — no headings, no preamble"
 					},
 					"test_cases":{
 						"type":"string",
-						"description":"Concrete test cases with steps and expected outcomes (markdown)"
+						"description":"At most 5 one-line test cases in the form 'action → expected result' (markdown list)"
 					}
 				}
 			}`),
