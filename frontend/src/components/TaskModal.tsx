@@ -279,6 +279,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 <div className="flex-1 overflow-y-auto flex min-w-0">
                     {/* Left content area */}
                     <div className="flex-1 p-6 bg-gray-50 flex flex-col min-w-0">
+                        {task?.parent_id && (
+                            <div className="mb-4 flex items-start gap-2 border border-violet-200 bg-violet-50 text-violet-900 px-3 py-2 rounded-lg text-xs" data-testid="subtask-banner">
+                                <span className="mt-0.5">🧩</span>
+                                <div>
+                                    <span className="font-semibold">Delegated subtask</span> of{' '}
+                                    <Link to={`/companies/${shortName}/tasks/${task.parent_id}`} className="font-medium text-violet-700 underline hover:text-violet-900">
+                                        task #{task.parent_id}
+                                    </Link>
+                                    . Runs listed here are sub-sessions of the parent task's main run — re-running restarts the parent's main session.
+                                </div>
+                            </div>
+                        )}
                         <form id="task-form" onSubmit={handleSaveTask} className="space-y-4">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
@@ -507,7 +519,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <div key={`r-${r.id}`} className="w-full min-w-0">
                                                         <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
-                                                                <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
+                                                                <span className="font-semibold text-gray-600 flex items-center gap-1.5">
+                                                                    ⚙️ Run #{r.id}
+                                                                    {r.parent_run_id ? (
+                                                                        <span className="font-normal bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full" title={`Sub-session of run #${r.parent_run_id}`}>sub-session</span>
+                                                                    ) : (
+                                                                        <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
+                                                                    )}
+                                                                    {r.agent_config_name && <span className="font-normal text-gray-400">{r.agent_config_name}</span>}
+                                                                </span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
                                                                     <span className="text-gray-400">{startStr}</span>

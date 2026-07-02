@@ -275,6 +275,42 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(ceoSpec.getByText('Home page shows a casual greeting.')).toBeVisible();
     });
 
+    test('re-running a subtask or child session restarts the main session', async ({ page, request }) => {
+        // Reset the mock to default mode: first call answers finish_task(in-review).
+        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+
+        const allTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
+        const subtask = (allTasks as any[]).find(t => t.parent_id === taskId);
+        expect(subtask).toBeTruthy();
+
+        const mainRunsBefore = await (await request.get(`/api/tasks/${taskId}/runs`)).json();
+        const subRunsBefore = await (await request.get(`/api/tasks/${subtask.id}/runs`)).json();
+
+        // Child session runs are not re-runnable entry points.
+        const childRun = await (await request.get(`/api/runs/${subRunsBefore[0].id}`)).json();
+        expect(childRun.is_latest).toBeFalsy();
+
+        // Re-running the SUBTASK must restart the parent's main session.
+        const rerunRes = await request.post(`/api/tasks/${subtask.id}/rerun`);
+        expect(rerunRes.ok()).toBeTruthy();
+        expect((await rerunRes.json()).task_id).toBe(taskId);
+
+        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        await expect.poll(async () => {
+            const runs = await (await request.get(`/api/tasks/${taskId}/runs`)).json();
+            return runs.length;
+        }, { timeout: 30_000, message: 'main task should get a new main-session run' }).toBe(mainRunsBefore.length + 1);
+
+        // No orphan sub-session run was spawned on the subtask itself.
+        const subRunsAfter = await (await request.get(`/api/tasks/${subtask.id}/runs`)).json();
+        expect(subRunsAfter.length).toBe(subRunsBefore.length);
+
+        // The subtask view labels itself and its runs as delegated sub-sessions.
+        await page.goto(`/companies/ceo-co/tasks/${subtask.id}`);
+        await expect(page.getByTestId('subtask-banner')).toBeVisible();
+        await expect(page.getByText('sub-session').first()).toBeVisible();
+    });
+
     test('agents page lists built-in agents, minimized by default', async ({ page }) => {
         await page.goto('/companies/ceo-co/agents');
         const builtin = page.getByTestId('builtin-agents');

@@ -107,10 +107,14 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := toRunResponse(run)
-	// Mark is_latest so the frontend can show the Re-run button only on the most recent run.
-	var maxID int64
-	api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
-	resp.IsLatest = int64(run.ID) == maxID
+	// Mark is_latest so the frontend can show the Re-run button only on the
+	// most recent run. Delegated child sessions are never re-runnable entry
+	// points — only the main (root) session of a task can be re-run.
+	if run.ParentRunID == nil {
+		var maxID int64
+		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
+		resp.IsLatest = int64(run.ID) == maxID
+	}
 	api.respondJSON(w, http.StatusOK, resp)
 }
 
@@ -145,15 +149,27 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
+
+	// Subtasks are delegated sessions owned by the orchestrator — re-running
+	// one in isolation would spawn an orphan session outside the main flow.
+	// Walk up to the root task so a re-run always restarts the main session.
+	for task.ParentID != nil {
+		parent, perr := api.q.GetTask(r.Context(), *task.ParentID)
+		if perr != nil {
+			break
+		}
+		task = parent
+	}
+
 	if task.AgentID == nil {
 		api.respondError(w, http.StatusBadRequest, "task has no assigned agent")
 		return
 	}
-	if err := api.engine.ProcessTask(r.Context(), int32(id)); err != nil {
+	if err := api.engine.ProcessTask(r.Context(), task.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "task_id": task.ID})
 }
 
 func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
