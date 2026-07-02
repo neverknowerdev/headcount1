@@ -19,6 +19,19 @@ var mcpDispatcherTools = map[string]bool{
 	"discover_mcp_tool": true,
 }
 
+// blockingTools are allowed to run without the per-call watchdog timeout:
+// they block by design (waiting on a human reply or a nested delegated
+// session) and can legitimately take hours.
+var blockingTools = map[string]bool{
+	"ask_human":     true,
+	"delegate_task": true,
+}
+
+// toolCallTimeout caps every non-blocking tool call so a single wedged tool
+// (hung subprocess, dead MCP server, stuck network call) fails the call with
+// a visible error instead of freezing the whole session forever.
+const toolCallTimeout = 10 * time.Minute
+
 // Mode controls how the agent manages its conversation state.
 type Mode string
 
@@ -270,9 +283,20 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			"output_tokens": argTokens, // backwards-compat alias
 		})
 
-		output, execErr := a.Registry.Execute(ctx, tc.Function.Name, argsRaw)
+		execCtx := ctx
+		if !blockingTools[tc.Function.Name] {
+			var cancel context.CancelFunc
+			execCtx, cancel = context.WithTimeout(ctx, toolCallTimeout)
+			defer cancel()
+		}
+		output, execErr := a.Registry.Execute(execCtx, tc.Function.Name, argsRaw)
 		if execErr != nil {
 			output = fmt.Sprintf("error: %v", execErr)
+			// Surface the failure as a visible error entry in the run log,
+			// in addition to returning it to the LLM as the tool result.
+			a.appendRunLog("error", fmt.Sprintf("tool %s failed: %v", tc.Function.Name, execErr), map[string]interface{}{
+				"tool_name": tc.Function.Name,
+			})
 		}
 
 		outTokens := tokens.Estimate(output)

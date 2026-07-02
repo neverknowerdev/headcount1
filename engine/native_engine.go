@@ -737,6 +737,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	_, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
 
 	status := "completed"
+	var runErrMsg string
 
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
@@ -747,6 +748,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return "canceled"
 		}
 		status = "failed"
+		runErrMsg = agentErr.Error()
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
@@ -776,7 +778,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		))
 	}
 
-	e.q.UpdateRunLog(ctx, run.ID, "", status)
+	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
 	// Update run metadata in filesystem.
 	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
@@ -916,9 +918,13 @@ func (e *NativeEngine) makeDelegateFunc(
 		status := e.executeSession(callCtx, subtask, "implement", session)
 
 		result := ""
+		var childErr string
 		if childRunID > 0 {
 			if childRun, runErr := e.q.GetRun(context.Background(), childRunID); runErr == nil {
 				result = childRun.ResultDescription
+				if childRun.Status == "failed" {
+					childErr = childRun.LogContent
+				}
 			}
 		}
 		if parentLogger != nil {
@@ -938,8 +944,15 @@ func (e *NativeEngine) makeDelegateFunc(
 		if result == "" {
 			result = "(no result summary provided)"
 		}
-		return fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession status: %s\nSubtask status: %s\nResult: %s",
-			subtask.ID, agentName, status, taskStatus, result), nil
+		reply := fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession status: %s\nSubtask status: %s\nResult: %s",
+			subtask.ID, agentName, status, taskStatus, result)
+		if status != "completed" {
+			if childErr != "" {
+				reply += "\nError: " + childErr
+			}
+			reply += "\nThe delegated session did not complete successfully. Decide how to proceed: retry with better instructions, delegate to a different specialist, or escalate via ask_human."
+		}
+		return reply, nil
 	}
 }
 

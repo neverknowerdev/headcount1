@@ -10,15 +10,25 @@ import (
 	"os/exec"
 	"sync"
 	"sync/atomic"
+	"time"
 )
 
 // stdioClient communicates with an MCP server via a subprocess's stdin/stdout.
+//
+// A dedicated reader goroutine pumps stdout lines into a channel so that send()
+// can select on the caller's context: if the subprocess wedges and never
+// responds, the call returns ctx.Err() instead of blocking forever.
 type stdioClient struct {
 	cmd    *exec.Cmd
 	stdin  io.WriteCloser
-	stdout *bufio.Reader
+	lines  chan readResult
 	mu     sync.Mutex
 	nextID atomic.Int32
+}
+
+type readResult struct {
+	line string
+	err  error
 }
 
 // newStdioClient spawns the MCP server subprocess. extraEnv is a list of
@@ -46,11 +56,29 @@ func newStdioClient(command string, args []string, extraEnv []string, dir string
 		return nil, fmt.Errorf("stdio mcp: start %q: %w", command, err)
 	}
 
-	return &stdioClient{
-		cmd:    cmd,
-		stdin:  stdin,
-		stdout: bufio.NewReader(stdoutPipe),
-	}, nil
+	c := &stdioClient{
+		cmd:   cmd,
+		stdin: stdin,
+		lines: make(chan readResult, 16),
+	}
+	go c.readLoop(stdoutPipe)
+	return c, nil
+}
+
+// readLoop pumps stdout lines into c.lines until the pipe closes or errors.
+func (c *stdioClient) readLoop(stdout io.Reader) {
+	r := bufio.NewReader(stdout)
+	for {
+		line, err := r.ReadString('\n')
+		if line != "" {
+			c.lines <- readResult{line: line}
+		}
+		if err != nil {
+			c.lines <- readResult{err: err}
+			close(c.lines)
+			return
+		}
+	}
 }
 
 func (c *stdioClient) send(ctx context.Context, method string, params any) (*Response, error) {
@@ -85,26 +113,32 @@ func (c *stdioClient) send(ctx context.Context, method string, params any) (*Res
 		return nil, fmt.Errorf("stdio mcp: write: %w", err)
 	}
 
-	// Read responses until we find the one with our ID (skip notifications).
+	// Read responses until we find the one with our ID (skip notifications
+	// and stale responses from previously abandoned requests). Selecting on
+	// ctx means a wedged subprocess fails the call instead of hanging it.
 	for {
-		if ctx.Err() != nil {
-			return nil, ctx.Err()
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("stdio mcp: %s: %w (server did not respond)", method, ctx.Err())
+		case res, ok := <-c.lines:
+			if !ok {
+				return nil, fmt.Errorf("stdio mcp: read: server closed stdout")
+			}
+			if res.err != nil {
+				return nil, fmt.Errorf("stdio mcp: read: %w", res.err)
+			}
+			var resp Response
+			if err := json.Unmarshal([]byte(res.line), &resp); err != nil {
+				continue // skip unparseable lines (e.g. server log output)
+			}
+			if resp.ID != id {
+				continue // notification or response for a different request
+			}
+			if resp.Error != nil {
+				return nil, resp.Error
+			}
+			return &resp, nil
 		}
-		line, err := c.stdout.ReadString('\n')
-		if err != nil {
-			return nil, fmt.Errorf("stdio mcp: read: %w", err)
-		}
-		var resp Response
-		if err := json.Unmarshal([]byte(line), &resp); err != nil {
-			continue // skip unparseable lines (e.g. server log output)
-		}
-		if resp.ID != id {
-			continue // notification or response for a different request
-		}
-		if resp.Error != nil {
-			return nil, resp.Error
-		}
-		return &resp, nil
 	}
 }
 
@@ -158,7 +192,18 @@ func (c *stdioClient) CallTool(ctx context.Context, name string, args json.RawMe
 	return ExtractText(&result), nil
 }
 
+// Close shuts the server down by closing stdin (EOF). If the process ignores
+// EOF and doesn't exit within 5 seconds it is killed, so Close never hangs
+// the run teardown on a wedged subprocess.
 func (c *stdioClient) Close() error {
 	c.stdin.Close()
-	return c.cmd.Wait()
+	done := make(chan error, 1)
+	go func() { done <- c.cmd.Wait() }()
+	select {
+	case err := <-done:
+		return err
+	case <-time.After(5 * time.Second):
+		c.cmd.Process.Kill()
+		return <-done
+	}
 }

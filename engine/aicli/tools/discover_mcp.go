@@ -7,6 +7,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
@@ -163,11 +164,14 @@ func (s *MCPSessionStore) connect(ctx context.Context, serverName string) (*mcpS
 	if err != nil {
 		return nil, fmt.Errorf("connect to %q: %w", serverName, err)
 	}
-	if _, err := client.Initialize(ctx); err != nil {
+	// Bound the handshake so a hung server never freezes the agent run.
+	initCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	if _, err := client.Initialize(initCtx); err != nil {
 		client.Close()
 		return nil, fmt.Errorf("initialize %q: %w", serverName, err)
 	}
-	mcpTools, err := client.ListTools(ctx)
+	mcpTools, err := client.ListTools(initCtx)
 	if err != nil {
 		client.Close()
 		return nil, fmt.Errorf("list tools for %q: %w", serverName, err)
@@ -322,7 +326,11 @@ func (t *CallMCPTool) Execute(ctx context.Context, args json.RawMessage) (string
 	if err != nil {
 		return "", err
 	}
-	result, callErr := sess.client.CallTool(ctx, p.Tool, p.Input)
+	// Hard timeout so a wedged MCP server fails the tool call instead of
+	// freezing the whole agent session.
+	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+	defer cancel()
+	result, callErr := sess.client.CallTool(callCtx, p.Tool, p.Input)
 	if callErr != nil {
 		if t.store.onAuthError != nil && isMCPAuthError(callErr) {
 			t.store.onAuthError(p.Server, callErr.Error())

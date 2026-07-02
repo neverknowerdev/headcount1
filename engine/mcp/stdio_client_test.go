@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -133,6 +134,41 @@ func main() {
 	result, err := client.CallTool(ctx, "echo", args)
 	require.NoError(t, err)
 	assert.Equal(t, "echo: HELLO", result)
+}
+
+// TestStdioClientContextTimeout verifies that a server which never responds
+// (wedged subprocess) fails the call when the context deadline passes instead
+// of blocking the caller forever. Regression test for run #56: a codegraph
+// subprocess was killed by its own watchdog mid-request and the client hung
+// indefinitely on the blocking read.
+func TestStdioClientContextTimeout(t *testing.T) {
+	srv := db.MCPServer{
+		Name:      "wedged",
+		Transport: "stdio",
+		Command:   "sleep", // reads nothing, writes nothing — a wedged server
+		Args:      `["300"]`,
+	}
+
+	client, err := mcp.NewClient(srv)
+	require.NoError(t, err)
+	defer client.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel()
+
+	done := make(chan error, 1)
+	go func() {
+		_, initErr := client.Initialize(ctx)
+		done <- initErr
+	}()
+
+	select {
+	case initErr := <-done:
+		require.Error(t, initErr)
+		assert.ErrorIs(t, initErr, context.DeadlineExceeded)
+	case <-time.After(5 * time.Second):
+		t.Fatal("Initialize did not return after context timeout — client is hanging on a wedged server")
+	}
 }
 
 func TestNewClient_InvalidTransport(t *testing.T) {
