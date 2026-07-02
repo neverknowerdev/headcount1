@@ -52,12 +52,20 @@ interface LogMessage {
   entry: LogEntry;
 }
 
+// AgentTokenStats is a per-agent aggregation across all sessions of a run
+// tree (root + delegated child sessions), shown in the expanded stats panel.
+export interface AgentTokenStats {
+  agent: string;
+  stats: RunTokenStats;
+}
+
 interface RunLogViewerProps {
   messages: LogMessage[];
   status?: string;
   autoScroll?: boolean;
   tokenStats?: RunTokenStats | null;
   compact?: boolean;
+  agentStats?: AgentTokenStats[];
 }
 
 // ─── Hierarchical grouping ────────────────────────────────────────────────────
@@ -1083,6 +1091,7 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
 interface TokenStatsBarProps {
   stats: RunTokenStats | null;
   messages: LogMessage[];
+  agentStats?: AgentTokenStats[];
 }
 
 interface TokenSegment {
@@ -1094,7 +1103,7 @@ interface TokenSegment {
   isSub?: boolean;
 }
 
-function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
+function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProps) {
   const [expanded, setExpanded] = useState(false);
 
   const aggregate: RunTokenStats = useMemo(() => {
@@ -1203,6 +1212,38 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
                 ))}
             </div>
           )}
+          {agentStats && agentStats.length > 0 && (
+            <div className="w-full pt-1 border-t border-gray-100 mt-0.5" data-testid="agent-token-stats">
+              <div className="text-xs text-gray-400 font-medium mb-0.5">By agent (all sessions)</div>
+              <div className="flex flex-col gap-0.5">
+                {agentStats.map(({ agent, stats: s }) => {
+                  const agentTotal = s.total_tokens ||
+                    (s.prompt_tokens || 0) + (s.completion_tokens || 0) + (s.reasoning_tokens || 0) +
+                    (s.tool_input_tokens || 0) + (s.tool_output_tokens || 0);
+                  return (
+                    <div key={agent} className="flex items-center gap-1.5 flex-wrap text-xs">
+                      <span className="font-mono font-medium text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded">{agent}</span>
+                      <span className="font-mono text-gray-700">{formatTokens(agentTotal)} tok</span>
+                      {(s.prompt_tokens || 0) > 0 && (
+                        <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.prompt_tokens!)} prompt</span>
+                      )}
+                      {(s.reasoning_tokens || 0) > 0 && (
+                        <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.reasoning_tokens!)} reasoning</span>
+                      )}
+                      {(s.completion_tokens || 0) > 0 && (
+                        <span className="bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.completion_tokens!)} completion</span>
+                      )}
+                      {((s.tool_input_tokens || 0) + (s.tool_output_tokens || 0)) > 0 && (
+                        <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded font-mono">
+                          {formatTokens((s.tool_input_tokens || 0) + (s.tool_output_tokens || 0))} tools
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -1211,7 +1252,7 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
 
 // ─── Main RunLogViewer ────────────────────────────────────────────────────────
 
-export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false }) => {
+export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -1300,7 +1341,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               {counts.tools > 0 && <span className="px-1.5 py-0.5 bg-amber-50  text-amber-700  rounded">{counts.tools} tools</span>}
             </div>
           )}
-          <TokenStatsBar stats={tokenStats} messages={messages || []} />
+          <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
         </div>
         <button
           onClick={() => setRawMode(!rawMode)}

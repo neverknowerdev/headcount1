@@ -231,6 +231,16 @@ test.describe.serial('CEO orchestration flow', () => {
         await sessionBlocks.first().getByRole('button').first().click();
         await expect(sessionBlocks.first().getByText('Execution Log')).toBeVisible({ timeout: 15_000 });
 
+        // Expanding the token bar reveals the per-agent breakdown across sessions.
+        // The expanded session block renders a nested viewer with its own bar;
+        // the first token bar on the page belongs to the root run.
+        await page.locator('button[title="Click for detailed breakdown"]').first().click();
+        const agentTokenStats = page.getByTestId('agent-token-stats');
+        await expect(agentTokenStats).toBeVisible();
+        await expect(agentTokenStats).toContainText('CEO');
+        await expect(agentTokenStats).toContainText('QA Lead');
+        await expect(agentTokenStats).toContainText('Programmer');
+
         // Run Logs list groups the child sessions under the root run.
         await page.goto('/companies/ceo-co/runs');
         await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
@@ -238,6 +248,19 @@ test.describe.serial('CEO orchestration flow', () => {
         // Child session rows are inside the collapsed run card — expand it.
         await page.locator('summary', { hasText: `Run #${rootRun.id}` }).click();
         await expect(page.getByText(/↳ Session #\d+ · QA Lead/)).toBeVisible();
+    });
+
+    test('agents page lists built-in agents, minimized by default', async ({ page }) => {
+        await page.goto('/companies/ceo-co/agents');
+        const builtin = page.getByTestId('builtin-agents');
+        await expect(builtin).toBeVisible();
+        await expect(builtin).toContainText('Built-in agents');
+        // Minimized by default: the cards are not rendered until expanded.
+        await expect(builtin.getByText('Chief Executive Officer — orchestrates task execution through delegation')).toBeHidden();
+        await builtin.getByRole('button').first().click();
+        await expect(builtin.getByText('Chief Executive Officer — orchestrates task execution through delegation')).toBeVisible();
+        await expect(builtin.getByText('QA Lead — defines acceptance criteria and test cases')).toBeVisible();
+        await expect(builtin.getByText('Social media marketing — posts, announcements, and content plans')).toBeVisible();
     });
 });
 

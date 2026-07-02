@@ -49,6 +49,12 @@ var ceoAllowedTools = []string{
 	"finish_task",
 }
 
+// BuiltinConfigs returns the predefined agent configurations in their
+// canonical display order (unlike Factory.ListNames, which is unordered).
+func BuiltinConfigs() []*AgentConfig {
+	return builtinConfigs()
+}
+
 // builtinConfigs returns the set of predefined agent configurations.
 // AllowedModels is intentionally left empty in all builtin configs so that
 // the engine's model resolver uses the configured LLM provider's available

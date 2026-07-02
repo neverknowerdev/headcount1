@@ -2,8 +2,37 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
-import { RunLogViewer } from '../components/RunLogViewer';
+import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket } from '../useWebSocket';
+
+// buildAgentStats aggregates token stats per agent across the whole session
+// tree: the root run plus each delegated child session, keyed by agent config
+// name (multiple sessions of the same agent are summed).
+function buildAgentStats(root: any, children: any[]): AgentTokenStats[] {
+    const order: string[] = [];
+    const byAgent = new Map<string, any>();
+    const numericKeys = [
+        'prompt_tokens', 'completion_tokens', 'reasoning_tokens',
+        'tool_input_tokens', 'tool_output_tokens', 'cached_tokens',
+        'total_tokens', 'mcp_tool_tokens',
+    ];
+    const add = (label: string, s: any) => {
+        if (!s) return;
+        if (!byAgent.has(label)) {
+            byAgent.set(label, {});
+            order.push(label);
+        }
+        const agg = byAgent.get(label);
+        for (const k of numericKeys) {
+            agg[k] = (agg[k] || 0) + (s[k] || 0);
+        }
+    };
+    add(root.agent_config_name || root.agent?.name || 'agent', root.token_stats);
+    for (const c of children) {
+        add(c.agent_config_name || c.agent?.name || `run #${c.id}`, c.token_stats);
+    }
+    return order.map(agent => ({ agent, stats: byAgent.get(agent) }));
+}
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -55,6 +84,19 @@ export const RunLogDetails: React.FC = () => {
     const [streamStalled, setStreamStalled] = useState<{at: number, message: string} | null>(null);
     const lastEventAtRef = useRef<number>(Date.now());
     const [tokenStats, setTokenStats] = useState<any>(null);
+    const [agentStats, setAgentStats] = useState<AgentTokenStats[] | undefined>(undefined);
+
+    // Per-agent breakdown across the session tree; refreshed when child
+    // sessions end so the numbers stay current while the run is live.
+    const fetchAgentStats = async (rootRun: any) => {
+        try {
+            const chRes = await axios.get(`/api/runs/${id}/children`);
+            const children = chRes.data || [];
+            setAgentStats(children.length > 0 ? buildAgentStats(rootRun, children) : undefined);
+        } catch (e) {
+            console.error('failed to load child runs', e);
+        }
+    };
 
     useEffect(() => {
         const fetchRun = async () => {
@@ -62,6 +104,7 @@ export const RunLogDetails: React.FC = () => {
                 const res = await axios.get(`/api/runs/${id}`);
                 setRun(res.data);
                 setTokenStats(res.data?.token_stats || null);
+                fetchAgentStats(res.data);
 
                 let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
@@ -129,6 +172,10 @@ export const RunLogDetails: React.FC = () => {
             }
         } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
             setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
+        } else if (msg.type === 'run_ended' && run) {
+            // Another run ended — likely one of our child sessions. Refresh
+            // the per-agent token breakdown.
+            fetchAgentStats(run);
         } else if (msg.type === 'run_status' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setRun((prev: any) => prev ? { ...prev, current_status: msg.payload.status } : prev);
@@ -245,7 +292,7 @@ export const RunLogDetails: React.FC = () => {
                 </div>
 
                 <div className="col-span-2 bg-gray-50 rounded-lg shadow border flex flex-col min-h-0">
-                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} />
+                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} />
                 </div>
             </div>
         </div>

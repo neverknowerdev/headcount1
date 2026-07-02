@@ -133,6 +133,8 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
 	})
 
+	r.Get("/agent-configs", api.ListAgentConfigs)
+
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
 		r.Post("/", api.CreateAgent)
