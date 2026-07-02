@@ -160,6 +160,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)
 		r.Get("/{id}", api.GetRun)
+		r.Get("/{id}/children", api.ListChildRuns)
 		r.Post("/{id}/stop", api.StopRun)
 	})
 

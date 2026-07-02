@@ -89,13 +89,32 @@ export const RunLogs: React.FC = () => {
                     <div className="text-gray-500 italic flex items-center justify-center h-full font-mono text-sm">No agent runs recorded yet...</div>
                 ) : (
                     <div className="space-y-4">
-                        {runs.map((r: any) => {
+                        {(() => {
+                            // Group delegated session runs under their parent so the
+                            // list shows one card per main (root) run.
+                            const childrenByParent = new Map<number, any[]>();
+                            runs.forEach((r: any) => {
+                                if (r.parent_run_id) {
+                                    const list = childrenByParent.get(r.parent_run_id) || [];
+                                    list.push(r);
+                                    childrenByParent.set(r.parent_run_id, list);
+                                }
+                            });
+                            const rootRuns = runs.filter((r: any) => !r.parent_run_id);
+                            return rootRuns.map((r: any) => {
                             const ts = r.token_stats || {};
                             const total = ts.total_tokens || 0;
+                            const children = childrenByParent.get(r.id) || [];
                             return (
                             <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
                                 <summary className="font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap">
-                                    <span>Run #{r.id} for Task #{r.task_id} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}</span>
+                                    <span>
+                                        Run #{r.id} for Task #{r.task_id} by {r.agent?.name}
+                                        {r.agent_config_name ? ` · ${r.agent_config_name}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        {children.length > 0 && (
+                                            <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
+                                        )}
+                                    </span>
                                     <div className="flex items-center gap-2">
                                         {total > 0 && (
                                             <div className="flex items-center gap-1 text-xs font-mono">
@@ -119,9 +138,23 @@ export const RunLogs: React.FC = () => {
                                     )}
                                     <pre className="whitespace-pre-wrap">{getLogPreview(r)}</pre>
                                 </div>
+                                {children.length > 0 && (
+                                    <div className="mt-2 space-y-1">
+                                        {children.map((c: any) => (
+                                            <div key={c.id} className="ml-6 flex items-center justify-between gap-2 text-xs border-l-2 border-violet-300 bg-violet-50/50 rounded px-3 py-1.5">
+                                                <span className="text-violet-800">
+                                                    ↳ Session #{c.id} · {c.agent_config_name || c.agent?.name} · Task #{c.task_id} ({c.status})
+                                                    {c.current_status && <span className="ml-2 text-gray-500 italic">{c.current_status}</span>}
+                                                </span>
+                                                <Link to={`/companies/${shortName}/run-logs/${c.id}`} className="text-violet-700 hover:underline shrink-0">View</Link>
+                                            </div>
+                                        ))}
+                                    </div>
+                                )}
                             </details>
                             );
-                        })}
+                        });
+                        })()}
                     </div>
                 )}
             </div>

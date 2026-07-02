@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import axios from 'axios';
 import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp, MessageSquare, XCircle
+  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -30,7 +31,7 @@ interface RunTokenStats {
 }
 
 interface LogEntry {
-  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error';
+  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
   content: string;
   model?: string;
   status_code?: number;
@@ -40,6 +41,10 @@ interface LogEntry {
   prompt_tokens?: number;
   output_tokens?: number;
   input_tokens?: number;
+  run_id?: number;
+  task_id?: number;
+  title?: string;
+  status?: string;
 }
 
 interface LogMessage {
@@ -66,6 +71,7 @@ type GroupedItem =
   | { kind: 'in';             key: number; msg: LogMessage }
   | { kind: 'out';            key: number; msg: LogMessage; toolPairs: ToolPair[] }
   | { kind: 'error';          key: number; msg: LogMessage }
+  | { kind: 'session';        key: number; msg: LogMessage; ended?: LogMessage }
   | { kind: 'info';           key: number; msg: LogMessage }
   | { kind: 'system';         key: number; content: string; ts?: string }
   | { kind: 'init-user';      key: number; content: string; ts?: string }
@@ -152,6 +158,26 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
       case 'error': {
         lastOut = null;
         items.push({ kind: 'error', key: key++, msg });
+        break;
+      }
+      case 'session_started': {
+        lastOut = null;
+        items.push({ kind: 'session', key: key++, msg });
+        break;
+      }
+      case 'session_ended': {
+        // Attach the end entry to the matching session block (by run_id).
+        const runId = msg.entry.run_id;
+        let matched = false;
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i];
+          if (it.kind === 'session' && !it.ended && it.msg.entry.run_id === runId) {
+            it.ended = msg;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) items.push({ kind: 'info', key: key++, msg });
         break;
       }
       default: {
@@ -952,6 +978,106 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
   );
 }
 
+// ─── SessionRow (delegated child session, expandable) ─────────────────────────
+
+interface SessionMeta {
+  run_id?: number;
+  task_id?: number;
+  agent_name?: string;
+  title?: string;
+}
+
+function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const [childRun, setChildRun] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  let meta: SessionMeta = {};
+  try { meta = JSON.parse(msg.entry.content); } catch {}
+  const runId = meta.run_id ?? msg.entry.run_id;
+  const agentName = meta.agent_name ?? msg.entry.agent_name ?? 'agent';
+  const title = meta.title ?? msg.entry.title ?? '';
+
+  let endStatus: string | undefined = ended?.entry.status;
+  if (!endStatus && ended) {
+    try { endStatus = JSON.parse(ended.entry.content).status; } catch {}
+  }
+  const status = childRun?.status ?? endStatus ?? (ended ? 'completed' : 'running');
+
+  const fetchChild = async () => {
+    if (!runId) return;
+    setLoading(true);
+    try {
+      const res = await axios.get(`/api/runs/${runId}`);
+      setChildRun(res.data);
+    } catch (e) {
+      console.error('failed to load session run', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && !childRun) fetchChild();
+  };
+
+  const statusChip =
+    status === 'running'   ? 'bg-yellow-100 text-yellow-800' :
+    status === 'completed' ? 'bg-green-100 text-green-800' :
+    status === 'canceled'  ? 'bg-gray-100 text-gray-600' :
+                             'bg-red-100 text-red-800';
+
+  const childMessages: LogMessage[] = useMemo(() => {
+    if (!Array.isArray(childRun?.log_entries)) return [];
+    return childRun.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
+  }, [childRun]);
+
+  return (
+    <div className="border-l-4 border-violet-300 bg-violet-50/40 my-1 mx-2 rounded" data-testid="session-block">
+      <button
+        onClick={toggle}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-violet-50 text-left text-xs"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <div className="shrink-0 w-5 h-5 rounded-full bg-violet-100 flex items-center justify-center">
+          <GitBranch size={11} className="text-violet-600" />
+        </div>
+        <span className="font-semibold text-violet-800">Session #{runId}</span>
+        <span className="font-mono text-violet-600">{agentName}</span>
+        <span className="text-gray-600 truncate flex-1">{title}</span>
+        <span className={`px-1.5 py-0.5 rounded-full font-medium ${statusChip}`}>
+          {status === 'running' && <Loader2 size={9} className="animate-spin inline mr-1" />}
+          {status}
+        </span>
+      </button>
+      {expanded && (
+        <div className="px-2 pb-2">
+          {loading && (
+            <div className="flex items-center gap-2 text-xs text-gray-400 py-2 px-2">
+              <Loader2 size={12} className="animate-spin" /> Loading session…
+            </div>
+          )}
+          {!loading && childRun && (
+            <div className="border rounded bg-white max-h-96 overflow-y-auto flex flex-col">
+              <RunLogViewer
+                messages={childMessages}
+                status={childRun.status}
+                tokenStats={childRun.token_stats}
+                autoScroll={false}
+              />
+            </div>
+          )}
+          {!loading && childRun && status === 'running' && (
+            <button onClick={fetchChild} className="mt-1 text-xs text-violet-600 hover:underline">Refresh</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── TokenStatsBar ────────────────────────────────────────────────────────────
 
 interface TokenStatsBarProps {
@@ -1140,6 +1266,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
               if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>
@@ -1216,6 +1343,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
               if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>

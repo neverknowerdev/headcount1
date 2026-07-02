@@ -17,11 +17,37 @@ var programmerPrompt string
 //go:embed prompts/qa.md
 var qaPrompt string
 
+//go:embed prompts/qa_lead.md
+var qaLeadPrompt string
+
 //go:embed prompts/writer.md
 var writerPrompt string
 
 //go:embed prompts/researcher.md
 var researcherPrompt string
+
+//go:embed prompts/tech_spec_researcher.md
+var techSpecResearcherPrompt string
+
+//go:embed prompts/design_spec_researcher.md
+var designSpecResearcherPrompt string
+
+//go:embed prompts/designer.md
+var designerPrompt string
+
+//go:embed prompts/smm.md
+var smmPrompt string
+
+// ceoAllowedTools restricts the CEO to orchestration-only tools: the CEO
+// delegates all real work and therefore gets no file/shell/web access.
+var ceoAllowedTools = []string{
+	"delegate_task",
+	"ask_human",
+	"report_status",
+	"expand_run_result",
+	"write_artifact",
+	"finish_task",
+}
 
 // builtinConfigs returns the set of predefined agent configurations.
 // AllowedModels is intentionally left empty in all builtin configs so that
@@ -32,11 +58,12 @@ func builtinConfigs() []*AgentConfig {
 	return []*AgentConfig{
 		{
 			Name:           "CEO",
-			Description:    "Chief Executive Officer — strategic oversight and decision making",
+			Description:    "Chief Executive Officer — orchestrates task execution through delegation",
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"CTO", "Writer", "Researcher"},
+			Subagents:      []string{"CTO", "Programmer", "QA Lead", "QA", "TechSpecResearcher", "DesignSpecResearcher", "Designer", "SMM", "Writer", "Researcher"},
+			AllowedTools:   ceoAllowedTools,
 		},
 		{
 			Name:           "CTO",
@@ -56,12 +83,52 @@ func builtinConfigs() []*AgentConfig {
 			ParentAgent:    "CTO",
 		},
 		{
+			Name:           "QA Lead",
+			Description:    "QA Lead — defines acceptance criteria and test cases",
+			Prompt:         strings.TrimSpace(qaLeadPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
+		},
+		{
 			Name:           "QA",
 			Description:    "Quality assurance — tests, validates, and reports defects",
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CTO",
+		},
+		{
+			Name:           "TechSpecResearcher",
+			Description:    "Technical researcher — investigates libraries, APIs, and implementation approaches",
+			Prompt:         strings.TrimSpace(techSpecResearcherPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
+		},
+		{
+			Name:           "DesignSpecResearcher",
+			Description:    "Design researcher — investigates UX patterns and design conventions",
+			Prompt:         strings.TrimSpace(designSpecResearcherPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
+		},
+		{
+			Name:           "Designer",
+			Description:    "Designer — produces UI/UX design specifications",
+			Prompt:         strings.TrimSpace(designerPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
+		},
+		{
+			Name:           "SMM",
+			Description:    "Social media marketing — posts, announcements, and content plans",
+			Prompt:         strings.TrimSpace(smmPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
 		},
 		{
 			Name:           "Writer",

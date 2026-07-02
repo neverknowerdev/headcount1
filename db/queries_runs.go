@@ -28,6 +28,30 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	return q.db.WithContext(ctx).Save(&r).Error
 }
 
+// SetRunRootID sets root_run_id after creation. Root runs point at themselves
+// so all sessions of one execution tree share the same root id.
+func (q *Queries) SetRunRootID(ctx context.Context, id int32, rootID int32) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("root_run_id", rootID).Error
+}
+
+// ListChildRuns returns all runs whose parent_run_id equals parentRunID,
+// ordered by start time ascending. Used by the Run Log UI to render nested
+// delegation sessions.
+func (q *Queries) ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Preload("Task").Preload("Agent").
+		Where("parent_run_id = ?", parentRunID).
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
+
+// UpdateRunCurrentStatus stores the agent's self-reported progress line.
+func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+}
+
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }

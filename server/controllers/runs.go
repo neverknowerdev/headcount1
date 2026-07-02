@@ -114,6 +114,26 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, resp)
 }
 
+// ListChildRuns returns the delegated session runs spawned by the given run,
+// so the Run Log UI can render nested sessions.
+func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	runs, err := api.q.ListChildRuns(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
+}
+
 func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {

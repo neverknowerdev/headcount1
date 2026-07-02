@@ -160,6 +160,9 @@ async function runTask(
             title,
             task_type: 'implement',
             agent_id: agentId,
+            // Pin a full-tool-access config: these tests exercise direct tool
+            // execution, not the CEO delegation flow (the default for root tasks).
+            agent_config_name: 'Researcher',
         },
     });
     expect(taskRes.ok(), `create task: ${await taskRes.text()}`).toBeTruthy();

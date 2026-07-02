@@ -129,6 +129,9 @@ export const RunLogDetails: React.FC = () => {
             }
         } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
             setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
+        } else if (msg.type === 'run_status' && msg.payload.run_id === runIdInt) {
+            lastEventAtRef.current = Date.now();
+            setRun((prev: any) => prev ? { ...prev, current_status: msg.payload.status } : prev);
         } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
@@ -213,10 +216,24 @@ export const RunLogDetails: React.FC = () => {
                         <p className="text-sm text-gray-500">Status</p>
                         <p className="font-medium capitalize">{run.status}</p>
                     </div>
+                    {run.current_status && (
+                        <div>
+                            <p className="text-sm text-gray-500">Current Activity</p>
+                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.current_status}</p>
+                        </div>
+                    )}
                     <div>
                         <p className="text-sm text-gray-500">Agent</p>
-                        <p className="font-medium">{run.agent?.name}</p>
+                        <p className="font-medium">{run.agent?.name}{run.agent_config_name ? ` (${run.agent_config_name})` : ''}</p>
                     </div>
+                    {run.parent_run_id && (
+                        <div>
+                            <p className="text-sm text-gray-500">Parent Session</p>
+                            <Link to={`/companies/${shortName}/run-logs/${run.parent_run_id}`} className="font-medium text-violet-600 hover:underline">
+                                Run #{run.parent_run_id}
+                            </Link>
+                        </div>
+                    )}
                     <div>
                         <p className="text-sm text-gray-500">Task</p>
                         <Link to={`/companies/${shortName}/tasks`} className="font-medium text-indigo-600 hover:underline">{run.task?.title} (#{run.task_id})</Link>

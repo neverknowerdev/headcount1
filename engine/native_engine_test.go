@@ -343,52 +343,69 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 
 // ---- subtask tests ----------------------------------------------------------
 
-// createSubtaskHandler returns a mock LLM that first calls create_subtask directly,
-// then acknowledges the result with a text response.
-func createSubtaskHandler(t *testing.T) http.Handler {
+// toolCallJSON builds a single-tool-call chat completion response body.
+func toolCallJSON(id, name, args string) map[string]interface{} {
+	return map[string]interface{}{
+		"id": "chatcmpl-" + id, "model": "test-model",
+		"choices": []map[string]interface{}{{
+			"index": 0,
+			"message": map[string]interface{}{
+				"role": "assistant", "content": "",
+				"tool_calls": []map[string]interface{}{{
+					"id": id, "type": "function",
+					"function": map[string]interface{}{"name": name, "arguments": args},
+				}},
+			},
+			"finish_reason": "tool_calls",
+		}},
+		"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
+	}
+}
+
+func textJSON(id, text string) map[string]interface{} {
+	return map[string]interface{}{
+		"id": "chatcmpl-" + id, "model": "test-model",
+		"choices": []map[string]interface{}{{
+			"index":         0,
+			"message":       map[string]interface{}{"role": "assistant", "content": text},
+			"finish_reason": "stop",
+		}},
+		"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 3, "total_tokens": 13},
+	}
+}
+
+// delegateTaskHandler emulates a full synchronous delegation: the parent calls
+// delegate_task, the child session finishes with finish_task, and the parent
+// then wraps up. Delegation is synchronous so global request order is fixed:
+//  1. parent  -> delegate_task
+//  2. child   -> finish_task(done)
+//  3. child   -> text (final answer)
+//  4. parent+ -> text
+func delegateTaskHandler(t *testing.T) http.Handler {
 	t.Helper()
 	var count atomic.Int32
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		n := count.Add(1)
-		switch n {
+		switch count.Add(1) {
 		case 1:
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-sub-001", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role": "assistant", "content": "",
-						"tool_calls": []map[string]interface{}{{
-							"id": "call_sub_001", "type": "function",
-							"function": map[string]interface{}{
-								"name":      "create_subtask",
-								"arguments": `{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`,
-							},
-						}},
-					},
-					"finish_reason": "tool_calls",
-				}},
-				"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-			})
+			json.NewEncoder(w).Encode(toolCallJSON("del-001", "delegate_task",
+				`{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`))
+		case 2:
+			json.NewEncoder(w).Encode(toolCallJSON("fin-001", "finish_task",
+				`{"task_status":"done","finish_status":"Subtask A implemented"}`))
+		case 3:
+			json.NewEncoder(w).Encode(textJSON("txt-001", "Subtask A done."))
 		default:
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-sub-002", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index":         0,
-					"message":       map[string]interface{}{"role": "assistant", "content": "Subtask delegated."},
-					"finish_reason": "stop",
-				}},
-				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 3, "total_tokens": 23},
-			})
+			json.NewEncoder(w).Encode(textJSON("txt-002", "Delegation complete."))
 		}
 	})
 }
 
-// TestNativeEngineCreateSubtask verifies that when the LLM calls create_subtask
-// a child Task is created in the DB with the correct parent_id.
-func TestNativeEngineCreateSubtask(t *testing.T) {
-	mockSrv := startTestServer(t, createSubtaskHandler(t))
+// TestNativeEngineDelegateTask verifies that when the LLM calls delegate_task a
+// child Task is created, run synchronously as a nested session linked to the
+// parent run, and its result recorded.
+func TestNativeEngineDelegateTask(t *testing.T) {
+	mockSrv := startTestServer(t, delegateTaskHandler(t))
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
 
@@ -397,34 +414,48 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
 
-	// Wait for the parent run to appear.
+	// Wait for the parent run to appear and finish.
 	q := db.New(database)
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 	waitForRunDone(t, q, runID, 30*time.Second)
 
-	// A subtask should have been created with the correct parent.
+	// A subtask should have been created with the correct parent and completed.
 	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
 	assert.Equal(t, task.ID, *subtask.ParentID)
 	assert.Equal(t, "subtask A", subtask.Title)
 	assert.Equal(t, "Programmer", subtask.AgentConfigName)
+	assert.Equal(t, "done", subtask.Status, "child session should have finished the subtask")
+
+	// The child run must be linked to the parent run (session hierarchy).
+	childRunID := waitForRunCreated(t, database, subtask.ID, 5*time.Second)
+	childRun, err := q.GetRun(context.Background(), childRunID)
+	require.NoError(t, err)
+	require.NotNil(t, childRun.ParentRunID)
+	assert.Equal(t, runID, *childRun.ParentRunID)
+	require.NotNil(t, childRun.RootRunID)
+	assert.Equal(t, runID, *childRun.RootRunID)
+	assert.Equal(t, "completed", childRun.Status)
+	assert.Equal(t, "Subtask A implemented", childRun.ResultDescription)
+
+	// The parent run's log must record the session start and end.
+	parentRun, err := q.GetRun(context.Background(), runID)
+	require.NoError(t, err)
+	assert.Contains(t, parentRun.LogEntries, "session_started")
+	assert.Contains(t, parentRun.LogEntries, "session_ended")
 }
 
-// TestNativeEngineSubtaskBlocksDuplicate verifies that create_subtask returns an
-// error when a subtask is already running, preventing a second one from starting.
-func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
-	// The first call from the LLM will create a subtask; the second call
-	// (same turn, different tool_call) should be blocked because the first
-	// subtask is already running.
+// TestNativeEngineSequentialDelegations verifies that two delegate_task calls
+// in one assistant turn run one after another (delegation is synchronous), each
+// producing its own completed subtask and linked session run.
+func TestNativeEngineSequentialDelegations(t *testing.T) {
 	var callCount atomic.Int32
-	blockCh := make(chan struct{})
-
-	// Handler for the parent agent: tries to create two subtasks in one turn.
-	parentHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
-		n := callCount.Add(1)
-		if n == 1 {
+		switch callCount.Add(1) {
+		case 1:
+			// Parent turn: two delegations in a single assistant message.
 			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-dup-001", "model": "test-model",
+				"id": "chatcmpl-seq-001", "model": "test-model",
 				"choices": []map[string]interface{}{{
 					"message": map[string]interface{}{
 						"role": "assistant", "content": "",
@@ -432,8 +463,15 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 							{
 								"id": "call_d1", "type": "function",
 								"function": map[string]interface{}{
-									"name":      "create_subtask",
+									"name":      "delegate_task",
 									"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
+								},
+							},
+							{
+								"id": "call_d2", "type": "function",
+								"function": map[string]interface{}{
+									"name":      "delegate_task",
+									"arguments": `{"title":"sub2","description":"d2","agent_name":"QA"}`,
 								},
 							},
 						},
@@ -442,60 +480,18 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 				}},
 				"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7},
 			})
-			return
-		}
-		// Subsequent parent turns: text response.
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-dup-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"message":       map[string]interface{}{"role": "assistant", "content": "done"},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 5, "completion_tokens": 1, "total_tokens": 6},
-		})
-	})
-
-	// Handler for the subtask agent: blocks until test unblocks it.
-	subtaskHandler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		<-blockCh
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-sub", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"message": map[string]interface{}{
-					"role": "assistant", "content": "",
-					"tool_calls": []map[string]interface{}{{
-						"id": "call_ft", "type": "function",
-						"function": map[string]interface{}{
-							"name":      "finish_task",
-							"arguments": `{"task_status":"in-review","finish_status":"done"}`,
-						},
-					}},
-				},
-				"finish_reason": "tool_calls",
-			}},
-			"usage": map[string]int{"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 15},
-		})
-	})
-
-	// Both parent and subtask hit the same mock server; route by call count.
-	combined := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// If the subtask's run is active, route to the subtask handler.
-		// For simplicity, route by overall call count: first two parent, rest subtask.
-		n := callCount.Load()
-		if n <= 1 {
-			parentHandler.ServeHTTP(w, r)
-		} else if n == 2 {
-			parentHandler.ServeHTTP(w, r) // second parent turn (after tool result)
-		} else {
-			subtaskHandler.ServeHTTP(w, r)
+		case 2, 4:
+			// Child sessions: finish their subtask.
+			json.NewEncoder(w).Encode(toolCallJSON("seq-fin", "finish_task",
+				`{"task_status":"done","finish_status":"done"}`))
+		case 3, 5:
+			json.NewEncoder(w).Encode(textJSON("seq-txt", "child done"))
+		default:
+			json.NewEncoder(w).Encode(textJSON("seq-end", "all delegations done"))
 		}
 	})
-	_ = combined // suppress unused warning
 
-	mockSrv := startTestServer(t, parentHandler)
-	t.Cleanup(func() { close(blockCh) })
-
+	mockSrv := startTestServer(t, handler)
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
 
@@ -507,12 +503,25 @@ func TestNativeEngineSubtaskBlocksDuplicate(t *testing.T) {
 	// Wait for the parent run to finish.
 	q := db.New(database)
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
-	waitForRunDone(t, q, runID, 15*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
 
-	// Exactly one subtask should exist.
+	// Both delegations should have produced completed subtasks.
 	subtasks, err := q.ListSubtasksByParent(context.Background(), task.ID)
 	require.NoError(t, err)
-	assert.Len(t, subtasks, 1, "only one subtask should be created")
+	require.Len(t, subtasks, 2, "both delegations should have created subtasks")
+	for _, st := range subtasks {
+		assert.Equal(t, "done", st.Status)
+	}
+
+	// Both child runs must be linked to the parent run.
+	childRuns, err := q.ListChildRuns(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, childRuns, 2)
+	for _, cr := range childRuns {
+		assert.Equal(t, "completed", cr.Status)
+		require.NotNil(t, cr.RootRunID)
+		assert.Equal(t, runID, *cr.RootRunID)
+	}
 }
 
 // TestNativeEngineSubtaskNotifiesParent verifies that when a subtask completes
@@ -559,6 +568,77 @@ func TestNativeEngineSubtaskNotifiesParent(t *testing.T) {
 		}
 		return false
 	}, 5*time.Second, 100*time.Millisecond, "parent task should have received a system comment")
+}
+
+// TestNativeEngineAskHuman verifies that ask_human posts an ask_user comment,
+// waits for a human reply, and feeds the reply back to the LLM as tool output.
+func TestNativeEngineAskHuman(t *testing.T) {
+	var count atomic.Int32
+	var capturedToolResult atomic.Value
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		n := count.Add(1)
+		if n == 1 {
+			json.NewEncoder(w).Encode(toolCallJSON("ask-001", "ask_human",
+				`{"question":"Which option should I pick?"}`))
+			return
+		}
+		// Capture the tool result carrying the human reply.
+		bodyBytes, _ := io.ReadAll(r.Body)
+		var req struct {
+			Messages []struct {
+				Role    string `json:"role"`
+				Content string `json:"content"`
+			} `json:"messages"`
+		}
+		if json.Unmarshal(bodyBytes, &req) == nil {
+			for _, msg := range req.Messages {
+				if msg.Role == "tool" {
+					capturedToolResult.Store(msg.Content)
+				}
+			}
+		}
+		json.NewEncoder(w).Encode(textJSON("ask-002", "Understood, going with Option B."))
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	q := db.New(database)
+
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	// Wait for the agent's question to appear as an ask_user comment.
+	require.Eventually(t, func() bool {
+		comments, err := q.ListCommentsByTask(context.Background(), task.ID)
+		if err != nil {
+			return false
+		}
+		for _, c := range comments {
+			if c.CommentType == "ask_user" && c.Content == "Which option should I pick?" {
+				return true
+			}
+		}
+		return false
+	}, 10*time.Second, 100*time.Millisecond, "ask_user comment should have been posted")
+
+	// Reply as the human.
+	_, err := q.CreateComment(context.Background(), db.Comment{
+		TaskID:     task.ID,
+		AuthorType: "human",
+		Content:    "Option B please",
+	})
+	require.NoError(t, err)
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	run := waitForRunDone(t, q, runID, 30*time.Second)
+	assert.Equal(t, "completed", run.Status)
+
+	toolResult, _ := capturedToolResult.Load().(string)
+	assert.Contains(t, toolResult, "Option B please", "human reply should be returned as the tool result")
 }
 
 // TestNativeEngineExpandRunResult verifies that the model can invoke expand_run_result

@@ -116,7 +116,7 @@ func TestLoadFromFile_NonExistentFile(t *testing.T) {
 func TestDefaultFactory_BuiltinAgents(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 	names := f.ListNames()
-	expected := []string{"CEO", "CTO", "Programmer", "QA", "Writer", "Researcher"}
+	expected := []string{"CEO", "CTO", "Programmer", "QA", "QA Lead", "TechSpecResearcher", "DesignSpecResearcher", "Designer", "SMM", "Writer", "Researcher"}
 	for _, name := range expected {
 		assert.Contains(t, names, name, "builtin agent %q should be registered", name)
 	}
@@ -173,7 +173,7 @@ func TestEmptyFactory_Register(t *testing.T) {
 
 func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
-	for _, name := range []string{"CEO", "CTO", "Programmer", "QA", "Writer", "Researcher"} {
+	for _, name := range []string{"CEO", "CTO", "Programmer", "QA", "QA Lead", "TechSpecResearcher", "DesignSpecResearcher", "Designer", "SMM", "Writer", "Researcher"} {
 		cfg, err := f.GetConfig(name)
 		require.NoError(t, err)
 		assert.NotEmpty(t, cfg.Prompt, "agent %q should have a non-empty prompt", name)

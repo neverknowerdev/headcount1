@@ -40,11 +40,28 @@ func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32
 
 func NewProxyLoggerWithHub(basePath, companyShortName string, taskID int32, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
 	logDir := filepath.Join(basePath, "data", companyShortName, "logs", fmt.Sprintf("%d", taskID))
+	logFile := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
+	return newProxyLoggerAt(basePath, logDir, logFile, runID, hub, q)
+}
+
+// NewSessionLoggerWithHub creates a logger for an execution session. All
+// sessions of one main run are grouped in a folder named after the root run:
+// data/{company}/logs/{rootTaskID}/run-{rootRunID}/. The root session logs to
+// main.log; each delegated child session gets its own session-{runID}.log.
+func NewSessionLoggerWithHub(basePath, companyShortName string, rootTaskID, rootRunID, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
+	logDir := filepath.Join(basePath, "data", companyShortName, "logs", fmt.Sprintf("%d", rootTaskID), fmt.Sprintf("run-%d", rootRunID))
+	fileName := "main.log"
+	if runID != rootRunID {
+		fileName = fmt.Sprintf("session-%d.log", runID)
+	}
+	return newProxyLoggerAt(basePath, logDir, filepath.Join(logDir, fileName), runID, hub, q)
+}
+
+func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
 	if err := os.MkdirAll(logDir, 0755); err != nil {
 		return nil, fmt.Errorf("failed to create log directory: %w", err)
 	}
 
-	logFile := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 	f, err := os.OpenFile(logFile, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 	if err != nil {
 		return nil, fmt.Errorf("failed to open log file: %w", err)
@@ -580,6 +597,55 @@ func (l *ProxyLogger) LogStall(model, agentName, providerName string, stallDurat
 			"message":        msg,
 		})
 	}
+}
+
+// LogSessionStarted records that a delegated child session began. The entry
+// carries the child run id so the Run Log UI can render an expandable nested
+// session block, and the file line points at the child's session log file.
+func (l *ProxyLogger) LogSessionStarted(childRunID, childTaskID int32, agentName, title, logFile string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	l.file.WriteString(fmt.Sprintf("\n=== Session Started [%s] ===\nRun: %d\nTask: %d\nAgent: %s\nTitle: %s\nLog file: %s\n\n",
+		ts, childRunID, childTaskID, agentName, title, logFile))
+
+	content, _ := json.Marshal(map[string]interface{}{
+		"run_id":     childRunID,
+		"task_id":    childTaskID,
+		"agent_name": agentName,
+		"title":      title,
+	})
+	extra := map[string]interface{}{
+		"run_id":     childRunID,
+		"task_id":    childTaskID,
+		"agent_name": agentName,
+		"title":      title,
+	}
+	l.broadcastLog("session_started", string(content), extra)
+	l.persistLog("session_started", string(content), extra)
+}
+
+// LogSessionEnded records that a delegated child session finished.
+func (l *ProxyLogger) LogSessionEnded(childRunID int32, status, result string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	l.file.WriteString(fmt.Sprintf("\n=== Session Ended [%s] ===\nRun: %d\nStatus: %s\nResult: %s\n\n",
+		ts, childRunID, status, result))
+
+	content, _ := json.Marshal(map[string]interface{}{
+		"run_id": childRunID,
+		"status": status,
+		"result": result,
+	})
+	extra := map[string]interface{}{
+		"run_id": childRunID,
+		"status": status,
+	}
+	l.broadcastLog("session_ended", string(content), extra)
+	l.persistLog("session_ended", string(content), extra)
 }
 
 // LogInfo writes a plain informational line to the log file and persists an

@@ -140,6 +140,15 @@ type Run struct {
 	Task              Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
 	AgentID           int32      `json:"agent_id" gorm:"not null"`
 	Agent             Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	// ParentRunID links a delegated session to the run that spawned it.
+	// RootRunID points at the top-level (CEO) run of the whole execution tree;
+	// it equals ID for root runs so log files can be grouped per main run.
+	ParentRunID     *int32 `json:"parent_run_id" gorm:"index"`
+	RootRunID       *int32 `json:"root_run_id" gorm:"index"`
+	AgentConfigName string `json:"agent_config_name" gorm:"default:''"`
+	// CurrentStatus is a short free-text progress line set by the agent via
+	// the report_status tool, shown live in the Run Log UI.
+	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
 	Status            string     `json:"status" gorm:"not null"`
 	SessionID         string     `json:"session_id"`
 	LogFilePath       string     `json:"log_file_path"`

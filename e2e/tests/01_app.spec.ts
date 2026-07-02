@@ -120,7 +120,9 @@ test.describe.serial('Paperclip2 App', () => {
         expect(runs.length).toBeGreaterThan(0);
         const run = runs[0];
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}.log`);
+        // Session-based layout: logs are grouped per main run in run-{id}/, with
+        // the root session writing main.log.
+        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.log');
         expect(fs.existsSync(logFile)).toBeTruthy();
         const logContent = fs.readFileSync(logFile, 'utf8');
         expect(logContent).toContain('LLM Request');

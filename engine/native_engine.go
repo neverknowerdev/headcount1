@@ -39,11 +39,42 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 	}
 }
 
+// defaultOrchestratorConfig is the agent config every root task is routed
+// through: the CEO orchestrates execution via delegation to specialists.
+const defaultOrchestratorConfig = "CEO"
+
+// maxDelegationDepth caps how deep delegation sessions can nest
+// (root CEO session is depth 0).
+const maxDelegationDepth = 3
+
+// parentSession links a delegated child session to the session that spawned
+// it: run hierarchy ids, the shared workspace, and a hook that fires once the
+// child's run record exists (so the parent can log the session start).
+type parentSession struct {
+	parentRunID   int32
+	rootRunID     int32
+	rootTaskID    int32
+	workspacePath string
+	depth         int
+	onRunCreated  func(run db.Run)
+}
+
 // ProcessTask picks up a task and spawns a goroutine to run the agent.
 func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
+	}
+
+	// Route every root task through the CEO orchestrator unless the task
+	// already pins a specific agent config.
+	if task.ParentID == nil && task.AgentConfigName == "" && e.agentFactory != nil {
+		if _, cfgErr := e.agentFactory.GetConfig(defaultOrchestratorConfig); cfgErr == nil {
+			task.AgentConfigName = defaultOrchestratorConfig
+			if updated, upErr := e.q.UpdateTask(ctx, task); upErr == nil {
+				task = updated
+			}
+		}
 	}
 
 	// Deduplication: skip if a non-stale run is already active.
@@ -118,31 +149,61 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 	e.q.UnlockTaskRun(ctx, run.TaskID)
 }
 
-// run is the goroutine body for a single agent execution.
+// run is the goroutine body for a single root agent execution.
 func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
+	e.executeSession(ctx, task, mode, nil)
+}
+
+// executeSession runs one agent session for a task and returns its final run
+// status ("completed", "failed" or "canceled"). Root sessions (parent == nil)
+// run detached from the caller's context; delegated child sessions inherit the
+// parent's run context so stopping the parent stops the whole tree.
+func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession) string {
 	if task.AgentID == nil {
-		return
+		return "failed"
 	}
 
 	agent, err := e.q.GetAgent(ctx, *task.AgentID)
 	if err != nil {
-		return
+		return "failed"
 	}
 
-	run, err := e.q.CreateRun(ctx, db.Run{
-		TaskID:    task.ID,
-		AgentID:   agent.ID,
-		Status:    "running",
-		StartedAt: time.Now(),
-	})
+	newRun := db.Run{
+		TaskID:          task.ID,
+		AgentID:         agent.ID,
+		Status:          "running",
+		StartedAt:       time.Now(),
+		AgentConfigName: task.AgentConfigName,
+	}
+	if parent != nil {
+		parentID := parent.parentRunID
+		rootID := parent.rootRunID
+		newRun.ParentRunID = &parentID
+		newRun.RootRunID = &rootID
+	}
+	run, err := e.q.CreateRun(ctx, newRun)
 	if err != nil {
-		return
+		return "failed"
+	}
+	if parent == nil {
+		// Root runs point at themselves so the whole tree shares one root id.
+		rootID := run.ID
+		run.RootRunID = &rootID
+		if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
+			fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
+		}
 	}
 
 	// Register the cancel func and lock the task immediately so that
 	// StopRun and test pollers (waitForRunCreated) can observe the run right
 	// away — before any potentially slow filesystem or DB work.
-	runCtx, cancel := context.WithCancel(context.Background())
+	// Child sessions derive from the parent run's context so a parent stop
+	// cancels them too.
+	baseCtx := context.Background()
+	if parent != nil {
+		baseCtx = ctx
+	}
+	runCtx, cancel := context.WithCancel(baseCtx)
 	e.cancelFuncs.Store(run.ID, cancel)
 	defer func() {
 		cancel()
@@ -158,27 +219,45 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		}
 	}()
 
+	// Let the delegating session record the child run before any slow work.
+	if parent != nil && parent.onRunCreated != nil {
+		parent.onRunCreated(run)
+	}
+
 	e.hub.BroadcastEvent("run_started", run)
+
+	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
+	if compErr != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("failed to get company: %v", compErr))
+		return "failed"
+	}
 
 	// Write initial run metadata to filesystem.
 	settings := loadSettings()
 	storage := filesystem.NewStorage(settings.BasePath)
-	companyShortName, _ := storage.GetCompanyShortNameForTask(task.ID)
-	if companyShortName != "" {
-		if err := storage.WriteRun(run, companyShortName); err != nil {
-			fmt.Printf("Warning: failed to write run metadata: %v\n", err)
-		}
+	if err := storage.WriteRun(run, company.ShortName); err != nil {
+		fmt.Printf("Warning: failed to write run metadata: %v\n", err)
+	}
+
+	// Session hierarchy: which run/task the log folder is grouped under.
+	rootRunID := run.ID
+	rootTaskID := task.ID
+	depth := 0
+	if parent != nil {
+		rootRunID = parent.rootRunID
+		rootTaskID = parent.rootTaskID
+		depth = parent.depth
 	}
 
 	// Resolve provider from the agent configuration.
 	if agent.ProviderID == nil {
 		e.failRun(ctx, run.ID, "agent has no provider configured")
-		return
+		return "failed"
 	}
 	provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
 	if err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("failed to get provider: %v", err))
-		return
+		return "failed"
 	}
 
 	// Load agent config early so model resolution can use AllowedModels.
@@ -197,31 +276,34 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	model, err := resolveModel(agentCfg, provider, agent.Model)
 	if err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("model resolution failed: %v", err))
-		return
+		return "failed"
 	}
 
-	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
-	if compErr != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("failed to get company: %v", compErr))
-		return
-	}
-
+	// Delegated sessions share the root session's workspace so specialists
+	// (e.g. Programmer then QA) see each other's changes.
 	fsMgr := filesystem.NewManager(settings.BasePath)
-	workspacePath := fsMgr.GetTaskWorktreePath(company, task)
-	if err := os.MkdirAll(workspacePath, 0755); err != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
-		return
+	var workspacePath string
+	if parent != nil && parent.workspacePath != "" {
+		workspacePath = parent.workspacePath
+	} else {
+		workspacePath = fsMgr.GetTaskWorktreePath(company, task)
+		if err := os.MkdirAll(workspacePath, 0755); err != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
+			return "failed"
+		}
+		if err := initTaskMemory(workspacePath, task, company); err != nil {
+			fmt.Printf("Warning: failed to init memory.md: %v\n", err)
+		}
 	}
 
-	if err := initTaskMemory(workspacePath, task, company); err != nil {
-		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
-	}
-
-	// Set up proxy logger (same format as the LLM gateway so UI and file layout match).
-	proxyLogger, logErr := logging.NewProxyLoggerWithHub(
+	// Set up the session logger. All sessions of one main run share the
+	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
+	// session writes main.log, child sessions write session-{runID}.log.
+	proxyLogger, logErr := logging.NewSessionLoggerWithHub(
 		settings.BasePath,
 		company.ShortName,
-		task.ID,
+		rootTaskID,
+		rootRunID,
 		run.ID,
 		e.hub,
 		e.q,
@@ -233,10 +315,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		e.q.UpdateRunLogFilePath(ctx, run.ID, proxyLogger.FilePath())
 	}
 
-	// Git worktree setup.
+	// Git worktree setup (root session only — children reuse its worktree).
 	var gitProject bool
 	var gitMgr *git.GitManager
-	if task.ProjectID != nil {
+	if parent == nil && task.ProjectID != nil {
 		project, projErr := e.q.GetProject(ctx, *task.ProjectID)
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
@@ -433,7 +515,27 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		agentNames = e.agentFactory.ListNames()
 	}
 
-	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
+	// Delegation: available until the nesting cap so a runaway chain of
+	// agents can't recurse forever.
+	if depth < maxDelegationDepth {
+		registry.Register(tools.NewDelegateTask(
+			e.makeDelegateFunc(task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth),
+			agentNames,
+		))
+	}
+
+	registry.Register(tools.NewAskHuman(func(qCtx context.Context, question string) (string, error) {
+		return e.askHuman(qCtx, task.ID, run.ID, question)
+	}))
+
+	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
+		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
+			return err
+		}
+		e.hub.BroadcastEvent("run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
+		e.logInfo(proxyLogger, "Status: "+status)
+		return nil
+	}))
 	registry.Register(tools.NewExpandRunResult(func(rCtx context.Context, runID int32) (string, error) {
 		r, err := e.q.GetRun(rCtx, runID)
 		if err != nil {
@@ -611,10 +713,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
-			e.q.UpdateRunLog(ctx, run.ID, "", "canceled")
+			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
-			e.notifyParentOfSubtaskCompletion(ctx, task, "canceled")
-			return
+			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
+			return "canceled"
 		}
 		status = "failed"
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
@@ -649,18 +751,168 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	e.q.UpdateRunLog(ctx, run.ID, "", status)
 
 	// Update run metadata in filesystem.
-	settings = loadSettings()
-	storage = filesystem.NewStorage(settings.BasePath)
-	if csn, _ := storage.GetCompanyShortNameForTask(task.ID); csn != "" {
-		if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
-			storage.WriteRun(updatedRun, csn)
-		}
+	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
+		storage.WriteRun(updatedRun, company.ShortName)
 	}
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
 	// Notify the parent task that this subtask has completed or failed.
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
+
+	return status
+}
+
+// askHuman posts the agent's question as an ask_user comment and blocks until
+// a human replies on the task, returning the reply text. It keeps the run's
+// last_message_time fresh while waiting so the run isn't declared stale.
+func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, question string) (string, error) {
+	rid := runID
+	questionComment, err := e.q.CreateComment(ctx, db.Comment{
+		TaskID:      taskID,
+		AuthorType:  "agent",
+		CommentType: "ask_user",
+		Content:     question,
+		RunID:       &rid,
+	})
+	if err != nil {
+		return "", fmt.Errorf("ask_human: failed to post question: %w", err)
+	}
+	e.hub.BroadcastEvent("comment_created", questionComment)
+	e.hub.BroadcastEvent("human_input_requested", map[string]interface{}{
+		"task_id":  taskID,
+		"run_id":   runID,
+		"question": question,
+	})
+
+	ticker := time.NewTicker(2 * time.Second)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-ticker.C:
+		}
+		// Keep the run alive so the staleness detector doesn't kill it while
+		// we wait for the user.
+		e.q.TouchRunLastMessageTime(context.Background(), runID)
+
+		comments, listErr := e.q.ListCommentsByTask(context.Background(), taskID)
+		if listErr != nil {
+			continue
+		}
+		for _, c := range comments {
+			if c.AuthorType == "human" && c.ID > questionComment.ID {
+				return c.Content, nil
+			}
+		}
+	}
+}
+
+// makeDelegateFunc returns the callback behind the delegate_task tool. It
+// creates a child task, runs it synchronously as a nested session linked to
+// the parent run, and returns the specialist's result to the delegating agent.
+func (e *NativeEngine) makeDelegateFunc(
+	parentTask db.Task,
+	parentAgent db.Agent,
+	parentRun db.Run,
+	parentLogger *logging.ProxyLogger,
+	rootRunID, rootTaskID int32,
+	workspacePath string,
+	depth int,
+) func(callCtx context.Context, title, description, agentName string) (string, error) {
+	return func(callCtx context.Context, title, description, agentName string) (string, error) {
+		// Reject if another subtask of this parent is already running.
+		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
+		if err != nil {
+			return "", fmt.Errorf("failed to check running subtasks: %w", err)
+		}
+		if runningCount > 0 {
+			return "", fmt.Errorf("a delegated session is already running for task %d; wait for it to complete", parentTask.ID)
+		}
+
+		if e.agentFactory == nil {
+			return "", fmt.Errorf("no agent configs available for delegation")
+		}
+		if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
+			return "", fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
+		}
+
+		parentID := parentTask.ID
+		agentID := parentAgent.ID
+		subtask, err := e.q.CreateTask(callCtx, db.Task{
+			CompanyID:       parentTask.CompanyID,
+			ProjectID:       parentTask.ProjectID,
+			SprintID:        parentTask.SprintID,
+			AgentID:         &agentID,
+			ParentID:        &parentID,
+			Title:           title,
+			Description:     description,
+			TaskType:        db.TaskTypeImplement,
+			Status:          "in-progress",
+			Priority:        "Normal",
+			AgentConfigName: agentName,
+		})
+		if err != nil {
+			return "", fmt.Errorf("failed to create subtask: %w", err)
+		}
+
+		e.hub.BroadcastEvent("task_created", map[string]interface{}{
+			"id":        subtask.ID,
+			"parent_id": parentTask.ID,
+			"title":     subtask.Title,
+		})
+
+		var childRunID int32
+		session := &parentSession{
+			parentRunID:   parentRun.ID,
+			rootRunID:     rootRunID,
+			rootTaskID:    rootTaskID,
+			workspacePath: workspacePath,
+			depth:         depth + 1,
+			onRunCreated: func(childRun db.Run) {
+				childRunID = childRun.ID
+				if parentLogger != nil {
+					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.log", childRun.ID))
+				}
+				e.hub.BroadcastEvent("session_started", map[string]interface{}{
+					"parent_run_id": parentRun.ID,
+					"run_id":        childRun.ID,
+					"task_id":       subtask.ID,
+					"agent_name":    agentName,
+					"title":         title,
+				})
+			},
+		}
+
+		status := e.executeSession(callCtx, subtask, "implement", session)
+
+		result := ""
+		if childRunID > 0 {
+			if childRun, runErr := e.q.GetRun(context.Background(), childRunID); runErr == nil {
+				result = childRun.ResultDescription
+			}
+		}
+		if parentLogger != nil {
+			parentLogger.LogSessionEnded(childRunID, status, result)
+		}
+		e.hub.BroadcastEvent("session_ended", map[string]interface{}{
+			"parent_run_id": parentRun.ID,
+			"run_id":        childRunID,
+			"status":        status,
+		})
+
+		finalTask, taskErr := e.q.GetTask(context.Background(), subtask.ID)
+		taskStatus := subtask.Status
+		if taskErr == nil {
+			taskStatus = finalTask.Status
+		}
+		if result == "" {
+			result = "(no result summary provided)"
+		}
+		return fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession status: %s\nSubtask status: %s\nResult: %s",
+			subtask.ID, agentName, status, taskStatus, result), nil
+	}
 }
 
 // notifyParentOfSubtaskCompletion adds a comment to the parent task when this
@@ -686,63 +938,6 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 		"status":      status,
 		"subtask_title": subtask.Title,
 	})
-}
-
-// makeCreateSubtaskFunc returns the callback used by the create_subtask tool.
-// It enforces the single-running-subtask constraint, creates the DB record, and
-// enqueues the subtask for processing.
-func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) func(callCtx context.Context, title, description, agentName string) (int32, error) {
-	return func(callCtx context.Context, title, description, agentName string) (int32, error) {
-		// Reject if another subtask of this parent is already running.
-		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
-		if err != nil {
-			return 0, fmt.Errorf("failed to check running subtasks: %w", err)
-		}
-		if runningCount > 0 {
-			return 0, fmt.Errorf("a subtask is already running for task %d; wait for it to complete before creating another", parentTask.ID)
-		}
-
-		// Look up the requested agent config; validate it exists.
-		var configName string
-		if e.agentFactory != nil {
-			if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
-				return 0, fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
-			}
-			configName = agentName
-		}
-
-		parentID := parentTask.ID
-		agentID := parentAgent.ID
-		subtask, err := e.q.CreateTask(callCtx, db.Task{
-			CompanyID:       parentTask.CompanyID,
-			ProjectID:       parentTask.ProjectID,
-			SprintID:        parentTask.SprintID,
-			AgentID:         &agentID,
-			ParentID:        &parentID,
-			Title:           title,
-			Description:     description,
-			TaskType:        db.TaskTypeImplement,
-			Status:          "to-do",
-			Priority:        "Normal",
-			AgentConfigName: configName,
-		})
-		if err != nil {
-			return 0, fmt.Errorf("failed to create subtask: %w", err)
-		}
-
-		e.hub.BroadcastEvent("task_created", map[string]interface{}{
-			"id":        subtask.ID,
-			"parent_id": parentTask.ID,
-			"title":     subtask.Title,
-		})
-
-		// Enqueue the subtask for execution (non-blocking).
-		if procErr := e.ProcessTask(callCtx, subtask.ID); procErr != nil {
-			return 0, fmt.Errorf("failed to enqueue subtask %d: %w", subtask.ID, procErr)
-		}
-
-		return subtask.ID, nil
-	}
 }
 
 // emitStatusChange creates a status_change comment and broadcasts it.

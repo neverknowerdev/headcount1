@@ -69,16 +69,17 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID   int32   `json:"company_id"`
-		ProjectID   *int32  `json:"project_id"`
-		AgentID     *int32  `json:"agent_id"`
-		SprintID    int32   `json:"sprint_id"`
-		ParentID    *int32  `json:"parent_id"`
-		Title       string  `json:"title"`
-		TaskType    string  `json:"task_type"`
-		Description string  `json:"description"`
-		Priority    string  `json:"priority"`
-		DueDate     *string `json:"due_date"`
+		CompanyID       int32   `json:"company_id"`
+		ProjectID       *int32  `json:"project_id"`
+		AgentID         *int32  `json:"agent_id"`
+		SprintID        int32   `json:"sprint_id"`
+		ParentID        *int32  `json:"parent_id"`
+		Title           string  `json:"title"`
+		TaskType        string  `json:"task_type"`
+		Description     string  `json:"description"`
+		Priority        string  `json:"priority"`
+		DueDate         *string `json:"due_date"`
+		AgentConfigName string  `json:"agent_config_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -107,17 +108,18 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := db.Task{
-		CompanyID:   req.CompanyID,
-		ProjectID:   req.ProjectID,
-		Title:       req.Title,
-		TaskType:    taskType,
-		Status:      "backlog",
-		AgentID:     req.AgentID,
-		SprintID:    req.SprintID,
-		ParentID:    req.ParentID,
-		Description: req.Description,
-		Priority:    priority,
-		DueDate:     dueDate,
+		CompanyID:       req.CompanyID,
+		ProjectID:       req.ProjectID,
+		Title:           req.Title,
+		TaskType:        taskType,
+		Status:          "backlog",
+		AgentID:         req.AgentID,
+		SprintID:        req.SprintID,
+		ParentID:        req.ParentID,
+		Description:     req.Description,
+		Priority:        priority,
+		DueDate:         dueDate,
+		AgentConfigName: req.AgentConfigName,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
@@ -181,9 +183,10 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		TaskType    string  `json:"task_type"`
 		Description string  `json:"description"`
 		Priority    string  `json:"priority"`
-		DueDate     *string `json:"due_date"`
-		Status      string  `json:"status"`
-		IsArchived  *bool   `json:"is_archived"`
+		DueDate         *string `json:"due_date"`
+		Status          string  `json:"status"`
+		IsArchived      *bool   `json:"is_archived"`
+		AgentConfigName string  `json:"agent_config_name"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -230,6 +233,9 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.IsArchived != nil {
 		task.IsArchived = *req.IsArchived
+	}
+	if req.AgentConfigName != "" {
+		task.AgentConfigName = req.AgentConfigName
 	}
 
 	if req.DueDate != nil {
