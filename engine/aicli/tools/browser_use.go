@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"path/filepath"
 	"sync"
+	"time"
 
 	"agent-orchestrator/engine/aicli"
 
@@ -17,9 +18,9 @@ import (
 // A single Chromium instance is lazily started on first use and reused
 // for the lifetime of the tool within a single agent run.
 type BrowserUse struct {
-	mu          sync.Mutex
-	taskCtx     context.Context
-	taskCancel  context.CancelFunc
+	mu         sync.Mutex
+	taskCtx    context.Context
+	taskCancel context.CancelFunc
 }
 
 // NewBrowserUse creates a BrowserUse tool.
@@ -161,13 +162,26 @@ func (b *BrowserUse) ensureBrowser(ctx context.Context) (context.Context, error)
 	return b.taskCtx, nil
 }
 
+// opTimeout bounds every browser operation so a wedged Chrome instance fails
+// the call instead of freezing the agent session (the agent-level watchdog
+// exempts browser_use because the browser must outlive individual calls).
+const opTimeout = 60 * time.Second
+
+// runOps executes chromedp actions against the shared browser context with a
+// per-operation timeout.
+func runOps(bc context.Context, actions ...chromedp.Action) error {
+	opCtx, cancel := context.WithTimeout(bc, opTimeout)
+	defer cancel()
+	return chromedp.Run(opCtx, actions...)
+}
+
 func (b *BrowserUse) navigate(ctx context.Context, url string) (string, error) {
 	bc, err := b.ensureBrowser(ctx)
 	if err != nil {
 		return "", err
 	}
 	var text string
-	if err := chromedp.Run(bc,
+	if err := runOps(bc,
 		chromedp.Navigate(url),
 		chromedp.WaitVisible("body"),
 		chromedp.Text("body", &text),
@@ -185,7 +199,7 @@ func (b *BrowserUse) click(ctx context.Context, selector string) (string, error)
 	if err != nil {
 		return "", err
 	}
-	if err := chromedp.Run(bc, chromedp.Click(selector, chromedp.NodeVisible)); err != nil {
+	if err := runOps(bc, chromedp.Click(selector, chromedp.NodeVisible)); err != nil {
 		return "", fmt.Errorf("browser_use click %q: %w", selector, err)
 	}
 	return fmt.Sprintf("Clicked element matching %q", selector), nil
@@ -196,7 +210,7 @@ func (b *BrowserUse) typeText(ctx context.Context, selector, text string) (strin
 	if err != nil {
 		return "", err
 	}
-	if err := chromedp.Run(bc, chromedp.SendKeys(selector, text, chromedp.NodeVisible)); err != nil {
+	if err := runOps(bc, chromedp.SendKeys(selector, text, chromedp.NodeVisible)); err != nil {
 		return "", fmt.Errorf("browser_use type %q: %w", selector, err)
 	}
 	return fmt.Sprintf("Typed into %q", selector), nil
@@ -208,7 +222,7 @@ func (b *BrowserUse) getText(ctx context.Context, selector string) (string, erro
 		return "", err
 	}
 	var text string
-	if err := chromedp.Run(bc, chromedp.Text(selector, &text)); err != nil {
+	if err := runOps(bc, chromedp.Text(selector, &text)); err != nil {
 		return "", fmt.Errorf("browser_use get_text %q: %w", selector, err)
 	}
 	return text, nil
@@ -220,7 +234,7 @@ func (b *BrowserUse) getHTML(ctx context.Context, selector string) (string, erro
 		return "", err
 	}
 	var html string
-	if err := chromedp.Run(bc, chromedp.OuterHTML(selector, &html)); err != nil {
+	if err := runOps(bc, chromedp.OuterHTML(selector, &html)); err != nil {
 		return "", fmt.Errorf("browser_use get_html %q: %w", selector, err)
 	}
 	if len(html) > 50_000 {
@@ -235,7 +249,7 @@ func (b *BrowserUse) screenshot(ctx context.Context) (string, error) {
 		return "", err
 	}
 	var buf []byte
-	if err := chromedp.Run(bc, chromedp.CaptureScreenshot(&buf)); err != nil {
+	if err := runOps(bc, chromedp.CaptureScreenshot(&buf)); err != nil {
 		return "", fmt.Errorf("browser_use screenshot: %w", err)
 	}
 	encoded := base64.StdEncoding.EncodeToString(buf)
@@ -248,7 +262,7 @@ func (b *BrowserUse) executeJS(ctx context.Context, script string) (string, erro
 		return "", err
 	}
 	var result any
-	if err := chromedp.Run(bc, chromedp.Evaluate(script, &result)); err != nil {
+	if err := runOps(bc, chromedp.Evaluate(script, &result)); err != nil {
 		return "", fmt.Errorf("browser_use execute_js: %w", err)
 	}
 	out, _ := json.Marshal(result)
