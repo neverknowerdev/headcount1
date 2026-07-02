@@ -69,7 +69,7 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
 		if err == nil && task.Status != "backlog" {
-			go api.engine.ProcessTask(context.Background(), req.TaskID)
+			go api.engine.RerunTask(context.Background(), req.TaskID)
 		}
 	}
 
