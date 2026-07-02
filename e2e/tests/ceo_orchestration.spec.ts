@@ -255,13 +255,29 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(agentTokenStats).toContainText('QA Lead');
         await expect(agentTokenStats).toContainText('Programmer');
 
-        // Run Logs list groups the child sessions under the root run.
+        // Run Logs list: only the main session is a top-level card. Its
+        // sub-sessions are nested one level down and stay collapsed until the
+        // card itself, then the individual session block, is maximized.
         await page.goto('/companies/ceo-co/runs');
         await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
-        await expect(page.getByText('2 sessions')).toBeVisible();
-        // Child session rows are inside the collapsed run card — expand it.
-        await page.locator('summary', { hasText: `Run #${rootRun.id}` }).click();
-        await expect(page.getByText(/↳ Session #\d+ · QA Lead/)).toBeVisible();
+        const rootCards = page.getByTestId('root-run-card');
+        await expect(rootCards).toHaveCount(1);
+        await expect(rootCards.first()).toContainText('2 sessions');
+
+        // Sub-session logs stay hidden until the root card itself is maximized
+        // (native <details> collapses its content).
+        await expect(rootCards.first().getByTestId('session-block').first()).not.toBeVisible();
+        await rootCards.first().locator('summary').click();
+        const listSessionBlocks = rootCards.first().getByTestId('session-block');
+        await expect(listSessionBlocks).toHaveCount(2);
+        await expect(listSessionBlocks.first()).toBeVisible();
+        await expect(listSessionBlocks.first()).toContainText('QA Lead');
+
+        // Each nested session itself stays collapsed (not even mounted) until
+        // it is individually maximized.
+        await expect(listSessionBlocks.first().getByText('Execution Log')).toHaveCount(0);
+        await listSessionBlocks.first().getByRole('button').first().click();
+        await expect(listSessionBlocks.first().getByText('Execution Log')).toBeVisible({ timeout: 15_000 });
 
         // Task view separates the user input from the CEO-generated spec.
         await page.goto(`/companies/ceo-co/tasks/${taskId}`);

@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { useStore } from '../store';
+import { RunLogViewer } from '../components/RunLogViewer';
 
 export const RunLogs: React.FC = () => {
     const { selectedCompanyId } = useStore();
@@ -62,18 +63,6 @@ export const RunLogs: React.FC = () => {
         return () => ws.close();
     }, [selectedCompanyId]);
 
-    const getLogPreview = (r: any): string => {
-        if (r.log_entries && r.log_entries.length > 0) {
-            const lastInfo = [...r.log_entries].reverse().find((e: any) => e.type === 'info');
-            return lastInfo?.content?.substring(0, 100) || 'Processing...';
-        }
-        if (r.log_content) {
-            const lines = r.log_content.split('\n').filter((l: string) => l.trim());
-            return lines[lines.length - 1]?.substring(0, 100) || 'Waiting for logs...';
-        }
-        return 'Waiting for logs...';
-    };
-
     const formatTokens = (n: number): string => {
         if (!n || n < 1000) return String(n || 0);
         if (n < 10000) return (n / 1000).toFixed(1).replace(/\.0$/, '') + 'K';
@@ -88,31 +77,32 @@ export const RunLogs: React.FC = () => {
                 {runs.length === 0 ? (
                     <div className="text-gray-500 italic flex items-center justify-center h-full font-mono text-sm">No agent runs recorded yet...</div>
                 ) : (
-                    <div className="space-y-4">
+                    <div className="space-y-3">
                         {(() => {
-                            // Group delegated session runs under their parent so the
-                            // list shows one card per main (root) run.
-                            const childrenByParent = new Map<number, any[]>();
+                            // Only main (root) sessions form the top level of the list.
+                            // Delegated sessions are nested one level down and rendered
+                            // by RunLogViewer's own session blocks, which stay collapsed
+                            // until the user expands ("maximizes") them individually.
+                            const childCountByParent = new Map<number, number>();
                             runs.forEach((r: any) => {
                                 if (r.parent_run_id) {
-                                    const list = childrenByParent.get(r.parent_run_id) || [];
-                                    list.push(r);
-                                    childrenByParent.set(r.parent_run_id, list);
+                                    childCountByParent.set(r.parent_run_id, (childCountByParent.get(r.parent_run_id) || 0) + 1);
                                 }
                             });
                             const rootRuns = runs.filter((r: any) => !r.parent_run_id);
                             return rootRuns.map((r: any) => {
                             const ts = r.token_stats || {};
                             const total = ts.total_tokens || 0;
-                            const children = childrenByParent.get(r.id) || [];
+                            const childCount = childCountByParent.get(r.id) || 0;
+                            const messages = (r.log_entries || []).map((e: any, i: number) => ({ id: i, entry: e }));
                             return (
-                            <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
-                                <summary className="font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap">
+                            <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
+                                <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
                                         Run #{r.id} for Task #{r.task_id} by {r.agent?.name}
                                         {r.agent_config_name ? ` · ${r.agent_config_name}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
-                                        {children.length > 0 && (
-                                            <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
+                                        {childCount > 0 && (
+                                            <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{childCount} session{childCount > 1 ? 's' : ''}</span>
                                         )}
                                     </span>
                                     <div className="flex items-center gap-2">
@@ -124,33 +114,14 @@ export const RunLogs: React.FC = () => {
                                                 )}
                                             </div>
                                         )}
-                                        <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded hover:bg-indigo-200">
+                                        <Link to={`/companies/${shortName}/run-logs/${r.id}`} className="text-xs bg-indigo-100 text-indigo-700 px-2 py-1 rounded hover:bg-indigo-200" onClick={e => e.stopPropagation()}>
                                             View Details
                                         </Link>
                                     </div>
                                 </summary>
-                                <div className="mt-4 text-xs bg-gray-900 text-green-400 p-3 rounded overflow-x-auto whitespace-pre-wrap max-h-96">
-                                    {r.status === 'running' && (
-                                        <div className="flex items-center gap-2 text-yellow-400 mb-2">
-                                            <div className="w-2 h-2 bg-yellow-400 rounded-full animate-pulse" />
-                                            Running...
-                                        </div>
-                                    )}
-                                    <pre className="whitespace-pre-wrap">{getLogPreview(r)}</pre>
+                                <div className="border-t h-[28rem]">
+                                    <RunLogViewer messages={messages} status={r.status} tokenStats={r.token_stats} />
                                 </div>
-                                {children.length > 0 && (
-                                    <div className="mt-2 space-y-1">
-                                        {children.map((c: any) => (
-                                            <div key={c.id} className="ml-6 flex items-center justify-between gap-2 text-xs border-l-2 border-violet-300 bg-violet-50/50 rounded px-3 py-1.5">
-                                                <span className="text-violet-800">
-                                                    ↳ Session #{c.id} · {c.agent_config_name || c.agent?.name} · Task #{c.task_id} ({c.status})
-                                                    {c.current_status && <span className="ml-2 text-gray-500 italic">{c.current_status}</span>}
-                                                </span>
-                                                <Link to={`/companies/${shortName}/run-logs/${c.id}`} className="text-violet-700 hover:underline shrink-0">View</Link>
-                                            </div>
-                                        ))}
-                                    </div>
-                                )}
                             </details>
                             );
                         });
