@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -437,11 +438,17 @@ func TestNativeEngineDelegateTask(t *testing.T) {
 	assert.Equal(t, "completed", childRun.Status)
 	assert.Equal(t, "Subtask A implemented", childRun.ResultDescription)
 
-	// The parent run's log must record the session start and end.
-	parentRun, err := q.GetRun(context.Background(), runID)
-	require.NoError(t, err)
-	assert.Contains(t, parentRun.LogEntries, "session_started")
-	assert.Contains(t, parentRun.LogEntries, "session_ended")
+	// The parent run's log must record the session start and end. Log entries
+	// are persisted by fire-and-forget goroutines, so poll instead of reading
+	// once — the run can complete a moment before the last entry lands.
+	require.Eventually(t, func() bool {
+		parentRun, err := q.GetRun(context.Background(), runID)
+		if err != nil {
+			return false
+		}
+		return strings.Contains(parentRun.LogEntries, "session_started") &&
+			strings.Contains(parentRun.LogEntries, "session_ended")
+	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
 }
 
 // TestNativeEngineSequentialDelegations verifies that two delegate_task calls

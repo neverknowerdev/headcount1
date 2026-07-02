@@ -147,11 +147,22 @@ func (b *BrowserUse) ensureBrowser(ctx context.Context) (context.Context, error)
 	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, opts...)
 	taskCtx, taskCancel := chromedp.NewContext(allocCtx)
 
-	// Start the browser process eagerly so failures surface here.
-	if err := chromedp.Run(taskCtx); err != nil {
+	// Start the browser process eagerly so failures surface here. chromedp
+	// binds the browser's lifetime to the context of this first Run, so it
+	// must be taskCtx itself — the launch is bounded with a timer instead of
+	// a derived timeout context.
+	startDone := make(chan error, 1)
+	go func() { startDone <- chromedp.Run(taskCtx) }()
+	var startErr error
+	select {
+	case startErr = <-startDone:
+	case <-time.After(30 * time.Second):
+		startErr = fmt.Errorf("timed out after 30s")
+	}
+	if startErr != nil {
 		taskCancel()
 		allocCancel()
-		return nil, fmt.Errorf("browser_use: failed to start browser: %w", err)
+		return nil, fmt.Errorf("browser_use: failed to start browser: %w", startErr)
 	}
 
 	b.taskCtx = taskCtx
