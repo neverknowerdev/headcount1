@@ -111,11 +111,11 @@ test.describe.serial('CEO orchestration flow', () => {
                 } } },
                 { text: 'Acceptance criteria are ready.' },
                 // CEO turn 4: record the refinement outputs as structured task
-                // fields, separate from the user's original description
+                // fields (item lists), separate from the user's original description
                 { tool_call: { id: 'c3b', name: 'update_task_details', arguments: {
                     refined_description: 'Show a casual greeting on the home page.',
-                    acceptance_criteria: '1. Home page shows a casual greeting.',
-                    test_cases: 'TC1: Open home page and verify the casual greeting is visible.',
+                    acceptance_criteria: ['Home page shows a casual greeting.', 'Greeting text is configurable.'],
+                    test_cases: ['Open home page → casual greeting is visible.'],
                 } } },
                 // CEO turn 5: delegate implementation to Programmer
                 { tool_call: { id: 'c4', name: 'delegate_task', arguments: {
@@ -128,8 +128,20 @@ test.describe.serial('CEO orchestration flow', () => {
                     task_status: 'done', finish_status: 'Casual greeting implemented.',
                 } } },
                 { text: 'Implementation done.' },
-                // CEO final turn: wrap up
+                // CEO tries to finish WITHOUT verifying the spec items — the
+                // engine must reject this (verification gate).
                 { tool_call: { id: 'c5', name: 'finish_task', arguments: {
+                    task_status: 'in-review', finish_status: 'Attempt to finish before verification.',
+                } } },
+                // CEO records a verdict for every item, then finishes for real.
+                { tool_call: { id: 'c6', name: 'verify_spec_items', arguments: {
+                    results: [
+                        { list: 'acceptance_criteria', id: 1, status: 'passed' },
+                        { list: 'acceptance_criteria', id: 2, status: 'failed', note: 'Config option not implemented yet.' },
+                        { list: 'test_cases', id: 1, status: 'passed', note: 'Verified by QA.' },
+                    ],
+                } } },
+                { tool_call: { id: 'c7', name: 'finish_task', arguments: {
                     task_status: 'in-review', finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
                 { text: 'Task complete.' },
@@ -205,8 +217,25 @@ test.describe.serial('CEO orchestration flow', () => {
         const finalTask = await (await request.get(`/api/tasks/${taskId}`)).json();
         expect(finalTask.description).toBe('Add a greeting to the product.');
         expect(finalTask.refined_description).toBe('Show a casual greeting on the home page.');
-        expect(finalTask.acceptance_criteria).toBe('1. Home page shows a casual greeting.');
-        expect(finalTask.test_cases).toBe('TC1: Open home page and verify the casual greeting is visible.');
+
+        // Criteria and test cases are structured item lists with per-item
+        // verdicts recorded during the verification stage.
+        const acItems = JSON.parse(finalTask.acceptance_criteria);
+        expect(acItems).toEqual([
+            { id: 1, text: 'Home page shows a casual greeting.', status: 'passed' },
+            { id: 2, text: 'Greeting text is configurable.', status: 'failed', note: 'Config option not implemented yet.' },
+        ]);
+        const tcItems = JSON.parse(finalTask.test_cases);
+        expect(tcItems).toEqual([
+            { id: 1, text: 'Open home page → casual greeting is visible.', status: 'passed', note: 'Verified by QA.' },
+        ]);
+
+        // The premature finish_task (before verification) must have been
+        // rejected by the engine's verification gate.
+        const rootEntries = rootDetails.log_entries as any[];
+        const gateError = rootEntries.find(e =>
+            e.type === 'tool_response' && typeof e.content === 'string' && e.content.includes('unverified'));
+        expect(gateError, 'finish_task before verify_spec_items should be rejected').toBeTruthy();
 
         // ── Subtasks: both delegations created and finished their tasks ──────
         const allTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
@@ -290,16 +319,23 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(ceoSpec.getByText('Refined Description')).toBeVisible();
         await expect(ceoSpec.getByText('Show a casual greeting on the home page.')).toBeVisible();
 
-        // Acceptance criteria and test cases are minimized by default…
+        // Acceptance criteria and test cases are minimized by default, with a
+        // verification progress badge in the header…
         await expect(ceoSpec.getByText('Acceptance Criteria')).toBeVisible();
         await expect(ceoSpec.getByText('Test Cases')).toBeVisible();
+        await expect(ceoSpec.getByText('1/2 passed, 1 failed')).toBeVisible();
+        await expect(ceoSpec.getByText('1/1 passed')).toBeVisible();
         await expect(ceoSpec.getByText('Home page shows a casual greeting.')).toHaveCount(0);
 
-        // …and expand on click.
+        // …and expand into a per-item checklist with verdicts.
         await ceoSpec.getByRole('button', { name: /Acceptance Criteria/ }).click();
         await expect(ceoSpec.getByText('Home page shows a casual greeting.')).toBeVisible();
+        await expect(ceoSpec.getByText('Greeting text is configurable.')).toBeVisible();
+        await expect(ceoSpec.getByText('Config option not implemented yet.')).toBeVisible();
+        await expect(ceoSpec.getByText('✅')).toHaveCount(1);
+        await expect(ceoSpec.getByText('❌')).toHaveCount(1);
         await ceoSpec.getByRole('button', { name: /Test Cases/ }).click();
-        await expect(ceoSpec.getByText(/Open home page and verify/)).toBeVisible();
+        await expect(ceoSpec.getByText(/casual greeting is visible/)).toBeVisible();
     });
 
     test('re-running a subtask or child session restarts the main session', async ({ page, request }) => {

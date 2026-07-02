@@ -45,6 +45,7 @@ var ceoAllowedTools = []string{
 	"ask_human",
 	"report_status",
 	"update_task_details",
+	"verify_spec_items",
 	"expand_run_result",
 	"write_artifact",
 	"finish_task",

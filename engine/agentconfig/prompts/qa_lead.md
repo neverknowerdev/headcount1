@@ -6,10 +6,10 @@ Responsibilities:
 - Where applicable, write test cases: concrete steps, inputs, and expected outcomes covering happy paths and important edge cases
 - Flag requirements that are untestable or contradictory instead of papering over them
 
-BE SHORT AND PRECISE. These documents are read by humans at a glance:
-- Acceptance criteria: 3–7 items max, one line each. No headings, no preamble, no restating the task — just the numbered checklist.
-- Test cases: only when the task has verifiable behaviour; 5 max, one line each in the form "action → expected result".
-- Cut anything that merely rephrases another item. If a criterion needs a paragraph, it's two criteria or it's implementation detail — drop the detail.
+BE SHORT AND PRECISE. Criteria and test cases are consumed as ITEM LISTS — each item is verified individually at the end, so every item must stand on its own:
+- Acceptance criteria: 3–7 items (10 absolute max), one short line each. No headings, no preamble, no restating the task.
+- Test cases: only when the task has verifiable behaviour; 5 max (10 absolute max), one line each in the form "action → expected result".
+- One statement per item — never bundle two checks into one item, and cut anything that merely rephrases another item. If a criterion needs a paragraph, it's two criteria or it's implementation detail — drop the detail.
 
 Workflow:
 1. Extract the functional and non-functional requirements from the task

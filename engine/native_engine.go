@@ -437,11 +437,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	var taskFinished bool
 
 	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus string) error {
-		taskFinished = true
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
 		}
+		// Verification gate: a task with structured acceptance criteria /
+		// test cases cannot be finished while any item is unverified.
+		if status == "done" || status == "in-review" {
+			pending := db.CountPendingSpecItems(t.AcceptanceCriteria) + db.CountPendingSpecItems(t.TestCases)
+			if pending > 0 {
+				return fmt.Errorf("cannot finish: %d acceptance criteria / test case items are still unverified — check each one and record the verdicts via verify_spec_items first", pending)
+			}
+		}
+		taskFinished = true
 		prevStatus := t.Status
 		t.Status = status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
@@ -528,7 +536,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return e.askHuman(qCtx, task.ID, run.ID, question)
 	}))
 
-	registry.Register(tools.NewUpdateTaskDetails(func(uCtx context.Context, refinedDescription, acceptanceCriteria, testCases string) error {
+	registry.Register(tools.NewUpdateTaskDetails(func(uCtx context.Context, refinedDescription string, acceptanceCriteria, testCases []string) error {
 		t, err := e.q.GetTask(uCtx, task.ID)
 		if err != nil {
 			return err
@@ -536,24 +544,64 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if refinedDescription != "" {
 			t.RefinedDescription = refinedDescription
 		}
-		if acceptanceCriteria != "" {
-			t.AcceptanceCriteria = acceptanceCriteria
+		// Criteria and test cases are stored as structured item lists so each
+		// entry can be verified individually during the testing phase.
+		if len(acceptanceCriteria) > 0 {
+			t.AcceptanceCriteria = db.MarshalSpecItems(db.NewSpecItems(acceptanceCriteria))
 		}
-		if testCases != "" {
-			t.TestCases = testCases
+		if len(testCases) > 0 {
+			t.TestCases = db.MarshalSpecItems(db.NewSpecItems(testCases))
 		}
 		if _, err := e.q.UpdateTask(uCtx, t); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{
-			"id":                  task.ID,
-			"status":              t.Status,
-			"refined_description": t.RefinedDescription,
-			"acceptance_criteria": t.AcceptanceCriteria,
-			"test_cases":          t.TestCases,
-		})
+		e.broadcastTaskSpec(t)
 		e.logInfo(proxyLogger, "Task details updated (refined description / acceptance criteria / test cases)")
 		return nil
+	}))
+
+	registry.Register(tools.NewVerifySpecItems(func(vCtx context.Context, results []tools.SpecItemResult) (string, error) {
+		t, err := e.q.GetTask(vCtx, task.ID)
+		if err != nil {
+			return "", err
+		}
+		acItems := db.ParseSpecItems(t.AcceptanceCriteria)
+		tcItems := db.ParseSpecItems(t.TestCases)
+		for _, r := range results {
+			var items []db.SpecItem
+			if r.List == "acceptance_criteria" {
+				items = acItems
+			} else {
+				items = tcItems
+			}
+			found := false
+			for i := range items {
+				if items[i].ID == r.ID {
+					items[i].Status = r.Status
+					items[i].Note = r.Note
+					found = true
+					break
+				}
+			}
+			if !found {
+				return "", fmt.Errorf("no item with id %d in %s (the task has %d acceptance criteria and %d test cases)",
+					r.ID, r.List, len(acItems), len(tcItems))
+			}
+		}
+		if len(acItems) > 0 {
+			t.AcceptanceCriteria = db.MarshalSpecItems(acItems)
+		}
+		if len(tcItems) > 0 {
+			t.TestCases = db.MarshalSpecItems(tcItems)
+		}
+		if _, err := e.q.UpdateTask(vCtx, t); err != nil {
+			return "", err
+		}
+		e.broadcastTaskSpec(t)
+		summary := fmt.Sprintf("Recorded %d verdict(s). %s %s",
+			len(results), specItemsSummary("Acceptance criteria", acItems), specItemsSummary("Test cases", tcItems))
+		e.logInfo(proxyLogger, summary)
+		return summary, nil
 	}))
 
 	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
@@ -979,6 +1027,38 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 		"status":      status,
 		"subtask_title": subtask.Title,
 	})
+}
+
+// broadcastTaskSpec pushes the task's spec fields to the UI after
+// update_task_details / verify_spec_items change them.
+func (e *NativeEngine) broadcastTaskSpec(t db.Task) {
+	e.hub.BroadcastEvent("task_updated", map[string]interface{}{
+		"id":                  t.ID,
+		"status":              t.Status,
+		"refined_description": t.RefinedDescription,
+		"acceptance_criteria": t.AcceptanceCriteria,
+		"test_cases":          t.TestCases,
+	})
+}
+
+// specItemsSummary renders a one-line verification progress summary, e.g.
+// "Acceptance criteria: 3 passed, 1 failed, 2 pending."
+func specItemsSummary(label string, items []db.SpecItem) string {
+	if len(items) == 0 {
+		return ""
+	}
+	passed, failed, pending := 0, 0, 0
+	for _, item := range items {
+		switch item.Status {
+		case db.SpecItemPassed:
+			passed++
+		case db.SpecItemFailed:
+			failed++
+		default:
+			pending++
+		}
+	}
+	return fmt.Sprintf("%s: %d passed, %d failed, %d pending.", label, passed, failed, pending)
 }
 
 // emitStatusChange creates a status_change comment and broadcasts it.

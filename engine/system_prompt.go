@@ -2,6 +2,7 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -93,14 +94,35 @@ type PromptData struct {
 	TestCases          string
 }
 
+// formatSpecItems renders structured spec items as numbered lines with their
+// id and verification status, so agents can reference items by id when
+// calling verify_spec_items. Legacy plain-text content passes through as-is.
+func formatSpecItems(raw string) string {
+	items := db.ParseSpecItems(raw)
+	if items == nil {
+		return raw
+	}
+	var b bytes.Buffer
+	for i, item := range items {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "%d. [%s] %s", item.ID, item.Status, item.Text)
+		if item.Note != "" {
+			fmt.Fprintf(&b, " — %s", item.Note)
+		}
+	}
+	return b.String()
+}
+
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
 		TaskName:           task.Title,
 		TaskStatus:         task.Status,
 		TaskDescription:    task.Description,
 		RefinedDescription: task.RefinedDescription,
-		AcceptanceCriteria: task.AcceptanceCriteria,
-		TestCases:          task.TestCases,
+		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
+		TestCases:          formatSpecItems(task.TestCases),
 	}
 
 	if task.CompanyID != 0 {
