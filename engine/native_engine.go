@@ -39,8 +39,22 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 	}
 }
 
-// ProcessTask picks up a task and spawns a goroutine to run the agent.
+// ProcessTask reacts to a task's current status and spawns a goroutine to run
+// the agent when that status implies pending work ("to-do", "in-progress").
+// Tasks in terminal or manual statuses (in-review, blocked, done, refinement)
+// are left untouched — moving a card to "done" must not restart the agent.
 func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
+	return e.processTask(ctx, taskID, false)
+}
+
+// RerunTask forces a new agent run for an explicit user action (the Re-run
+// button or a comment with the Run Agent flag), moving the task from a
+// terminal status back to "in-progress" if necessary.
+func (e *NativeEngine) RerunTask(ctx context.Context, taskID int32) error {
+	return e.processTask(ctx, taskID, true)
+}
+
+func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun bool) error {
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
@@ -83,7 +97,11 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	case "in-progress":
 		go e.run(context.Background(), task, "implement")
 	case "in-review", "blocked", "done", "refinement":
-		// Re-run triggered by a user comment (Run Agent flag). Move back to in-progress.
+		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
+		// a task out of these statuses; a plain status change never does.
+		if !forceRerun {
+			return nil
+		}
 		prevStatus := task.Status
 		task.Status = "in-progress"
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {

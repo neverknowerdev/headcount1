@@ -129,7 +129,7 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "task has no assigned agent")
 		return
 	}
-	if err := api.engine.ProcessTask(r.Context(), int32(id)); err != nil {
+	if err := api.engine.RerunTask(r.Context(), int32(id)); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

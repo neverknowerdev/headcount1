@@ -1,66 +1,65 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { useStore } from '../store';
+import { useWebSocket, wsUrl } from '../useWebSocket';
 
 export const RunLogs: React.FC = () => {
     const { selectedCompanyId } = useStore();
     const { shortName } = useParams<{shortName: string}>();
     const [runs, setRuns] = useState<any[]>([]);
 
-    useEffect(() => {
+    const fetchRuns = useCallback(async () => {
         if (!selectedCompanyId) return;
+        try {
+            const res = await axios.get(`/api/runs?company_id=${selectedCompanyId}`);
+            setRuns(res.data || []);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [selectedCompanyId]);
 
-        const fetchRuns = async () => {
-            try {
-                const res = await axios.get(`/api/runs?company_id=${selectedCompanyId}`);
-                setRuns(res.data || []);
-            } catch (e) {
-                console.error(e);
-            }
-        };
+    useEffect(() => { fetchRuns(); }, [fetchRuns]);
 
-        fetchRuns();
-
-        const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-        ws.onmessage = (event) => {
-            const msg = JSON.parse(event.data);
-            if (msg.type === 'run_log') {
-                setRuns((prev) => {
-                    const runId = msg.payload.run_id;
-                    if (msg.payload.entry) {
-                        // Structured format
-                        return prev.map(r =>
-                            r.id === runId
-                                ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] }
-                                : r
-                        );
-                    } else if (msg.payload.line) {
-                        // Legacy format fallback
-                        return prev.map(r =>
-                            r.id === runId
-                                ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' }
-                                : r
-                        );
-                    }
-                    return prev;
-                });
-            } else if (msg.type === 'run_started') {
-                fetchRuns();
-            } else if (msg.type === 'run_ended') {
-                setRuns((prev) => {
-                    const runId = msg.payload.run_id;
-                    const status = msg.payload.status;
+    useWebSocket(wsUrl(), (msg) => {
+        if (msg.type === 'run_log') {
+            setRuns((prev) => {
+                const runId = msg.payload.run_id;
+                if (msg.payload.entry) {
+                    // Structured format
                     return prev.map(r =>
                         r.id === runId
-                            ? { ...r, status }
+                            ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] }
                             : r
                     );
-                });
-            }
-        };
-        return () => ws.close();
-    }, [selectedCompanyId]);
+                } else if (msg.payload.line) {
+                    // Legacy format fallback
+                    return prev.map(r =>
+                        r.id === runId
+                            ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' }
+                            : r
+                    );
+                }
+                return prev;
+            });
+        } else if (msg.type === 'run_started') {
+            fetchRuns();
+        } else if (msg.type === 'run_ended') {
+            setRuns((prev) => {
+                const runId = msg.payload.run_id;
+                const status = msg.payload.status;
+                return prev.map(r =>
+                    r.id === runId
+                        ? { ...r, status }
+                        : r
+                );
+            });
+        }
+    }, {
+        enabled: !!selectedCompanyId,
+        // Re-fetch on every (re)connect so events missed while offline are recovered.
+        onConnect: fetchRuns,
+    });
 
     const getLogPreview = (r: any): string => {
         if (r.log_entries && r.log_entries.length > 0) {
