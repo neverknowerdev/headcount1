@@ -764,3 +764,64 @@ func fixtureHandler(ft *aicli.FixtureTransport) http.Handler {
 		io.Copy(w, resp.Body)
 	})
 }
+
+// TestNativeEngineProcessTaskIgnoresTerminalStatuses verifies that a plain
+// status change (e.g. dragging a card to done/blocked/in-review/refinement)
+// does NOT restart the agent — only an explicit re-run may do that.
+func TestNativeEngineProcessTaskIgnoresTerminalStatuses(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	q := db.New(database)
+
+	for _, status := range []string{"in-review", "blocked", "done", "refinement"} {
+		task.Status = status
+		_, err := q.UpdateTask(context.Background(), task)
+		require.NoError(t, err)
+
+		require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+		// Give a would-be run goroutine time to appear, then assert nothing happened.
+		time.Sleep(300 * time.Millisecond)
+
+		var runCount int64
+		require.NoError(t, database.Model(&db.Run{}).Where("task_id = ?", task.ID).Count(&runCount).Error)
+		assert.Zero(t, runCount, "status %q: ProcessTask must not start a run", status)
+
+		updated, err := q.GetTask(context.Background(), task.ID)
+		require.NoError(t, err)
+		assert.Equal(t, status, updated.Status, "status %q: ProcessTask must not change the status", status)
+	}
+}
+
+// TestNativeEngineRerunTaskFromTerminalStatus verifies that an explicit re-run
+// (Re-run button / Run Agent comment) pulls a task out of a terminal status,
+// moves it to in-progress, and starts a new run.
+func TestNativeEngineRerunTaskFromTerminalStatus(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	q := db.New(database)
+
+	task.Status = "done"
+	_, err := q.UpdateTask(context.Background(), task)
+	require.NoError(t, err)
+
+	require.NoError(t, eng.RerunTask(context.Background(), task.ID))
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	run := waitForRunDone(t, q, runID, 30*time.Second)
+	assert.Equal(t, "completed", run.Status)
+
+	// The mock agent finishes with finish_task(in-review), proving the run
+	// actually executed after being forced out of "done".
+	updated, err := q.GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "in-review", updated.Status)
+}
