@@ -106,10 +106,11 @@ test.describe.serial('CEO orchestration flow', () => {
                     agent_name: 'QA Lead',
                 } } },
                 // QA Lead session
+                // finish_task is a terminal tool: the session ends the instant it
+                // succeeds, with no further LLM round-trip in this session.
                 { tool_call: { id: 'q1', name: 'finish_task', arguments: {
                     task_status: 'done', finish_status: 'Acceptance criteria defined: casual greeting shown on home page.',
                 } } },
-                { text: 'Acceptance criteria are ready.' },
                 // CEO turn 4: record the refinement outputs as structured task
                 // fields (item lists), separate from the user's original description
                 { tool_call: { id: 'c3b', name: 'update_task_details', arguments: {
@@ -132,7 +133,6 @@ test.describe.serial('CEO orchestration flow', () => {
                 { tool_call: { id: 'p2', name: 'finish_task', arguments: {
                     task_status: 'done', finish_status: 'Casual greeting implemented.',
                 } } },
-                { text: 'Implementation done.' },
                 // CEO tries to finish WITHOUT verification — the engine must
                 // reject this (verification gate).
                 { tool_call: { id: 'c5', name: 'finish_task', arguments: {
@@ -154,11 +154,9 @@ test.describe.serial('CEO orchestration flow', () => {
                 { tool_call: { id: 'v2', name: 'finish_task', arguments: {
                     task_status: 'done', finish_status: 'Verification complete: 2 passed, 1 failed.',
                 } } },
-                { text: 'Verification done.' },
                 { tool_call: { id: 'c7', name: 'finish_task', arguments: {
                     task_status: 'in-review', finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
-                { text: 'Task complete.' },
             ],
         };
         const scRes = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
@@ -269,8 +267,9 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(zipRes.headers()['content-type']).toContain('application/zip');
 
         // ── Subtasks: two delegations plus the QA verification session ───────
-        const allTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
-        const subtasks = (allTasks as any[]).filter(t => t.parent_id === taskId);
+        // Subtasks are excluded from the default task list; fetch them
+        // explicitly via parent_id.
+        const subtasks = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
         expect(subtasks.length).toBe(3);
         for (const st of subtasks) {
             expect(st.status).toBe('done');
@@ -396,8 +395,8 @@ test.describe.serial('CEO orchestration flow', () => {
         // Reset the mock to default mode: first call answers finish_task(in-review).
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
 
-        const allTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
-        const subtask = (allTasks as any[]).find(t => t.parent_id === taskId);
+        const subtasksList = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
+        const subtask = (subtasksList as any[])[0];
         expect(subtask).toBeTruthy();
 
         const mainRunsBefore = await (await request.get(`/api/tasks/${taskId}/runs`)).json();
