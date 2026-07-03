@@ -86,7 +86,7 @@ func TestAgentToolCall(t *testing.T) {
 	var capturedStatus string
 
 	reg := aicli.NewRegistry()
-	reg.Register(tools.NewFinishTask(func(ctx context.Context, status, finishStatus string) error {
+	reg.Register(tools.NewFinishTask(func(ctx context.Context, status, finishStatus, resultDetails string) error {
 		finishCalled.Store(true)
 		capturedStatus = status
 		return nil

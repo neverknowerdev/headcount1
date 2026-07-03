@@ -2,10 +2,13 @@ package engine
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"text/template"
+	"time"
 
 	"agent-orchestrator/db"
 	"gopkg.in/yaml.v3"
@@ -54,13 +57,17 @@ const promptTemplate = `You are an agent that works on tasks. Implement the task
 
 At the end of every run you MUST call finish_task — there are no exceptions:
 - in-review: work is done, ready for human review
-- blocked: you are stuck and need user input
+- blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
 - done: task is fully complete, no review needed
 - refinement: you need clarification before you can start
+Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — other agents read it via expand_run_result.
 
-Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
+Deliverables (plans, reports, specs, documentation) are ARTIFACTS: write them with write_artifact, discover existing ones with list_artifacts, and read them with read_artifact. Artifacts are shared across the whole task tree — always check list_artifacts before re-deriving work another agent may already have produced. Never paste a full document into a chat message when it exists as an artifact; reference its filename instead.
+
+Your file tools are sandboxed to the working directory below. Absolute paths outside it are inaccessible; explore code through the codegraph tools when available.
 
 Context of your work:
+Current date: {{.CurrentDate}}
 {{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}
 {{if .ProjectName}}Project: {{.ProjectName}}. {{.ProjectDescription}}{{end}}
 {{if .SprintName}}Sprint: {{.SprintName}}. {{.SprintDescription}}{{end}}
@@ -68,8 +75,11 @@ Working directory: {{.WorkingDirectory}}
 
 Task name: {{.TaskName}}
 Task status: {{.TaskStatus}}
-Task: {{.TaskDescription}}
-`
+Task (user input): {{.TaskDescription}}
+{{if .RefinedDescription}}Refined description: {{.RefinedDescription}}{{end}}
+{{if .SpecItems}}
+Acceptance criteria / test cases (spec items — verify with verify_spec_items, citing evidence):
+{{.SpecItems}}{{end}}`
 
 type PromptData struct {
 	CompanyName        string
@@ -79,16 +89,43 @@ type PromptData struct {
 	SprintName         string
 	SprintDescription  string
 	WorkingDirectory   string
+	CurrentDate        string
 	TaskName           string
 	TaskStatus         string
 	TaskDescription    string
+	RefinedDescription string
+	SpecItems          string
 }
 
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
-		TaskName:        task.Title,
-		TaskStatus:      task.Status,
-		TaskDescription: task.Description,
+		TaskName:           task.Title,
+		TaskStatus:         task.Status,
+		TaskDescription:    task.Description,
+		RefinedDescription: task.RefinedDescription,
+		CurrentDate:        time.Now().Format("2006-01-02"),
+	}
+
+	// Spec items live on the root task of the subtask tree so every agent in
+	// the tree sees the same checklist (with IDs for verify_spec_items).
+	if b.q != nil {
+		root, err := b.q.GetRootTask(context.Background(), task.ID)
+		if err == nil {
+			if root.RefinedDescription != "" && data.RefinedDescription == "" {
+				data.RefinedDescription = root.RefinedDescription
+			}
+			if items, iErr := b.q.ListSpecItemsByTask(context.Background(), root.ID); iErr == nil && len(items) > 0 {
+				var sb bytes.Buffer
+				for _, it := range items {
+					line := fmt.Sprintf("- [id %d] (%s, %s) %s", it.ID, it.Kind, it.Status, it.Text)
+					if it.Note != "" {
+						line += " — " + it.Note
+					}
+					sb.WriteString(line + "\n")
+				}
+				data.SpecItems = sb.String()
+			}
+		}
 	}
 
 	if task.CompanyID != 0 {

@@ -219,3 +219,13 @@ func (q *Queries) ListCompletedRunsByTask(ctx context.Context, taskID int32) ([]
 		Find(&runs).Error
 	return runs, err
 }
+
+// GetLatestRunByTask returns the most recently started run for a task.
+func (q *Queries) GetLatestRunByTask(ctx context.Context, taskID int32) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).
+		Where("task_id = ?", taskID).
+		Order("started_at desc").
+		First(&r).Error
+	return r, err
+}

@@ -48,8 +48,10 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.SpecItem{},
 	))
 	return database
 }

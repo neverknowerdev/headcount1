@@ -94,6 +94,7 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.SpecItem{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)

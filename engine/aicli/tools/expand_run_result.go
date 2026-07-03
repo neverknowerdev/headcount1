@@ -8,7 +8,7 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// ExpandRunResult fetches the full explanation for a past run by ID.
+// ExpandRunResult fetches the full detailed handoff for a past run by run ID.
 type ExpandRunResult struct {
 	fn func(ctx context.Context, runID int32) (string, error)
 }
@@ -21,9 +21,11 @@ func (t *ExpandRunResult) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "expand_run_result",
-			Description: "Retrieve the full detailed explanation for a previous run. Use this when the short result summary in your context is not enough to understand what a previous run did.",
-			Parameters:  json.RawMessage(`{"type":"object","properties":{"run_id":{"type":"integer","description":"The numeric ID of the run whose explanation you want to read"}},"required":["run_id"]}`),
+			Name: "expand_run_result",
+			Description: "Retrieve the full detailed handoff (result_details) recorded by a previous run's finish_task. " +
+				"Use this when a short result summary is not enough. Pass the RUN id exactly as given in subtask results " +
+				"or past-run context (run_id, not a task or subtask id).",
+			Parameters: json.RawMessage(`{"type":"object","properties":{"run_id":{"type":"integer","description":"The numeric RUN id (as shown in 'run #N' in subtask results and past-run context) — not a task id"}},"required":["run_id"]}`),
 		},
 	}
 }

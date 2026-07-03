@@ -75,8 +75,8 @@ func (p *CodegraphProxy) RegisterAll(r *aicli.Registry) {
 		required:    []string{"symbol"},
 	})
 	r.Register(&cgProxyTool{proxy: p, name: "codegraph_node", mcpTool: "codegraph_node",
-		desc:        "Show the source code of a symbol or file, along with its call paths and callers.",
-		extraParams: `"symbol":{"type":"string","description":"Symbol name or file path to inspect"}`,
+		desc:        "Show the source code of a SYMBOL (function, class, method, struct), along with its call paths and callers. File paths are not supported — use codegraph_explore for file-level questions.",
+		extraParams: `"symbol":{"type":"string","description":"Symbol name to inspect (not a file path)"}`,
 		required:    []string{"symbol"},
 	})
 	r.Register(&cgProxyTool{proxy: p, name: "codegraph_files", mcpTool: "codegraph_files",
@@ -108,6 +108,23 @@ func (p *CodegraphProxy) projectNames() []string {
 		names = append(names, e.project.Name)
 	}
 	return names
+}
+
+// projectLegend renders "name — description (repo dir)" for each project so
+// tool schemas can explain what each enum value refers to.
+func (p *CodegraphProxy) projectLegend() string {
+	parts := make([]string, 0, len(p.entries))
+	for _, e := range p.entries {
+		s := e.project.Name
+		if e.project.Description != "" {
+			s += " — " + e.project.Description
+		}
+		if e.server.WorkDir != "" {
+			s += " (indexed from " + e.server.WorkDir + ")"
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // resolveEntry resolves the target project entry from the "project" parameter.
@@ -172,7 +189,14 @@ type cgProxyTool struct {
 func (t *cgProxyTool) Def() aicli.ToolDef {
 	projectEnum := buildProjectEnum(t.proxy.projectNames())
 
-	projectProp := fmt.Sprintf(`"project":{"type":"string","description":"Project to query. Omit to use the current project.","enum":%s}`, projectEnum)
+	// Include each project's description/repo path so agents don't have to
+	// guess what an enum value like "app" actually refers to.
+	projDesc := "Project to query. Omit to use the current project."
+	if legend := t.proxy.projectLegend(); legend != "" {
+		projDesc += " Projects: " + legend
+	}
+	descJSON, _ := json.Marshal(projDesc)
+	projectProp := fmt.Sprintf(`"project":{"type":"string","description":%s,"enum":%s}`, descJSON, projectEnum)
 
 	var props string
 	if t.extraParams != "" {

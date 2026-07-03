@@ -99,6 +99,9 @@ type Task struct {
 	Title           string     `json:"title" gorm:"not null"`
 	TaskType        string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	Description     string     `json:"description"`
+	// RefinedDescription is the agent-produced refinement of the task. The
+	// user's original Description is never modified by agents.
+	RefinedDescription string  `json:"refined_description" gorm:"type:text"`
 	Priority        string     `json:"priority" gorm:"not null;default:'Normal'"`
 	Status          string     `json:"status" gorm:"not null;default:'backlog'"`
 	DueDate         *time.Time `json:"due_date"`
@@ -268,6 +271,25 @@ type Artifact struct {
 	Content   string    `json:"content" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// SpecItem is a single acceptance criterion or test case attached to a task
+// (always the root task of a subtask tree). Items are created "pending" by
+// update_task_details and flipped to passed/failed by verify_spec_items.
+// The run that defined an item may not verify it — verification must come
+// from a different (independent) run.
+type SpecItem struct {
+	ID              int32     `json:"id" gorm:"primaryKey"`
+	TaskID          int32     `json:"task_id" gorm:"not null;index"`
+	Task            Task      `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	Kind            string    `json:"kind" gorm:"not null"`   // "criterion" | "test_case"
+	Text            string    `json:"text" gorm:"not null"`
+	Status          string    `json:"status" gorm:"not null;default:'pending'"` // pending | passed | failed
+	Note            string    `json:"note" gorm:"type:text"`  // verifier's evidence / failure note
+	DefinedByRunID  int32     `json:"defined_by_run_id" gorm:"not null"`
+	VerifiedByRunID *int32    `json:"verified_by_run_id"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type ActivityLog struct {

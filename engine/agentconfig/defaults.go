@@ -23,6 +23,34 @@ var writerPrompt string
 //go:embed prompts/researcher.md
 var researcherPrompt string
 
+//go:embed prompts/codeexplorer.md
+var codeExplorerPrompt string
+
+// Shared tool bundles. AllowedTools supports exact names and "prefix*"
+// wildcards (see aicli.Registry.Filter). Every agent needs finish_task; the
+// artifact read tools are universal so agents can consume each other's
+// deliverables instead of re-deriving them.
+var (
+	coordinationTools = []string{
+		"finish_task", "create_subtask", "expand_run_result",
+		"list_artifacts", "read_artifact", "update_task_details",
+	}
+	readOnlyCodeTools = []string{
+		"read", "ls", "grep", "codegraph_*",
+	}
+	artifactTools = []string{
+		"list_artifacts", "read_artifact", "write_artifact",
+	}
+)
+
+func join(lists ...[]string) []string {
+	var out []string
+	for _, l := range lists {
+		out = append(out, l...)
+	}
+	return out
+}
+
 // builtinConfigs returns the set of predefined agent configurations.
 // AllowedModels is intentionally left empty in all builtin configs so that
 // the engine's model resolver uses the configured LLM provider's available
@@ -32,11 +60,14 @@ func builtinConfigs() []*AgentConfig {
 	return []*AgentConfig{
 		{
 			Name:           "CEO",
-			Description:    "Chief Executive Officer — strategic oversight and decision making",
+			Description:    "Chief Executive Officer — orchestrates task execution through delegation",
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"CTO", "Writer", "Researcher"},
+			Subagents:      []string{"CTO", "Writer", "Researcher", "CodeExplorer"},
+			// The CEO coordinates; it gets no file, shell, web, or authoring
+			// tools so deliverables always come from specialists.
+			AllowedTools: coordinationTools,
 		},
 		{
 			Name:           "CTO",
@@ -44,8 +75,9 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(ctoPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"Programmer", "QA", "Researcher"},
+			Subagents:      []string{"Programmer", "QA", "Researcher", "CodeExplorer"},
 			ParentAgent:    "CEO",
+			AllowedTools:   join(coordinationTools, readOnlyCodeTools),
 		},
 		{
 			Name:           "Programmer",
@@ -54,14 +86,22 @@ func builtinConfigs() []*AgentConfig {
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CTO",
+			AllowedTools: join(readOnlyCodeTools, []string{
+				"finish_task", "expand_run_result", "write", "bash", "web_fetch",
+				"list_artifacts", "read_artifact",
+			}),
 		},
 		{
 			Name:           "QA",
-			Description:    "Quality assurance — tests, validates, and reports defects",
+			Description:    "Quality assurance — independently verifies deliverables, tests, and reports defects",
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CTO",
+			AllowedTools: join(readOnlyCodeTools, artifactTools, []string{
+				"finish_task", "expand_run_result", "verify_spec_items",
+				"bash", "browser_use",
+			}),
 		},
 		{
 			Name:           "Writer",
@@ -70,13 +110,30 @@ func builtinConfigs() []*AgentConfig {
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
 			ParentAgent:    "CEO",
+			AllowedTools: join(readOnlyCodeTools, artifactTools, []string{
+				"finish_task", "expand_run_result", "web_fetch",
+			}),
 		},
 		{
 			Name:           "Researcher",
-			Description:    "Researcher — investigates topics and synthesises findings",
+			Description:    "Researcher — investigates external topics and synthesises findings",
 			Prompt:         strings.TrimSpace(researcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
+			AllowedTools: join(readOnlyCodeTools, artifactTools, []string{
+				"finish_task", "expand_run_result", "web_fetch", "browser_use",
+				"call_mcp_tool", "discover_mcp_tool",
+			}),
+		},
+		{
+			Name:           "CodeExplorer",
+			Description:    "Codebase explorer — maps architecture, features, and implementation state",
+			Prompt:         strings.TrimSpace(codeExplorerPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			AllowedTools: join(readOnlyCodeTools, artifactTools, []string{
+				"finish_task", "expand_run_result", "bash",
+			}),
 		},
 	}
 }

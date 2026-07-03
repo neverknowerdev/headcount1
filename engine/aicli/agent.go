@@ -19,6 +19,25 @@ var mcpDispatcherTools = map[string]bool{
 	"discover_mcp_tool": true,
 }
 
+const (
+	// maxToolOutputChars caps a single tool result appended to history.
+	// Pathologically large outputs (full-file dumps, huge search results)
+	// are truncated with a marker so the agent can re-query more narrowly.
+	maxToolOutputChars = 60000
+
+	// staleToolResultKeepChars is how much of a bulky old tool result
+	// survives pruning once the conversation has moved past it.
+	staleToolResultKeepChars = 1500
+
+	// staleToolResultThreshold: old tool results larger than this get
+	// truncated in requests (the in-memory history keeps the full content).
+	staleToolResultThreshold = 4000
+
+	// freshAssistantTurns is how many most-recent assistant turns keep their
+	// tool results intact during pruning.
+	freshAssistantTurns = 2
+)
+
 // Mode controls how the agent manages its conversation state.
 type Mode string
 
@@ -59,6 +78,9 @@ type Agent struct {
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
 	MCPListingCostPerTurn    int
 	MCPServerListingCosts    map[string]int
+	// TerminalTools are tool names that end the run: once such a tool
+	// executes successfully, the loop returns without another LLM call.
+	TerminalTools            map[string]bool
 	q                        *db.Queries
 	runID                    int32
 	logger                   RunLogger
@@ -76,6 +98,9 @@ type Config struct {
 	ReasoningLevel           string
 	MCPListingCostPerTurn    int
 	MCPServerListingCosts    map[string]int
+	// TerminalTools lists tool names that end the run once they execute
+	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
+	TerminalTools            []string
 	Queries                  *db.Queries
 	RunID                    int32
 	Logger                   RunLogger
@@ -87,6 +112,10 @@ func New(cfg Config) *Agent {
 	if mode == "" {
 		mode = ModeMessageHistory
 	}
+	terminal := make(map[string]bool, len(cfg.TerminalTools))
+	for _, name := range cfg.TerminalTools {
+		terminal[name] = true
+	}
 	return &Agent{
 		Client:                cfg.Client,
 		Registry:              cfg.Registry,
@@ -96,6 +125,7 @@ func New(cfg Config) *Agent {
 		ReasoningLevel:        cfg.ReasoningLevel,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
+		TerminalTools:         terminal,
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
@@ -154,7 +184,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 
 		req := ChatRequest{
-			Messages:        pruneMCPHistory(history),
+			Messages:        pruneHistory(history),
 			Tools:           a.Registry.Defs(),
 			ReasoningEffort: reasoningEffort,
 		}
@@ -234,7 +264,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 
 		// Execute each tool call and build the tool-result messages.
-		toolMessages, err := a.executeToolCalls(ctx, assistantMsg.ToolCalls)
+		toolMessages, terminalDone, err := a.executeToolCalls(ctx, assistantMsg.ToolCalls)
 		if err != nil {
 			return "", fmt.Errorf("turn %d: tool execution failed: %w", turn, err)
 		}
@@ -247,6 +277,12 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 
 		history = append(history, toolMessages...)
+
+		// A terminal tool (e.g. finish_task) completed — the run is over.
+		// Skip the extra wrap-up LLM round; the finish summary already exists.
+		if terminalDone {
+			return strings.TrimSpace(assistantMsg.Content), nil
+		}
 	}
 
 	return "", fmt.Errorf("agent loop exceeded %d turns without a final answer", maxTurns)
@@ -254,10 +290,12 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each
 // invocation and result, and returns the corresponding tool-result Messages.
-func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Message, error) {
+// The bool result reports whether a terminal tool executed successfully.
+func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Message, bool, error) {
 	results := make([]Message, 0, len(calls))
 	mcpServerTokens := map[string]int{}
 	mcpTotalTokens := 0
+	terminalDone := false
 
 	for _, tc := range calls {
 		argsRaw := json.RawMessage(tc.Function.Arguments)
@@ -273,6 +311,15 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		output, execErr := a.Registry.Execute(ctx, tc.Function.Name, argsRaw)
 		if execErr != nil {
 			output = fmt.Sprintf("error: %v", execErr)
+		} else if a.TerminalTools[tc.Function.Name] {
+			terminalDone = true
+		}
+
+		// Cap pathologically large outputs so a single result can't blow up
+		// the context; the agent is told how to get the rest.
+		if len(output) > maxToolOutputChars {
+			output = output[:maxToolOutputChars] +
+				fmt.Sprintf("\n…[output truncated at %d chars — re-run %s with a narrower query to see more]", maxToolOutputChars, tc.Function.Name)
 		}
 
 		outTokens := tokens.Estimate(output)
@@ -334,7 +381,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		}()
 	}
 
-	return results, nil
+	return results, terminalDone, nil
 }
 
 // appendRunLog persists a structured log entry to the run's log_entries column
@@ -363,26 +410,46 @@ func (a *Agent) appendRunLog(entryType, content string, extra map[string]interfa
 	}()
 }
 
-// pruneMCPHistory replaces old MCP tool responses with a placeholder so they
-// don't consume tokens on every subsequent LLM call. Only the most recent
-// batch of MCP results (those after the last assistant message) is kept intact.
-func pruneMCPHistory(history []Message) []Message {
-	// Find the last assistant message index.
-	lastAssistant := -1
+// pruneHistory compacts the request payload without losing the in-memory
+// history:
+//   - MCP dispatcher results older than the last assistant turn are omitted
+//     entirely (they are re-fetchable and often huge).
+//   - Other bulky tool results (codegraph dumps, file reads, command output)
+//     older than the last freshAssistantTurns assistant turns are truncated
+//     to a head excerpt plus a marker telling the agent how to re-fetch.
+//
+// This keeps per-turn prompt growth roughly flat once results are digested,
+// instead of re-sending every historical tool dump on every LLM call.
+func pruneHistory(history []Message) []Message {
+	// Find the cut-off: index of the freshAssistantTurns-th assistant message
+	// from the end. Everything before it is "stale".
+	seen := 0
+	cutoff := -1
 	for i := len(history) - 1; i >= 0; i-- {
 		if history[i].Role == "assistant" {
-			lastAssistant = i
-			break
+			seen++
+			if seen == freshAssistantTurns {
+				cutoff = i
+				break
+			}
 		}
 	}
-	if lastAssistant <= 0 {
+	if cutoff <= 0 {
 		return history
 	}
 	pruned := make([]Message, len(history))
 	copy(pruned, history)
-	for i := 0; i < lastAssistant; i++ {
-		if pruned[i].Role == "tool" && mcpDispatcherTools[pruned[i].Name] {
+	for i := 0; i < cutoff; i++ {
+		if pruned[i].Role != "tool" {
+			continue
+		}
+		if mcpDispatcherTools[pruned[i].Name] {
 			pruned[i].Content = "[omitted]"
+			continue
+		}
+		if len(pruned[i].Content) > staleToolResultThreshold {
+			pruned[i].Content = pruned[i].Content[:staleToolResultKeepChars] +
+				"\n…[older tool output pruned to save context — call the tool again if you still need the full content]"
 		}
 	}
 	return pruned

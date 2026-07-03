@@ -366,13 +366,30 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		initialMessages = append(initialMessages, aicli.Message{Role: entry.role, Content: entry.text})
 	}
 
+	// Resolve the root task of this subtask tree once: artifacts and spec
+	// items always attach to the root so every agent in the tree shares one
+	// artifact namespace and one acceptance-criteria checklist.
+	rootTask, rootErr := e.q.GetRootTask(ctx, task.ID)
+	if rootErr != nil {
+		rootTask = task
+	}
+
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath)
 
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
 
-	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus string) error {
+	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus, resultDetails string) error {
+		// Completion gate: a task that owns spec items cannot be marked
+		// "done" while any item is still pending — verification (by an
+		// independent run, e.g. a QA subtask) must happen first.
+		if status == "done" {
+			if pending, pErr := e.q.CountPendingSpecItems(finCtx, task.ID); pErr == nil && pending > 0 {
+				return fmt.Errorf("cannot finish as done: %d acceptance criteria / test case item(s) are still pending — "+
+					"have them verified (delegate to QA; the defining run cannot verify its own items) or finish as in-review", pending)
+			}
+		}
 		taskFinished = true
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
@@ -384,7 +401,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 			return err
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
-		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, ""); err != nil {
+		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, resultDetails); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
 		runID := run.ID
@@ -402,25 +419,43 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		return nil
 	}))
 
-	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
+	// Resolve artifact directory from the ROOT task so the whole subtask tree
+	// shares one directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{rootID}
 	artifactDir := func() string {
 		base := settings.BasePath
 		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
 			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
 		}
-		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
+		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", rootTask.ID))
 	}()
 
-	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content string) error {
+	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content string) (string, error) {
 		if err := os.MkdirAll(artifactDir, 0755); err != nil {
-			return fmt.Errorf("could not create artifact directory: %w", err)
+			return "", fmt.Errorf("could not create artifact directory: %w", err)
 		}
 		filePath := filepath.Join(artifactDir, filename)
+
+		// Collision detection: overwriting another run's artifact must be
+		// visible, not silent (last-write-wins destroyed grounded deliverables
+		// in past runs).
+		existing, exErr := e.q.GetArtifactByTaskAndFilename(wCtx, rootTask.ID, filename)
 		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			return fmt.Errorf("could not write artifact file: %w", err)
+			return "", fmt.Errorf("could not write artifact file: %w", err)
+		}
+		if exErr == nil {
+			if upErr := e.q.UpdateArtifactContent(wCtx, existing.ID, content, run.ID); upErr != nil {
+				fmt.Printf("Warning: failed to update artifact in DB: %v\n", upErr)
+			}
+			e.hub.BroadcastEvent("artifact_created", existing)
+			msg := fmt.Sprintf("Artifact %q written — OVERWROTE an existing artifact originally written by run #%d. "+
+				"If that was not intended, use a different filename.", filename, existing.RunID)
+			if existing.RunID == run.ID {
+				msg = fmt.Sprintf("Artifact %q updated.", filename)
+			}
+			return msg, nil
 		}
 		artifact, err := e.q.CreateArtifact(wCtx, db.Artifact{
-			TaskID:   task.ID,
+			TaskID:   rootTask.ID,
 			RunID:    run.ID,
 			Filename: filename,
 			FilePath: filePath,
@@ -428,7 +463,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		})
 		if err != nil {
 			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
-			return nil
+			return "", nil
 		}
 		e.hub.BroadcastEvent("artifact_created", artifact)
 		commentContent, _ := json.Marshal(map[string]string{
@@ -444,23 +479,105 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 		}); cErr == nil {
 			e.hub.BroadcastEvent("comment_created", ac)
 		}
-		return nil
+		return fmt.Sprintf("Artifact %q written.", filename), nil
 	}))
+
+	registry.Register(tools.NewListArtifacts(func(lCtx context.Context) ([]tools.ArtifactInfo, error) {
+		artifacts, err := e.q.ListArtifactsByTask(lCtx, rootTask.ID)
+		if err != nil {
+			return nil, err
+		}
+		infos := make([]tools.ArtifactInfo, 0, len(artifacts))
+		for _, a := range artifacts {
+			infos = append(infos, tools.ArtifactInfo{
+				ID:        a.ID,
+				Filename:  a.Filename,
+				SizeBytes: len(a.Content),
+				WrittenBy: fmt.Sprintf("run #%d", a.RunID),
+				UpdatedAt: a.UpdatedAt.Format(time.RFC3339),
+			})
+		}
+		return infos, nil
+	}))
+
+	registry.Register(tools.NewReadArtifact(func(rCtx context.Context, filename string) (string, error) {
+		a, err := e.q.GetArtifactByTaskAndFilename(rCtx, rootTask.ID, filename)
+		if err != nil {
+			return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
+		}
+		return a.Content, nil
+	}))
+
+	registry.Register(tools.NewUpdateTaskDetails(func(uCtx context.Context, refined string, criteria, testCases []string) (string, error) {
+		var parts []string
+		if refined != "" {
+			if err := e.q.UpdateTaskRefinedDescription(uCtx, rootTask.ID, refined); err != nil {
+				return "", err
+			}
+			parts = append(parts, "refined description recorded")
+		}
+		if len(criteria) > 0 {
+			items, err := e.q.ReplaceSpecItems(uCtx, rootTask.ID, "criterion", criteria, run.ID)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, fmt.Sprintf("%d acceptance criteria recorded as pending (ids %s)", len(items), specItemIDs(items)))
+		}
+		if len(testCases) > 0 {
+			items, err := e.q.ReplaceSpecItems(uCtx, rootTask.ID, "test_case", testCases, run.ID)
+			if err != nil {
+				return "", err
+			}
+			parts = append(parts, fmt.Sprintf("%d test cases recorded as pending (ids %s)", len(items), specItemIDs(items)))
+		}
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": rootTask.ID})
+		return "Task details updated: " + strings.Join(parts, "; ") +
+			". Items must be verified by an independent run (e.g. a QA subtask) via verify_spec_items before the task can finish as done.", nil
+	}))
+
+	registry.Register(tools.NewVerifySpecItems(func(vCtx context.Context, verdicts []tools.SpecVerdict) (string, error) {
+		passed, failed := 0, 0
+		for _, v := range verdicts {
+			item, err := e.q.GetSpecItem(vCtx, v.ID)
+			if err != nil {
+				return "", fmt.Errorf("spec item %d not found", v.ID)
+			}
+			if item.TaskID != rootTask.ID {
+				return "", fmt.Errorf("spec item %d belongs to a different task", v.ID)
+			}
+			if err := e.q.UpdateSpecItemVerdict(vCtx, v.ID, v.Verdict, v.Evidence, run.ID); err != nil {
+				return "", err
+			}
+			if v.Verdict == "passed" {
+				passed++
+			} else {
+				failed++
+			}
+		}
+		pending, _ := e.q.CountPendingSpecItems(vCtx, rootTask.ID)
+		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": rootTask.ID})
+		return fmt.Sprintf("Recorded %d verdict(s): %d passed, %d failed. %d item(s) still pending.",
+			len(verdicts), passed, failed, pending), nil
+	}))
+
 	var agentNames []string
 	if e.agentFactory != nil {
 		agentNames = e.agentFactory.ListNames()
 	}
 
-	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent), agentNames))
+	registry.Register(tools.NewCreateSubtask(e.makeCreateSubtaskFunc(ctx, task, agent, run.ID, rootTask.ID), agentNames))
 	registry.Register(tools.NewExpandRunResult(func(rCtx context.Context, runID int32) (string, error) {
 		r, err := e.q.GetRun(rCtx, runID)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("run %d not found — pass the RUN id exactly as shown in subtask results ('run #N'), not a task id", runID)
 		}
-		if r.ResultDescription == "" {
-			return "No detailed explanation available for this run.", nil
+		if r.ResultExplanation != "" {
+			return r.ResultExplanation, nil
 		}
-		return r.ResultDescription, nil
+		if r.ResultDescription != "" {
+			return r.ResultDescription + "\n(No more detail was recorded for this run.)", nil
+		}
+		return "No detailed explanation available for this run.", nil
 	}))
 
 	// Build the MCP session store for external integrations.
@@ -600,13 +717,21 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 
 	// Wire the proxy logger as the agent's RunLogger so request/response entries
 	// appear in the log file and the DB (identical format to the gateway).
+	// The display name comes from the agent CONFIG when set — subtasks reuse
+	// the parent's DB agent row, and labeling every sub-session with the
+	// parent's name ("CEO") made log forensics unreliable.
+	agentDisplayName := agent.Name
+	if agentCfg != nil && agentCfg.Name != "" {
+		agentDisplayName = agentCfg.Name
+	}
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,
 		Registry:              registry,
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
-		AgentName:             agent.Name,
+		AgentName:             agentDisplayName,
+		TerminalTools:         []string{"finish_task"},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -706,25 +831,41 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	})
 }
 
+// specItemIDs renders a compact comma-separated ID list for tool feedback.
+func specItemIDs(items []db.SpecItem) string {
+	ids := make([]string, len(items))
+	for i, it := range items {
+		ids[i] = fmt.Sprintf("%d", it.ID)
+	}
+	return strings.Join(ids, ",")
+}
+
+// subtaskTerminalStatuses are task statuses that mean a subtask run is over.
+var subtaskTerminalStatuses = map[string]bool{
+	"in-review": true, "blocked": true, "done": true, "refinement": true,
+}
+
 // makeCreateSubtaskFunc returns the callback used by the create_subtask tool.
-// It enforces the single-running-subtask constraint, creates the DB record, and
-// enqueues the subtask for processing.
-func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent) func(callCtx context.Context, title, description, agentName string) (int32, error) {
-	return func(callCtx context.Context, title, description, agentName string) (int32, error) {
+// It enforces the single-running-subtask constraint, creates the DB record,
+// enqueues the subtask, then BLOCKS until the subtask's run finishes and
+// returns a rich result: final status, run ID, result summary, and artifacts —
+// so the delegating agent never has to guess run IDs or re-do the work.
+func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.Task, parentAgent db.Agent, parentRunID, rootTaskID int32) func(callCtx context.Context, title, description, agentName string) (string, error) {
+	return func(callCtx context.Context, title, description, agentName string) (string, error) {
 		// Reject if another subtask of this parent is already running.
 		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
 		if err != nil {
-			return 0, fmt.Errorf("failed to check running subtasks: %w", err)
+			return "", fmt.Errorf("failed to check running subtasks: %w", err)
 		}
 		if runningCount > 0 {
-			return 0, fmt.Errorf("a subtask is already running for task %d; wait for it to complete before creating another", parentTask.ID)
+			return "", fmt.Errorf("a subtask is already running for task %d; wait for it to complete before creating another", parentTask.ID)
 		}
 
 		// Look up the requested agent config; validate it exists.
 		var configName string
 		if e.agentFactory != nil {
 			if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
-				return 0, fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
+				return "", fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
 			}
 			configName = agentName
 		}
@@ -745,7 +886,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 			AgentConfigName: configName,
 		})
 		if err != nil {
-			return 0, fmt.Errorf("failed to create subtask: %w", err)
+			return "", fmt.Errorf("failed to create subtask: %w", err)
 		}
 
 		e.hub.BroadcastEvent("task_created", map[string]interface{}{
@@ -754,13 +895,84 @@ func (e *NativeEngine) makeCreateSubtaskFunc(ctx context.Context, parentTask db.
 			"title":     subtask.Title,
 		})
 
-		// Enqueue the subtask for execution (non-blocking).
 		if procErr := e.ProcessTask(callCtx, subtask.ID); procErr != nil {
-			return 0, fmt.Errorf("failed to enqueue subtask %d: %w", subtask.ID, procErr)
+			return "", fmt.Errorf("failed to enqueue subtask %d: %w", subtask.ID, procErr)
 		}
 
-		return subtask.ID, nil
+		return e.waitForSubtask(callCtx, subtask.ID, agentName, parentRunID, rootTaskID)
 	}
+}
+
+// waitForSubtask polls until the subtask reaches a terminal status (or its
+// run dies), keeping the parent run alive, then composes the result message.
+func (e *NativeEngine) waitForSubtask(ctx context.Context, subtaskID int32, agentName string, parentRunID, rootTaskID int32) (string, error) {
+	const (
+		pollInterval = 3 * time.Second
+		maxWait      = 2 * time.Hour
+	)
+	deadline := time.Now().Add(maxWait)
+	lastTouch := time.Now()
+
+	for {
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(pollInterval):
+		}
+		if time.Now().After(deadline) {
+			return "", fmt.Errorf("subtask %d did not finish within %s", subtaskID, maxWait)
+		}
+		// Keep the parent run from being treated as stale while it waits.
+		if time.Since(lastTouch) > time.Minute {
+			_ = e.q.TouchRunLastMessageTime(context.Background(), parentRunID)
+			lastTouch = time.Now()
+		}
+
+		sub, err := e.q.GetTask(ctx, subtaskID)
+		if err != nil {
+			return "", fmt.Errorf("failed to poll subtask %d: %w", subtaskID, err)
+		}
+		subRun, runErr := e.q.GetLatestRunByTask(ctx, subtaskID)
+
+		finished := subtaskTerminalStatuses[sub.Status]
+		// A run that died (failed/canceled) without finish_task also ends the wait.
+		if !finished && runErr == nil && subRun.Status != "running" && subRun.Status != "" && sub.Status != "to-do" {
+			finished = true
+		}
+		if !finished {
+			continue
+		}
+
+		return e.composeSubtaskResult(ctx, sub, subRun, runErr == nil, agentName, rootTaskID), nil
+	}
+}
+
+// composeSubtaskResult builds the create_subtask tool result: status, run id,
+// result summary, and artifacts written by the subtask's run.
+func (e *NativeEngine) composeSubtaskResult(ctx context.Context, sub db.Task, subRun db.Run, haveRun bool, agentName string, rootTaskID int32) string {
+	var b strings.Builder
+	fmt.Fprintf(&b, "Subtask #%d (%s) finished with task status %q.", sub.ID, agentName, sub.Status)
+	if haveRun {
+		fmt.Fprintf(&b, "\nRun: #%d (status %s).", subRun.ID, subRun.Status)
+		if subRun.ResultDescription != "" {
+			fmt.Fprintf(&b, "\nResult: %s", subRun.ResultDescription)
+		}
+		if subRun.ResultExplanation != "" {
+			fmt.Fprintf(&b, "\nA detailed handoff is available: call expand_run_result with run_id=%d.", subRun.ID)
+		}
+		if artifacts, aErr := e.q.ListArtifactsByTask(ctx, rootTaskID); aErr == nil {
+			var written []string
+			for _, a := range artifacts {
+				if a.RunID == subRun.ID {
+					written = append(written, fmt.Sprintf("%q", a.Filename))
+				}
+			}
+			if len(written) > 0 {
+				fmt.Fprintf(&b, "\nArtifacts written by this subtask: %s — read them with read_artifact.", strings.Join(written, ", "))
+			}
+		}
+	}
+	return b.String()
 }
 
 // emitStatusChange creates a status_change comment and broadcasts it.
@@ -803,6 +1015,13 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 
 // tryGitCommit generates a commit message and commits workspace changes.
 func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) {
+	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
+	// creation failed or the task has a bare directory workspace) instead of
+	// letting `git diff` fail with usage noise.
+	if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); statErr != nil {
+		e.logInfo(logger, "Workspace is not a git worktree; skipping commit")
+		return
+	}
 	e.logInfo(logger, "Checking for changes to commit in worktree...")
 	diff, err := gitMgr.GetDiffInDir(ctx, workspacePath)
 	if err != nil {

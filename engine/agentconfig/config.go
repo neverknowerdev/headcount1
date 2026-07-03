@@ -3,6 +3,8 @@
 // TOML files or constructed programmatically.
 package agentconfig
 
+import "strings"
+
 // ReasoningLevel controls how much reasoning budget the LLM applies.
 type ReasoningLevel string
 
@@ -65,12 +67,16 @@ func (c *AgentConfig) DefaultModel() string {
 
 // IsToolAllowed reports whether the named tool may be used by this agent.
 // An empty AllowedTools list (or one containing "*") allows all tools.
+// Entries ending in "*" match by prefix (e.g. "codegraph_*").
 func (c *AgentConfig) IsToolAllowed(name string) bool {
 	if len(c.AllowedTools) == 0 {
 		return true
 	}
 	for _, t := range c.AllowedTools {
 		if t == "*" || t == name {
+			return true
+		}
+		if n := len(t); n > 1 && t[n-1] == '*' && strings.HasPrefix(name, t[:n-1]) {
 			return true
 		}
 	}
