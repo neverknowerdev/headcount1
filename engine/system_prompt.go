@@ -69,8 +69,8 @@ Working directory: {{.WorkingDirectory}}
 
 Task name: {{.TaskName}}
 Task status: {{.TaskStatus}}
-Task (user input): {{.TaskDescription}}
-{{if .RefinedDescription}}Refined task description:
+{{if .TaskDescription}}Task (user input): {{.TaskDescription}}
+{{end}}{{if .RefinedDescription}}Refined task description:
 {{.RefinedDescription}}
 {{end}}{{if .AcceptanceCriteria}}Acceptance criteria:
 {{.AcceptanceCriteria}}

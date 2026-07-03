@@ -131,7 +131,10 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}/runs", api.ListTaskRuns)
 		r.Post("/{id}/rerun", api.RerunTask)
 		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
+		r.Get("/{id}/artifacts/download", api.DownloadTaskArtifacts)
 	})
+
+	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
 
@@ -251,9 +254,5 @@ func (s *Server) serveWs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	client := &eventhub.Client{Hub: s.hub, Conn: conn, Send: make(chan []byte, 256)}
-	client.Hub.Register <- client
-
-	go client.WritePump()
-	go client.ReadPump()
+	s.hub.Serve(conn)
 }

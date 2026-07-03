@@ -7,7 +7,7 @@ import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { RunLogViewer } from './RunLogViewer';
-import { useWebSocket } from '../useWebSocket';
+import { useWebSocket, wsUrl } from '../useWebSocket';
 
 // parseSpecItems decodes a structured acceptance-criteria / test-cases item
 // list. Returns null for legacy plain-text content (rendered as markdown).
@@ -46,6 +46,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [openRunMenu, setOpenRunMenu] = useState<number | null>(null);
     // Acceptance Criteria / Test Cases sections are minimized by default.
     const [expandedSpecs, setExpandedSpecs] = useState<Set<string>>(new Set());
+    // Artifacts block (task-level deliverables) — minimized by default.
+    const [artifacts, setArtifacts] = useState<any[]>([]);
+    const [artifactsExpanded, setArtifactsExpanded] = useState(false);
+    const [expandedArtifactIds, setExpandedArtifactIds] = useState<Set<number>>(new Set());
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -99,16 +103,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCompanyId, taskId]);
 
-    // Fetches only comments + runs — safe to call for re-sync without resetting the form.
+    // Fetches only comments + runs + artifacts — safe to call for re-sync
+    // without resetting the form.
     const fetchActivity = useCallback(async () => {
         if (!taskId) return;
         try {
-            const [commentsRes, runsRes] = await Promise.all([
+            const [commentsRes, runsRes, artifactsRes] = await Promise.all([
                 axios.get(`/api/comments?task_id=${taskId}`),
                 axios.get(`/api/tasks/${taskId}/runs`),
+                axios.get(`/api/tasks/${taskId}/artifacts`),
             ]);
             setComments(commentsRes.data || []);
             setRuns(runsRes.data || []);
+            setArtifacts(artifactsRes.data || []);
         } catch (e) {
             console.error(e);
         }
@@ -143,13 +150,32 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [taskId]);
 
-    useWebSocket(`ws://${window.location.host}/api/ws`, (msg) => {
+    // Re-sync after a (re)connect: recover comments/runs/status changes whose
+    // WS events were missed while disconnected. Deliberately does not touch
+    // formData so in-progress edits are never clobbered.
+    const resyncAfterReconnect = useCallback(async () => {
+        if (!taskId) return;
+        fetchActivity();
+        try {
+            const res = await axios.get(`/api/tasks/${taskId}`);
+            setTask((prev: any) => prev ? { ...prev, ...res.data } : res.data);
+        } catch (e) {
+            console.error(e);
+        }
+    }, [taskId, fetchActivity]);
+
+    useWebSocket(wsUrl(), (msg) => {
         if (msg.type === 'comment_created' && msg.payload.task_id === taskId) {
             setComments(prev => {
                 // deduplicate: ignore if we already have this comment (e.g. from a recent re-fetch)
                 if (prev.some((c: any) => c.id === msg.payload.id)) return prev;
                 return [...prev, msg.payload];
             });
+        }
+        if (msg.type === 'artifact_created') {
+            // Artifacts can be produced by delegated subtask sessions (their
+            // own task ids), so refetch the whole tree instead of filtering.
+            axios.get(`/api/tasks/${taskId}/artifacts`).then(res => setArtifacts(res.data || [])).catch(() => {});
         }
         if (msg.type === 'task_updated' && (msg.payload.id === taskId || msg.payload.task_id === taskId)) {
             setTask((prev: any) => prev ? { ...prev, ...msg.payload } : prev);
@@ -175,7 +201,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
             }
         }
-    }, !!taskId);
+    }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
 
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -394,6 +420,73 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         </div>
                                     );
                                 })}
+                            </div>
+                        )}
+
+                        {/* Artifacts: task-level deliverables, minimized by default */}
+                        {taskId && artifacts.length > 0 && (
+                            <div className="mt-4 border border-emerald-200 rounded-lg bg-emerald-50/40 overflow-hidden" data-testid="artifacts-block">
+                                <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-50">
+                                    <button
+                                        type="button"
+                                        onClick={() => setArtifactsExpanded(v => !v)}
+                                        className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800 hover:text-emerald-900"
+                                    >
+                                        {artifactsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                        📄 {artifacts.length} artifact{artifacts.length > 1 ? 's' : ''}
+                                    </button>
+                                    <a
+                                        href={`/api/tasks/${taskId}/artifacts/download`}
+                                        className="text-xs text-emerald-700 hover:underline"
+                                        title="Download all artifacts as a zip archive"
+                                    >
+                                        ⬇ Download all
+                                    </a>
+                                </div>
+                                {artifactsExpanded && (
+                                    <ul className="bg-white border-t border-emerald-100 divide-y divide-gray-50">
+                                        {artifacts.map((a: any) => {
+                                            const isOpen = expandedArtifactIds.has(a.id);
+                                            return (
+                                                <li key={a.id}>
+                                                    <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setExpandedArtifactIds(prev => {
+                                                                const next = new Set(prev);
+                                                                if (next.has(a.id)) next.delete(a.id); else next.add(a.id);
+                                                                return next;
+                                                            })}
+                                                            className="flex items-center gap-1.5 min-w-0 flex-1 text-left hover:text-emerald-800"
+                                                        >
+                                                            {isOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                                                            <span className="font-semibold text-gray-800 truncate">{a.filename}</span>
+                                                            <span className="text-gray-400 shrink-0">{(a.content || '').length} bytes</span>
+                                                            {a.is_verified && (
+                                                                <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full shrink-0">✓ verified</span>
+                                                            )}
+                                                            {a.description && <span className="text-gray-500 italic truncate">{a.description}</span>}
+                                                        </button>
+                                                        <a
+                                                            href={`/api/artifacts/${a.id}/download`}
+                                                            className="text-emerald-700 hover:underline shrink-0"
+                                                            title={`Download ${a.filename}`}
+                                                        >
+                                                            ⬇
+                                                        </a>
+                                                    </div>
+                                                    {isOpen && (
+                                                        <div className="px-3 pb-2 border-t border-gray-50">
+                                                            <div className="prose prose-sm max-w-none mt-2 prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm max-h-64 overflow-y-auto">
+                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content || ''}</ReactMarkdown>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </li>
+                                            );
+                                        })}
+                                    </ul>
+                                )}
                             </div>
                         )}
 

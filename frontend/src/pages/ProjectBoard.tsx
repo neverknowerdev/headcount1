@@ -7,6 +7,7 @@ import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
 import { Plus, Settings } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
+import { useWebSocket, wsUrl } from '../useWebSocket';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
 
@@ -81,15 +82,16 @@ export const ProjectBoard: React.FC = () => {
 
   useEffect(() => {
     fetchTasks();
-    const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'task_updated' || msg.type === 'task_created') {
-        fetchTasks();
-      }
-    };
-    return () => ws.close();
   }, [fetchTasks]);
+
+  useWebSocket(wsUrl(), (msg) => {
+    if (msg.type === 'task_updated' || msg.type === 'task_created') {
+      fetchTasks();
+    }
+  }, {
+    // Re-fetch on every (re)connect so board state missed while offline is recovered.
+    onConnect: fetchTasks,
+  });
 
   const updateTaskStatus = async (id: number, status: string) => {
     try {

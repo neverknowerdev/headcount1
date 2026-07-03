@@ -426,6 +426,10 @@ func TestNativeEngineDelegateTask(t *testing.T) {
 	assert.Equal(t, "subtask A", subtask.Title)
 	assert.Equal(t, "Programmer", subtask.AgentConfigName)
 	assert.Equal(t, "done", subtask.Status, "child session should have finished the subtask")
+	// Delegated subtasks carry no raw user input: the orchestrator's
+	// instructions land in RefinedDescription, and Description stays empty.
+	assert.Empty(t, subtask.Description)
+	assert.Equal(t, "do subtask A", subtask.RefinedDescription)
 
 	// The child run must be linked to the parent run (session hierarchy).
 	childRunID := waitForRunCreated(t, database, subtask.ID, 5*time.Second)
@@ -449,6 +453,129 @@ func TestNativeEngineDelegateTask(t *testing.T) {
 		return strings.Contains(parentRun.LogEntries, "session_started") &&
 			strings.Contains(parentRun.LogEntries, "session_ended")
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
+}
+
+// TestNativeEngineNoNestedDelegation verifies the depth limit: a delegated
+// subtask session has no delegate_task tool, so it cannot create subtasks of
+// its own.
+func TestNativeEngineNoNestedDelegation(t *testing.T) {
+	var count atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch count.Add(1) {
+		case 1:
+			// Root session delegates.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-001", "delegate_task",
+				`{"title":"sub1","description":"d1","agent_name":"Programmer"}`))
+		case 2:
+			// Child session tries to delegate — the tool is not registered at
+			// this depth, so the call must fail and the loop continues.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-002", "delegate_task",
+				`{"title":"grandchild","description":"nope","agent_name":"QA"}`))
+		case 3:
+			json.NewEncoder(w).Encode(toolCallJSON("nd-003", "finish_task",
+				`{"task_status":"done","finish_status":"done without delegating"}`))
+		case 4:
+			json.NewEncoder(w).Encode(textJSON("nd-004", "child done"))
+		default:
+			json.NewEncoder(w).Encode(textJSON("nd-005", "root done"))
+		}
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	grandchildren, err := q.ListSubtasksByParent(context.Background(), subtask.ID)
+	require.NoError(t, err)
+	assert.Empty(t, grandchildren, "subtasks must not be able to create subtasks of their own")
+}
+
+// TestNativeEngineVerifyImplementation covers the full verification loop: the
+// root agent defines spec items, cannot finish while they are pending, calls
+// verify_implementation, an independent QA session reports per-item verdicts
+// via report_verification_results, and the engine applies them to the task.
+func TestNativeEngineVerifyImplementation(t *testing.T) {
+	var count atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch count.Add(1) {
+		case 1:
+			json.NewEncoder(w).Encode(toolCallJSON("vi-001", "update_task_details",
+				`{"acceptance_criteria":["It works.","It is documented."],"test_cases":["Run it → it works."]}`))
+		case 2:
+			// Premature finish must be rejected by the verification gate.
+			json.NewEncoder(w).Encode(toolCallJSON("vi-002", "finish_task",
+				`{"task_status":"in-review","finish_status":"too early"}`))
+		case 3:
+			json.NewEncoder(w).Encode(toolCallJSON("vi-003", "verify_implementation",
+				`{"notes":"check the workdir"}`))
+		case 4:
+			// QA verification session: report a verdict for every item.
+			json.NewEncoder(w).Encode(toolCallJSON("vi-004", "report_verification_results",
+				`{"results":[
+					{"list":"acceptance_criteria","id":1,"success":true},
+					{"list":"acceptance_criteria","id":2,"success":false,"error":"no docs found"},
+					{"list":"test_cases","id":1,"success":true}
+				]}`))
+		case 5:
+			json.NewEncoder(w).Encode(toolCallJSON("vi-005", "finish_task",
+				`{"task_status":"done","finish_status":"verification complete"}`))
+		case 6:
+			json.NewEncoder(w).Encode(textJSON("vi-006", "verified"))
+		case 7:
+			// One item failed, but all are verified (no pending) — finish allowed.
+			json.NewEncoder(w).Encode(toolCallJSON("vi-007", "finish_task",
+				`{"task_status":"in-review","finish_status":"done with one known failure"}`))
+		default:
+			json.NewEncoder(w).Encode(textJSON("vi-008", "root done"))
+		}
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	run := waitForRunDone(t, q, runID, 30*time.Second)
+	assert.Equal(t, "completed", run.Status)
+
+	// The verification session ran as a QA subtask linked to the root run.
+	vtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	assert.Equal(t, "QA", vtask.AgentConfigName)
+	assert.Contains(t, vtask.Title, "Verify:")
+
+	childRuns, err := q.ListChildRuns(context.Background(), runID)
+	require.NoError(t, err)
+	require.Len(t, childRuns, 1)
+	assert.Equal(t, "QA", childRuns[0].AgentConfigName)
+
+	// The QA verdicts were applied to the root task's spec items.
+	updated, err := q.GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "in-review", updated.Status)
+	acItems := db.ParseSpecItems(updated.AcceptanceCriteria)
+	require.Len(t, acItems, 2)
+	assert.Equal(t, db.SpecItemPassed, acItems[0].Status)
+	assert.Equal(t, db.SpecItemFailed, acItems[1].Status)
+	assert.Equal(t, "no docs found", acItems[1].Note)
+	tcItems := db.ParseSpecItems(updated.TestCases)
+	require.Len(t, tcItems, 1)
+	assert.Equal(t, db.SpecItemPassed, tcItems[0].Status)
 }
 
 // TestNativeEngineSequentialDelegations verifies that two delegate_task calls
@@ -763,4 +890,65 @@ func fixtureHandler(ft *aicli.FixtureTransport) http.Handler {
 		w.WriteHeader(resp.StatusCode)
 		io.Copy(w, resp.Body)
 	})
+}
+
+// TestNativeEngineProcessTaskIgnoresTerminalStatuses verifies that a plain
+// status change (e.g. dragging a card to done/blocked/in-review/refinement)
+// does NOT restart the agent — only an explicit re-run may do that.
+func TestNativeEngineProcessTaskIgnoresTerminalStatuses(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	q := db.New(database)
+
+	for _, status := range []string{"in-review", "blocked", "done", "refinement"} {
+		task.Status = status
+		_, err := q.UpdateTask(context.Background(), task)
+		require.NoError(t, err)
+
+		require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+		// Give a would-be run goroutine time to appear, then assert nothing happened.
+		time.Sleep(300 * time.Millisecond)
+
+		var runCount int64
+		require.NoError(t, database.Model(&db.Run{}).Where("task_id = ?", task.ID).Count(&runCount).Error)
+		assert.Zero(t, runCount, "status %q: ProcessTask must not start a run", status)
+
+		updated, err := q.GetTask(context.Background(), task.ID)
+		require.NoError(t, err)
+		assert.Equal(t, status, updated.Status, "status %q: ProcessTask must not change the status", status)
+	}
+}
+
+// TestNativeEngineRerunTaskFromTerminalStatus verifies that an explicit re-run
+// (Re-run button / Run Agent comment) pulls a task out of a terminal status,
+// moves it to in-progress, and starts a new run.
+func TestNativeEngineRerunTaskFromTerminalStatus(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	q := db.New(database)
+
+	task.Status = "done"
+	_, err := q.UpdateTask(context.Background(), task)
+	require.NoError(t, err)
+
+	require.NoError(t, eng.RerunTask(context.Background(), task.ID))
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	run := waitForRunDone(t, q, runID, 30*time.Second)
+	assert.Equal(t, "completed", run.Status)
+
+	// The mock agent finishes with finish_task(in-review), proving the run
+	// actually executed after being forced out of "done".
+	updated, err := q.GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "in-review", updated.Status)
 }

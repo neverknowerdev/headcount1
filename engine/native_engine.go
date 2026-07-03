@@ -43,13 +43,42 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 // through: the CEO orchestrates execution via delegation to specialists.
 const defaultOrchestratorConfig = "CEO"
 
-// maxDelegationDepth caps how deep delegation sessions can nest
-// (root CEO session is depth 0).
-const maxDelegationDepth = 3
+// maxDelegationDepth caps how deep delegation sessions can nest: the main
+// task (depth 0) can delegate subtasks, but subtasks cannot create subtasks
+// of their own.
+const maxDelegationDepth = 1
+
+// verifierConfig is the agent config used for verification sessions spawned
+// by verify_implementation — always a different agent from the implementer.
+const verifierConfig = "QA"
+
+// verificationCapture collects the per-item verdicts a QA verification
+// session reports via report_verification_results, so the session that
+// requested the verification can apply them.
+type verificationCapture struct {
+	mu      sync.Mutex
+	results []tools.VerificationResult
+}
+
+func (c *verificationCapture) add(results []tools.VerificationResult) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.results = append(c.results, results...)
+}
+
+func (c *verificationCapture) get() []tools.VerificationResult {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	out := make([]tools.VerificationResult, len(c.results))
+	copy(out, c.results)
+	return out
+}
 
 // parentSession links a delegated child session to the session that spawned
-// it: run hierarchy ids, the shared workspace, and a hook that fires once the
-// child's run record exists (so the parent can log the session start).
+// it: run hierarchy ids, the parent's workspace, and a hook that fires once
+// the child's run record exists (so the parent can log the session start).
+// verification is set for QA verification sessions, which share the parent's
+// workdir and report item verdicts instead of doing new work.
 type parentSession struct {
 	parentRunID   int32
 	rootRunID     int32
@@ -57,10 +86,25 @@ type parentSession struct {
 	workspacePath string
 	depth         int
 	onRunCreated  func(run db.Run)
+	verification  *verificationCapture
 }
 
-// ProcessTask picks up a task and spawns a goroutine to run the agent.
+// ProcessTask reacts to a task's current status and spawns a goroutine to run
+// the agent when that status implies pending work ("to-do", "in-progress").
+// Tasks in terminal or manual statuses (in-review, blocked, done, refinement)
+// are left untouched — moving a card to "done" must not restart the agent.
 func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
+	return e.processTask(ctx, taskID, false)
+}
+
+// RerunTask forces a new agent run for an explicit user action (the Re-run
+// button or a comment with the Run Agent flag), moving the task from a
+// terminal status back to "in-progress" if necessary.
+func (e *NativeEngine) RerunTask(ctx context.Context, taskID int32) error {
+	return e.processTask(ctx, taskID, true)
+}
+
+func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun bool) error {
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
@@ -114,7 +158,11 @@ func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	case "in-progress":
 		go e.run(context.Background(), task, "implement")
 	case "in-review", "blocked", "done", "refinement":
-		// Re-run triggered by a user comment (Run Agent flag). Move back to in-progress.
+		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
+		// a task out of these statuses; a plain status change never does.
+		if !forceRerun {
+			return nil
+		}
 		prevStatus := task.Status
 		task.Status = "in-progress"
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {
@@ -161,6 +209,13 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession) string {
 	if task.AgentID == nil {
 		return "failed"
+	}
+
+	// Delegated child tasks arrive fresh from CreateTask without preloaded
+	// associations (Company, Project, Sprint) — reload so the system prompt
+	// and artifact paths see the full task.
+	if full, err := e.q.GetTask(ctx, task.ID); err == nil {
+		task = full
 	}
 
 	agent, err := e.q.GetAgent(ctx, *task.AgentID)
@@ -279,20 +334,37 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Delegated sessions share the root session's workspace so specialists
-	// (e.g. Programmer then QA) see each other's changes.
+	// Workspace layout:
+	//   - the main task and every delegated subtask get their own directory
+	//     (a git worktree when the task belongs to a repo-backed project)
+	//   - delegated subtask sessions can additionally READ the parent task's
+	//     workdir, but never write to it
+	//   - QA verification sessions run in the same workdir as the session
+	//     they verify, plus read-only access to its subtasks' dirs (where
+	//     delegated implementers left their work)
 	fsMgr := filesystem.NewManager(settings.BasePath)
+	isVerification := parent != nil && parent.verification != nil
 	var workspacePath string
-	if parent != nil && parent.workspacePath != "" {
+	var readOnlyDirs []string
+	if isVerification {
 		workspacePath = parent.workspacePath
+		if task.ParentID != nil {
+			if siblings, sibErr := e.q.ListSubtasksByParent(ctx, *task.ParentID); sibErr == nil {
+				for _, st := range siblings {
+					if st.ID == task.ID {
+						continue
+					}
+					dir := fsMgr.GetTaskWorktreePath(company, st)
+					if _, statErr := os.Stat(dir); statErr == nil {
+						readOnlyDirs = append(readOnlyDirs, dir)
+					}
+				}
+			}
+		}
 	} else {
 		workspacePath = fsMgr.GetTaskWorktreePath(company, task)
-		if err := os.MkdirAll(workspacePath, 0755); err != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
-			return "failed"
-		}
-		if err := initTaskMemory(workspacePath, task, company); err != nil {
-			fmt.Printf("Warning: failed to init memory.md: %v\n", err)
+		if parent != nil && parent.workspacePath != "" && parent.workspacePath != workspacePath {
+			readOnlyDirs = append(readOnlyDirs, parent.workspacePath)
 		}
 	}
 
@@ -315,10 +387,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.q.UpdateRunLogFilePath(ctx, run.ID, proxyLogger.FilePath())
 	}
 
-	// Git worktree setup (root session only — children reuse its worktree).
+	// Git worktree setup. Every session with its own workdir (main task and
+	// delegated subtasks — not verification sessions, which share one) works
+	// inside a git worktree of the project repo on its own task-N branch and
+	// commits its changes at the end of the session.
 	var gitProject bool
 	var gitMgr *git.GitManager
-	if parent == nil && task.ProjectID != nil {
+	if !isVerification && task.ProjectID != nil {
 		project, projErr := e.q.GetProject(ctx, *task.ProjectID)
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
@@ -338,6 +413,30 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
+	// Ensure the workdir exists (no-op when the worktree was just created)
+	// and seed the task memory file for sessions that own their dir.
+	if !isVerification {
+		if err := os.MkdirAll(workspacePath, 0755); err != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
+			return "failed"
+		}
+		if err := initTaskMemory(workspacePath, task, company); err != nil {
+			fmt.Printf("Warning: failed to init memory.md: %v\n", err)
+		}
+	}
+
+	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
+	artifactDir := func() string {
+		base := settings.BasePath
+		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
+			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
+		}
+		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
+	}()
+	// Artifact files are readable by every session's file tools (the CEO has
+	// no file tools, so it only ever sees the metadata list below).
+	readOnlyDirs = append(readOnlyDirs, artifactDir)
+
 	// Build system prompt.
 	var systemPrompt string
 	if agentCfg != nil && agentCfg.Prompt != "" {
@@ -347,13 +446,30 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	} else {
 		systemPrompt = NewSystemPromptBuilder(e.q).Build(agent, task)
 	}
+	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	if len(readOnlyDirs) > 0 {
+		systemPrompt += fmt.Sprintf("\nReadable (read-only) dirs: %s", strings.Join(readOnlyDirs, ", "))
+	}
+
+	// Every session sees the artifact list of the whole task tree — metadata
+	// only (name, size, lines, modify time, description, verified flag).
+	// Agents with file tools can read the files from the artifacts dir.
+	if arts, artErr := e.q.ListArtifactsByTaskTree(ctx, rootTaskID); artErr == nil && len(arts) > 0 {
+		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
+	}
 
 	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
 	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
 	pastRuns, _ := e.q.ListCompletedRunsByTask(ctx, task.ID)
 	// Build initial messages: task description as the first user message,
 	// then past run results and human/agent comments interleaved chronologically.
-	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, task.Description, mode)
+	// Delegated subtasks carry no raw user input — their description IS the
+	// refined description written by the orchestrator.
+	taskDesc := task.Description
+	if taskDesc == "" {
+		taskDesc = task.RefinedDescription
+	}
+	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, taskDesc, mode)
 	if len(attachments) > 0 {
 		taskContent += "\nAttachments:"
 		for _, a := range attachments {
@@ -431,7 +547,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
-	registry := tools.DefaultRegistry(workspacePath)
+	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
 
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
@@ -446,7 +562,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if status == "done" || status == "in-review" {
 			pending := db.CountPendingSpecItems(t.AcceptanceCriteria) + db.CountPendingSpecItems(t.TestCases)
 			if pending > 0 {
-				return fmt.Errorf("cannot finish: %d acceptance criteria / test case items are still unverified — check each one and record the verdicts via verify_spec_items first", pending)
+				return fmt.Errorf("cannot finish: %d acceptance criteria / test case items are still unverified — run verify_implementation to have QA verify every item first", pending)
 			}
 		}
 		taskFinished = true
@@ -474,16 +590,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return nil
 	}))
 
-	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
-	artifactDir := func() string {
-		base := settings.BasePath
-		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
-			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
-		}
-		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
-	}()
-
-	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content string) error {
+	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content, description string) error {
 		if err := os.MkdirAll(artifactDir, 0755); err != nil {
 			return fmt.Errorf("could not create artifact directory: %w", err)
 		}
@@ -492,11 +599,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return fmt.Errorf("could not write artifact file: %w", err)
 		}
 		artifact, err := e.q.CreateArtifact(wCtx, db.Artifact{
-			TaskID:   task.ID,
-			RunID:    run.ID,
-			Filename: filename,
-			FilePath: filePath,
-			Content:  content,
+			TaskID:      task.ID,
+			RunID:       run.ID,
+			Filename:    filename,
+			FilePath:    filePath,
+			Content:     content,
+			Description: description,
 		})
 		if err != nil {
 			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
@@ -523,9 +631,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		agentNames = e.agentFactory.ListNames()
 	}
 
-	// Delegation: available until the nesting cap so a runaway chain of
-	// agents can't recurse forever.
-	if depth < maxDelegationDepth {
+	// Delegation: only the main task may delegate (no subtasks of subtasks),
+	// and verification sessions never delegate.
+	if depth < maxDelegationDepth && !isVerification {
 		registry.Register(tools.NewDelegateTask(
 			e.makeDelegateFunc(task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth),
 			agentNames,
@@ -560,49 +668,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return nil
 	}))
 
-	registry.Register(tools.NewVerifySpecItems(func(vCtx context.Context, results []tools.SpecItemResult) (string, error) {
-		t, err := e.q.GetTask(vCtx, task.ID)
-		if err != nil {
-			return "", err
-		}
-		acItems := db.ParseSpecItems(t.AcceptanceCriteria)
-		tcItems := db.ParseSpecItems(t.TestCases)
-		for _, r := range results {
-			var items []db.SpecItem
-			if r.List == "acceptance_criteria" {
-				items = acItems
-			} else {
-				items = tcItems
-			}
-			found := false
-			for i := range items {
-				if items[i].ID == r.ID {
-					items[i].Status = r.Status
-					items[i].Note = r.Note
-					found = true
-					break
-				}
-			}
-			if !found {
-				return "", fmt.Errorf("no item with id %d in %s (the task has %d acceptance criteria and %d test cases)",
-					r.ID, r.List, len(acItems), len(tcItems))
-			}
-		}
-		if len(acItems) > 0 {
-			t.AcceptanceCriteria = db.MarshalSpecItems(acItems)
-		}
-		if len(tcItems) > 0 {
-			t.TestCases = db.MarshalSpecItems(tcItems)
-		}
-		if _, err := e.q.UpdateTask(vCtx, t); err != nil {
-			return "", err
-		}
-		e.broadcastTaskSpec(t)
-		summary := fmt.Sprintf("Recorded %d verdict(s). %s %s",
-			len(results), specItemsSummary("Acceptance criteria", acItems), specItemsSummary("Test cases", tcItems))
-		e.logInfo(proxyLogger, summary)
-		return summary, nil
-	}))
+	// Verification: implementer-facing sessions get verify_implementation
+	// (spawns an independent QA session — the ONLY way to mark spec items as
+	// passed). QA verification sessions instead get
+	// report_verification_results to hand their verdicts back.
+	if !isVerification {
+		registry.Register(tools.NewVerifyImplementation(func(vCtx context.Context, notes string) (string, error) {
+			return e.verifyImplementation(vCtx, task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, notes)
+		}))
+	} else {
+		capture := parent.verification
+		registry.Register(tools.NewReportVerificationResults(func(rCtx context.Context, results []tools.VerificationResult) (string, error) {
+			capture.add(results)
+			e.logInfo(proxyLogger, fmt.Sprintf("Verification verdicts reported: %d item(s)", len(results)))
+			return fmt.Sprintf("Recorded %d verdict(s).", len(results)), nil
+		}))
+	}
 
 	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
 		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
@@ -927,14 +1008,17 @@ func (e *NativeEngine) makeDelegateFunc(
 			CompanyID:       parentTask.CompanyID,
 			ProjectID:       parentTask.ProjectID,
 			SprintID:        parentTask.SprintID,
-			AgentID:         &agentID,
-			ParentID:        &parentID,
-			Title:           title,
-			Description:     description,
-			TaskType:        db.TaskTypeImplement,
-			Status:          "in-progress",
-			Priority:        "Normal",
-			AgentConfigName: agentName,
+			AgentID:  &agentID,
+			ParentID: &parentID,
+			Title:    title,
+			// Delegated subtasks have no raw user input: the orchestrator's
+			// instructions ARE the refined description, and the subtask never
+			// goes through the refinement stage.
+			RefinedDescription: description,
+			TaskType:           db.TaskTypeImplement,
+			Status:             "in-progress",
+			Priority:           "Normal",
+			AgentConfigName:    agentName,
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to create subtask: %w", err)
@@ -1034,8 +1118,212 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	})
 }
 
+// verifyImplementation is the callback behind the verify_implementation tool:
+// it spawns an independent QA session (never the implementer) that inspects
+// the workdir and artifacts, checks every acceptance criterion and test case,
+// and reports per-item verdicts. The verdicts are applied to the task's spec
+// items — this is the only code path that can mark items passed.
+func (e *NativeEngine) verifyImplementation(
+	ctx context.Context,
+	task db.Task,
+	agent db.Agent,
+	run db.Run,
+	logger *logging.ProxyLogger,
+	rootRunID, rootTaskID int32,
+	workspacePath string,
+	depth int,
+	notes string,
+) (string, error) {
+	t, err := e.q.GetTask(ctx, task.ID)
+	if err != nil {
+		return "", err
+	}
+	acItems := db.ParseSpecItems(t.AcceptanceCriteria)
+	tcItems := db.ParseSpecItems(t.TestCases)
+	if len(acItems)+len(tcItems) == 0 {
+		return "", fmt.Errorf("the task has no acceptance criteria or test cases to verify — define them via update_task_details first")
+	}
+	if e.agentFactory != nil {
+		if _, cfgErr := e.agentFactory.GetConfig(verifierConfig); cfgErr != nil {
+			return "", fmt.Errorf("verifier agent config %q not available: %w", verifierConfig, cfgErr)
+		}
+	}
+
+	// Compose the QA briefing: what was built, what to check, where to look.
+	var b strings.Builder
+	b.WriteString("You are verifying an implementation produced by another agent. Test it properly — run it, read the files, check the outputs. Never assume.\n\n")
+	if t.RefinedDescription != "" {
+		fmt.Fprintf(&b, "What was supposed to be built:\n%s\n\n", t.RefinedDescription)
+	} else if t.Description != "" {
+		fmt.Fprintf(&b, "What was supposed to be built:\n%s\n\n", t.Description)
+	}
+	if len(acItems) > 0 {
+		fmt.Fprintf(&b, "Acceptance criteria to verify:\n%s\n\n", formatSpecItems(t.AcceptanceCriteria))
+	}
+	if len(tcItems) > 0 {
+		fmt.Fprintf(&b, "Test cases to execute:\n%s\n\n", formatSpecItems(t.TestCases))
+	}
+	if notes != "" {
+		fmt.Fprintf(&b, "Notes from the implementer:\n%s\n\n", notes)
+	}
+	b.WriteString("The implementation lives in your workdir (and any read-only dirs listed in your context); produced artifacts are listed in your context. ")
+	b.WriteString("You MUST call report_verification_results exactly once with a verdict for EVERY item above (success true/false, with an error description for failures) before finishing.")
+
+	parentID := t.ID
+	agentID := agent.ID
+	vtask, err := e.q.CreateTask(ctx, db.Task{
+		CompanyID:          t.CompanyID,
+		ProjectID:          t.ProjectID,
+		SprintID:           t.SprintID,
+		AgentID:            &agentID,
+		ParentID:           &parentID,
+		Title:              "Verify: " + t.Title,
+		RefinedDescription: b.String(),
+		TaskType:           db.TaskTypeImplement,
+		Status:             "in-progress",
+		Priority:           "Normal",
+		AgentConfigName:    verifierConfig,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create verification task: %w", err)
+	}
+	e.hub.BroadcastEvent("task_created", map[string]interface{}{
+		"id":        vtask.ID,
+		"parent_id": t.ID,
+		"title":     vtask.Title,
+	})
+
+	capture := &verificationCapture{}
+	var childRunID int32
+	session := &parentSession{
+		parentRunID:   run.ID,
+		rootRunID:     rootRunID,
+		rootTaskID:    rootTaskID,
+		workspacePath: workspacePath,
+		depth:         depth + 1,
+		verification:  capture,
+		onRunCreated: func(childRun db.Run) {
+			childRunID = childRun.ID
+			if logger != nil {
+				logger.LogSessionStarted(childRun.ID, vtask.ID, verifierConfig, vtask.Title, fmt.Sprintf("session-%d.log", childRun.ID))
+			}
+			e.hub.BroadcastEvent("session_started", map[string]interface{}{
+				"parent_run_id": run.ID,
+				"run_id":        childRun.ID,
+				"task_id":       vtask.ID,
+				"agent_name":    verifierConfig,
+				"title":         vtask.Title,
+			})
+		},
+	}
+
+	status := e.executeSession(ctx, vtask, "implement", session)
+
+	results := capture.get()
+	if logger != nil {
+		logger.LogSessionEnded(childRunID, status, fmt.Sprintf("%d verification verdict(s) reported", len(results)))
+	}
+	e.hub.BroadcastEvent("session_ended", map[string]interface{}{
+		"parent_run_id": run.ID,
+		"run_id":        childRunID,
+		"status":        status,
+	})
+
+	if len(results) == 0 {
+		return "", fmt.Errorf("verification session finished (status %s) without reporting any results — run verify_implementation again", status)
+	}
+
+	// Apply the verdicts. Reload the task in case something changed while QA ran.
+	t, err = e.q.GetTask(ctx, task.ID)
+	if err != nil {
+		return "", err
+	}
+	acItems = db.ParseSpecItems(t.AcceptanceCriteria)
+	tcItems = db.ParseSpecItems(t.TestCases)
+	var unknown []string
+	for _, r := range results {
+		items := acItems
+		if r.List == "test_cases" {
+			items = tcItems
+		}
+		found := false
+		for i := range items {
+			if items[i].ID == r.ID {
+				if r.Success {
+					items[i].Status = db.SpecItemPassed
+					items[i].Note = ""
+				} else {
+					items[i].Status = db.SpecItemFailed
+					items[i].Note = r.Error
+				}
+				found = true
+				break
+			}
+		}
+		if !found {
+			unknown = append(unknown, fmt.Sprintf("%s#%d", r.List, r.ID))
+		}
+	}
+	if len(acItems) > 0 {
+		t.AcceptanceCriteria = db.MarshalSpecItems(acItems)
+	}
+	if len(tcItems) > 0 {
+		t.TestCases = db.MarshalSpecItems(tcItems)
+	}
+	if _, err := e.q.UpdateTask(ctx, t); err != nil {
+		return "", err
+	}
+	e.broadcastTaskSpec(t)
+
+	// All items verified green → the produced artifacts are considered verified.
+	pending, failed := 0, 0
+	for _, item := range append(append([]db.SpecItem{}, acItems...), tcItems...) {
+		switch item.Status {
+		case db.SpecItemFailed:
+			failed++
+		case db.SpecItemPending:
+			pending++
+		}
+	}
+	if failed == 0 && pending == 0 {
+		if markErr := e.q.MarkTaskTreeArtifactsVerified(ctx, t.ID); markErr != nil {
+			fmt.Printf("Warning: failed to mark artifacts verified for task %d: %v\n", t.ID, markErr)
+		}
+	}
+
+	resultsJSON, _ := json.Marshal(results)
+	summary := fmt.Sprintf("Verification finished. %s %s\nResults: %s",
+		specItemsSummary("Acceptance criteria", acItems), specItemsSummary("Test cases", tcItems), string(resultsJSON))
+	if len(unknown) > 0 {
+		summary += fmt.Sprintf("\nWarning: verdicts for unknown items ignored: %s", strings.Join(unknown, ", "))
+	}
+	e.logInfo(logger, summary)
+	return summary, nil
+}
+
+// formatArtifactList renders artifact metadata (never content) for agent
+// system prompts: name, size, line count, modify time, verified flag and the
+// producer's one-line description.
+func formatArtifactList(arts []db.Artifact) string {
+	var b strings.Builder
+	for _, a := range arts {
+		lines := strings.Count(a.Content, "\n") + 1
+		verified := "no"
+		if a.IsVerified {
+			verified = "yes"
+		}
+		fmt.Fprintf(&b, "- %s (%d bytes, %d lines, modified %s, verified: %s)",
+			a.Filename, len(a.Content), lines, a.UpdatedAt.Format("2006-01-02 15:04"), verified)
+		if a.Description != "" {
+			fmt.Fprintf(&b, " — %s", a.Description)
+		}
+		b.WriteString("\n")
+	}
+	return strings.TrimRight(b.String(), "\n")
+}
+
 // broadcastTaskSpec pushes the task's spec fields to the UI after
-// update_task_details / verify_spec_items change them.
+// update_task_details / verify_implementation change them.
 func (e *NativeEngine) broadcastTaskSpec(t db.Task) {
 	e.hub.BroadcastEvent("task_updated", map[string]interface{}{
 		"id":                  t.ID,
