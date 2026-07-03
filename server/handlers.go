@@ -131,7 +131,10 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}/runs", api.ListTaskRuns)
 		r.Post("/{id}/rerun", api.RerunTask)
 		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
+		r.Get("/{id}/artifacts/download", api.DownloadTaskArtifacts)
 	})
+
+	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
 

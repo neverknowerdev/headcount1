@@ -33,6 +33,30 @@ func resolvePath(workspacePath, path string) (string, error) {
 	return abs, nil
 }
 
+// resolveReadPath resolves path like resolvePath, but additionally accepts
+// absolute paths under any of the extra read-only roots (e.g. the parent
+// task's workdir or the artifacts directory). Writes must keep using
+// resolvePath — read-only roots are never writable.
+func resolveReadPath(workspacePath string, readOnlyDirs []string, path string) (string, error) {
+	resolved, err := resolvePath(workspacePath, path)
+	if err == nil {
+		return resolved, nil
+	}
+	if filepath.IsAbs(path) {
+		abs := filepath.Clean(path)
+		for _, dir := range readOnlyDirs {
+			root := filepath.Clean(dir)
+			if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+				return abs, nil
+			}
+		}
+	}
+	if len(readOnlyDirs) > 0 {
+		return "", fmt.Errorf("path %q escapes the workspace and the read-only dirs (%s)", path, strings.Join(readOnlyDirs, ", "))
+	}
+	return "", err
+}
+
 // validateCommandPaths rejects shell commands that reference paths outside the
 // workspace — absolute paths, home-dir (~) paths, and relative traversals alike.
 //
@@ -41,7 +65,7 @@ func resolvePath(workspacePath, path string) (string, error) {
 // enforcement is the kernel sandbox (see sandbox_exec.go). Paths that exist
 // are additionally checked through os.Root, which catches symlinks inside the
 // workspace that point outside it.
-func validateCommandPaths(workspacePath, command string) error {
+func validateCommandPaths(workspacePath string, readOnlyDirs []string, command string) error {
 	// Reject $HOME / ${HOME} variable references that could bypass path checking.
 	if strings.Contains(command, "$HOME") || strings.Contains(command, "${HOME}") {
 		return fmt.Errorf("command references $HOME which is outside the workspace; use paths relative to the workspace root")
@@ -75,6 +99,20 @@ func validateCommandPaths(workspacePath, command string) error {
 			continue
 		}
 		if abs != workspace && !strings.HasPrefix(abs, workspace+string(filepath.Separator)) {
+			// Absolute references into a read-only root are fine: the kernel
+			// sandbox only restricts writes, and these roots are meant to be
+			// readable (parent task workdir, artifacts dir).
+			allowed := false
+			for _, dir := range readOnlyDirs {
+				root := filepath.Clean(dir)
+				if abs == root || strings.HasPrefix(abs, root+string(filepath.Separator)) {
+					allowed = true
+					break
+				}
+			}
+			if allowed {
+				continue
+			}
 			return fmt.Errorf("path %q escapes the workspace (%s); use paths relative to the workspace root", token, workspace)
 		}
 		rel, err := filepath.Rel(workspace, abs)

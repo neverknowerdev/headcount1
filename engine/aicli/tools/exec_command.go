@@ -12,12 +12,12 @@ import (
 // ExecCommand runs shell commands inside the workspace sandbox.
 type ExecCommand struct {
 	workspacePath string
+	readOnlyDirs  []string
 }
 
 // NewExecCommand creates an ExecCommand tool sandboxed to workspacePath.
-func NewExecCommand(workspacePath string) *ExecCommand {
-	logSandboxMode()
-	return &ExecCommand{workspacePath: workspacePath}
+func NewExecCommand(workspacePath string, readOnlyDirs ...string) *ExecCommand {
+	return &ExecCommand{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
 
 func (t *ExecCommand) Def() aicli.ToolDef {
@@ -44,7 +44,7 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	if err := validateCommandPaths(t.workspacePath, p.Command); err != nil {
+	if err := validateCommandPaths(t.workspacePath, t.readOnlyDirs, p.Command); err != nil {
 		return "", err
 	}
 	// 60-second hard cap so a misbehaving command can't stall the run forever.

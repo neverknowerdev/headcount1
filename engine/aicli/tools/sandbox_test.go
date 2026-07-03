@@ -43,7 +43,7 @@ func TestValidateCommandPaths(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateCommandPaths(workspace, tc.cmd)
+			err := validateCommandPaths(workspace, nil, tc.cmd)
 			if tc.wantErr && err == nil {
 				t.Errorf("expected error for command %q, got nil", tc.cmd)
 			}
@@ -67,14 +67,14 @@ func TestValidateCommandPathsSymlinkEscape(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if err := validateCommandPaths(workspace, "cat ./link/secret.txt"); err == nil {
+	if err := validateCommandPaths(workspace, nil, "cat ./link/secret.txt"); err == nil {
 		t.Error("expected error for symlink escaping the workspace, got nil")
 	}
-	if err := validateCommandPaths(workspace, "ls ./real"); err != nil {
+	if err := validateCommandPaths(workspace, nil, "ls ./real"); err != nil {
 		t.Errorf("unexpected error for real subdir: %v", err)
 	}
 	// Nonexistent relative paths (e.g. output files) must stay allowed.
-	if err := validateCommandPaths(workspace, "echo hi > ./does/not/exist.txt"); err != nil {
+	if err := validateCommandPaths(workspace, nil, "echo hi > ./does/not/exist.txt"); err != nil {
 		t.Errorf("unexpected error for nonexistent path: %v", err)
 	}
 }

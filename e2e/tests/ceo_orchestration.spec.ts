@@ -123,24 +123,38 @@ test.describe.serial('CEO orchestration flow', () => {
                     description: 'Implement the casual greeting per the acceptance criteria.',
                     agent_name: 'Programmer',
                 } } },
-                // Programmer session
-                { tool_call: { id: 'p1', name: 'finish_task', arguments: {
+                // Programmer session: produce an artifact, then finish
+                { tool_call: { id: 'p1', name: 'write_artifact', arguments: {
+                    filename: 'greeting-report.md',
+                    content: '# Greeting implementation\n\nImplemented the casual greeting.',
+                    description: 'Implementation report for the greeting feature',
+                } } },
+                { tool_call: { id: 'p2', name: 'finish_task', arguments: {
                     task_status: 'done', finish_status: 'Casual greeting implemented.',
                 } } },
                 { text: 'Implementation done.' },
-                // CEO tries to finish WITHOUT verifying the spec items — the
-                // engine must reject this (verification gate).
+                // CEO tries to finish WITHOUT verification — the engine must
+                // reject this (verification gate).
                 { tool_call: { id: 'c5', name: 'finish_task', arguments: {
                     task_status: 'in-review', finish_status: 'Attempt to finish before verification.',
                 } } },
-                // CEO records a verdict for every item, then finishes for real.
-                { tool_call: { id: 'c6', name: 'verify_spec_items', arguments: {
+                // CEO runs verify_implementation, which spawns an independent
+                // QA session — the only way to mark spec items as passed.
+                { tool_call: { id: 'c6', name: 'verify_implementation', arguments: {
+                    notes: 'Greeting implemented; see the artifact report.',
+                } } },
+                // QA verification session: verdict for every item, then finish.
+                { tool_call: { id: 'v1', name: 'report_verification_results', arguments: {
                     results: [
-                        { list: 'acceptance_criteria', id: 1, status: 'passed' },
-                        { list: 'acceptance_criteria', id: 2, status: 'failed', note: 'Config option not implemented yet.' },
-                        { list: 'test_cases', id: 1, status: 'passed', note: 'Verified by QA.' },
+                        { list: 'acceptance_criteria', id: 1, success: true },
+                        { list: 'acceptance_criteria', id: 2, success: false, error: 'Config option not implemented yet.' },
+                        { list: 'test_cases', id: 1, success: true },
                     ],
                 } } },
+                { tool_call: { id: 'v2', name: 'finish_task', arguments: {
+                    task_status: 'done', finish_status: 'Verification complete: 2 passed, 1 failed.',
+                } } },
+                { text: 'Verification done.' },
                 { tool_call: { id: 'c7', name: 'finish_task', arguments: {
                     task_status: 'in-review', finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
@@ -198,9 +212,9 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(rootRun.result_description).toBe('Greeting feature delegated, implemented and verified.');
 
         const children = await (await request.get(`/api/runs/${rootRun.id}/children`)).json();
-        expect(children.length).toBe(2);
+        expect(children.length).toBe(3);
         const configs = (children as any[]).map(c => c.agent_config_name);
-        expect(configs).toEqual(['QA Lead', 'Programmer']);
+        expect(configs).toEqual(['QA Lead', 'Programmer', 'QA']);
         for (const child of children) {
             expect(child.parent_run_id).toBe(rootRun.id);
             expect(child.root_run_id).toBe(rootRun.id);
@@ -210,8 +224,8 @@ test.describe.serial('CEO orchestration flow', () => {
         // The root run's structured log must record both session boundaries.
         const rootDetails = await (await request.get(`/api/runs/${rootRun.id}`)).json();
         const entryTypes = (rootDetails.log_entries as any[]).map(e => e.type);
-        expect(entryTypes.filter(t => t === 'session_started').length).toBe(2);
-        expect(entryTypes.filter(t => t === 'session_ended').length).toBe(2);
+        expect(entryTypes.filter(t => t === 'session_started').length).toBe(3);
+        expect(entryTypes.filter(t => t === 'session_ended').length).toBe(3);
 
         // ── Task spec: CEO-generated fields, user input untouched ────────────
         const finalTask = await (await request.get(`/api/tasks/${taskId}`)).json();
@@ -227,7 +241,7 @@ test.describe.serial('CEO orchestration flow', () => {
         ]);
         const tcItems = JSON.parse(finalTask.test_cases);
         expect(tcItems).toEqual([
-            { id: 1, text: 'Open home page → casual greeting is visible.', status: 'passed', note: 'Verified by QA.' },
+            { id: 1, text: 'Open home page → casual greeting is visible.', status: 'passed' },
         ]);
 
         // The premature finish_task (before verification) must have been
@@ -235,15 +249,40 @@ test.describe.serial('CEO orchestration flow', () => {
         const rootEntries = rootDetails.log_entries as any[];
         const gateError = rootEntries.find(e =>
             e.type === 'tool_response' && typeof e.content === 'string' && e.content.includes('unverified'));
-        expect(gateError, 'finish_task before verify_spec_items should be rejected').toBeTruthy();
+        expect(gateError, 'finish_task before verify_implementation should be rejected').toBeTruthy();
 
-        // ── Subtasks: both delegations created and finished their tasks ──────
+        // ── Artifacts: produced by the Programmer, listed with metadata ──────
+        const artifacts = await (await request.get(`/api/tasks/${taskId}/artifacts`)).json();
+        expect(artifacts.length).toBe(1);
+        const artifact = artifacts[0];
+        expect(artifact.filename).toBe('greeting-report.md');
+        expect(artifact.description).toBe('Implementation report for the greeting feature');
+        // One acceptance criterion failed, so the artifacts are NOT marked verified.
+        expect(artifact.is_verified).toBeFalsy();
+
+        // Download endpoints: single file and the whole-task zip.
+        const dl = await request.get(`/api/artifacts/${artifact.id}/download`);
+        expect(dl.ok()).toBeTruthy();
+        expect((await dl.text())).toContain('Implemented the casual greeting.');
+        const zipRes = await request.get(`/api/tasks/${taskId}/artifacts/download`);
+        expect(zipRes.ok()).toBeTruthy();
+        expect(zipRes.headers()['content-type']).toContain('application/zip');
+
+        // ── Subtasks: two delegations plus the QA verification session ───────
         const allTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
         const subtasks = (allTasks as any[]).filter(t => t.parent_id === taskId);
-        expect(subtasks.length).toBe(2);
+        expect(subtasks.length).toBe(3);
         for (const st of subtasks) {
             expect(st.status).toBe('done');
         }
+        // Delegated subtasks carry no raw user input — the orchestrator's
+        // instructions live in refined_description.
+        const implTask = subtasks.find((t: any) => t.title === 'Implement greeting');
+        expect(implTask.description).toBe('');
+        expect(implTask.refined_description).toBe('Implement the casual greeting per the acceptance criteria.');
+        const verifyTask = subtasks.find((t: any) => t.title.startsWith('Verify:'));
+        expect(verifyTask, 'a QA verification subtask should exist').toBeTruthy();
+        expect(verifyTask.agent_config_name).toBe('QA');
 
         // ── Filesystem: logs grouped by main run id, one file per session ────
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
@@ -266,7 +305,7 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(page.getByTestId('run-current-status')).toHaveText(STATUS_LINE);
 
         const sessionBlocks = page.getByTestId('session-block');
-        await expect(sessionBlocks).toHaveCount(2);
+        await expect(sessionBlocks).toHaveCount(3);
         await expect(sessionBlocks.first()).toContainText('QA Lead');
         await expect(sessionBlocks.first()).toContainText('Define acceptance criteria');
 
@@ -283,6 +322,7 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(agentTokenStats).toContainText('CEO');
         await expect(agentTokenStats).toContainText('QA Lead');
         await expect(agentTokenStats).toContainText('Programmer');
+        await expect(agentTokenStats).toContainText('QA');
 
         // Run Logs list: only the main session is a top-level card. Its
         // sub-sessions are nested one level down and stay collapsed until the
@@ -291,14 +331,14 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
         const rootCards = page.getByTestId('root-run-card');
         await expect(rootCards).toHaveCount(1);
-        await expect(rootCards.first()).toContainText('2 sessions');
+        await expect(rootCards.first()).toContainText('3 sessions');
 
         // Sub-session logs stay hidden until the root card itself is maximized
         // (native <details> collapses its content).
         await expect(rootCards.first().getByTestId('session-block').first()).not.toBeVisible();
         await rootCards.first().locator('summary').click();
         const listSessionBlocks = rootCards.first().getByTestId('session-block');
-        await expect(listSessionBlocks).toHaveCount(2);
+        await expect(listSessionBlocks).toHaveCount(3);
         await expect(listSessionBlocks.first()).toBeVisible();
         await expect(listSessionBlocks.first()).toContainText('QA Lead');
 
@@ -336,6 +376,20 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(ceoSpec.getByText('❌')).toHaveCount(1);
         await ceoSpec.getByRole('button', { name: /Test Cases/ }).click();
         await expect(ceoSpec.getByText(/casual greeting is visible/)).toBeVisible();
+
+        // Artifacts block at task-description level: collapsed by default,
+        // expandable per artifact, with download links.
+        const artifactsBlock = page.getByTestId('artifacts-block');
+        await expect(artifactsBlock).toBeVisible();
+        await expect(artifactsBlock).toContainText('1 artifact');
+        await expect(artifactsBlock).toContainText('Download all');
+        await expect(artifactsBlock.getByText('greeting-report.md')).toBeHidden();
+        await artifactsBlock.getByRole('button', { name: /1 artifact/ }).click();
+        await expect(artifactsBlock.getByText('greeting-report.md')).toBeVisible();
+        await expect(artifactsBlock.getByText('Implementation report for the greeting feature')).toBeVisible();
+        // Expand the artifact row to see its content inline.
+        await artifactsBlock.getByRole('button', { name: /greeting-report\.md/ }).click();
+        await expect(artifactsBlock.getByText('Implemented the casual greeting.')).toBeVisible();
     });
 
     test('re-running a subtask or child session restarts the main session', async ({ page, request }) => {

@@ -281,8 +281,13 @@ type Artifact struct {
 	Filename  string    `json:"filename" gorm:"not null"`
 	FilePath  string    `json:"file_path" gorm:"not null"`
 	Content   string    `json:"content" gorm:"type:text"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	// Description is a one-line summary provided by the producing agent.
+	// IsVerified is set when a QA verification session passes all spec items
+	// for the artifact's task.
+	Description string    `json:"description" gorm:"type:text;default:''"`
+	IsVerified  bool      `json:"is_verified" gorm:"not null;default:false"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
 }
 
 type ActivityLog struct {
