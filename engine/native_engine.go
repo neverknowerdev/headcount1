@@ -670,9 +670,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 				}
 			}
 			cgProxy := tools.NewCodegraphProxy(currentProj, cgServers)
-			cgProxy.RegisterAll(registry)
+			cgSummary := cgProxy.RegisterAll(ctx, registry)
 			defer cgProxy.Close()
 			e.logInfo(proxyLogger, fmt.Sprintf("Codegraph: %d project(s) available", len(cgServers)))
+			e.logInfo(proxyLogger, cgSummary)
 		}
 	} else if cgErr != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
@@ -682,6 +683,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
 	}
+
+	// Append the authoritative tool listing so prose tool references in agent
+	// prompt files can never promise a tool that isn't actually registered.
+	systemPrompt += registry.PromptListing()
 
 	// MCP listing token costs — set if any external MCP servers are active for this run.
 	var listingCostTotal int

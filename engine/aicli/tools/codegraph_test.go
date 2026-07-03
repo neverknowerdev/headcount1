@@ -3,6 +3,8 @@ package tools_test
 import (
 	"context"
 	"encoding/json"
+	"os"
+	"os/exec"
 	"strings"
 	"testing"
 
@@ -51,13 +53,15 @@ func TestCodegraphProxy_Empty(t *testing.T) {
 	proxy := tools.NewCodegraphProxy(nil, nil)
 	defer proxy.Close()
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 	defs := reg.Defs()
 	// Should still register tools even with no projects.
 	assert.NotEmpty(t, defs)
 }
 
-func TestCodegraphProxy_RegisterAll(t *testing.T) {
+// With an unreachable server (`false` binary), discovery fails and RegisterAll
+// falls back to registering the full curated catalog.
+func TestCodegraphProxy_RegisterAll_FallbackOnDiscoveryFailure(t *testing.T) {
 	proxy := makeProxy(
 		[]db.Project{stubProject(1, "my-app")},
 		[]db.MCPServer{stubServer("codegraph-1")},
@@ -65,7 +69,7 @@ func TestCodegraphProxy_RegisterAll(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	defs := reg.Defs()
 	nameSet := make(map[string]bool)
@@ -87,6 +91,99 @@ func TestCodegraphProxy_RegisterAll(t *testing.T) {
 	}
 }
 
+// With a live server, RegisterAll registers exactly the server's tools/list:
+// curated defs for known names, passthrough defs for unknown ones, and no
+// catalog tools the server doesn't expose.
+func TestCodegraphProxy_RegisterAll_DiscoversServerTools(t *testing.T) {
+	if _, err := exec.LookPath("go"); err != nil {
+		t.Skip("go binary not in PATH; skipping stdio MCP test")
+	}
+
+	helperSrc := `package main
+
+import (
+	"bufio"
+	"encoding/json"
+	"fmt"
+	"os"
+)
+
+type msg struct {
+	JSONRPC string          ` + "`json:\"jsonrpc\"`" + `
+	ID      *int            ` + "`json:\"id,omitempty\"`" + `
+	Method  string          ` + "`json:\"method,omitempty\"`" + `
+}
+
+func main() {
+	scanner := bufio.NewScanner(os.Stdin)
+	for scanner.Scan() {
+		var req msg
+		if err := json.Unmarshal(scanner.Bytes(), &req); err != nil || req.ID == nil {
+			continue
+		}
+		var result interface{}
+		switch req.Method {
+		case "initialize":
+			result = map[string]interface{}{
+				"protocolVersion": "2024-11-05",
+				"capabilities":    map[string]interface{}{},
+				"serverInfo":      map[string]interface{}{"name": "fake-codegraph", "version": "0"},
+			}
+		case "tools/list":
+			result = map[string]interface{}{
+				"tools": []map[string]interface{}{
+					{"name": "codegraph_node", "description": "server node desc",
+						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"symbol": map[string]interface{}{"type": "string"}}}},
+					{"name": "codegraph_search", "description": "server search desc",
+						"inputSchema": map[string]interface{}{"type": "object", "properties": map[string]interface{}{"search": map[string]interface{}{"type": "string"}}}},
+				},
+			}
+		default:
+			result = map[string]interface{}{}
+		}
+		out, _ := json.Marshal(map[string]interface{}{"jsonrpc": "2.0", "id": *req.ID, "result": result})
+		fmt.Println(string(out))
+	}
+}
+`
+	dir := t.TempDir()
+	srcPath := dir + "/fake_codegraph.go"
+	require.NoError(t, os.WriteFile(srcPath, []byte(helperSrc), 0644))
+
+	server := db.MCPServer{
+		Name:      "codegraph-fake",
+		Transport: "stdio",
+		Command:   "go",
+		Args:      `["run","` + srcPath + `"]`,
+	}
+	proxy := makeProxy([]db.Project{stubProject(1, "my-app")}, []db.MCPServer{server})
+	defer proxy.Close()
+
+	reg := aicli.NewRegistry()
+	summary := proxy.RegisterAll(context.Background(), reg)
+
+	names := make(map[string]string) // name → params JSON
+	for _, d := range reg.Defs() {
+		names[d.Function.Name] = string(d.Function.Parameters)
+	}
+
+	// Exactly the two server tools, nothing else from the catalog.
+	assert.Len(t, names, 2)
+	assert.Contains(t, names, "codegraph_node")
+	assert.Contains(t, names, "codegraph_search")
+	assert.NotContains(t, names, "codegraph_query")
+	assert.NotContains(t, names, "codegraph_explore")
+
+	// The passthrough/curated defs must still carry the project routing param.
+	assert.Contains(t, names["codegraph_search"], `"project"`)
+	assert.Contains(t, names["codegraph_search"], "my-app")
+	assert.Contains(t, names["codegraph_node"], `"project"`)
+
+	// Summary names what was skipped.
+	assert.Contains(t, summary, "codegraph_query")
+	assert.Contains(t, summary, "registered 2")
+}
+
 // ---- tool definitions include project enum ----
 
 func TestCodegraphProxy_ToolDef_ProjectEnum(t *testing.T) {
@@ -97,7 +194,7 @@ func TestCodegraphProxy_ToolDef_ProjectEnum(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	var exploreDef *aicli.ToolDef
 	for _, d := range reg.Defs() {
@@ -121,7 +218,7 @@ func TestCodegraphProxy_ToolDef_EmptyProjectEnum(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	for _, d := range reg.Defs() {
 		if d.Function.Name == "codegraph_explore" {
@@ -142,7 +239,7 @@ func TestCodegraphProxy_Execute_InvalidJSON(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	_, err := reg.Execute(context.Background(), "codegraph_explore", json.RawMessage(`not json`))
 	require.Error(t, err)
@@ -158,7 +255,7 @@ func TestCodegraphProxy_Execute_UnknownProject(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	_, err := reg.Execute(context.Background(), "codegraph_explore",
 		json.RawMessage(`{"query":"how does auth work","project":"nonexistent"}`))
@@ -173,7 +270,7 @@ func TestCodegraphProxy_Execute_NoProjects(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	_, err := reg.Execute(context.Background(), "codegraph_explore",
 		json.RawMessage(`{"query":"auth"}`))
@@ -196,7 +293,7 @@ func TestCodegraphProxy_Execute_DefaultsToCurrentProject(t *testing.T) {
 	// We can't fully execute (would try to spawn `false`), but we can verify
 	// the project resolution logic doesn't error on unknown project.
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	// Execute with no project: will resolve to proj2 and try to spawn `false`,
 	// which will fail at MCP connect — but with a "start server" error, not
@@ -223,7 +320,7 @@ func TestCodegraphProxy_ProjectFieldStripped(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	// Passing explicit valid project name; will fail at MCP spawn but that's expected.
 	_, err := reg.Execute(context.Background(), "codegraph_explore",
@@ -243,7 +340,7 @@ func TestBuildProjectEnum_MultipleProjects(t *testing.T) {
 	defer proxy.Close()
 
 	reg := aicli.NewRegistry()
-	proxy.RegisterAll(reg)
+	proxy.RegisterAll(context.Background(), reg)
 
 	for _, d := range reg.Defs() {
 		params := string(d.Function.Parameters)

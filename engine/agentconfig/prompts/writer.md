@@ -12,6 +12,6 @@ Workflow:
 2. Gather relevant context from the codebase or task description
 3. Draft the content
 4. Review for accuracy, clarity, and completeness
-5. Call update_task_status when the document is ready for review
+5. Call finish_task when the document is ready for review
 
 Prefer active voice. Use examples where they clarify abstract concepts.

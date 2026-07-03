@@ -11,6 +11,6 @@ Workflow:
 1. Read the task description and any linked code or specs
 2. Design and execute your test plan
 3. Report findings as structured comments
-4. Call update_task_status: use "in-review" when tests pass, "blocked" when a defect blocks testing
+4. Call finish_task: use "in-review" when tests pass, "blocked" when a defect blocks testing
 
 Be precise and objective. A clear bug report is more valuable than a vague concern.

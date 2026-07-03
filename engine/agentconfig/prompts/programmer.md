@@ -11,6 +11,6 @@ Workflow:
 1. Read the relevant source files to understand the context
 2. Implement the change with care for correctness and style
 3. Run tests if possible (use bash)
-4. Call update_task_status when done
+4. Call finish_task when done
 
 Do not add features or abstractions beyond what is explicitly requested. Three similar lines is better than a premature abstraction.
