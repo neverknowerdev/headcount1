@@ -38,10 +38,13 @@ var codeExtensions = map[string]bool{
 // WriteArtifactFile lets the agent publish output artifacts for the current task.
 // Any file type is allowed except source code and config files.
 type WriteArtifactFile struct {
-	onWrite func(ctx context.Context, filename, content, description string) error
+	// onWrite persists the artifact and returns a human-readable result
+	// message (e.g. noting that an existing artifact was overwritten and by
+	// which run it was originally written).
+	onWrite func(ctx context.Context, filename, content, description string) (string, error)
 }
 
-func NewWriteArtifactFile(onWrite func(ctx context.Context, filename, content, description string) error) *WriteArtifactFile {
+func NewWriteArtifactFile(onWrite func(ctx context.Context, filename, content, description string) (string, error)) *WriteArtifactFile {
 	return &WriteArtifactFile{onWrite: onWrite}
 }
 
@@ -96,8 +99,12 @@ func (t *WriteArtifactFile) Execute(ctx context.Context, args json.RawMessage) (
 	if codeExtensions[ext] {
 		return "", fmt.Errorf("write_artifact: %q is a code/config file type and cannot be an artifact; use write instead", ext)
 	}
-	if err := t.onWrite(ctx, p.Filename, p.Content, p.Description); err != nil {
+	msg, err := t.onWrite(ctx, p.Filename, p.Content, p.Description)
+	if err != nil {
 		return "", fmt.Errorf("write_artifact: %w", err)
 	}
-	return fmt.Sprintf("Artifact %q written.", p.Filename), nil
+	if msg == "" {
+		msg = fmt.Sprintf("Artifact %q written.", p.Filename)
+	}
+	return msg, nil
 }

@@ -38,6 +38,9 @@ var designerPrompt string
 //go:embed prompts/smm.md
 var smmPrompt string
 
+//go:embed prompts/codeexplorer.md
+var codeExplorerPrompt string
+
 // ceoAllowedTools restricts the CEO to orchestration-only tools: the CEO
 // delegates all real work and therefore gets no file/shell/web access.
 var ceoAllowedTools = []string{
@@ -48,6 +51,8 @@ var ceoAllowedTools = []string{
 	"verify_implementation",
 	"expand_run_result",
 	"write_artifact",
+	"list_artifacts",
+	"read_artifact",
 	"finish_task",
 }
 
@@ -66,15 +71,17 @@ func builtinConfigs() []*AgentConfig {
 	return []*AgentConfig{
 		{
 			Name:           "CEO",
+			ShortName:      "CEO",
 			Description:    "Chief Executive Officer — orchestrates task execution through delegation",
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"CTO", "Programmer", "QA Lead", "QA", "TechSpecResearcher", "DesignSpecResearcher", "Designer", "SMM", "Writer", "Researcher"},
+			Subagents:      []string{"CTO", "Programmer", "QA Lead", "QA", "TechSpecResearcher", "DesignSpecResearcher", "Designer", "SMM", "Writer", "Researcher", "CodeExplorer"},
 			AllowedTools:   ceoAllowedTools,
 		},
 		{
 			Name:           "CTO",
+			ShortName:      "CTO",
 			Description:    "Chief Technology Officer — technical architecture and engineering leadership",
 			Prompt:         strings.TrimSpace(ctoPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -84,6 +91,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Programmer",
+			ShortName:      "PROG",
 			Description:    "Software developer — implements features and fixes bugs",
 			Prompt:         strings.TrimSpace(programmerPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -92,6 +100,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "QA Lead",
+			ShortName:      "QALEAD",
 			Description:    "QA Lead — defines acceptance criteria and test cases",
 			Prompt:         strings.TrimSpace(qaLeadPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -100,6 +109,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "QA",
+			ShortName:      "QA",
 			Description:    "Quality assurance — tests, validates, and reports defects",
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -108,6 +118,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "TechSpecResearcher",
+			ShortName:      "TSPEC",
 			Description:    "Technical researcher — investigates libraries, APIs, and implementation approaches",
 			Prompt:         strings.TrimSpace(techSpecResearcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -116,6 +127,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "DesignSpecResearcher",
+			ShortName:      "DSPEC",
 			Description:    "Design researcher — investigates UX patterns and design conventions",
 			Prompt:         strings.TrimSpace(designSpecResearcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -124,6 +136,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Designer",
+			ShortName:      "DSGN",
 			Description:    "Designer — produces UI/UX design specifications",
 			Prompt:         strings.TrimSpace(designerPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -132,6 +145,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "SMM",
+			ShortName:      "SMM",
 			Description:    "Social media marketing — posts, announcements, and content plans",
 			Prompt:         strings.TrimSpace(smmPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -140,6 +154,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Writer",
+			ShortName:      "WRITER",
 			Description:    "Technical writer — creates documentation, reports, and summaries",
 			Prompt:         strings.TrimSpace(writerPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -148,10 +163,20 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Researcher",
+			ShortName:      "RSRCH",
 			Description:    "Researcher — investigates topics and synthesises findings",
 			Prompt:         strings.TrimSpace(researcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
+		},
+		{
+			Name:           "CodeExplorer",
+			ShortName:      "EXPLORE",
+			Description:    "Codebase explorer — maps architecture, features, and implementation state",
+			Prompt:         strings.TrimSpace(codeExplorerPrompt),
+			ChatType:       ChatTypeMessageHistory,
+			ReasoningLevel: ReasoningLevelMedium,
+			ParentAgent:    "CEO",
 		},
 	}
 }

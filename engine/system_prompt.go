@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"text/template"
+	"time"
 
 	"agent-orchestrator/db"
 	"gopkg.in/yaml.v3"
@@ -55,13 +56,19 @@ const promptTemplate = `You are an agent that works on tasks. Implement the task
 
 At the end of every run you MUST call finish_task — there are no exceptions:
 - in-review: work is done, ready for human review
-- blocked: you are stuck and need user input
+- blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
 - done: task is fully complete, no review needed
 - refinement: you need clarification before you can start
+Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — other agents read it via expand_run_result.
 
 Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
 
+Deliverables are ARTIFACTS: write them with write_artifact, discover existing ones with list_artifacts, and read them with read_artifact. Artifacts are shared across the whole task tree — check what already exists before re-deriving work another agent may have produced. Never paste a full document into a chat message when it exists as an artifact; reference its filename instead.
+
+Your file tools are sandboxed to the working directory (plus any listed read-only dirs). Absolute paths outside them are inaccessible; explore code through the codegraph tools when available.
+
 Context of your work:
+Current date: {{.CurrentDate}}
 {{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}
 {{if .ProjectName}}Project: {{.ProjectName}}. {{.ProjectDescription}}{{end}}
 {{if .SprintName}}Sprint: {{.SprintName}}. {{.SprintDescription}}{{end}}
@@ -86,6 +93,7 @@ type PromptData struct {
 	SprintName         string
 	SprintDescription  string
 	WorkingDirectory   string
+	CurrentDate        string
 	TaskName           string
 	TaskStatus         string
 	TaskDescription    string
@@ -123,6 +131,7 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		RefinedDescription: task.RefinedDescription,
 		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
 		TestCases:          formatSpecItems(task.TestCases),
+		CurrentDate:        time.Now().Format("2006-01-02"),
 	}
 
 	if task.CompanyID != 0 {

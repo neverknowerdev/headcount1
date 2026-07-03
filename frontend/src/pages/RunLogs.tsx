@@ -98,8 +98,8 @@ export const RunLogs: React.FC = () => {
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        Run #{r.id} for Task #{r.task_id} by {r.agent?.name}
-                                        {r.agent_config_name ? ` · ${r.agent_config_name}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        Run {r.name || `#${r.id}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name}
+                                        {!r.name && r.agent_config_name ? ` · ${r.agent_config_name}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                         {childCount > 0 && (
                                             <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{childCount} session{childCount > 1 ? 's' : ''}</span>
                                         )}

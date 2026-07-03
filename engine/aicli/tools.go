@@ -49,6 +49,7 @@ func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessag
 
 // Filter returns a new Registry containing only tools whose names appear in
 // allowed. An empty allowed list or one containing "*" returns r unchanged.
+// Entries ending in "*" match by prefix (e.g. "codegraph_*").
 func (r *Registry) Filter(allowed []string) *Registry {
 	if len(allowed) == 0 {
 		return r
@@ -58,17 +59,27 @@ func (r *Registry) Filter(allowed []string) *Registry {
 			return r
 		}
 	}
-	allowedSet := make(map[string]bool, len(allowed))
-	for _, a := range allowed {
-		allowedSet[a] = true
-	}
 	filtered := NewRegistry()
 	for name, tool := range r.tools {
-		if allowedSet[name] {
+		if nameMatchesFilter(name, allowed) {
 			filtered.Register(tool)
 		}
 	}
 	return filtered
+}
+
+// nameMatchesFilter reports whether a tool name matches any filter entry.
+// An entry ending in "*" matches by prefix (e.g. "codegraph_*").
+func nameMatchesFilter(name string, allowed []string) bool {
+	for _, a := range allowed {
+		if a == name {
+			return true
+		}
+		if n := len(a); n > 0 && a[n-1] == '*' && len(name) >= n-1 && name[:n-1] == a[:n-1] {
+			return true
+		}
+	}
+	return false
 }
 
 // PromptListing renders the registry as a system-prompt section so the prompt

@@ -102,6 +102,9 @@ type Task struct {
 	// fields below are produced by the CEO orchestrator during refinement
 	// (via the update_task_details tool) and shown separately in the UI.
 	Description        string     `json:"description"`
+	// RefKey is the human-readable task key: "DEC-50" for a main task,
+	// "DEC-50-1", "DEC-50-2", … for its subtasks. Set on creation.
+	RefKey             string     `json:"ref_key" gorm:"index"`
 	RefinedDescription string     `json:"refined_description" gorm:"type:text;default:''"`
 	AcceptanceCriteria string     `json:"acceptance_criteria" gorm:"type:text;default:''"`
 	TestCases          string     `json:"test_cases" gorm:"type:text;default:''"`
@@ -146,6 +149,9 @@ type Run struct {
 	Task              Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
 	AgentID           int32      `json:"agent_id" gorm:"not null"`
 	Agent             Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	// Name is the human-readable run key: "<task ref>-<AGENTSHORT>[-n]",
+	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". Set when the run starts.
+	Name              string     `json:"name" gorm:"index"`
 	// ParentRunID links a delegated session to the run that spawned it.
 	// RootRunID points at the top-level (CEO) run of the whole execution tree;
 	// it equals ID for root runs so log files can be grouped per main run.

@@ -193,6 +193,23 @@ func (p *CodegraphProxy) Close() {
 }
 
 // projectNames returns the list of project names for the enum schema.
+// projectLegend renders "name — description (repo dir)" for each project so
+// tool schemas can explain what each enum value refers to.
+func (p *CodegraphProxy) projectLegend() string {
+	parts := make([]string, 0, len(p.entries))
+	for _, e := range p.entries {
+		s := e.project.Name
+		if e.project.Description != "" {
+			s += " — " + e.project.Description
+		}
+		if e.server.WorkDir != "" {
+			s += " (indexed from " + e.server.WorkDir + ")"
+		}
+		parts = append(parts, s)
+	}
+	return strings.Join(parts, "; ")
+}
+
 func (p *CodegraphProxy) projectNames() []string {
 	names := make([]string, 0, len(p.entries))
 	for _, e := range p.entries {
@@ -264,7 +281,12 @@ type cgProxyTool struct {
 func (t *cgProxyTool) Def() aicli.ToolDef {
 	projectEnum := buildProjectEnum(t.proxy.projectNames())
 
-	projectProp := fmt.Sprintf(`"project":{"type":"string","description":"Project to query. Omit to use the current project.","enum":%s}`, projectEnum)
+	projDesc := "Project to query. Omit to use the current project."
+	if legend := t.proxy.projectLegend(); legend != "" {
+		projDesc += " Projects: " + legend
+	}
+	descJSON, _ := json.Marshal(projDesc)
+	projectProp := fmt.Sprintf(`"project":{"type":"string","description":%s,"enum":%s}`, descJSON, projectEnum)
 
 	if t.rawSchema != nil {
 		return aicli.ToolDef{

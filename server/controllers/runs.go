@@ -79,6 +79,8 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 
 	var runs []db.Run
 	err := api.db.
+		Preload("Task").
+		Preload("Agent").
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error

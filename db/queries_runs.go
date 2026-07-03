@@ -243,3 +243,29 @@ func (q *Queries) ListCompletedRunsByTask(ctx context.Context, taskID int32) ([]
 		Find(&runs).Error
 	return runs, err
 }
+
+// GetLatestRunByTask returns the most recently started run for a task.
+func (q *Queries) GetLatestRunByTask(ctx context.Context, taskID int32) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).
+		Where("task_id = ?", taskID).
+		Order("started_at desc").
+		First(&r).Error
+	return r, err
+}
+
+// UpdateRunName stores the human-readable run key (e.g. "DEC-50-CEO").
+func (q *Queries) UpdateRunName(ctx context.Context, id int32, name string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("name", name).Error
+}
+
+// CountRunsByNameKey counts runs on a task whose name is the given key or a
+// numbered variant of it ("<key>" or "<key>-N"). Used to pick the next run
+// name suffix.
+func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key string) (int64, error) {
+	var count int64
+	err := q.db.WithContext(ctx).Model(&Run{}).
+		Where("task_id = ? AND (name = ? OR name LIKE ?)", taskID, key, key+"-%").
+		Count(&count).Error
+	return count, err
+}

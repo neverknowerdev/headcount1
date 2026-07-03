@@ -301,7 +301,7 @@ test.describe.serial('CEO orchestration flow', () => {
 
         // ── UI: Run Log view shows the main flow with expandable sessions ────
         await page.goto(`/companies/ceo-co/run-logs/${rootRun.id}`);
-        await expect(page.getByRole('heading', { name: `Run #${rootRun.id} Details` })).toBeVisible({ timeout: 15_000 });
+        await expect(page.getByRole('heading', { name: `Run ${rootRun.name || '#' + rootRun.id} Details` })).toBeVisible({ timeout: 15_000 });
         await expect(page.getByTestId('run-current-status')).toHaveText(STATUS_LINE);
 
         const sessionBlocks = page.getByTestId('session-block');

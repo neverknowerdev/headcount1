@@ -49,6 +49,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
 	))
@@ -104,15 +105,18 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&agent, "company_id = ?", company.ID).Error)
 
 	agentID := agent.ID
-	require.NoError(t, database.Create(&db.Task{
+	// Create via Queries so the ref key ("TASK-1" style) is assigned, as in
+	// production.
+	created, err := q.CreateTask(ctx, db.Task{
 		CompanyID: company.ID,
 		SprintID:  sprint.ID,
 		AgentID:   &agentID,
 		Title:     "Test Task",
 		TaskType:  db.TaskTypeImplement,
 		Status:    "to-do",
-	}).Error)
-	require.NoError(t, database.First(&task, "company_id = ?", company.ID).Error)
+	})
+	require.NoError(t, err)
+	require.NoError(t, database.First(&task, created.ID).Error)
 	return
 }
 

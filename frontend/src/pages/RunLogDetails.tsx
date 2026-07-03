@@ -227,7 +227,7 @@ export const RunLogDetails: React.FC = () => {
                     <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
                         <ArrowLeft size={20} />
                     </Link>
-                    <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
+                    <h1 className="text-2xl font-bold">Run {run.name || `#${run.id}`} Details</h1>
                 </div>
                 <div className="flex items-center gap-2">
                     {run.status === 'running' && (
@@ -290,7 +290,7 @@ export const RunLogDetails: React.FC = () => {
                     )}
                     <div>
                         <p className="text-sm text-gray-500">Task</p>
-                        <Link to={`/companies/${shortName}/tasks`} className="font-medium text-indigo-600 hover:underline">{run.task?.title} (#{run.task_id})</Link>
+                        <Link to={`/companies/${shortName}/tasks`} className="font-medium text-indigo-600 hover:underline">{run.task?.title} ({run.task?.ref_key || `#${run.task_id}`})</Link>
                     </div>
                     <div>
                         <p className="text-sm text-gray-500">Started At</p>

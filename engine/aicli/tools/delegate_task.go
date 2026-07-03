@@ -4,9 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"agent-orchestrator/engine/aicli"
 )
+
+// absolutePathRe matches absolute filesystem paths that a sandboxed delegated
+// session cannot access (macOS/Linux home paths and Windows drive paths).
+// Delegation instructions must reference artifacts, run IDs, the codegraph
+// project, or workspace-relative paths instead.
+var absolutePathRe = regexp.MustCompile(`(?m)(/Users/[\w.-]+|/home/[\w.-]+|[A-Za-z]:\\\\?[\w.-]+)`)
 
 // DelegateTask delegates a scoped piece of work to a specialist agent by
 // creating a child task and running it as a nested execution session. The
@@ -71,6 +78,12 @@ func (t *DelegateTask) Execute(ctx context.Context, args json.RawMessage) (strin
 	}
 	if p.AgentName == "" {
 		return "", fmt.Errorf("agent_name is required")
+	}
+	// Fail fast on instructions the sandboxed session cannot follow: absolute
+	// paths outside its workspace waste an entire delegated run.
+	if m := absolutePathRe.FindString(p.Description); m != "" {
+		return "", fmt.Errorf("description references the absolute path %q, which the sandboxed session cannot access — "+
+			"rewrite the instruction to reference artifacts (read_artifact), the codegraph project, or workspace-relative paths", m)
 	}
 	return t.fn(ctx, p.Title, p.Description, p.AgentName)
 }

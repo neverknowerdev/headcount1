@@ -138,8 +138,8 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
 
         // Verify Agent Run Logs
-        await expect(page.getByText(/Run #\d/).first()).toBeVisible();
-        await page.locator('summary:has-text("Run #")').first().click();
+        await expect(page.getByText(/Run (#\d|[A-Z0-9-]+-[A-Z0-9]+)/).first()).toBeVisible();
+        await page.locator('summary:has-text("Run ")').first().click();
 
         // Verify Run Logs page
         await page.keyboard.press('Escape');

@@ -334,6 +334,27 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
+	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
+	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2".
+	shortName := agentconfig.DeriveShortName(agent.Name)
+	if agentCfg != nil {
+		shortName = agentCfg.EffectiveShortName()
+	}
+	taskRef := task.RefKey
+	if taskRef == "" {
+		taskRef = fmt.Sprintf("TASK-%d", task.ID)
+	}
+	runKey := taskRef + "-" + shortName
+	// prior = earlier runs with this key (this run's name is still empty, so
+	// it is not counted). The second run becomes "<key>-2", and so on.
+	if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
+		runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
+	}
+	run.Name = runKey
+	if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
+		fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
+	}
+
 	// Workspace layout:
 	//   - the main task and every delegated subtask get their own directory
 	//     (a git worktree when the task belongs to a repo-backed project)
@@ -552,7 +573,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
 
-	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus string) error {
+	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
@@ -572,7 +593,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return err
 		}
 		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
-		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, ""); err != nil {
+		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, resultDetails); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
 		runID := run.ID
@@ -590,14 +611,41 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return nil
 	}))
 
-	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content, description string) error {
+	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content, description string) (string, error) {
 		if err := os.MkdirAll(artifactDir, 0755); err != nil {
-			return fmt.Errorf("could not create artifact directory: %w", err)
+			return "", fmt.Errorf("could not create artifact directory: %w", err)
 		}
 		filePath := filepath.Join(artifactDir, filename)
-		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
-			return fmt.Errorf("could not write artifact file: %w", err)
+
+		// Collision detection across the task tree: overwriting another run's
+		// artifact must be visible, not silent (last-write-wins destroyed
+		// grounded deliverables in past runs).
+		var existing *db.Artifact
+		if arts, exErr := e.q.ListArtifactsByTaskTree(wCtx, rootTaskID); exErr == nil {
+			for i := len(arts) - 1; i >= 0; i-- {
+				if arts[i].Filename == filename {
+					existing = &arts[i]
+					break
+				}
+			}
 		}
+
+		if err := os.WriteFile(filePath, []byte(content), 0644); err != nil {
+			return "", fmt.Errorf("could not write artifact file: %w", err)
+		}
+
+		if existing != nil {
+			if upErr := e.q.UpdateArtifactContent(wCtx, existing.ID, content, run.ID); upErr != nil {
+				fmt.Printf("Warning: failed to update artifact in DB: %v\n", upErr)
+			}
+			e.hub.BroadcastEvent("artifact_created", *existing)
+			if existing.RunID == run.ID {
+				return fmt.Sprintf("Artifact %q updated.", filename), nil
+			}
+			return fmt.Sprintf("Artifact %q written — OVERWROTE an existing artifact originally written by run #%d. "+
+				"If that was not intended, use a different filename.", filename, existing.RunID), nil
+		}
+
 		artifact, err := e.q.CreateArtifact(wCtx, db.Artifact{
 			TaskID:      task.ID,
 			RunID:       run.ID,
@@ -608,7 +656,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		})
 		if err != nil {
 			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
-			return nil
+			return "", nil
 		}
 		e.hub.BroadcastEvent("artifact_created", artifact)
 		commentContent, _ := json.Marshal(map[string]string{
@@ -624,7 +672,40 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}); cErr == nil {
 			e.hub.BroadcastEvent("comment_created", ac)
 		}
-		return nil
+		return fmt.Sprintf("Artifact %q written.", filename), nil
+	}))
+
+	// Artifact read access: agents can also read deliverables through these
+	// DB-backed tools, which work regardless of filesystem sandboxing.
+	registry.Register(tools.NewListArtifacts(func(lCtx context.Context) ([]tools.ArtifactInfo, error) {
+		artifacts, err := e.q.ListArtifactsByTaskTree(lCtx, rootTaskID)
+		if err != nil {
+			return nil, err
+		}
+		infos := make([]tools.ArtifactInfo, 0, len(artifacts))
+		for _, a := range artifacts {
+			infos = append(infos, tools.ArtifactInfo{
+				ID:        a.ID,
+				Filename:  a.Filename,
+				SizeBytes: len(a.Content),
+				WrittenBy: fmt.Sprintf("run #%d", a.RunID),
+				UpdatedAt: a.UpdatedAt.Format(time.RFC3339),
+			})
+		}
+		return infos, nil
+	}))
+
+	registry.Register(tools.NewReadArtifact(func(rCtx context.Context, filename string) (string, error) {
+		arts, err := e.q.ListArtifactsByTaskTree(rCtx, rootTaskID)
+		if err != nil {
+			return "", err
+		}
+		for i := len(arts) - 1; i >= 0; i-- {
+			if arts[i].Filename == filename {
+				return arts[i].Content, nil
+			}
+		}
+		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
 	}))
 	var agentNames []string
 	if e.agentFactory != nil {
@@ -696,12 +777,15 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	registry.Register(tools.NewExpandRunResult(func(rCtx context.Context, runID int32) (string, error) {
 		r, err := e.q.GetRun(rCtx, runID)
 		if err != nil {
-			return "", err
+			return "", fmt.Errorf("run %d not found — pass the RUN id exactly as shown in delegation results ('run #N'), not a task id", runID)
 		}
-		if r.ResultDescription == "" {
-			return "No detailed explanation available for this run.", nil
+		if r.ResultExplanation != "" {
+			return r.ResultExplanation, nil
 		}
-		return r.ResultDescription, nil
+		if r.ResultDescription != "" {
+			return r.ResultDescription + "\n(No more detail was recorded for this run.)", nil
+		}
+		return "No detailed explanation available for this run.", nil
 	}))
 
 	// Build the MCP session store for external integrations.
@@ -846,13 +930,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Wire the proxy logger as the agent's RunLogger so request/response entries
 	// appear in the log file and the DB (identical format to the gateway).
+	// The display name comes from the agent CONFIG when set — delegated
+	// sessions reuse the parent's DB agent row, and labeling every
+	// sub-session with the parent's name ("CEO") made log forensics
+	// unreliable.
+	agentDisplayName := agent.Name
+	if agentCfg != nil && agentCfg.Name != "" {
+		agentDisplayName = agentCfg.Name
+	}
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,
 		Registry:              registry,
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
-		AgentName:             agent.Name,
+		AgentName:             agentDisplayName,
+		TerminalTools:         []string{"finish_task"},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -1055,12 +1148,27 @@ func (e *NativeEngine) makeDelegateFunc(
 		status := e.executeSession(callCtx, subtask, "implement", session)
 
 		result := ""
-		var childErr string
+		var childErr, childRunName, childDetailHint, childArtifacts string
 		if childRunID > 0 {
 			if childRun, runErr := e.q.GetRun(context.Background(), childRunID); runErr == nil {
 				result = childRun.ResultDescription
+				childRunName = childRun.Name
+				if childRun.ResultExplanation != "" {
+					childDetailHint = fmt.Sprintf("\nA detailed handoff is available: call expand_run_result with run_id=%d.", childRunID)
+				}
 				if childRun.Status == "failed" {
 					childErr = childRun.LogContent
+				}
+			}
+			if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
+				var written []string
+				for _, a := range arts {
+					if a.RunID == childRunID {
+						written = append(written, fmt.Sprintf("%q", a.Filename))
+					}
+				}
+				if len(written) > 0 {
+					childArtifacts = fmt.Sprintf("\nArtifacts written by this session: %s — read them with read_artifact.", strings.Join(written, ", "))
 				}
 			}
 		}
@@ -1081,8 +1189,13 @@ func (e *NativeEngine) makeDelegateFunc(
 		if result == "" {
 			result = "(no result summary provided)"
 		}
-		reply := fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession status: %s\nSubtask status: %s\nResult: %s",
-			subtask.ID, agentName, status, taskStatus, result)
+		runLabel := fmt.Sprintf("run #%d", childRunID)
+		if childRunName != "" {
+			runLabel = fmt.Sprintf("%s (run #%d)", childRunName, childRunID)
+		}
+		reply := fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession: %s, status %s\nSubtask status: %s\nResult: %s",
+			subtask.ID, agentName, runLabel, status, taskStatus, result)
+		reply += childArtifacts + childDetailHint
 		if status != "completed" {
 			if childErr != "" {
 				reply += "\nError: " + childErr
@@ -1394,6 +1507,13 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 
 // tryGitCommit generates a commit message and commits workspace changes.
 func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) {
+	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
+	// creation failed or the task has a bare directory workspace) instead of
+	// letting `git diff` fail with usage noise.
+	if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); statErr != nil {
+		e.logInfo(logger, "Workspace is not a git worktree; skipping commit")
+		return
+	}
 	e.logInfo(logger, "Checking for changes to commit in worktree...")
 	diff, err := gitMgr.GetDiffInDir(ctx, workspacePath)
 	if err != nil {
