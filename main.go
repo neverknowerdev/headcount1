@@ -15,6 +15,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
+	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
@@ -32,6 +33,11 @@ import (
 var frontendDist embed.FS
 
 func main() {
+	// Must run before anything else: when this process is a sandbox re-exec
+	// child (Linux Landlock, see engine/aicli/tools), this applies the
+	// filesystem ruleset and execs the shell command in place of the server.
+	tools.MaybeRunSandboxChild()
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -43,8 +49,8 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
-		if utils.IsE2E() {
-			dbConnStr = "paperclip-e2e.db"
+			if utils.IsE2E() {
+				dbConnStr = "paperclip-e2e.db"
 			} else {
 				dbConnStr = "orchestrator.db"
 			}
@@ -182,14 +188,14 @@ func main() {
 		log.Fatalf("Failed to create sub filesystem: %v", err)
 	}
 
-		r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
+	r.Get("/*", func(w http.ResponseWriter, r *http.Request) {
 		// Disable caching for JS and CSS files
 		if strings.HasSuffix(r.URL.Path, ".js") || strings.HasSuffix(r.URL.Path, ".css") {
 			w.Header().Set("Cache-Control", "no-cache, no-store, must-revalidate")
 			w.Header().Set("Pragma", "no-cache")
 			w.Header().Set("Expires", "0")
 		}
-		
+
 		fsHandler := http.FileServer(http.FS(distFS))
 
 		path := r.URL.Path
