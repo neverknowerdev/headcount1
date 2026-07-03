@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"time"
 
 	"agent-orchestrator/engine/aicli"
@@ -17,6 +16,7 @@ type ExecCommand struct {
 
 // NewExecCommand creates an ExecCommand tool sandboxed to workspacePath.
 func NewExecCommand(workspacePath string) *ExecCommand {
+	logSandboxMode()
 	return &ExecCommand{workspacePath: workspacePath}
 }
 
@@ -51,7 +51,15 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 	cmdCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", p.Command)
+	// Kernel-level write sandbox (Landlock on Linux, Seatbelt on macOS);
+	// see sandbox_exec.go.
+	cmd, cleanup, err := sandboxedCommand(cmdCtx, t.workspacePath, p.Command)
+	if err != nil {
+		return "", err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
 	cmd.Dir = t.workspacePath
 	output, err := cmd.CombinedOutput()
 	result := string(output)

@@ -54,6 +54,31 @@ func TestValidateCommandPaths(t *testing.T) {
 	}
 }
 
+func TestValidateCommandPathsSymlinkEscape(t *testing.T) {
+	workspace := t.TempDir()
+	outside := t.TempDir()
+
+	// A symlink inside the workspace pointing outside passes the textual
+	// prefix check but must be caught by the os.Root resolution.
+	if err := os.Symlink(outside, filepath.Join(workspace, "link")); err != nil {
+		t.Skipf("cannot create symlink: %v", err)
+	}
+	if err := os.MkdirAll(filepath.Join(workspace, "real"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := validateCommandPaths(workspace, "cat ./link/secret.txt"); err == nil {
+		t.Error("expected error for symlink escaping the workspace, got nil")
+	}
+	if err := validateCommandPaths(workspace, "ls ./real"); err != nil {
+		t.Errorf("unexpected error for real subdir: %v", err)
+	}
+	// Nonexistent relative paths (e.g. output files) must stay allowed.
+	if err := validateCommandPaths(workspace, "echo hi > ./does/not/exist.txt"); err != nil {
+		t.Errorf("unexpected error for nonexistent path: %v", err)
+	}
+}
+
 func TestResolvePath(t *testing.T) {
 	workspace := t.TempDir()
 	homeDir, _ := os.UserHomeDir()
