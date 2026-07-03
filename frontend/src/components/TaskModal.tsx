@@ -271,7 +271,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             )}
             {taskId ? (
                 <div className="flex flex-col min-w-0">
-                    <span className="text-xs font-mono text-gray-400">{prefix}-{task.id}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
+                    <span className="text-xs font-mono text-gray-400">{task.ref_key || `${prefix}-${task.id}`}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
                     <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
                 </div>
             ) : (
@@ -498,7 +498,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <div key={`r-${r.id}`} className="w-full min-w-0">
                                                         <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
-                                                                <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
+                                                                <span className="font-semibold text-gray-600">⚙️ Run {r.name || `#${r.id}`}</span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
                                                                     <span className="text-gray-400">{startStr}</span>
@@ -680,7 +680,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 setShowParentDropdown(false);
                                             }}
                                         >
-                                            <span className="text-xs text-gray-500 font-mono mr-2">{prefix}-{t.id}</span>
+                                            <span className="text-xs text-gray-500 font-mono mr-2">{t.ref_key || `${prefix}-${t.id}`}</span>
                                             {t.title}
                                         </div>
                                     ))}

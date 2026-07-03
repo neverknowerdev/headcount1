@@ -58,6 +58,17 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		query = query.Where("agent_id = ?", agentID)
 	}
 
+	// The grid shows main tasks only. Subtasks are internal delegation
+	// artifacts; fetch them explicitly via parent_id or include_subtasks=true.
+	parentIDStr := r.URL.Query().Get("parent_id")
+	switch {
+	case parentIDStr != "":
+		parentID, _ := strconv.Atoi(parentIDStr)
+		query = query.Where("parent_id = ?", parentID)
+	case r.URL.Query().Get("include_subtasks") != "true":
+		query = query.Where("parent_id IS NULL")
+	}
+
 	var tasks []db.Task
 	if err := query.Order("id").Find(&tasks).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

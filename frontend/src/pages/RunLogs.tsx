@@ -94,7 +94,7 @@ export const RunLogs: React.FC = () => {
                             return (
                             <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
                                 <summary className="font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap">
-                                    <span>Run #{r.id} for Task #{r.task_id} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}</span>
+                                    <span>Run {r.name || `#${r.id}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}</span>
                                     <div className="flex items-center gap-2">
                                         {total > 0 && (
                                             <div className="flex items-center gap-1 text-xs font-mono">

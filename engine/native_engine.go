@@ -170,6 +170,39 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	if lockErr := e.q.LockTaskRun(ctx, task.ID, run.ID); lockErr != nil {
 		fmt.Printf("Warning: failed to lock task %d for run %d: %v\n", task.ID, run.ID, lockErr)
 	}
+
+	// Load agent config early: model resolution uses AllowedModels and the
+	// run name uses the config's short name. The proxy logger isn't ready
+	// yet, so fall back to stdout for this warning.
+	var agentCfg *agentconfig.AgentConfig
+	if task.AgentConfigName != "" && e.agentFactory != nil {
+		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
+			agentCfg = cfg
+		} else {
+			fmt.Printf("Warning: agent config %q not found for task %d: %v\n", task.AgentConfigName, task.ID, cfgErr)
+		}
+	}
+
+	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
+	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2".
+	shortName := agentconfig.DeriveShortName(agent.Name)
+	if agentCfg != nil {
+		shortName = agentCfg.EffectiveShortName()
+	}
+	taskRef := task.RefKey
+	if taskRef == "" {
+		taskRef = fmt.Sprintf("TASK-%d", task.ID)
+	}
+	runKey := taskRef + "-" + shortName
+	// prior = earlier runs with this key (this run's name is still empty, so
+	// it is not counted). The second run becomes "<key>-2", and so on.
+	if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
+		runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
+	}
+	run.Name = runKey
+	if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
+		fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
+	}
 	defer func() {
 		if clearErr := e.q.UnlockTaskRun(context.Background(), task.ID); clearErr != nil {
 			fmt.Printf("Warning: failed to unlock task %d: %v\n", task.ID, clearErr)
@@ -197,17 +230,6 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	if err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("failed to get provider: %v", err))
 		return
-	}
-
-	// Load agent config early so model resolution can use AllowedModels.
-	// The proxy logger isn't ready yet, so fall back to stdout for this warning.
-	var agentCfg *agentconfig.AgentConfig
-	if task.AgentConfigName != "" && e.agentFactory != nil {
-		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
-			agentCfg = cfg
-		} else {
-			fmt.Printf("Warning: agent config %q not found for task %d: %v\n", task.AgentConfigName, task.ID, cfgErr)
-		}
 	}
 
 	// Resolve the model: intersect AgentConfig.AllowedModels with the
@@ -741,7 +763,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	}
 	aiAgent := aicli.New(agentCfgObj)
 
-	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
+	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent run %s for task %d (mode=%s model=%s provider=%s)", run.Name, task.ID, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
 	if agentCfg != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
@@ -953,7 +975,11 @@ func (e *NativeEngine) composeSubtaskResult(ctx context.Context, sub db.Task, su
 	var b strings.Builder
 	fmt.Fprintf(&b, "Subtask #%d (%s) finished with task status %q.", sub.ID, agentName, sub.Status)
 	if haveRun {
-		fmt.Fprintf(&b, "\nRun: #%d (status %s).", subRun.ID, subRun.Status)
+		runLabel := fmt.Sprintf("#%d", subRun.ID)
+		if subRun.Name != "" {
+			runLabel = fmt.Sprintf("%s (#%d)", subRun.Name, subRun.ID)
+		}
+		fmt.Fprintf(&b, "\nRun: %s, status %s.", runLabel, subRun.Status)
 		if subRun.ResultDescription != "" {
 			fmt.Fprintf(&b, "\nResult: %s", subRun.ResultDescription)
 		}

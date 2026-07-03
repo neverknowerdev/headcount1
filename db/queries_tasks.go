@@ -1,10 +1,99 @@
 package db
 
-import "context"
+import (
+	"context"
+	"fmt"
+	"strings"
+)
 
 func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 	err := q.db.WithContext(ctx).Create(&t).Error
+	if err != nil {
+		return t, err
+	}
+	// Assign the human-readable ref key ("DEC-50", subtasks "DEC-50-1", …).
+	if t.RefKey == "" {
+		if key, kErr := q.computeTaskRefKey(ctx, t); kErr == nil && key != "" {
+			t.RefKey = key
+			if uErr := q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", t.ID).Update("ref_key", key).Error; uErr != nil {
+				fmt.Printf("Warning: failed to store ref_key for task %d: %v\n", t.ID, uErr)
+			}
+		}
+	}
 	return t, err
+}
+
+// computeTaskRefKey builds the task key: main tasks get
+// "<COMPANY_SHORT>-<id>"; subtasks get "<parent ref>-<sibling index>" where
+// the index is the task's 1-based position among its parent's subtasks.
+func (q *Queries) computeTaskRefKey(ctx context.Context, t Task) (string, error) {
+	if t.ParentID == nil {
+		var company Company
+		if err := q.db.WithContext(ctx).First(&company, t.CompanyID).Error; err != nil {
+			return "", err
+		}
+		short := strings.ToUpper(company.ShortName)
+		if short == "" {
+			short = "TASK"
+		}
+		return fmt.Sprintf("%s-%d", short, t.ID), nil
+	}
+	var parent Task
+	if err := q.db.WithContext(ctx).First(&parent, *t.ParentID).Error; err != nil {
+		return "", err
+	}
+	parentRef := parent.RefKey
+	if parentRef == "" {
+		var pErr error
+		if parentRef, pErr = q.computeTaskRefKey(ctx, parent); pErr != nil {
+			return "", pErr
+		}
+	}
+	// Next sibling index = max index used by existing siblings + 1, so keys
+	// never collide even after siblings are deleted.
+	var siblings []Task
+	if err := q.db.WithContext(ctx).
+		Select("id", "ref_key").
+		Where("parent_id = ? AND id != ?", *t.ParentID, t.ID).
+		Find(&siblings).Error; err != nil {
+		return "", err
+	}
+	maxIdx := 0
+	prefix := parentRef + "-"
+	for _, s := range siblings {
+		if !strings.HasPrefix(s.RefKey, prefix) {
+			continue
+		}
+		var idx int
+		if _, err := fmt.Sscanf(strings.TrimPrefix(s.RefKey, prefix), "%d", &idx); err == nil && idx > maxIdx {
+			maxIdx = idx
+		}
+	}
+	return fmt.Sprintf("%s-%d", parentRef, maxIdx+1), nil
+}
+
+// BackfillTaskRefKeys assigns ref keys to tasks created before the field
+// existed. Main tasks are keyed first so subtask keys can build on them.
+func (q *Queries) BackfillTaskRefKeys(ctx context.Context) error {
+	for _, scope := range []string{"parent_id IS NULL", "parent_id IS NOT NULL"} {
+		var tasks []Task
+		if err := q.db.WithContext(ctx).
+			Where("(ref_key = '' OR ref_key IS NULL) AND " + scope).
+			Order("id asc").
+			Find(&tasks).Error; err != nil {
+			return err
+		}
+		for _, t := range tasks {
+			key, err := q.computeTaskRefKey(ctx, t)
+			if err != nil || key == "" {
+				continue
+			}
+			if err := q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", t.ID).Update("ref_key", key).Error; err != nil {
+				return err
+			}
+		}
+	}
+	return nil
 }
 
 func (q *Queries) UpdateTask(ctx context.Context, t Task) (Task, error) {

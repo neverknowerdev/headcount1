@@ -60,6 +60,7 @@ func builtinConfigs() []*AgentConfig {
 	return []*AgentConfig{
 		{
 			Name:           "CEO",
+			ShortName:      "CEO",
 			Description:    "Chief Executive Officer — orchestrates task execution through delegation",
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -71,6 +72,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "CTO",
+			ShortName:      "CTO",
 			Description:    "Chief Technology Officer — technical architecture and engineering leadership",
 			Prompt:         strings.TrimSpace(ctoPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -81,6 +83,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Programmer",
+			ShortName:      "PROG",
 			Description:    "Software developer — implements features and fixes bugs",
 			Prompt:         strings.TrimSpace(programmerPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -93,6 +96,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "QA",
+			ShortName:      "QA",
 			Description:    "Quality assurance — independently verifies deliverables, tests, and reports defects",
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -105,6 +109,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Writer",
+			ShortName:      "WRITER",
 			Description:    "Technical writer — creates documentation, reports, and summaries",
 			Prompt:         strings.TrimSpace(writerPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -116,6 +121,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "Researcher",
+			ShortName:      "RSRCH",
 			Description:    "Researcher — investigates external topics and synthesises findings",
 			Prompt:         strings.TrimSpace(researcherPrompt),
 			ChatType:       ChatTypeMessageHistory,
@@ -127,6 +133,7 @@ func builtinConfigs() []*AgentConfig {
 		},
 		{
 			Name:           "CodeExplorer",
+			ShortName:      "EXPLORE",
 			Description:    "Codebase explorer — maps architecture, features, and implementation state",
 			Prompt:         strings.TrimSpace(codeExplorerPrompt),
 			ChatType:       ChatTypeMessageHistory,

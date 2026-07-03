@@ -100,6 +100,11 @@ func main() {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
 
+	// Assign ref keys ("DEC-50", "DEC-50-1") to tasks created before the field existed.
+	if err := db.New(database).BackfillTaskRefKeys(context.Background()); err != nil {
+		log.Printf("Warning: task ref key backfill failed: %v", err)
+	}
+
 	recoverStaleRuns(database)
 
 	// Seed predefined MCP servers (paperclip2, github, google-docs) if not present.

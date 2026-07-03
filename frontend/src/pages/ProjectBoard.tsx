@@ -17,6 +17,8 @@ interface Task {
     description: string;
     status: string;
     priority: string;
+    ref_key?: string;
+    parent_id?: number | null;
 }
 
 interface Project {
@@ -201,7 +203,7 @@ export const ProjectBoard: React.FC = () => {
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
                                         <div className="mt-4 flex justify-between items-center">
-                                            <span className="text-xs text-gray-400">{prefix}-{task.id}</span>
+                                            <span className="text-xs text-gray-400">{task.ref_key || `${prefix}-${task.id}`}</span>
                                             {task.priority !== 'Normal' && (
                                                 <span className={`text-[10px] px-2 py-0.5 rounded-full ${
                                                     task.priority === 'Urgent' ? 'bg-red-100 text-red-800' :

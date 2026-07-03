@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -101,4 +102,52 @@ func TestArtifactOverwriteTracking(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "v2", found.Content)
 	assert.Equal(t, run2.ID, found.RunID)
+}
+
+// TestTaskRefKeys: main tasks get COMPANY-ID keys, subtasks get -1, -2
+// suffixes, and deleted siblings never cause key reuse.
+func TestTaskRefKeys(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	root := seedTestData(t, database, "http://unused")
+	require.NotEmpty(t, root.RefKey)
+	assert.Regexp(t, `^[A-Z]+-\d+$`, root.RefKey)
+
+	rootID := root.ID
+	mk := func(title string) db.Task {
+		sub, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &rootID, Title: title, TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+		require.NoError(t, err)
+		return sub
+	}
+	s1 := mk("first")
+	s2 := mk("second")
+	assert.Equal(t, root.RefKey+"-1", s1.RefKey)
+	assert.Equal(t, root.RefKey+"-2", s2.RefKey)
+
+	// Delete the first subtask; the next one must NOT reuse index 1.
+	require.NoError(t, database.Delete(&db.Task{}, s1.ID).Error)
+	s3 := mk("third")
+	assert.Equal(t, root.RefKey+"-3", s3.RefKey)
+
+	// Nested subtask builds on the parent's key.
+	s2ID := s2.ID
+	nested, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &s2ID, Title: "nested", TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+	require.NoError(t, err)
+	assert.Equal(t, s2.RefKey+"-1", nested.RefKey)
+}
+
+// TestDeriveShortName covers the agent short-name fallback.
+func TestDeriveShortName(t *testing.T) {
+	cases := map[string]string{
+		"Programmer":         "PROGRAM",
+		"QA":                 "QA",
+		"QA Lead":            "QL",
+		"TechSpecResearcher": "TECHSPE",
+		"":                   "AGENT",
+	}
+	for in, want := range cases {
+		assert.Equal(t, want, agentconfig.DeriveShortName(in), "input %q", in)
+	}
 }

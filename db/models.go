@@ -99,6 +99,9 @@ type Task struct {
 	Title           string     `json:"title" gorm:"not null"`
 	TaskType        string     `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	Description     string     `json:"description"`
+	// RefKey is the human-readable task key: "DEC-50" for a main task,
+	// "DEC-50-1", "DEC-50-2", … for its subtasks. Set on creation.
+	RefKey          string     `json:"ref_key" gorm:"index"`
 	// RefinedDescription is the agent-produced refinement of the task. The
 	// user's original Description is never modified by agents.
 	RefinedDescription string  `json:"refined_description" gorm:"type:text"`
@@ -143,6 +146,9 @@ type Run struct {
 	Task              Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
 	AgentID           int32      `json:"agent_id" gorm:"not null"`
 	Agent             Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	// Name is the human-readable run key: "<task ref>-<AGENTSHORT>[-n]",
+	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". Set when the run starts.
+	Name              string     `json:"name" gorm:"index"`
 	Status            string     `json:"status" gorm:"not null"`
 	SessionID         string     `json:"session_id"`
 	LogFilePath       string     `json:"log_file_path"`

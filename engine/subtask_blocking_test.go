@@ -83,6 +83,10 @@ func TestCreateSubtaskBlocksAndReturnsResult(t *testing.T) {
 	subRun, err := q.GetLatestRunByTask(context.Background(), subtasks[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Full detail about X.", subRun.ResultExplanation)
+
+	// Human-readable keys: subtask "TASK-1-1", its Researcher run "TASK-1-1-RSRCH".
+	assert.Equal(t, task.RefKey+"-1", subtasks[0].RefKey)
+	assert.Equal(t, subtasks[0].RefKey+"-RSRCH", subRun.Name)
 }
 
 // TestCreateSubtaskRejectsAbsolutePaths: delegation descriptions pointing at
