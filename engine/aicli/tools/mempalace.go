@@ -120,13 +120,30 @@ const rememberMaxChars = 500
 
 // rememberDupThreshold is the cosine-similarity threshold above which content
 // counts as a duplicate. The pilot showed 0.95 misses re-phrasings of the
-// same fact ("no agent has shell tools" stored 7×). Measured with the shipped
-// MiniLM embeddings, comparing stored-form vs stored-form (both carrying the
-// "[closet] [kind]" prefix): same-task paraphrases score ≈0.83, cross-task
-// paraphrases ≈0.75, genuinely different facts with shared vocabulary ≈0.54.
-// 0.72 catches both paraphrase classes with margin against false positives.
-// Tune with the paraphrase-gauntlet e2e test.
-const rememberDupThreshold = 0.72
+// same fact ("no agent has shell tools" stored 7×).
+//
+// Dedup is checked (and drawers are stored) as RAW content — no "[closet]
+// [kind]" prefix. Measured with the shipped MiniLM embeddings, adding any
+// shared boilerplate tag to both sides compresses the similarity range and
+// costs margin in both directions (e.g. a same-topic pair scores 0.83 raw vs
+// 0.54 with a shared prefix). The prefix also turned out to actively harm
+// safety: two agents filing the SAME fact under different `kind` tags
+// ("learning" vs "note") dropped a genuine duplicate from 0.83 to 0.75 raw —
+// a mismatched tag alone can push a real duplicate below any threshold set
+// to protect decision reversals. Raw content has no such failure mode.
+//
+// Threshold picked from measured raw-content similarity:
+//   - paraphrases of the same fact (reordered clauses, synonyms, prefix/
+//     task-ref noise): 0.856–0.944
+//   - a genuine decision reversal on the same topic ("use WebSockets" →
+//     "use SSE, WebSockets rejected") — must NOT be treated as a duplicate,
+//     or overturning a decision would silently fail to record: 0.754
+//   - genuinely different facts sharing vocabulary ("lack shell tools" vs
+//     "lack browser tools"): 0.040–0.399
+//
+// 0.80 sits with ~0.05 margin on both sides of the (0.754, 0.856) safe
+// window. Tune with the paraphrase-gauntlet e2e test if the model changes.
+const rememberDupThreshold = 0.80
 
 // CheckDuplicate reports whether content is already stored in the palace and
 // returns the most similar existing text (may be empty). Primary path is
@@ -248,20 +265,18 @@ var mpCatalog = []mpToolSpec{
 			if kind == "decision" {
 				room = mempalace.RoomDecisions
 			}
-			stored := content
-			if p.scope.Closet != "" {
-				stored = fmt.Sprintf("[%s] [%s] %s", p.scope.Closet, kind, content)
-			} else {
-				stored = fmt.Sprintf("[%s] %s", kind, content)
-			}
 
 			// Duplicate guard: keep the palace clean when agents re-store the
-			// same fact across runs. Checked against the STORED form (prefix
-			// included) — existing drawers carry the same prefix shape, and
-			// like-vs-like comparison separates paraphrases from genuinely
-			// different facts much better than raw-vs-prefixed. Returning the
-			// existing text teaches the agent what memory already holds.
-			if dup, existing := p.CheckDuplicate(ctx, stored); dup {
+			// same fact across runs. Checked (and stored) as RAW content — no
+			// "[closet] [kind]" tag — see rememberDupThreshold for why: a
+			// shared prefix compresses the embedding's similarity range and a
+			// mismatched kind tag can drag a genuine duplicate low enough to
+			// evade any threshold that also has to protect decision
+			// reversals. The task association isn't lost — every drawer here
+			// carries source_file ("tasks/<ref>/run-N"), which mempalace
+			// search results echo back. Returning the existing text teaches
+			// the agent what memory already holds.
+			if dup, existing := p.CheckDuplicate(ctx, content); dup {
 				p.record("remember", "write", "", clip(content, 120), 0)
 				if existing != "" {
 					return fmt.Sprintf("Already in memory (similar: %q) — not stored again.", clip(existing, 200)), nil
@@ -271,7 +286,7 @@ var mpCatalog = []mpToolSpec{
 			call := map[string]any{
 				"wing":     p.scope.wing(),
 				"room":     room,
-				"content":  stored,
+				"content":  content,
 				"added_by": p.scope.AddedBy,
 			}
 			if src := p.scope.sourceFile(p.scope.RunID); src != "" {

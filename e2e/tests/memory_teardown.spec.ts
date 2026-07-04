@@ -257,15 +257,17 @@ test.describe.serial('MemPalace teardown capture & dedup', () => {
         expect(dupReply!).toContain('CGO_ENABLED');
 
         // Exactly one CGO fact drawer; the different fact was stored as its
-        // own drawer. Only count remember-stored drawers (prefixed
-        // "[task-…] [learning]") — the transcript miner also files the runs'
-        // conversations, which legitimately quote the fact text.
+        // own drawer. remember stores raw content (no prefix), so filter to
+        // remember-written drawers by source_file basename instead: the API
+        // reduces "tasks/<ref>/run-N" to "run-N", distinct from the
+        // transcript miner's "transcript-N.jsonl" (which legitimately quotes
+        // the fact text too) and artifact ingestion's "<filename>.<ext>".
         const drawers = await (await request.get(
             `/api/memory/drawers?company_id=${companyId}&wing=company&limit=100`,
         )).json();
         const factPreviews = (drawers.drawers || [])
-            .map((d: { content_preview: string }) => d.content_preview)
-            .filter((p: string) => /^\[task-.*\] \[learning\]/.test(p));
+            .filter((d: { metadata?: { source_file?: string } }) => /^run-\d+$/.test(d.metadata?.source_file || ''))
+            .map((d: { content_preview: string }) => d.content_preview);
         expect(factPreviews.filter((p: string) => p.includes('CGO_ENABLED')).length).toBe(1);
         expect(factPreviews.filter((p: string) => p.includes('browser tools')).length).toBe(1);
     });

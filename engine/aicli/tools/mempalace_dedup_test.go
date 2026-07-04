@@ -149,9 +149,17 @@ func TestRememberStoresNonDuplicate(t *testing.T) {
 	if err != nil || !strings.Contains(out, "d1") {
 		t.Fatalf("out=%q err=%v", out, err)
 	}
+	// Content is stored raw — no closet/kind prefix. The task association
+	// rides on source_file (already asserted below); the prefix was dropped
+	// because it measurably degrades dedup separation (see
+	// rememberDupThreshold's doc comment) without which mempalace_search
+	// can't recover.
 	stored, _ := f.args["mempalace_add_drawer"]["content"].(string)
-	if !strings.HasPrefix(stored, "[task-dec-1] [learning]") {
-		t.Errorf("stored content missing closet/kind prefix: %q", stored)
+	if stored != "build needs CGO_ENABLED=0, else it fails with linker errors" {
+		t.Errorf("stored content should be raw (no prefix), got %q", stored)
+	}
+	if src, _ := f.args["mempalace_add_drawer"]["source_file"].(string); src != "tasks/dec-1/run-3" {
+		t.Errorf("source_file = %q, want tasks/dec-1/run-3 (task association)", src)
 	}
 }
 
