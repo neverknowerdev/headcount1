@@ -175,6 +175,8 @@ After a plan-mode run completes (where `RefinedDescription` is persisted):
 
 In the `finish_task` execution path (`engine/aicli/tools/finish_task_execution.go`): if the agent has not called `write_diary` during the session, the engine writes a minimal auto-diary (task, status, result summary) to `agent:<name>` wing. Non-blocking (goroutine, logged on failure).
 
+> **Revised by Phase 1.5 (§1.5.1):** the pilot showed this trigger never fires where it matters — failed/canceled/hung runs never call `finish_task`. Auto-capture moves to run teardown on *any* terminal status.
+
 ## 1.5 Activity logging — `db.MemoryActivity`
 
 ```go
@@ -248,6 +250,72 @@ In `pkg/backup/backup.go` `CreateBackup`: `addDirectoryToTar(tw, filepath.Join(b
 7. Activity feed shows agent recalls/writes with correct attribution.
 8. Backup → wipe `memory/` → restore → search returns identical results (repair path verified).
 9. All memory features no-op gracefully mid-run if the MCP server dies (tool returns error string, run continues).
+
+---
+
+# Phase 1.5 — Guaranteed capture & retrieval quality (post-pilot revision)
+
+**Source:** analysis of the first real multi-agent batch (DEC-59–65, runs 80–95, 2026-07-04; 62 `memory_activities` rows) plus a review of upstream MemPalace's own harness integrations (`hooks/` for Claude Code, Codex CLI, Cursor — see plan §7).
+
+**Pilot verdict in one line:** the pull side works (recall-first discipline held, cross-run knowledge transfer happened), the push side is fragile — capture depends entirely on agent cooperation and a clean `finish_task`, and retrieval quality is degraded by 800-char hard chunking, write duplication, and a dead knowledge graph.
+
+Design principle adopted from upstream: **mechanical capture is the meal, agent-called memory tools are the garnish.** Upstream never trusts the AI to save — Stop/PreCompact/SessionEnd hooks mine transcripts mechanically; the AI only adds distilled judgment on top ("two-layer capture"). Paperclip2 currently has this inverted.
+
+## 1.5.1 Run-teardown capture (replaces the §1.4 trigger) — highest priority
+
+Move all automatic capture out of the `finish_task` closure (`native_engine.go` finish callback) into the run-teardown path, firing on **every terminal status** — `completed`, `failed`, `canceled`, timeout. Detached goroutine with its own timeout (upstream SessionEnd pattern: background, never delays teardown). Captures, in order of value:
+
+1. **Auto-diary** from `result_description`/`result_explanation` + final status — synthesized even when the run died mid-flight ("run ended with status failed; last status: <current_status>"). Skip only if the agent already wrote a diary (`MempalaceProxy.DiaryWritten()`).
+2. **Artifacts → drawers.** Each artifact written during the run is ingested (`mempalace_add_drawer`, `source_file = artifacts/<filename>`, room by content, closet = task). Pilot evidence: the 22-file frontend fix plan was invisible to recall — only the diary *mentioning* it was findable.
+3. **Mechanical KG facts** — no LLM involved: `task-<id> --status--> <terminal status>`, `task-<id> --blocked_by--> <blocker>` when the result marks the task blocked, `task-<id> --produced--> artifact:<filename>`. This makes `memory_facts` return something for the first time (pilot: 7 calls, 0 results, KG contained 1 junk triple).
+
+Idempotency: drawer IDs keyed on content-hash + source (upstream's mined-file sentinel recipe) so retried teardowns never duplicate.
+
+## 1.5.2 Chunking fix — stop shredding agent memories
+
+Pilot evidence: every stored doc capped at exactly `DEFAULT_CHUNK_SIZE = 800` chars; recall returned mid-word fragments ("rontend:** React 19…", "uld block npm install"). Measured `remember` payloads: 600–1,200 chars typical, ~2,300 max — i.e. almost every memory gets sliced.
+
+- Set palace config `chunk_size` ≥ 2400 with sentence-boundary splitting and non-zero `chunk_overlap` (config plumbing already exists in `mempalace/config.py`; wire it into palace provisioning in `pkg/mempalace`).
+- Agent-authored `remember`/diary payloads are already distilled units — they should land as **one drawer, unchunked** whenever under the cap.
+- Prompt addition (CEO/CTO/Coder configs): "one fact per `remember` call" — improves recall precision and makes dedup meaningful.
+
+## 1.5.3 Dedup on write
+
+Pilot evidence: the "no shell tooling" platform limitation was stored as ~7 near-identical memories by CEO/CTO/Coder across runs 83–95; nobody ever called `memory_invalidate`.
+
+- `remember` wrapper: run `mempalace_check_duplicate` (or a recall with similarity threshold) before `add_drawer`; on a strong match return "already known: <existing drawer excerpt>" instead of writing. Zero agent-prompt change needed.
+- Engine-side ingestion (1.5.1) uses the same guard.
+- Note the structural cause: parallel sibling tasks can't recall what siblings haven't finished writing. Mitigations: dedup-on-write (above) + wing-level wake-up refresh (the hourly cache in `pkg/mempalace.WakeUp` shortens to 5 min while any run in the wing is active, so late-starting runs see fresh facts).
+
+## 1.5.4 KG extraction fix (refinement-store)
+
+`storeRefinementMemory` currently promotes a markdown heading to a KG entity (pilot: `task-dec-59 --approach--> "## Task DEC-59: … — Complete"`). Replace `firstLine(content)` as the object with a stripped, prose-only summary (strip `#`/formatting, require ≥ N alpha chars, cap 140); skip the fact entirely rather than store junk. Publish the entity-naming convention (`task-<ref-key-lowercase>`) in the Memory prompt section so agents' `memory_facts` queries (pilot: `DEC-62`, `task-dec-65-1` — all misses) can actually hit.
+
+## 1.5.5 Transcript mining at teardown + long-run checkpoints (bridge to Phase 2)
+
+Upstream's `--mode convos` miner chunks transcripts **by Q+A exchange pair** with per-file idempotency — it does not dump raw logs (which would poison top-k recall with tool-schema noise).
+
+- **Teardown mine:** normalize the run's session log into the JSONL shape `convo_miner` accepts and run `mempalace mine <dir> --mode convos --wing <project>` in the teardown goroutine. Gives verbatim recall of what actually happened in dead runs (91/93 in the pilot left zero trace).
+- **Checkpoint mine (upstream Stop-hook analog):** every `SAVE_INTERVAL` (default 15) assistant turns in `executeSession`, background-mine the transcript-so-far; per-run `last_save` counter (upstream's `${SESSION_ID}_last_save` state-file pattern → a field on the run). Protects 20-min runs from losing everything on a crash. This is also the natural forerunner of Phase 2's PreCompact-equivalent: when compaction lands, the same mine runs synchronously before any turn is dropped.
+- Optional one-time in-session nudge (upstream verbose mode): after a checkpoint mine, inject a single "save checkpoint: record durable learnings with remember" system note, guarded by a per-run flag. Ship dark, behind `memory.checkpoint_nudge`.
+
+## 1.5.6 Protocol slimming
+
+With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redundant ceremony (and was the main source of duplicate blocker-memories). Prompt changes:
+
+- `write_diary` → optional ("use it when you have judgment to add beyond the automatic record").
+- `remember` repositioned: only for things no pipeline can know — hard-won learnings, "don't try X, it 404s".
+- Remove "treat memory_facts as current truth" until 1.5.1/1.5.4 give the KG real content; reinstate afterwards.
+- Document the `room` filter on `recall_memory` with one example (pilot: never used).
+
+## 1.5.7 Acceptance criteria
+
+1. A run killed with `kill -9` mid-session still yields: auto-diary, its artifacts as drawers, a `status` KG fact, and (with 1.5.5) exchange-pair drawers from the transcript-so-far.
+2. Two agents storing the same fact produce one drawer; the second `remember` returns "already known".
+3. No stored drawer ends mid-word; a 1,200-char `remember` is retrievable as a single intact result.
+4. `memory_facts task-dec-<n>` returns the task's status/approach facts after any terminal run; no KG object contains markdown syntax.
+5. Runs 91/93-style failures (agent never calls `finish_task`) show `engine:auto-diary` + `engine:teardown-ingest` rows in `memory_activities`.
+6. Teardown capture adds zero latency to run completion (all async) and is idempotent under retry.
 
 ---
 
@@ -333,8 +401,9 @@ On each compaction, one `UtilityModel` call produces a ≤10-line session narrat
 
 # Rollout & sequencing
 
-1. **P1 wave 1 (foundations):** F1–F4, 1.1, 1.2, 1.5 — agents get memory tools. *(~1 wk)*
-2. **P1 wave 2:** 1.3, 1.4, 1.6, 1.7, 1.8 — refinement hooks + full UI + backup. *(~1.5 wk)*
-3. **P2:** 2.1–2.6 (2.7 later). Compaction ships default-off, enabled per company in settings, flipped to default-on after the e2e suite + one week of dogfooding. *(~1 wk)*
+1. **P1 wave 1 (foundations):** F1–F4, 1.1, 1.2, 1.5 — agents get memory tools. *(~1 wk)* ✅ shipped; validated in the DEC-59–65 pilot.
+2. **P1 wave 2:** 1.3, 1.4, 1.6, 1.7, 1.8 — refinement hooks + full UI + backup. *(~1.5 wk)* ✅ shipped (1.4 trigger superseded by 1.5.1).
+3. **P1.5 (post-pilot fixes — next up):** 1.5.1 teardown capture → 1.5.2 chunking → 1.5.3 dedup → 1.5.4 KG fix → 1.5.6 protocol slimming, then 1.5.5 transcript mining. 1.5.1–1.5.4 are small, independent, and each directly fixes a defect observed in production. *(~1 wk)*
+4. **P2:** 2.1–2.6 (2.7 later). Compaction ships default-off, enabled per company in settings, flipped to default-on after the e2e suite + one week of dogfooding. 1.5.5's checkpoint mine becomes the PreCompact-equivalent guarantee (sweep-before-drop). *(~1 wk)*
 
 Risks tracked from plan §5: Python runtime (F1 flag), embedding download (background init), write concurrency (F3 lock + daemon), version drift (pinned version + `repair` on restore).

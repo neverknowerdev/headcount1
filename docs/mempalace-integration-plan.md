@@ -317,3 +317,41 @@ Each phase ships independently and is useful on its own.
 - Nightly `compress`/`sync` scheduler (alongside the 24h MCP tool-cache job); include palace in `pkg/backup`; optional `pgvector` backend when running on Postgres.
 
 **Total: roughly 2.5–3.5 weeks of focused work**, with agents gaining working memory (Phases 0–1) after the first week.
+
+---
+
+## 7. Post-pilot addendum (2026-07-04): first production batch + upstream hooks review
+
+Phases 0–1 shipped and ran a real multi-agent batch (tasks DEC-59–65, runs 80–95, 62 memory-activity events). Full defect analysis and the resulting work package live in **`mempalace-tech-spec.md` → Phase 1.5**; this section records the findings and the upstream research that shaped it.
+
+### 7.1 What the pilot proved
+
+- **Pull side works.** Recall-first discipline held (13 recalls before the first write); CTO's tech-state memory from run 81 was recalled by every subsequent Sprint-1 task (4–8 relevant hits); queries were keyword-dense and on-topic.
+- **Push side is fragile.** Everything stored depended on agent cooperation *and* a clean `finish_task`: failed/canceled runs (91, 92, 93) left zero trace; the §4.5 auto-diary never fired once (wrong trigger point).
+
+### 7.2 Observed defects → fixes (tech-spec §1.5.x)
+
+| Defect (evidence) | Fix |
+|---|---|
+| Auto-diary inside `finish_task` closure — never fires for failed/canceled/hung runs | 1.5.1 teardown capture on any terminal status |
+| Artifacts invisible to recall (22-file fix plan unfindable; only the diary mentioning it) | 1.5.1 artifact→drawer ingestion |
+| `memory_facts`: 7 calls, 0 results; KG = 1 junk triple (markdown heading as entity) | 1.5.1 mechanical facts + 1.5.4 extraction fix |
+| 800-char hard chunking → mid-word fragments ("rontend:** React 19…"); typical `remember` = 600–1,200 chars | 1.5.2 chunk config + unchunked agent memories |
+| Same "no shell tooling" fact stored ~7× by different agents; `memory_invalidate` never used | 1.5.3 dedup-on-write |
+| Mandatory `write_diary` = duplication engine + redundant once teardown capture exists | 1.5.6 protocol slimming |
+
+### 7.3 Upstream integration patterns (github.com/MemPalace/mempalace, `hooks/`)
+
+How MemPalace itself integrates with Claude Code / Codex CLI / Cursor — the model we're adopting:
+
+- **Harness lifecycle hooks, never agent obligations.** *Stop hook*: every 15 human messages, background-mine the JSONL transcript (`mempalace mine --mode convos`) + optionally block the AI once for a verbatim save checkpoint (loop-guarded by `stop_hook_active`). *PreCompact hook*: **synchronous** mine before context compaction — the no-loss guarantee is the sync mine, not AI compliance. *SessionEnd hook*: detached background final mine so short sessions aren't lost.
+- **Two-layer capture.** Layer 1 mechanical: JSONL mining extracts tool output (bash results, build errors) with zero LLM/token cost. Layer 2 semantic: periodic nudge makes the AI file distilled entries. Mining guarantees coverage; the AI adds judgment.
+- **Convo mining is not log-dumping.** `convo_miner` chunks by Q+A exchange pair, normalizes format, and is idempotent per source file (drawer-ID recipe + mined-file sentinels) — re-mining never duplicates. Raw execution logs (1–7 MB of JSON per session in our runs, ~1% signal) must never hit `add_drawer` directly.
+- **Session-start recall injection** (Cursor `sessionStart` hook) — we already have this via `WakeUp` + plan-mode recall; we're ahead of upstream here.
+- **Ops details worth copying:** per-session state files for save intervals; `MEMPAL_VERBOSE` silent/verbose modes; backfill via `mempalace mine <transcript-dir> --mode convos`.
+
+**Net takeaway:** upstream treats mechanical transcript mining as the meal and AI-called memory tools as the garnish; our Phase 1 had it inverted. Phase 1.5 re-balances: engine guarantees capture (teardown ingest, checkpoint mining), agents contribute only distilled judgment.
+
+### 7.4 Revised sequencing
+
+Phase 1.5 (~1 wk) is inserted before Phase 2 (compaction): teardown capture → chunking → dedup → KG fix → protocol slimming → transcript mining. The checkpoint-mine machinery (1.5.5) then doubles as Phase 2's sweep-before-drop precondition (§4.3 guardrail), de-risking compaction.
