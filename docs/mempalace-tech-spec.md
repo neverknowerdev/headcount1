@@ -297,6 +297,7 @@ Upstream's `--mode convos` miner chunks transcripts **by Q+A exchange pair** wit
 
 - **Teardown mine:** normalize the run's session log into the JSONL shape `convo_miner` accepts and run `mempalace mine <dir> --mode convos --wing <project>` in the teardown goroutine. Gives verbatim recall of what actually happened in dead runs (91/93 in the pilot left zero trace).
 - **Checkpoint mine (upstream Stop-hook analog):** every `SAVE_INTERVAL` (default 15) assistant turns in `executeSession`, background-mine the transcript-so-far; per-run `last_save` counter (upstream's `${SESSION_ID}_last_save` state-file pattern → a field on the run). Protects 20-min runs from losing everything on a crash. This is also the natural forerunner of Phase 2's PreCompact-equivalent: when compaction lands, the same mine runs synchronously before any turn is dropped.
+- **Pre-prune mine (upstream PreCompact analog, needed today):** `pruneHistory` (`engine/aicli/agent.go:455`) already drops context *now* — it silently truncates stale tool results and caps history at 60k chars, with no capture beforehand. Before `pruneHistory` cuts anything, run the same transcript mine **synchronously** (upstream's rule: the no-loss guarantee is the sync mine, not AI compliance). Cheap in practice: the mine is idempotent, so only the delta since the last checkpoint is new work; if the mine fails, prune proceeds anyway (memory must never stall a run) but the failure is logged to `memory_activities`. When Phase 2 replaces `pruneHistory` with the compactor, this same call site becomes the sweep-before-drop precondition (§2.4).
 - Optional one-time in-session nudge (upstream verbose mode): after a checkpoint mine, inject a single "save checkpoint: record durable learnings with remember" system note, guarded by a per-run flag. Ship dark, behind `memory.checkpoint_nudge`.
 
 ## 1.5.6 Protocol slimming
@@ -315,6 +316,7 @@ With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redund
 3. No stored drawer ends mid-word; a 1,200-char `remember` is retrievable as a single intact result.
 4. `memory_facts task-dec-<n>` returns the task's status/approach facts after any terminal run; no KG object contains markdown syntax.
 5. Runs 91/93-style failures (agent never calls `finish_task`) show `engine:auto-diary` + `engine:teardown-ingest` rows in `memory_activities`.
+5a. A fact present only in a tool result that `pruneHistory` truncates is retrievable via `recall_run` afterwards (pre-prune mine verified); a failed mine never blocks or delays the prune.
 6. Teardown capture adds zero latency to run completion (all async) and is idempotent under retry.
 
 ---
