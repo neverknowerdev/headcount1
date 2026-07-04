@@ -10,7 +10,8 @@ import (
 
 // FinishTask is called by the agent at the end of every run to record the
 // outcome, update the task status, and leave a visible one-line summary plus
-// a detailed result that other agents can retrieve via expand_run_result.
+// a detailed result that is handed back to the task owner when the session
+// ran as a delegated subtask.
 type FinishTask struct {
 	onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error
 }
@@ -32,7 +33,7 @@ func (t *FinishTask) Def() aicli.ToolDef {
 				"Use 'refinement' when you need clarification before you can proceed. " +
 				"finish_status is a short one-sentence summary shown to the user. " +
 				"result_details is the full handoff for whoever consumes your work: key findings, decisions, artifact filenames, " +
-				"file paths touched, caveats and assumptions. Other agents read it via expand_run_result — make it complete.",
+				"file paths touched, caveats and assumptions. It is returned to your task owner when your session completes — make it complete.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
@@ -47,7 +48,7 @@ func (t *FinishTask) Def() aicli.ToolDef {
 					},
 					"result_details":{
 						"type":"string",
-						"description":"Detailed handoff: findings, decisions, artifact filenames, caveats. Read by other agents via expand_run_result."
+						"description":"Detailed handoff: findings, decisions, artifact filenames, caveats. Returned to your task owner when the session completes."
 					}
 				},
 				"required":["task_status","finish_status"]

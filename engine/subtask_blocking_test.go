@@ -19,11 +19,11 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestDelegateTaskReturnsRichResult verifies the delegation flow: the
-// delegate_task tool result (visible in the parent's next LLM request)
-// carries the child session's status, run key, result summary, and the
-// expand_run_result pointer, and the child task/run get ref-key names.
-func TestDelegateTaskReturnsRichResult(t *testing.T) {
+// TestCreateSubtaskReturnsRichResult verifies the delegation flow: the
+// create_subtask tool result (visible in the parent's next LLM request)
+// carries the child session's status, run key, result summary and detailed
+// handoff, and the child task/run get ref-key names.
+func TestCreateSubtaskReturnsRichResult(t *testing.T) {
 	var calls atomic.Int32
 	var mu sync.Mutex
 	var bodies []string
@@ -39,9 +39,9 @@ func TestDelegateTaskReturnsRichResult(t *testing.T) {
 		var resp map[string]interface{}
 		switch {
 		case n == 1:
-			// Parent turn 1: delegate to the Researcher.
-			resp = toolCallResponse("delegate_task",
-				`{"title":"research X","description":"Investigate X and write findings to findings.md","agent_name":"Researcher"}`)
+			// Parent turn 1: delegate to the CTO.
+			resp = toolCallResponse("create_subtask",
+				`{"title":"research X","description":"Investigate X and write findings to findings.md","agent_name":"CTO"}`)
 		case n == 2:
 			// Child session turn 1: finish immediately with a result.
 			resp = toolCallResponse("finish_task",
@@ -71,9 +71,9 @@ func TestDelegateTaskReturnsRichResult(t *testing.T) {
 	defer mu.Unlock()
 	require.GreaterOrEqual(t, len(bodies), 3, "expected a parent turn after the child session finished")
 	last := bodies[len(bodies)-1]
-	assert.Contains(t, last, "Delegated session for subtask", "delegation result missing")
+	assert.Contains(t, last, "Subtask #", "delegation result missing")
 	assert.Contains(t, last, "Research complete: X is feasible.", "child result summary missing")
-	assert.Contains(t, last, "expand_run_result", "detailed-handoff pointer missing")
+	assert.Contains(t, last, "Full detail about X.", "detailed handoff missing from the tool result")
 
 	// The child task ended in-review with the detailed handoff stored, and
 	// both the task and its run carry human-readable keys.
@@ -86,12 +86,12 @@ func TestDelegateTaskReturnsRichResult(t *testing.T) {
 	childRun, err := q.GetLatestRunByTask(context.Background(), subtasks[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Full detail about X.", childRun.ResultExplanation)
-	assert.Equal(t, subtasks[0].RefKey+"-RSRCH", childRun.Name)
+	assert.Equal(t, subtasks[0].RefKey+"-CTO", childRun.Name)
 }
 
-// TestDelegateTaskRejectsAbsolutePaths: delegation descriptions pointing at
+// TestCreateSubtaskRejectsAbsolutePaths: subtask descriptions pointing at
 // paths the sandbox forbids fail fast instead of wasting a whole session.
-func TestDelegateTaskRejectsAbsolutePaths(t *testing.T) {
+func TestCreateSubtaskRejectsAbsolutePaths(t *testing.T) {
 	var sawError atomic.Bool
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		body, _ := io.ReadAll(r.Body)
@@ -102,8 +102,8 @@ func TestDelegateTaskRejectsAbsolutePaths(t *testing.T) {
 				`{"task_status":"blocked","finish_status":"path rejected"}`))
 			return
 		}
-		json.NewEncoder(w).Encode(toolCallResponse("delegate_task",
-			`{"title":"explore","description":"Explore /Users/someone/project/app and report","agent_name":"Researcher"}`))
+		json.NewEncoder(w).Encode(toolCallResponse("create_subtask",
+			`{"title":"explore","description":"Explore /Users/someone/project/app and report","agent_name":"CTO"}`))
 	})
 
 	mockSrv := startTestServer(t, handler)

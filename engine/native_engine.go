@@ -44,41 +44,14 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 const defaultOrchestratorConfig = "CEO"
 
 // maxDelegationDepth caps how deep delegation sessions can nest: the main
-// task (depth 0) can delegate subtasks, but subtasks cannot create subtasks
-// of their own.
-const maxDelegationDepth = 1
-
-// verifierConfig is the agent config used for verification sessions spawned
-// by verify_implementation — always a different agent from the implementer.
-const verifierConfig = "QA"
-
-// verificationCapture collects the per-item verdicts a QA verification
-// session reports via report_verification_results, so the session that
-// requested the verification can apply them.
-type verificationCapture struct {
-	mu      sync.Mutex
-	results []tools.VerificationResult
-}
-
-func (c *verificationCapture) add(results []tools.VerificationResult) {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	c.results = append(c.results, results...)
-}
-
-func (c *verificationCapture) get() []tools.VerificationResult {
-	c.mu.Lock()
-	defer c.mu.Unlock()
-	out := make([]tools.VerificationResult, len(c.results))
-	copy(out, c.results)
-	return out
-}
+// task (depth 0, CEO) and first-level subtasks (depth 1, e.g. CTO/CMO) can
+// create subtasks; deeper sessions (depth 2, the implementers) cannot.
+const maxDelegationDepth = 2
 
 // parentSession links a delegated child session to the session that spawned
-// it: run hierarchy ids, the parent's workspace, and a hook that fires once
-// the child's run record exists (so the parent can log the session start).
-// verification is set for QA verification sessions, which share the parent's
-// workdir and report item verdicts instead of doing new work.
+// it: run hierarchy ids, the parent's workspace, a hook that fires once the
+// child's run record exists (so the parent can log the session start), and
+// the askOwner callback backing the child's ask_task_owner tool.
 type parentSession struct {
 	parentRunID   int32
 	rootRunID     int32
@@ -86,7 +59,69 @@ type parentSession struct {
 	workspacePath string
 	depth         int
 	onRunCreated  func(run db.Run)
-	verification  *verificationCapture
+	askOwner      func(ctx context.Context, question string) (string, error)
+}
+
+// subtaskEvent is what a running subtask session reports back to the waiting
+// owner session: either a question from the sub-agent (via ask_task_owner) or
+// the session's final status.
+type subtaskEvent struct {
+	question string
+	status   string
+	done     bool
+}
+
+// delegationState tracks one running subtask session so the owner session can
+// wait for its completion and exchange question/answer messages with it.
+type delegationState struct {
+	subtaskID  int32
+	agentName  string
+	title      string
+	childRunID int32
+	eventCh    chan subtaskEvent
+	answerCh   chan string
+}
+
+// pendingSubtasks holds the delegation states whose sub-agent is paused on an
+// unanswered ask_task_owner question, keyed by subtask id.
+type pendingSubtasks struct {
+	mu sync.Mutex
+	m  map[int32]*delegationState
+}
+
+func (p *pendingSubtasks) put(state *delegationState) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.m[state.subtaskID] = state
+}
+
+// take removes and returns the state for the given subtask id. A zero id is
+// accepted when exactly one question is pending.
+func (p *pendingSubtasks) take(subtaskID int32) (*delegationState, error) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if len(p.m) == 0 {
+		return nil, fmt.Errorf("no subtask has a pending question")
+	}
+	if subtaskID == 0 {
+		if len(p.m) == 1 {
+			for id, state := range p.m {
+				delete(p.m, id)
+				return state, nil
+			}
+		}
+		return nil, fmt.Errorf("multiple subtasks have pending questions — pass subtask_id explicitly")
+	}
+	state, ok := p.m[subtaskID]
+	if !ok {
+		ids := make([]string, 0, len(p.m))
+		for id := range p.m {
+			ids = append(ids, fmt.Sprintf("#%d", id))
+		}
+		return nil, fmt.Errorf("subtask %d has no pending question (pending: %s)", subtaskID, strings.Join(ids, ", "))
+	}
+	delete(p.m, subtaskID)
+	return state, nil
 }
 
 // ProcessTask reacts to a task's current status and spawns a goroutine to run
@@ -360,33 +395,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	//     (a git worktree when the task belongs to a repo-backed project)
 	//   - delegated subtask sessions can additionally READ the parent task's
 	//     workdir, but never write to it
-	//   - QA verification sessions run in the same workdir as the session
-	//     they verify, plus read-only access to its subtasks' dirs (where
-	//     delegated implementers left their work)
 	fsMgr := filesystem.NewManager(settings.BasePath)
-	isVerification := parent != nil && parent.verification != nil
-	var workspacePath string
+	workspacePath := fsMgr.GetTaskWorktreePath(company, task)
 	var readOnlyDirs []string
-	if isVerification {
-		workspacePath = parent.workspacePath
-		if task.ParentID != nil {
-			if siblings, sibErr := e.q.ListSubtasksByParent(ctx, *task.ParentID); sibErr == nil {
-				for _, st := range siblings {
-					if st.ID == task.ID {
-						continue
-					}
-					dir := fsMgr.GetTaskWorktreePath(company, st)
-					if _, statErr := os.Stat(dir); statErr == nil {
-						readOnlyDirs = append(readOnlyDirs, dir)
-					}
-				}
-			}
-		}
-	} else {
-		workspacePath = fsMgr.GetTaskWorktreePath(company, task)
-		if parent != nil && parent.workspacePath != "" && parent.workspacePath != workspacePath {
-			readOnlyDirs = append(readOnlyDirs, parent.workspacePath)
-		}
+	if parent != nil && parent.workspacePath != "" && parent.workspacePath != workspacePath {
+		readOnlyDirs = append(readOnlyDirs, parent.workspacePath)
 	}
 
 	// Set up the session logger. All sessions of one main run share the
@@ -408,13 +421,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.q.UpdateRunLogFilePath(ctx, run.ID, proxyLogger.FilePath())
 	}
 
-	// Git worktree setup. Every session with its own workdir (main task and
-	// delegated subtasks — not verification sessions, which share one) works
-	// inside a git worktree of the project repo on its own task-N branch and
-	// commits its changes at the end of the session.
+	// Git worktree setup. Every session (main task and delegated subtasks)
+	// works inside a git worktree of the project repo on its own task-N
+	// branch and commits its changes at the end of the session.
 	var gitProject bool
 	var gitMgr *git.GitManager
-	if !isVerification && task.ProjectID != nil {
+	if task.ProjectID != nil {
 		project, projErr := e.q.GetProject(ctx, *task.ProjectID)
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
@@ -435,15 +447,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// Ensure the workdir exists (no-op when the worktree was just created)
-	// and seed the task memory file for sessions that own their dir.
-	if !isVerification {
-		if err := os.MkdirAll(workspacePath, 0755); err != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
-			return "failed"
-		}
-		if err := initTaskMemory(workspacePath, task, company); err != nil {
-			fmt.Printf("Warning: failed to init memory.md: %v\n", err)
-		}
+	// and seed the task memory file.
+	if err := os.MkdirAll(workspacePath, 0755); err != nil {
+		e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
+		return "failed"
+	}
+	if err := initTaskMemory(workspacePath, task, company); err != nil {
+		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
 	}
 
 	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
@@ -578,14 +588,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if err != nil {
 			return err
 		}
-		// Verification gate: a task with structured acceptance criteria /
-		// test cases cannot be finished while any item is unverified.
-		if status == "done" || status == "in-review" {
-			pending := db.CountPendingSpecItems(t.AcceptanceCriteria) + db.CountPendingSpecItems(t.TestCases)
-			if pending > 0 {
-				return fmt.Errorf("cannot finish: %d acceptance criteria / test case items are still unverified — run verify_implementation to have QA verify every item first", pending)
-			}
-		}
 		taskFinished = true
 		prevStatus := t.Status
 		t.Status = status
@@ -707,63 +709,45 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
 	}))
-	var agentNames []string
-	if e.agentFactory != nil {
-		agentNames = e.agentFactory.ListNames()
-	}
-
-	// Delegation: only the main task may delegate (no subtasks of subtasks),
-	// and verification sessions never delegate.
-	if depth < maxDelegationDepth && !isVerification {
-		registry.Register(tools.NewDelegateTask(
-			e.makeDelegateFunc(task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth),
-			agentNames,
+	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
+	// The set of sub-agents an agent may delegate to comes from its config's
+	// Subagents list (falling back to every known config when unset).
+	if depth < maxDelegationDepth {
+		subagents := []string(nil)
+		if agentCfg != nil && len(agentCfg.Subagents) > 0 {
+			subagents = agentCfg.Subagents
+		} else if e.agentFactory != nil {
+			subagents = e.agentFactory.ListNames()
+		}
+		pending := &pendingSubtasks{m: make(map[int32]*delegationState)}
+		registry.Register(tools.NewCreateSubtask(
+			e.makeCreateSubtaskFunc(task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, subagents, pending),
+			subagents,
 		))
+		registry.Register(tools.NewAnswerSubtaskQuestion(func(aCtx context.Context, subtaskID int32, answer string) (string, error) {
+			state, err := pending.take(subtaskID)
+			if err != nil {
+				return "", err
+			}
+			e.recordSubtaskQA(aCtx, state.subtaskID, run.ID, "owner_answer", answer)
+			e.logInfo(proxyLogger, fmt.Sprintf("Answered subtask #%d question", state.subtaskID))
+			select {
+			case state.answerCh <- answer:
+			case <-aCtx.Done():
+				return "", aCtx.Err()
+			}
+			return e.waitForSubtaskEvent(aCtx, state, rootTaskID, pending, proxyLogger, run)
+		}))
 	}
 
 	registry.Register(tools.NewAskHuman(func(qCtx context.Context, question string) (string, error) {
 		return e.askHuman(qCtx, task.ID, run.ID, question)
 	}))
 
-	registry.Register(tools.NewUpdateTaskDetails(func(uCtx context.Context, refinedDescription string, acceptanceCriteria, testCases []string) error {
-		t, err := e.q.GetTask(uCtx, task.ID)
-		if err != nil {
-			return err
-		}
-		if refinedDescription != "" {
-			t.RefinedDescription = refinedDescription
-		}
-		// Criteria and test cases are stored as structured item lists so each
-		// entry can be verified individually during the testing phase.
-		if len(acceptanceCriteria) > 0 {
-			t.AcceptanceCriteria = db.MarshalSpecItems(db.NewSpecItems(acceptanceCriteria))
-		}
-		if len(testCases) > 0 {
-			t.TestCases = db.MarshalSpecItems(db.NewSpecItems(testCases))
-		}
-		if _, err := e.q.UpdateTask(uCtx, t); err != nil {
-			return err
-		}
-		e.broadcastTaskSpec(t)
-		e.logInfo(proxyLogger, "Task details updated (refined description / acceptance criteria / test cases)")
-		return nil
-	}))
-
-	// Verification: implementer-facing sessions get verify_implementation
-	// (spawns an independent QA session — the ONLY way to mark spec items as
-	// passed). QA verification sessions instead get
-	// report_verification_results to hand their verdicts back.
-	if !isVerification {
-		registry.Register(tools.NewVerifyImplementation(func(vCtx context.Context, notes string) (string, error) {
-			return e.verifyImplementation(vCtx, task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, notes)
-		}))
-	} else {
-		capture := parent.verification
-		registry.Register(tools.NewReportVerificationResults(func(rCtx context.Context, results []tools.VerificationResult) (string, error) {
-			capture.add(results)
-			e.logInfo(proxyLogger, fmt.Sprintf("Verification verdicts reported: %d item(s)", len(results)))
-			return fmt.Sprintf("Recorded %d verdict(s).", len(results)), nil
-		}))
+	// Delegated sessions can ask the agent that created their subtask a
+	// question; the owner session answers via answer_subtask_question.
+	if parent != nil && parent.askOwner != nil {
+		registry.Register(tools.NewAskTaskOwner(parent.askOwner))
 	}
 
 	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
@@ -773,19 +757,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.hub.BroadcastEvent("run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
 		e.logInfo(proxyLogger, "Status: "+status)
 		return nil
-	}))
-	registry.Register(tools.NewExpandRunResult(func(rCtx context.Context, runID int32) (string, error) {
-		r, err := e.q.GetRun(rCtx, runID)
-		if err != nil {
-			return "", fmt.Errorf("run %d not found — pass the RUN id exactly as shown in delegation results ('run #N'), not a task id", runID)
-		}
-		if r.ResultExplanation != "" {
-			return r.ResultExplanation, nil
-		}
-		if r.ResultDescription != "" {
-			return r.ResultDescription + "\n(No more detail was recorded for this run.)", nil
-		}
-		return "No detailed explanation available for this run.", nil
 	}))
 
 	// Build the MCP session store for external integrations.
@@ -1066,10 +1037,12 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	}
 }
 
-// makeDelegateFunc returns the callback behind the delegate_task tool. It
-// creates a child task, runs it synchronously as a nested session linked to
-// the parent run, and returns the specialist's result to the delegating agent.
-func (e *NativeEngine) makeDelegateFunc(
+// makeCreateSubtaskFunc returns the callback behind the create_subtask tool.
+// It creates a child task, runs it as a nested session linked to the parent
+// run, and blocks until the sub-agent either finishes (returning its result
+// and artifacts) or asks the owner a question via ask_task_owner (returning
+// the question, to be answered with answer_subtask_question).
+func (e *NativeEngine) makeCreateSubtaskFunc(
 	parentTask db.Task,
 	parentAgent db.Agent,
 	parentRun db.Run,
@@ -1077,15 +1050,18 @@ func (e *NativeEngine) makeDelegateFunc(
 	rootRunID, rootTaskID int32,
 	workspacePath string,
 	depth int,
+	allowedAgents []string,
+	pending *pendingSubtasks,
 ) func(callCtx context.Context, title, description, agentName string) (string, error) {
 	return func(callCtx context.Context, title, description, agentName string) (string, error) {
-		// Reject if another subtask of this parent is already running.
+		// Reject if another subtask of this parent is already running — that
+		// includes a subtask paused on an unanswered ask_task_owner question.
 		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
 		if err != nil {
 			return "", fmt.Errorf("failed to check running subtasks: %w", err)
 		}
 		if runningCount > 0 {
-			return "", fmt.Errorf("a delegated session is already running for task %d; wait for it to complete", parentTask.ID)
+			return "", fmt.Errorf("a subtask of task %d is already running; wait for it to finish — if it asked a question, reply with answer_subtask_question first", parentTask.ID)
 		}
 
 		if e.agentFactory == nil {
@@ -1094,19 +1070,28 @@ func (e *NativeEngine) makeDelegateFunc(
 		if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
 			return "", fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
 		}
+		allowed := len(allowedAgents) == 0
+		for _, a := range allowedAgents {
+			if a == agentName {
+				allowed = true
+				break
+			}
+		}
+		if !allowed {
+			return "", fmt.Errorf("agent %q is not one of your sub-agents (%s)", agentName, strings.Join(allowedAgents, ", "))
+		}
 
 		parentID := parentTask.ID
 		agentID := parentAgent.ID
 		subtask, err := e.q.CreateTask(callCtx, db.Task{
-			CompanyID:       parentTask.CompanyID,
-			ProjectID:       parentTask.ProjectID,
-			SprintID:        parentTask.SprintID,
-			AgentID:  &agentID,
-			ParentID: &parentID,
-			Title:    title,
-			// Delegated subtasks have no raw user input: the orchestrator's
-			// instructions ARE the refined description, and the subtask never
-			// goes through the refinement stage.
+			CompanyID: parentTask.CompanyID,
+			ProjectID: parentTask.ProjectID,
+			SprintID:  parentTask.SprintID,
+			AgentID:   &agentID,
+			ParentID:  &parentID,
+			Title:     title,
+			// Delegated subtasks have no raw user input: the owner's
+			// instructions ARE the refined description.
 			RefinedDescription: description,
 			TaskType:           db.TaskTypeImplement,
 			Status:             "in-progress",
@@ -1123,7 +1108,14 @@ func (e *NativeEngine) makeDelegateFunc(
 			"title":     subtask.Title,
 		})
 
-		var childRunID int32
+		state := &delegationState{
+			subtaskID: subtask.ID,
+			agentName: agentName,
+			title:     title,
+			eventCh:   make(chan subtaskEvent),
+			answerCh:  make(chan string),
+		}
+
 		session := &parentSession{
 			parentRunID:   parentRun.ID,
 			rootRunID:     rootRunID,
@@ -1131,7 +1123,7 @@ func (e *NativeEngine) makeDelegateFunc(
 			workspacePath: workspacePath,
 			depth:         depth + 1,
 			onRunCreated: func(childRun db.Run) {
-				childRunID = childRun.ID
+				state.childRunID = childRun.ID
 				if parentLogger != nil {
 					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.log", childRun.ID))
 				}
@@ -1143,67 +1135,153 @@ func (e *NativeEngine) makeDelegateFunc(
 					"title":         title,
 				})
 			},
+			askOwner: func(qCtx context.Context, question string) (string, error) {
+				e.recordSubtaskQA(qCtx, subtask.ID, state.childRunID, "ask_owner", question)
+				select {
+				case state.eventCh <- subtaskEvent{question: question}:
+				case <-qCtx.Done():
+					return "", qCtx.Err()
+				}
+				select {
+				case answer := <-state.answerCh:
+					return answer, nil
+				case <-qCtx.Done():
+					return "", qCtx.Err()
+				}
+			},
 		}
 
-		status := e.executeSession(callCtx, subtask, "implement", session)
+		// Run the child session in a goroutine so this call can also react to
+		// ask_task_owner questions while the session is still in flight.
+		go func() {
+			status := e.executeSession(callCtx, subtask, "implement", session)
+			select {
+			case state.eventCh <- subtaskEvent{status: status, done: true}:
+			case <-callCtx.Done():
+			}
+		}()
 
-		result := ""
-		var childErr, childRunName, childDetailHint, childArtifacts string
-		if childRunID > 0 {
-			if childRun, runErr := e.q.GetRun(context.Background(), childRunID); runErr == nil {
-				result = childRun.ResultDescription
-				childRunName = childRun.Name
-				if childRun.ResultExplanation != "" {
-					childDetailHint = fmt.Sprintf("\nA detailed handoff is available: call expand_run_result with run_id=%d.", childRunID)
-				}
-				if childRun.Status == "failed" {
-					childErr = childRun.LogContent
-				}
-			}
-			if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
-				var written []string
-				for _, a := range arts {
-					if a.RunID == childRunID {
-						written = append(written, fmt.Sprintf("%q", a.Filename))
-					}
-				}
-				if len(written) > 0 {
-					childArtifacts = fmt.Sprintf("\nArtifacts written by this session: %s — read them with read_artifact.", strings.Join(written, ", "))
-				}
-			}
-		}
-		if parentLogger != nil {
-			parentLogger.LogSessionEnded(childRunID, status, result)
-		}
-		e.hub.BroadcastEvent("session_ended", map[string]interface{}{
-			"parent_run_id": parentRun.ID,
-			"run_id":        childRunID,
-			"status":        status,
-		})
-
-		finalTask, taskErr := e.q.GetTask(context.Background(), subtask.ID)
-		taskStatus := subtask.Status
-		if taskErr == nil {
-			taskStatus = finalTask.Status
-		}
-		if result == "" {
-			result = "(no result summary provided)"
-		}
-		runLabel := fmt.Sprintf("run #%d", childRunID)
-		if childRunName != "" {
-			runLabel = fmt.Sprintf("%s (run #%d)", childRunName, childRunID)
-		}
-		reply := fmt.Sprintf("Delegated session for subtask #%d (%s) finished.\nSession: %s, status %s\nSubtask status: %s\nResult: %s",
-			subtask.ID, agentName, runLabel, status, taskStatus, result)
-		reply += childArtifacts + childDetailHint
-		if status != "completed" {
-			if childErr != "" {
-				reply += "\nError: " + childErr
-			}
-			reply += "\nThe delegated session did not complete successfully. Decide how to proceed: retry with better instructions, delegate to a different specialist, or escalate via ask_human."
-		}
-		return reply, nil
+		return e.waitForSubtaskEvent(callCtx, state, rootTaskID, pending, parentLogger, parentRun)
 	}
+}
+
+// waitForSubtaskEvent blocks until the subtask session either asks the owner
+// a question (recorded in pending, question returned as the tool result) or
+// finishes (final result returned).
+func (e *NativeEngine) waitForSubtaskEvent(
+	ctx context.Context,
+	state *delegationState,
+	rootTaskID int32,
+	pending *pendingSubtasks,
+	logger *logging.ProxyLogger,
+	ownerRun db.Run,
+) (string, error) {
+	select {
+	case <-ctx.Done():
+		return "", ctx.Err()
+	case ev := <-state.eventCh:
+		if !ev.done {
+			pending.put(state)
+			e.logInfo(logger, fmt.Sprintf("Subtask #%d asked its owner: %s", state.subtaskID, ev.question))
+			e.hub.BroadcastEvent("subtask_question", map[string]interface{}{
+				"subtask_id":   state.subtaskID,
+				"owner_run_id": ownerRun.ID,
+				"question":     ev.question,
+			})
+			return fmt.Sprintf("Subtask #%d (%s, %q) asks you a question and is paused until you reply:\n\n%s\n\n"+
+				"Reply with answer_subtask_question (subtask_id=%d). The subtask keeps its full context and resumes with your answer.",
+				state.subtaskID, state.agentName, state.title, ev.question, state.subtaskID), nil
+		}
+		return e.buildSubtaskReply(state, ev.status, rootTaskID, logger, ownerRun)
+	}
+}
+
+// buildSubtaskReply assembles the create_subtask / answer_subtask_question
+// tool result for a finished subtask session: final status, result summary,
+// detailed handoff, and the artifacts the session produced.
+func (e *NativeEngine) buildSubtaskReply(
+	state *delegationState,
+	status string,
+	rootTaskID int32,
+	logger *logging.ProxyLogger,
+	ownerRun db.Run,
+) (string, error) {
+	result := ""
+	var childErr, childRunName, childDetails, childArtifacts string
+	if state.childRunID > 0 {
+		if childRun, runErr := e.q.GetRun(context.Background(), state.childRunID); runErr == nil {
+			result = childRun.ResultDescription
+			childRunName = childRun.Name
+			if childRun.ResultExplanation != "" && childRun.ResultExplanation != childRun.ResultDescription {
+				childDetails = "\nDetails:\n" + childRun.ResultExplanation
+			}
+			if childRun.Status == "failed" {
+				childErr = childRun.LogContent
+			}
+		}
+		if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
+			var written []string
+			for _, a := range arts {
+				if a.RunID == state.childRunID {
+					written = append(written, fmt.Sprintf("%q", a.Filename))
+				}
+			}
+			if len(written) > 0 {
+				childArtifacts = fmt.Sprintf("\nArtifacts written by this subtask: %s — read them with read_artifact.", strings.Join(written, ", "))
+			}
+		}
+	}
+	if logger != nil {
+		logger.LogSessionEnded(state.childRunID, status, result)
+	}
+	e.hub.BroadcastEvent("session_ended", map[string]interface{}{
+		"parent_run_id": ownerRun.ID,
+		"run_id":        state.childRunID,
+		"status":        status,
+	})
+
+	taskStatus := ""
+	if finalTask, taskErr := e.q.GetTask(context.Background(), state.subtaskID); taskErr == nil {
+		taskStatus = finalTask.Status
+	}
+	if result == "" {
+		result = "(no result summary provided)"
+	}
+	runLabel := fmt.Sprintf("run #%d", state.childRunID)
+	if childRunName != "" {
+		runLabel = fmt.Sprintf("%s (run #%d)", childRunName, state.childRunID)
+	}
+	reply := fmt.Sprintf("Subtask #%d (%s) finished.\nSession: %s, status %s\nSubtask status: %s\nResult: %s",
+		state.subtaskID, state.agentName, runLabel, status, taskStatus, result)
+	reply += childDetails + childArtifacts
+	if status != "completed" {
+		if childErr != "" {
+			reply += "\nError: " + childErr
+		}
+		reply += "\nThe subtask session did not complete successfully. Decide how to proceed: retry with better instructions, assign a different sub-agent, or escalate via ask_human."
+	}
+	return reply, nil
+}
+
+// recordSubtaskQA stores an ask_task_owner question or the owner's answer as
+// a comment on the subtask, so the exchange is visible in the task activity.
+func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32, commentType, content string) {
+	comment := db.Comment{
+		TaskID:      taskID,
+		AuthorType:  "agent",
+		CommentType: commentType,
+		Content:     content,
+	}
+	if runID > 0 {
+		rid := runID
+		comment.RunID = &rid
+	}
+	created, err := e.q.CreateComment(ctx, comment)
+	if err != nil {
+		fmt.Printf("Warning: failed to record subtask %s comment: %v\n", commentType, err)
+		return
+	}
+	e.hub.BroadcastEvent("comment_created", created)
 }
 
 // notifyParentOfSubtaskCompletion adds a comment to the parent task when this
@@ -1231,189 +1309,6 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	})
 }
 
-// verifyImplementation is the callback behind the verify_implementation tool:
-// it spawns an independent QA session (never the implementer) that inspects
-// the workdir and artifacts, checks every acceptance criterion and test case,
-// and reports per-item verdicts. The verdicts are applied to the task's spec
-// items — this is the only code path that can mark items passed.
-func (e *NativeEngine) verifyImplementation(
-	ctx context.Context,
-	task db.Task,
-	agent db.Agent,
-	run db.Run,
-	logger *logging.ProxyLogger,
-	rootRunID, rootTaskID int32,
-	workspacePath string,
-	depth int,
-	notes string,
-) (string, error) {
-	t, err := e.q.GetTask(ctx, task.ID)
-	if err != nil {
-		return "", err
-	}
-	acItems := db.ParseSpecItems(t.AcceptanceCriteria)
-	tcItems := db.ParseSpecItems(t.TestCases)
-	if len(acItems)+len(tcItems) == 0 {
-		return "", fmt.Errorf("the task has no acceptance criteria or test cases to verify — define them via update_task_details first")
-	}
-	if e.agentFactory != nil {
-		if _, cfgErr := e.agentFactory.GetConfig(verifierConfig); cfgErr != nil {
-			return "", fmt.Errorf("verifier agent config %q not available: %w", verifierConfig, cfgErr)
-		}
-	}
-
-	// Compose the QA briefing: what was built, what to check, where to look.
-	var b strings.Builder
-	b.WriteString("You are verifying an implementation produced by another agent. Test it properly — run it, read the files, check the outputs. Never assume.\n\n")
-	if t.RefinedDescription != "" {
-		fmt.Fprintf(&b, "What was supposed to be built:\n%s\n\n", t.RefinedDescription)
-	} else if t.Description != "" {
-		fmt.Fprintf(&b, "What was supposed to be built:\n%s\n\n", t.Description)
-	}
-	if len(acItems) > 0 {
-		fmt.Fprintf(&b, "Acceptance criteria to verify:\n%s\n\n", formatSpecItems(t.AcceptanceCriteria))
-	}
-	if len(tcItems) > 0 {
-		fmt.Fprintf(&b, "Test cases to execute:\n%s\n\n", formatSpecItems(t.TestCases))
-	}
-	if notes != "" {
-		fmt.Fprintf(&b, "Notes from the implementer:\n%s\n\n", notes)
-	}
-	b.WriteString("The implementation lives in your workdir (and any read-only dirs listed in your context); produced artifacts are listed in your context. ")
-	b.WriteString("You MUST call report_verification_results exactly once with a verdict for EVERY item above (success true/false, with an error description for failures) before finishing.")
-
-	parentID := t.ID
-	agentID := agent.ID
-	vtask, err := e.q.CreateTask(ctx, db.Task{
-		CompanyID:          t.CompanyID,
-		ProjectID:          t.ProjectID,
-		SprintID:           t.SprintID,
-		AgentID:            &agentID,
-		ParentID:           &parentID,
-		Title:              "Verify: " + t.Title,
-		RefinedDescription: b.String(),
-		TaskType:           db.TaskTypeImplement,
-		Status:             "in-progress",
-		Priority:           "Normal",
-		AgentConfigName:    verifierConfig,
-	})
-	if err != nil {
-		return "", fmt.Errorf("failed to create verification task: %w", err)
-	}
-	e.hub.BroadcastEvent("task_created", map[string]interface{}{
-		"id":        vtask.ID,
-		"parent_id": t.ID,
-		"title":     vtask.Title,
-	})
-
-	capture := &verificationCapture{}
-	var childRunID int32
-	session := &parentSession{
-		parentRunID:   run.ID,
-		rootRunID:     rootRunID,
-		rootTaskID:    rootTaskID,
-		workspacePath: workspacePath,
-		depth:         depth + 1,
-		verification:  capture,
-		onRunCreated: func(childRun db.Run) {
-			childRunID = childRun.ID
-			if logger != nil {
-				logger.LogSessionStarted(childRun.ID, vtask.ID, verifierConfig, vtask.Title, fmt.Sprintf("session-%d.log", childRun.ID))
-			}
-			e.hub.BroadcastEvent("session_started", map[string]interface{}{
-				"parent_run_id": run.ID,
-				"run_id":        childRun.ID,
-				"task_id":       vtask.ID,
-				"agent_name":    verifierConfig,
-				"title":         vtask.Title,
-			})
-		},
-	}
-
-	status := e.executeSession(ctx, vtask, "implement", session)
-
-	results := capture.get()
-	if logger != nil {
-		logger.LogSessionEnded(childRunID, status, fmt.Sprintf("%d verification verdict(s) reported", len(results)))
-	}
-	e.hub.BroadcastEvent("session_ended", map[string]interface{}{
-		"parent_run_id": run.ID,
-		"run_id":        childRunID,
-		"status":        status,
-	})
-
-	if len(results) == 0 {
-		return "", fmt.Errorf("verification session finished (status %s) without reporting any results — run verify_implementation again", status)
-	}
-
-	// Apply the verdicts. Reload the task in case something changed while QA ran.
-	t, err = e.q.GetTask(ctx, task.ID)
-	if err != nil {
-		return "", err
-	}
-	acItems = db.ParseSpecItems(t.AcceptanceCriteria)
-	tcItems = db.ParseSpecItems(t.TestCases)
-	var unknown []string
-	for _, r := range results {
-		items := acItems
-		if r.List == "test_cases" {
-			items = tcItems
-		}
-		found := false
-		for i := range items {
-			if items[i].ID == r.ID {
-				if r.Success {
-					items[i].Status = db.SpecItemPassed
-					items[i].Note = ""
-				} else {
-					items[i].Status = db.SpecItemFailed
-					items[i].Note = r.Error
-				}
-				found = true
-				break
-			}
-		}
-		if !found {
-			unknown = append(unknown, fmt.Sprintf("%s#%d", r.List, r.ID))
-		}
-	}
-	if len(acItems) > 0 {
-		t.AcceptanceCriteria = db.MarshalSpecItems(acItems)
-	}
-	if len(tcItems) > 0 {
-		t.TestCases = db.MarshalSpecItems(tcItems)
-	}
-	if _, err := e.q.UpdateTask(ctx, t); err != nil {
-		return "", err
-	}
-	e.broadcastTaskSpec(t)
-
-	// All items verified green → the produced artifacts are considered verified.
-	pending, failed := 0, 0
-	for _, item := range append(append([]db.SpecItem{}, acItems...), tcItems...) {
-		switch item.Status {
-		case db.SpecItemFailed:
-			failed++
-		case db.SpecItemPending:
-			pending++
-		}
-	}
-	if failed == 0 && pending == 0 {
-		if markErr := e.q.MarkTaskTreeArtifactsVerified(ctx, t.ID); markErr != nil {
-			fmt.Printf("Warning: failed to mark artifacts verified for task %d: %v\n", t.ID, markErr)
-		}
-	}
-
-	resultsJSON, _ := json.Marshal(results)
-	summary := fmt.Sprintf("Verification finished. %s %s\nResults: %s",
-		specItemsSummary("Acceptance criteria", acItems), specItemsSummary("Test cases", tcItems), string(resultsJSON))
-	if len(unknown) > 0 {
-		summary += fmt.Sprintf("\nWarning: verdicts for unknown items ignored: %s", strings.Join(unknown, ", "))
-	}
-	e.logInfo(logger, summary)
-	return summary, nil
-}
-
 // formatArtifactList renders artifact metadata (never content) for agent
 // system prompts: name, size, line count, modify time, verified flag and the
 // producer's one-line description.
@@ -1433,38 +1328,6 @@ func formatArtifactList(arts []db.Artifact) string {
 		b.WriteString("\n")
 	}
 	return strings.TrimRight(b.String(), "\n")
-}
-
-// broadcastTaskSpec pushes the task's spec fields to the UI after
-// update_task_details / verify_implementation change them.
-func (e *NativeEngine) broadcastTaskSpec(t db.Task) {
-	e.hub.BroadcastEvent("task_updated", map[string]interface{}{
-		"id":                  t.ID,
-		"status":              t.Status,
-		"refined_description": t.RefinedDescription,
-		"acceptance_criteria": t.AcceptanceCriteria,
-		"test_cases":          t.TestCases,
-	})
-}
-
-// specItemsSummary renders a one-line verification progress summary, e.g.
-// "Acceptance criteria: 3 passed, 1 failed, 2 pending."
-func specItemsSummary(label string, items []db.SpecItem) string {
-	if len(items) == 0 {
-		return ""
-	}
-	passed, failed, pending := 0, 0, 0
-	for _, item := range items {
-		switch item.Status {
-		case db.SpecItemPassed:
-			passed++
-		case db.SpecItemFailed:
-			failed++
-		default:
-			pending++
-		}
-	}
-	return fmt.Sprintf("%s: %d passed, %d failed, %d pending.", label, passed, failed, pending)
 }
 
 // emitStatusChange creates a status_change comment and broadcasts it.

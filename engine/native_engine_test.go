@@ -379,38 +379,37 @@ func textJSON(id, text string) map[string]interface{} {
 	}
 }
 
-// delegateTaskHandler emulates a full synchronous delegation: the parent calls
-// delegate_task, the child session finishes with finish_task, and the parent
-// then wraps up. Delegation is synchronous so global request order is fixed:
-//  1. parent  -> delegate_task
-//  2. child   -> finish_task(done)
-//  3. child   -> text (final answer)
-//  4. parent+ -> text
-func delegateTaskHandler(t *testing.T) http.Handler {
+// createSubtaskHandler emulates a full delegation: the parent calls
+// create_subtask, the child session finishes with finish_task (a terminal
+// tool), and the parent then wraps up. Delegation blocks the parent so the
+// global request order is fixed:
+//  1. parent -> create_subtask
+//  2. child  -> finish_task(done)   (terminal: child session ends)
+//  3. parent -> finish_task
+func createSubtaskHandler(t *testing.T) http.Handler {
 	t.Helper()
 	var count atomic.Int32
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch count.Add(1) {
 		case 1:
-			json.NewEncoder(w).Encode(toolCallJSON("del-001", "delegate_task",
-				`{"title":"subtask A","description":"do subtask A","agent_name":"Programmer"}`))
+			json.NewEncoder(w).Encode(toolCallJSON("del-001", "create_subtask",
+				`{"title":"subtask A","description":"do subtask A","agent_name":"CTO"}`))
 		case 2:
 			json.NewEncoder(w).Encode(toolCallJSON("fin-001", "finish_task",
 				`{"task_status":"done","finish_status":"Subtask A implemented"}`))
-		case 3:
-			json.NewEncoder(w).Encode(textJSON("txt-001", "Subtask A done."))
 		default:
-			json.NewEncoder(w).Encode(textJSON("txt-002", "Delegation complete."))
+			json.NewEncoder(w).Encode(toolCallJSON("fin-002", "finish_task",
+				`{"task_status":"in-review","finish_status":"Delegation complete."}`))
 		}
 	})
 }
 
-// TestNativeEngineDelegateTask verifies that when the LLM calls delegate_task a
-// child Task is created, run synchronously as a nested session linked to the
-// parent run, and its result recorded.
-func TestNativeEngineDelegateTask(t *testing.T) {
-	mockSrv := startTestServer(t, delegateTaskHandler(t))
+// TestNativeEngineCreateSubtask verifies that when the LLM calls create_subtask
+// a child Task is created, run as a nested session linked to the parent run,
+// and its result recorded.
+func TestNativeEngineCreateSubtask(t *testing.T) {
+	mockSrv := startTestServer(t, createSubtaskHandler(t))
 	database := setupTestDB(t)
 	task := seedTestData(t, database, mockSrv.URL)
 
@@ -428,7 +427,7 @@ func TestNativeEngineDelegateTask(t *testing.T) {
 	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
 	assert.Equal(t, task.ID, *subtask.ParentID)
 	assert.Equal(t, "subtask A", subtask.Title)
-	assert.Equal(t, "Programmer", subtask.AgentConfigName)
+	assert.Equal(t, "CTO", subtask.AgentConfigName)
 	assert.Equal(t, "done", subtask.Status, "child session should have finished the subtask")
 	// Delegated subtasks carry no raw user input: the orchestrator's
 	// instructions land in RefinedDescription, and Description stays empty.
@@ -459,30 +458,39 @@ func TestNativeEngineDelegateTask(t *testing.T) {
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
 }
 
-// TestNativeEngineNoNestedDelegation verifies the depth limit: a delegated
-// subtask session has no delegate_task tool, so it cannot create subtasks of
-// its own.
-func TestNativeEngineNoNestedDelegation(t *testing.T) {
+// TestNativeEngineDelegationDepthLimit verifies the two-level depth cap:
+// the root (CEO) delegates to the CTO, the CTO delegates to a Coder, but the
+// Coder session has no create_subtask tool and cannot nest any deeper.
+func TestNativeEngineDelegationDepthLimit(t *testing.T) {
 	var count atomic.Int32
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		switch count.Add(1) {
 		case 1:
-			// Root session delegates.
-			json.NewEncoder(w).Encode(toolCallJSON("nd-001", "delegate_task",
-				`{"title":"sub1","description":"d1","agent_name":"Programmer"}`))
+			// Root (CEO) session delegates to the CTO.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-001", "create_subtask",
+				`{"title":"sub1","description":"d1","agent_name":"CTO"}`))
 		case 2:
-			// Child session tries to delegate — the tool is not registered at
-			// this depth, so the call must fail and the loop continues.
-			json.NewEncoder(w).Encode(toolCallJSON("nd-002", "delegate_task",
-				`{"title":"grandchild","description":"nope","agent_name":"QA"}`))
+			// CTO session (depth 1) delegates to a Coder.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-002", "create_subtask",
+				`{"title":"sub2","description":"d2","agent_name":"Coder"}`))
 		case 3:
-			json.NewEncoder(w).Encode(toolCallJSON("nd-003", "finish_task",
-				`{"task_status":"done","finish_status":"done without delegating"}`))
+			// Coder session (depth 2) tries to delegate — the tool is not
+			// registered at this depth, so the call fails and the loop continues.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-003", "create_subtask",
+				`{"title":"great-grandchild","description":"nope","agent_name":"QA"}`))
 		case 4:
-			json.NewEncoder(w).Encode(textJSON("nd-004", "child done"))
+			// Coder finishes.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-004", "finish_task",
+				`{"task_status":"done","finish_status":"done without delegating"}`))
+		case 5:
+			// CTO finishes.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-005", "finish_task",
+				`{"task_status":"done","finish_status":"cto done"}`))
 		default:
-			json.NewEncoder(w).Encode(textJSON("nd-005", "root done"))
+			// Root finishes.
+			json.NewEncoder(w).Encode(toolCallJSON("nd-006", "finish_task",
+				`{"task_status":"in-review","finish_status":"root done"}`))
 		}
 	})
 
@@ -498,50 +506,90 @@ func TestNativeEngineNoNestedDelegation(t *testing.T) {
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 	waitForRunDone(t, q, runID, 30*time.Second)
 
-	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
-	grandchildren, err := q.ListSubtasksByParent(context.Background(), subtask.ID)
+	// Depth 1: the CTO subtask exists. Depth 2: the Coder subtask exists.
+	ctoTask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	assert.Equal(t, "CTO", ctoTask.AgentConfigName)
+	coderTask := waitForSubtask(t, database, ctoTask.ID, 5*time.Second)
+	assert.Equal(t, "Coder", coderTask.AgentConfigName)
+
+	// Depth 3 must not exist: the Coder's delegation attempt was rejected.
+	greatGrandchildren, err := q.ListSubtasksByParent(context.Background(), coderTask.ID)
 	require.NoError(t, err)
-	assert.Empty(t, grandchildren, "subtasks must not be able to create subtasks of their own")
+	assert.Empty(t, greatGrandchildren, "depth-2 sessions must not be able to create subtasks")
 }
 
-// TestNativeEngineVerifyImplementation covers the full verification loop: the
-// root agent defines spec items, cannot finish while they are pending, calls
-// verify_implementation, an independent QA session reports per-item verdicts
-// via report_verification_results, and the engine applies them to the task.
-func TestNativeEngineVerifyImplementation(t *testing.T) {
-	var count atomic.Int32
+// TestNativeEngineSubagentRestriction verifies that create_subtask only
+// accepts agents from the delegating config's Subagents list: the CEO cannot
+// delegate straight to a Coder.
+func TestNativeEngineSubagentRestriction(t *testing.T) {
+	var sawRestrictionError atomic.Bool
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		w.Header().Set("Content-Type", "application/json")
+		if strings.Contains(string(body), "not one of your sub-agents") {
+			sawRestrictionError.Store(true)
+			json.NewEncoder(w).Encode(toolCallJSON("sr-002", "finish_task",
+				`{"task_status":"blocked","finish_status":"cannot delegate to Coder"}`))
+			return
+		}
+		json.NewEncoder(w).Encode(toolCallJSON("sr-001", "create_subtask",
+			`{"title":"direct to coder","description":"d","agent_name":"Coder"}`))
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	assert.True(t, sawRestrictionError.Load(), "CEO delegation to a non-subagent must be rejected")
+	subtasks, err := q.ListSubtasksByParent(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Empty(t, subtasks, "no subtask should be created for a rejected agent")
+}
+
+// TestNativeEngineAskTaskOwner covers the question/answer loop between a
+// delegated sub-agent and its task owner: the sub-agent pauses on
+// ask_task_owner, the owner receives the question as the create_subtask
+// result, answers via answer_subtask_question, and the sub-agent resumes with
+// the answer and finishes.
+func TestNativeEngineAskTaskOwner(t *testing.T) {
+	var count atomic.Int32
+	var questionToolResult atomic.Value // what the owner saw from create_subtask
+	var answerToolResult atomic.Value   // what the sub-agent saw from ask_task_owner
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		body := string(bodyBytes)
 		w.Header().Set("Content-Type", "application/json")
 		switch count.Add(1) {
 		case 1:
-			json.NewEncoder(w).Encode(toolCallJSON("vi-001", "update_task_details",
-				`{"acceptance_criteria":["It works.","It is documented."],"test_cases":["Run it → it works."]}`))
+			// Owner (CEO) delegates to the CTO.
+			json.NewEncoder(w).Encode(toolCallJSON("ato-001", "create_subtask",
+				`{"title":"pick storage","description":"decide and document the storage layer","agent_name":"CTO"}`))
 		case 2:
-			// Premature finish must be rejected by the verification gate.
-			json.NewEncoder(w).Encode(toolCallJSON("vi-002", "finish_task",
-				`{"task_status":"in-review","finish_status":"too early"}`))
+			// CTO session asks its owner a question and pauses.
+			json.NewEncoder(w).Encode(toolCallJSON("ato-002", "ask_task_owner",
+				`{"question":"Which storage should I use?"}`))
 		case 3:
-			json.NewEncoder(w).Encode(toolCallJSON("vi-003", "verify_implementation",
-				`{"notes":"check the workdir"}`))
+			// Owner turn: the create_subtask result carries the question.
+			questionToolResult.Store(lastToolResult(body))
+			json.NewEncoder(w).Encode(toolCallJSON("ato-003", "answer_subtask_question",
+				`{"answer":"Use SQLite."}`))
 		case 4:
-			// QA verification session: report a verdict for every item.
-			json.NewEncoder(w).Encode(toolCallJSON("vi-004", "report_verification_results",
-				`{"results":[
-					{"list":"acceptance_criteria","id":1,"success":true},
-					{"list":"acceptance_criteria","id":2,"success":false,"error":"no docs found"},
-					{"list":"test_cases","id":1,"success":true}
-				]}`))
-		case 5:
-			json.NewEncoder(w).Encode(toolCallJSON("vi-005", "finish_task",
-				`{"task_status":"done","finish_status":"verification complete"}`))
-		case 6:
-			json.NewEncoder(w).Encode(textJSON("vi-006", "verified"))
-		case 7:
-			// One item failed, but all are verified (no pending) — finish allowed.
-			json.NewEncoder(w).Encode(toolCallJSON("vi-007", "finish_task",
-				`{"task_status":"in-review","finish_status":"done with one known failure"}`))
+			// CTO resumed: the ask_task_owner result carries the answer.
+			answerToolResult.Store(lastToolResult(body))
+			json.NewEncoder(w).Encode(toolCallJSON("ato-004", "finish_task",
+				`{"task_status":"done","finish_status":"Storage decided: SQLite.","result_details":"Chose SQLite per owner's answer."}`))
 		default:
-			json.NewEncoder(w).Encode(textJSON("vi-008", "root done"))
+			// Owner wraps up after the answer_subtask_question result.
+			json.NewEncoder(w).Encode(toolCallJSON("ato-005", "finish_task",
+				`{"task_status":"in-review","finish_status":"Subtask answered and completed."}`))
 		}
 	})
 
@@ -558,32 +606,59 @@ func TestNativeEngineVerifyImplementation(t *testing.T) {
 	run := waitForRunDone(t, q, runID, 30*time.Second)
 	assert.Equal(t, "completed", run.Status)
 
-	// The verification session ran as a QA subtask linked to the root run.
-	vtask := waitForSubtask(t, database, task.ID, 5*time.Second)
-	assert.Equal(t, "QA", vtask.AgentConfigName)
-	assert.Contains(t, vtask.Title, "Verify:")
+	// The owner saw the sub-agent's question as the create_subtask result.
+	qres, _ := questionToolResult.Load().(string)
+	assert.Contains(t, qres, "Which storage should I use?")
+	assert.Contains(t, qres, "answer_subtask_question")
 
-	childRuns, err := q.ListChildRuns(context.Background(), runID)
-	require.NoError(t, err)
-	require.Len(t, childRuns, 1)
-	assert.Equal(t, "QA", childRuns[0].AgentConfigName)
+	// The sub-agent saw the owner's answer as the ask_task_owner result.
+	ares, _ := answerToolResult.Load().(string)
+	assert.Contains(t, ares, "Use SQLite.")
 
-	// The QA verdicts were applied to the root task's spec items.
-	updated, err := q.GetTask(context.Background(), task.ID)
+	// The subtask completed, and the final answer_subtask_question result
+	// carried the sub-agent's result back to the owner.
+	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	assert.Equal(t, "done", subtask.Status)
+
+	// The Q&A exchange is recorded as comments on the subtask.
+	comments, err := q.ListCommentsByTask(context.Background(), subtask.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "in-review", updated.Status)
-	acItems := db.ParseSpecItems(updated.AcceptanceCriteria)
-	require.Len(t, acItems, 2)
-	assert.Equal(t, db.SpecItemPassed, acItems[0].Status)
-	assert.Equal(t, db.SpecItemFailed, acItems[1].Status)
-	assert.Equal(t, "no docs found", acItems[1].Note)
-	tcItems := db.ParseSpecItems(updated.TestCases)
-	require.Len(t, tcItems, 1)
-	assert.Equal(t, db.SpecItemPassed, tcItems[0].Status)
+	var sawQuestion, sawAnswer bool
+	for _, c := range comments {
+		if c.CommentType == "ask_owner" && strings.Contains(c.Content, "Which storage") {
+			sawQuestion = true
+		}
+		if c.CommentType == "owner_answer" && strings.Contains(c.Content, "Use SQLite.") {
+			sawAnswer = true
+		}
+	}
+	assert.True(t, sawQuestion, "ask_owner comment should be recorded on the subtask")
+	assert.True(t, sawAnswer, "owner_answer comment should be recorded on the subtask")
 }
 
-// TestNativeEngineSequentialDelegations verifies that two delegate_task calls
-// in one assistant turn run one after another (delegation is synchronous), each
+// lastToolResult extracts the content of the last role:"tool" message in an
+// OpenAI-style chat completions request body.
+func lastToolResult(body string) string {
+	var req struct {
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+	}
+	if json.Unmarshal([]byte(body), &req) != nil {
+		return ""
+	}
+	last := ""
+	for _, m := range req.Messages {
+		if m.Role == "tool" {
+			last = m.Content
+		}
+	}
+	return last
+}
+
+// TestNativeEngineSequentialDelegations verifies that two create_subtask calls
+// in one assistant turn run one after another (delegation blocks), each
 // producing its own completed subtask and linked session run.
 func TestNativeEngineSequentialDelegations(t *testing.T) {
 	var callCount atomic.Int32
@@ -601,15 +676,15 @@ func TestNativeEngineSequentialDelegations(t *testing.T) {
 							{
 								"id": "call_d1", "type": "function",
 								"function": map[string]interface{}{
-									"name":      "delegate_task",
-									"arguments": `{"title":"sub1","description":"d1","agent_name":"Programmer"}`,
+									"name":      "create_subtask",
+									"arguments": `{"title":"sub1","description":"d1","agent_name":"CTO"}`,
 								},
 							},
 							{
 								"id": "call_d2", "type": "function",
 								"function": map[string]interface{}{
-									"name":      "delegate_task",
-									"arguments": `{"title":"sub2","description":"d2","agent_name":"QA"}`,
+									"name":      "create_subtask",
+									"arguments": `{"title":"sub2","description":"d2","agent_name":"Designer"}`,
 								},
 							},
 						},
@@ -777,104 +852,6 @@ func TestNativeEngineAskHuman(t *testing.T) {
 
 	toolResult, _ := capturedToolResult.Load().(string)
 	assert.Contains(t, toolResult, "Option B please", "human reply should be returned as the tool result")
-}
-
-// TestNativeEngineExpandRunResult verifies that the model can invoke expand_run_result
-// and receive the full run description.
-func TestNativeEngineExpandRunResult(t *testing.T) {
-	var pastRunID atomic.Int32
-	var capturedToolResult atomic.Value // stores string
-	var count atomic.Int32
-
-	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Content-Type", "application/json")
-		n := count.Add(1)
-		if n == 1 {
-			runID := pastRunID.Load()
-			json.NewEncoder(w).Encode(map[string]interface{}{
-				"id": "chatcmpl-exp-001", "model": "test-model",
-				"choices": []map[string]interface{}{{
-					"index": 0,
-					"message": map[string]interface{}{
-						"role": "assistant", "content": "",
-						"tool_calls": []map[string]interface{}{{
-							"id": "call_exp_001", "type": "function",
-							"function": map[string]interface{}{
-								"name":      "expand_run_result",
-								"arguments": fmt.Sprintf(`{"run_id":%d}`, runID),
-							},
-						}},
-					},
-					"finish_reason": "tool_calls",
-				}},
-				"usage": map[string]int{"prompt_tokens": 20, "completion_tokens": 10, "total_tokens": 30},
-			})
-			return
-		}
-		if n == 2 {
-			// Capture the tool result from the request messages.
-			bodyBytes, _ := io.ReadAll(r.Body)
-			var req struct {
-				Messages []struct {
-					Role    string `json:"role"`
-					Content string `json:"content"`
-				} `json:"messages"`
-			}
-			if json.Unmarshal(bodyBytes, &req) == nil {
-				for _, msg := range req.Messages {
-					if msg.Role == "tool" {
-						capturedToolResult.Store(msg.Content)
-					}
-				}
-			}
-		}
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"id": "chatcmpl-exp-002", "model": "test-model",
-			"choices": []map[string]interface{}{{
-				"index":         0,
-				"message":       map[string]interface{}{"role": "assistant", "content": "I read the run details."},
-				"finish_reason": "stop",
-			}},
-			"usage": map[string]int{"prompt_tokens": 30, "completion_tokens": 5, "total_tokens": 35},
-		})
-	})
-
-	mockSrv := startTestServer(t, handler)
-	database := setupTestDB(t)
-	task := seedTestData(t, database, mockSrv.URL)
-
-	// Insert a completed past run with a known ResultDescription.
-	q := db.New(database)
-	pastRun, err := q.CreateRun(context.Background(), db.Run{
-		TaskID:    task.ID,
-		AgentID:   *task.AgentID,
-		Status:    "running",
-		StartedAt: time.Now().Add(-time.Hour),
-	})
-	require.NoError(t, err)
-	require.NoError(t, q.UpdateRunResult(context.Background(), pastRun.ID, "Detailed explanation of the past run.", ""))
-	require.NoError(t, q.UpdateRunLog(context.Background(), pastRun.ID, "", "completed"))
-	pastRunID.Store(pastRun.ID)
-
-	hub := eventhub.NewHub()
-	eng := engine.NewNativeEngine(database, hub)
-	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
-
-	// Wait for the engine's run (not the pre-existing past run) to appear and complete.
-	var engineRunID int32
-	require.Eventually(t, func() bool {
-		var id sql.NullInt64
-		if err := database.Raw("SELECT id FROM runs WHERE task_id = ? AND id > ? ORDER BY id DESC LIMIT 1", task.ID, pastRun.ID).Scan(&id).Error; err == nil && id.Valid {
-			engineRunID = int32(id.Int64)
-			return true
-		}
-		return false
-	}, 10*time.Second, 50*time.Millisecond, "engine run should have been created")
-	waitForRunDone(t, q, engineRunID, 30*time.Second)
-
-	// Verify the tool result contained the expected run description.
-	toolResult, _ := capturedToolResult.Load().(string)
-	assert.Contains(t, toolResult, "Detailed explanation of the past run.")
 }
 
 // fixtureHandler wraps a FixtureTransport as an HTTP handler.

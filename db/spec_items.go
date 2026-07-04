@@ -54,14 +54,3 @@ func MarshalSpecItems(items []SpecItem) string {
 	return string(b)
 }
 
-// CountPendingSpecItems returns how many structured items are still
-// unverified. Legacy plain-text content counts as zero.
-func CountPendingSpecItems(raw string) int {
-	pending := 0
-	for _, item := range ParseSpecItems(raw) {
-		if item.Status == SpecItemPending {
-			pending++
-		}
-	}
-	return pending
-}

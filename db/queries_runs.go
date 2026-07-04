@@ -47,6 +47,19 @@ func (q *Queries) ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, 
 	return runs, err
 }
 
+// ListDescendantRuns returns every run in the given root run's session tree
+// except the root itself (all sessions share the root's id in root_run_id),
+// ordered by start time ascending. Used for whole-tree per-agent token stats.
+func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Preload("Task").Preload("Agent").
+		Where("root_run_id = ? AND id <> ?", rootRunID, rootRunID).
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
+
 // UpdateRunCurrentStatus stores the agent's self-reported progress line.
 func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error

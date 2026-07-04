@@ -21,7 +21,7 @@ type AgentConfigResponse struct {
 }
 
 // ListAgentConfigs returns the built-in agent configurations (CEO, CTO,
-// Programmer, QA Lead, …) in their canonical order so the Agents page can
+// CMO, Coder, …) in their canonical order so the Agents page can
 // display them alongside the company's own agents.
 func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 	configs := agentconfig.BuiltinConfigs()

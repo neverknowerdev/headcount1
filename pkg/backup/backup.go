@@ -31,9 +31,19 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		return "", fmt.Errorf("failed to create backup directory: %w", err)
 	}
 
+	// Timestamps are second-granular; if a backup with the same name already
+	// exists (two backups within one second), add a numeric suffix instead of
+	// silently overwriting the earlier archive.
 	timestamp := time.Now().Format("2006-01-02_150405")
 	archiveName := fmt.Sprintf("backup_%s.tar.gz", timestamp)
 	archivePath := filepath.Join(backupDir, archiveName)
+	for n := 2; ; n++ {
+		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
+			break
+		}
+		archiveName = fmt.Sprintf("backup_%s-%d.tar.gz", timestamp, n)
+		archivePath = filepath.Join(backupDir, archiveName)
+	}
 
 	archiveFile, err := os.Create(archivePath)
 	if err != nil {

@@ -121,14 +121,27 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListChildRuns returns the delegated session runs spawned by the given run,
-// so the Run Log UI can render nested sessions.
+// so the Run Log UI can render nested sessions. With ?deep=true it returns
+// every descendant session in the run's tree (children, grandchildren, …),
+// which the UI uses for whole-tree per-agent token stats.
 func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	runs, err := api.q.ListChildRuns(r.Context(), int32(id))
+	var runs []db.Run
+	if r.URL.Query().Get("deep") == "true" {
+		// Descendants are resolved via root_run_id, which only works for root
+		// runs (they point at themselves); for child sessions fall back to
+		// direct children.
+		runs, err = api.q.ListDescendantRuns(r.Context(), int32(id))
+		if err == nil && len(runs) == 0 {
+			runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+		}
+	} else {
+		runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+	}
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return

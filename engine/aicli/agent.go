@@ -20,16 +20,19 @@ var mcpDispatcherTools = map[string]bool{
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
-// ask_human and delegate_task block by design (waiting on a human reply or a
-// nested delegated session) and can legitimately take hours. browser_use is
+// ask_human, create_subtask, answer_subtask_question and ask_task_owner block
+// by design (waiting on a human reply, a nested delegated session, or the
+// task owner's answer) and can legitimately take hours. browser_use is
 // stateful: it parents a headless browser on the first call's context so the
 // browser survives for the whole run — a per-call cancel would kill it
 // between turns and lose all navigation state. Its operations carry their
 // own internal timeouts instead.
 var blockingTools = map[string]bool{
-	"ask_human":     true,
-	"delegate_task": true,
-	"browser_use":   true,
+	"ask_human":               true,
+	"create_subtask":          true,
+	"answer_subtask_question": true,
+	"ask_task_owner":          true,
+	"browser_use":             true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool

@@ -59,7 +59,7 @@ At the end of every run you MUST call finish_task — there are no exceptions:
 - blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
 - done: task is fully complete, no review needed
 - refinement: you need clarification before you can start
-Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — other agents read it via expand_run_result.
+Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — it is returned to your task owner when your session completes.
 
 Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
 

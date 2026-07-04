@@ -8,21 +8,27 @@ const env = loadE2EEnv();
 
 const QUESTION = 'Should the greeting be formal or casual?';
 const HUMAN_REPLY = 'Casual, please.';
-const STATUS_LINE = 'Refinement: clarifying requirements';
+const STATUS_LINE = 'Planning: reviewing the request';
+const OWNER_QUESTION = 'Should the greeting appear on the home page only, or on every page?';
+const OWNER_ANSWER = 'Home page only.';
 
 /**
- * Full CEO orchestration flow, driven end-to-end through the real engine with
- * a scripted mock LLM provider:
+ * Full orchestration flow, driven end-to-end through the real engine with a
+ * scripted mock LLM provider, across the three-level hierarchy:
  *
  *   CEO (root session)
- *     1. report_status                 -> visible progress line on the run
- *     2. ask_human                     -> ask_user comment, waits for reply
- *     3. delegate_task -> QA Lead      -> nested session (acceptance criteria)
- *     4. delegate_task -> Programmer   -> nested session (implementation)
- *     5. finish_task(in-review)        -> final task status
+ *     1. report_status                    -> visible progress line on the run
+ *     2. ask_human                        -> ask_user comment, waits for reply
+ *     3. create_subtask -> CTO            -> nested session
+ *          CTO: ask_task_owner            -> pauses; CEO gets the question
+ *     4. answer_subtask_question          -> CTO resumes
+ *          CTO: create_subtask -> Coder   -> nested session (writes artifact)
+ *          CTO: create_subtask -> QA      -> nested session (verifies)
+ *          CTO: finish_task(done)
+ *     5. finish_task(in-review)           -> final task status
  *
- * Delegation is synchronous, so the global order of chat-completion requests
- * is deterministic and one scenario list drives all three sessions.
+ * Delegation blocks the owner session, so the global order of chat-completion
+ * requests is deterministic and one scenario list drives all four sessions.
  */
 test.describe.serial('CEO orchestration flow', () => {
     let companyId: number;
@@ -57,7 +63,7 @@ test.describe.serial('CEO orchestration flow', () => {
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
     });
 
-    test('task is refined, delegated, verified and finished by the CEO', async ({ page, request }) => {
+    test('task is delegated CEO → CTO → Coder/QA with a question round-trip', async ({ page, request }) => {
         // ── Setup: provider, company, agent, sprint, task (all via API) ──────
         const provider = await postJSON(request, '/api/providers', {
             name: 'e2e-mock',
@@ -97,65 +103,57 @@ test.describe.serial('CEO orchestration flow', () => {
             entries: [
                 // CEO turn 1: report progress
                 { tool_call: { id: 'c1', name: 'report_status', arguments: { status: STATUS_LINE } } },
-                // CEO turn 2: refinement question to the human
+                // CEO turn 2: question to the human
                 { tool_call: { id: 'c2', name: 'ask_human', arguments: { question: QUESTION } } },
-                // CEO turn 3: delegate acceptance criteria to QA Lead
-                { tool_call: { id: 'c3', name: 'delegate_task', arguments: {
-                    title: 'Define acceptance criteria',
-                    description: 'Write acceptance criteria for the greeting feature. Greeting must be casual.',
-                    agent_name: 'QA Lead',
+                // CEO turn 3: delegate the whole technical job to the CTO
+                { tool_call: { id: 'c3', name: 'create_subtask', arguments: {
+                    title: 'Implement greeting feature',
+                    description: 'Implement a casual greeting per the user decision. Verify it before reporting back.',
+                    agent_name: 'CTO',
                 } } },
-                // QA Lead session
-                // finish_task is a terminal tool: the session ends the instant it
-                // succeeds, with no further LLM round-trip in this session.
-                { tool_call: { id: 'q1', name: 'finish_task', arguments: {
-                    task_status: 'done', finish_status: 'Acceptance criteria defined: casual greeting shown on home page.',
+                // CTO turn 1: ask the CEO (task owner) a clarifying question —
+                // this pauses the CTO session and returns the question to the CEO.
+                { tool_call: { id: 't1', name: 'ask_task_owner', arguments: { question: OWNER_QUESTION } } },
+                // CEO turn 4: answer the pending question (single pending → no id needed)
+                { tool_call: { id: 'c4', name: 'answer_subtask_question', arguments: { answer: OWNER_ANSWER } } },
+                // CTO turn 2 (resumed): delegate implementation to the Coder
+                { tool_call: { id: 't2', name: 'create_subtask', arguments: {
+                    title: 'Write greeting code',
+                    description: 'Add a casual greeting to the home page.',
+                    agent_name: 'Coder',
                 } } },
-                // CEO turn 4: record the refinement outputs as structured task
-                // fields (item lists), separate from the user's original description
-                { tool_call: { id: 'c3b', name: 'update_task_details', arguments: {
-                    refined_description: 'Show a casual greeting on the home page.',
-                    acceptance_criteria: ['Home page shows a casual greeting.', 'Greeting text is configurable.'],
-                    test_cases: ['Open home page → casual greeting is visible.'],
-                } } },
-                // CEO turn 5: delegate implementation to Programmer
-                { tool_call: { id: 'c4', name: 'delegate_task', arguments: {
-                    title: 'Implement greeting',
-                    description: 'Implement the casual greeting per the acceptance criteria.',
-                    agent_name: 'Programmer',
-                } } },
-                // Programmer session: produce an artifact, then finish
+                // Coder session: produce an artifact, then finish (terminal).
                 { tool_call: { id: 'p1', name: 'write_artifact', arguments: {
                     filename: 'greeting-report.md',
                     content: '# Greeting implementation\n\nImplemented the casual greeting.',
                     description: 'Implementation report for the greeting feature',
                 } } },
                 { tool_call: { id: 'p2', name: 'finish_task', arguments: {
-                    task_status: 'done', finish_status: 'Casual greeting implemented.',
+                    task_status: 'done',
+                    finish_status: 'Casual greeting implemented.',
+                    result_details: 'Implemented the casual greeting on the home page; see greeting-report.md.',
                 } } },
-                // CEO tries to finish WITHOUT verification — the engine must
-                // reject this (verification gate).
+                // CTO turn 3: delegate verification to QA
+                { tool_call: { id: 't3', name: 'create_subtask', arguments: {
+                    title: 'Verify greeting',
+                    description: 'Verify the casual greeting shows on the home page. Read greeting-report.md for what was built.',
+                    agent_name: 'QA',
+                } } },
+                // QA session: verdict, then finish (terminal).
+                { tool_call: { id: 'q1', name: 'finish_task', arguments: {
+                    task_status: 'done',
+                    finish_status: 'Verified: casual greeting shows on the home page.',
+                } } },
+                // CTO turn 4: wrap up
+                { tool_call: { id: 't4', name: 'finish_task', arguments: {
+                    task_status: 'done',
+                    finish_status: 'Greeting implemented and verified.',
+                    result_details: 'Coder implemented the greeting (greeting-report.md), QA verified it on the home page.',
+                } } },
+                // CEO turn 5: finish the root task
                 { tool_call: { id: 'c5', name: 'finish_task', arguments: {
-                    task_status: 'in-review', finish_status: 'Attempt to finish before verification.',
-                } } },
-                // CEO runs verify_implementation, which spawns an independent
-                // QA session — the only way to mark spec items as passed.
-                { tool_call: { id: 'c6', name: 'verify_implementation', arguments: {
-                    notes: 'Greeting implemented; see the artifact report.',
-                } } },
-                // QA verification session: verdict for every item, then finish.
-                { tool_call: { id: 'v1', name: 'report_verification_results', arguments: {
-                    results: [
-                        { list: 'acceptance_criteria', id: 1, success: true },
-                        { list: 'acceptance_criteria', id: 2, success: false, error: 'Config option not implemented yet.' },
-                        { list: 'test_cases', id: 1, success: true },
-                    ],
-                } } },
-                { tool_call: { id: 'v2', name: 'finish_task', arguments: {
-                    task_status: 'done', finish_status: 'Verification complete: 2 passed, 1 failed.',
-                } } },
-                { tool_call: { id: 'c7', name: 'finish_task', arguments: {
-                    task_status: 'in-review', finish_status: 'Greeting feature delegated, implemented and verified.',
+                    task_status: 'in-review',
+                    finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
             ],
         };
@@ -170,7 +168,7 @@ test.describe.serial('CEO orchestration flow', () => {
         const upd = await request.put(`/api/tasks/${taskId}`, { data: { status: 'to-do' } });
         expect(upd.ok()).toBeTruthy();
 
-        // ── Refinement: the CEO asks the human and waits ─────────────────────
+        // ── The CEO asks the human and waits ─────────────────────────────────
         await expect.poll(async () => {
             const res = await request.get(`/api/comments?task_id=${taskId}`);
             if (!res.ok()) return false;
@@ -187,12 +185,11 @@ test.describe.serial('CEO orchestration flow', () => {
             task_id: taskId, author_type: 'human', content: HUMAN_REPLY,
         });
 
-        // ── Completion: CEO finishes the task after both delegations ─────────
+        // ── Completion: CEO finishes the task after the delegation tree ──────
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
-        // ── Runs: one root (CEO) session with two nested child sessions ──────
-        // finish_task flips the task status before the run itself wraps up, so
-        // poll until the root run reaches a terminal status.
+        // ── Runs: one root (CEO) session with a nested CTO session, which in
+        //    turn ran Coder and QA sessions ─────────────────────────────────────
         await expect.poll(async () => {
             const res = await request.get(`/api/tasks/${taskId}/runs`);
             if (!res.ok()) return '';
@@ -209,54 +206,85 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(rootRun.current_status).toBe(STATUS_LINE);
         expect(rootRun.result_description).toBe('Greeting feature delegated, implemented and verified.');
 
-        const children = await (await request.get(`/api/runs/${rootRun.id}/children`)).json();
-        expect(children.length).toBe(3);
-        const configs = (children as any[]).map(c => c.agent_config_name);
-        expect(configs).toEqual(['QA Lead', 'Programmer', 'QA']);
-        for (const child of children) {
-            expect(child.parent_run_id).toBe(rootRun.id);
+        // Direct children of the root: exactly one CTO session.
+        const rootChildren = await (await request.get(`/api/runs/${rootRun.id}/children`)).json();
+        expect(rootChildren.length).toBe(1);
+        const ctoRun = rootChildren[0];
+        expect(ctoRun.agent_config_name).toBe('CTO');
+        expect(ctoRun.parent_run_id).toBe(rootRun.id);
+        expect(ctoRun.root_run_id).toBe(rootRun.id);
+        expect(ctoRun.status).toBe('completed');
+
+        // Direct children of the CTO session: Coder then QA.
+        const ctoChildren = await (await request.get(`/api/runs/${ctoRun.id}/children`)).json();
+        expect((ctoChildren as any[]).map(c => c.agent_config_name)).toEqual(['Coder', 'QA']);
+        for (const child of ctoChildren) {
+            expect(child.parent_run_id).toBe(ctoRun.id);
             expect(child.root_run_id).toBe(rootRun.id);
             expect(child.status).toBe('completed');
         }
 
-        // The root run's structured log must record both session boundaries.
-        const rootDetails = await (await request.get(`/api/runs/${rootRun.id}`)).json();
-        const entryTypes = (rootDetails.log_entries as any[]).map(e => e.type);
-        expect(entryTypes.filter(t => t === 'session_started').length).toBe(3);
-        expect(entryTypes.filter(t => t === 'session_ended').length).toBe(3);
+        // ?deep=true returns the whole tree from the root.
+        const deepChildren = await (await request.get(`/api/runs/${rootRun.id}/children?deep=true`)).json();
+        expect((deepChildren as any[]).map(c => c.agent_config_name).sort()).toEqual(['CTO', 'Coder', 'QA']);
 
-        // ── Task spec: CEO-generated fields, user input untouched ────────────
+        // The root run's structured log records its (single) session boundary;
+        // the CTO run's log records its two.
+        const rootDetails = await (await request.get(`/api/runs/${rootRun.id}`)).json();
+        const rootEntryTypes = (rootDetails.log_entries as any[]).map(e => e.type);
+        expect(rootEntryTypes.filter(t => t === 'session_started').length).toBe(1);
+        expect(rootEntryTypes.filter(t => t === 'session_ended').length).toBe(1);
+        const ctoDetails = await (await request.get(`/api/runs/${ctoRun.id}`)).json();
+        const ctoEntryTypes = (ctoDetails.log_entries as any[]).map(e => e.type);
+        expect(ctoEntryTypes.filter(t => t === 'session_started').length).toBe(2);
+        expect(ctoEntryTypes.filter(t => t === 'session_ended').length).toBe(2);
+
+        // ── Question round-trip: create_subtask returned the CTO's question,
+        //    the CEO answered, and both are recorded on the CTO subtask ───────
+        const subtasks = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
+        expect(subtasks.length).toBe(1);
+        const ctoTask = subtasks[0];
+        expect(ctoTask.agent_config_name).toBe('CTO');
+        expect(ctoTask.status).toBe('done');
+        // Delegated subtasks carry no raw user input — the owner's
+        // instructions live in refined_description.
+        expect(ctoTask.description).toBe('');
+        expect(ctoTask.refined_description).toContain('Implement a casual greeting');
+
+        const ctoComments = await (await request.get(`/api/comments?task_id=${ctoTask.id}`)).json();
+        expect((ctoComments as any[]).some(c => c.comment_type === 'ask_owner' && c.content === OWNER_QUESTION),
+            'ask_owner comment should be recorded on the subtask').toBeTruthy();
+        expect((ctoComments as any[]).some(c => c.comment_type === 'owner_answer' && c.content === OWNER_ANSWER),
+            'owner_answer comment should be recorded on the subtask').toBeTruthy();
+
+        // The CEO saw the question as the create_subtask tool result.
+        const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
+        const toolResults: string[] = [];
+        for (const req of mockLog.requests as any[]) {
+            for (const msg of ((req.body as any)?.messages ?? [])) {
+                if (msg.role === 'tool' && typeof msg.content === 'string') toolResults.push(msg.content);
+            }
+        }
+        expect(toolResults.some(c => c.includes(OWNER_QUESTION) && c.includes('answer_subtask_question')),
+            'CEO should have received the CTO question as a tool result').toBeTruthy();
+        expect(toolResults.some(c => c.includes(OWNER_ANSWER)),
+            'CTO should have received the CEO answer as a tool result').toBeTruthy();
+        // The final answer_subtask_question result carries the CTO's handoff.
+        expect(toolResults.some(c => c.includes('Greeting implemented and verified.') && c.includes('Coder implemented the greeting')),
+            'CEO should have received the CTO final result with details').toBeTruthy();
+
+        // ── Task spec: user input untouched, no forced refinement fields ─────
         const finalTask = await (await request.get(`/api/tasks/${taskId}`)).json();
         expect(finalTask.description).toBe('Add a greeting to the product.');
-        expect(finalTask.refined_description).toBe('Show a casual greeting on the home page.');
+        expect(finalTask.refined_description).toBeFalsy();
+        expect(finalTask.acceptance_criteria).toBeFalsy();
 
-        // Criteria and test cases are structured item lists with per-item
-        // verdicts recorded during the verification stage.
-        const acItems = JSON.parse(finalTask.acceptance_criteria);
-        expect(acItems).toEqual([
-            { id: 1, text: 'Home page shows a casual greeting.', status: 'passed' },
-            { id: 2, text: 'Greeting text is configurable.', status: 'failed', note: 'Config option not implemented yet.' },
-        ]);
-        const tcItems = JSON.parse(finalTask.test_cases);
-        expect(tcItems).toEqual([
-            { id: 1, text: 'Open home page → casual greeting is visible.', status: 'passed' },
-        ]);
-
-        // The premature finish_task (before verification) must have been
-        // rejected by the engine's verification gate.
-        const rootEntries = rootDetails.log_entries as any[];
-        const gateError = rootEntries.find(e =>
-            e.type === 'tool_response' && typeof e.content === 'string' && e.content.includes('unverified'));
-        expect(gateError, 'finish_task before verify_implementation should be rejected').toBeTruthy();
-
-        // ── Artifacts: produced by the Programmer, listed with metadata ──────
+        // ── Artifacts: produced by the Coder, listed with metadata ───────────
         const artifacts = await (await request.get(`/api/tasks/${taskId}/artifacts`)).json();
         expect(artifacts.length).toBe(1);
         const artifact = artifacts[0];
         expect(artifact.filename).toBe('greeting-report.md');
         expect(artifact.description).toBe('Implementation report for the greeting feature');
-        // One acceptance criterion failed, so the artifacts are NOT marked verified.
-        expect(artifact.is_verified).toBeFalsy();
 
         // Download endpoints: single file and the whole-task zip.
         const dl = await request.get(`/api/artifacts/${artifact.id}/download`);
@@ -266,22 +294,17 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(zipRes.ok()).toBeTruthy();
         expect(zipRes.headers()['content-type']).toContain('application/zip');
 
-        // ── Subtasks: two delegations plus the QA verification session ───────
-        // Subtasks are excluded from the default task list; fetch them
-        // explicitly via parent_id.
-        const subtasks = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
-        expect(subtasks.length).toBe(3);
-        for (const st of subtasks) {
+        // ── Subtasks of the CTO task: Coder and QA, both done ────────────────
+        const ctoSubtasks = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${ctoTask.id}`)).json();
+        expect(ctoSubtasks.length).toBe(2);
+        for (const st of ctoSubtasks) {
             expect(st.status).toBe('done');
         }
-        // Delegated subtasks carry no raw user input — the orchestrator's
-        // instructions live in refined_description.
-        const implTask = subtasks.find((t: any) => t.title === 'Implement greeting');
-        expect(implTask.description).toBe('');
-        expect(implTask.refined_description).toBe('Implement the casual greeting per the acceptance criteria.');
-        const verifyTask = subtasks.find((t: any) => t.title.startsWith('Verify:'));
-        expect(verifyTask, 'a QA verification subtask should exist').toBeTruthy();
-        expect(verifyTask.agent_config_name).toBe('QA');
+        const coderTask = (ctoSubtasks as any[]).find(t => t.title === 'Write greeting code');
+        expect(coderTask.agent_config_name).toBe('Coder');
+        expect(coderTask.refined_description).toBe('Add a casual greeting to the home page.');
+        const qaTask = (ctoSubtasks as any[]).find(t => t.title === 'Verify greeting');
+        expect(qaTask.agent_config_name).toBe('QA');
 
         // ── Filesystem: logs grouped by main run id, one file per session ────
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
@@ -291,7 +314,7 @@ test.describe.serial('CEO orchestration flow', () => {
         const mainContent = fs.readFileSync(mainLog, 'utf8');
         expect(mainContent).toContain('Session Started');
         expect(mainContent).toContain('Session Ended');
-        for (const child of children) {
+        for (const child of [ctoRun, ...ctoChildren]) {
             const sessionLog = path.join(runDir, `session-${child.id}.log`);
             expect(fs.existsSync(sessionLog)).toBeTruthy();
             const sessionContent = fs.readFileSync(sessionLog, 'utf8');
@@ -304,23 +327,22 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(page.getByTestId('run-current-status')).toHaveText(STATUS_LINE);
 
         const sessionBlocks = page.getByTestId('session-block');
-        await expect(sessionBlocks).toHaveCount(3);
-        await expect(sessionBlocks.first()).toContainText('QA Lead');
-        await expect(sessionBlocks.first()).toContainText('Define acceptance criteria');
+        await expect(sessionBlocks).toHaveCount(1);
+        await expect(sessionBlocks.first()).toContainText('CTO');
+        await expect(sessionBlocks.first()).toContainText('Implement greeting feature');
 
-        // Expand the first session and verify the nested log loads.
+        // Expand the CTO session and verify the nested log loads.
         await sessionBlocks.first().getByRole('button').first().click();
         await expect(sessionBlocks.first().getByText('Execution Log')).toBeVisible({ timeout: 15_000 });
 
-        // Expanding the token bar reveals the per-agent breakdown across sessions.
-        // The expanded session block renders a nested viewer with its own bar;
-        // the first token bar on the page belongs to the root run.
+        // Expanding the token bar reveals the per-agent breakdown across the
+        // whole session tree (children and grandchildren).
         await page.locator('button[title="Click for detailed breakdown"]').first().click();
         const agentTokenStats = page.getByTestId('agent-token-stats');
         await expect(agentTokenStats).toBeVisible();
         await expect(agentTokenStats).toContainText('CEO');
-        await expect(agentTokenStats).toContainText('QA Lead');
-        await expect(agentTokenStats).toContainText('Programmer');
+        await expect(agentTokenStats).toContainText('CTO');
+        await expect(agentTokenStats).toContainText('Coder');
         await expect(agentTokenStats).toContainText('QA');
 
         // Run Logs list: only the main session is a top-level card. Its
@@ -330,16 +352,16 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
         const rootCards = page.getByTestId('root-run-card');
         await expect(rootCards).toHaveCount(1);
-        await expect(rootCards.first()).toContainText('3 sessions');
+        await expect(rootCards.first()).toContainText('1 session');
 
         // Sub-session logs stay hidden until the root card itself is maximized
         // (native <details> collapses its content).
         await expect(rootCards.first().getByTestId('session-block').first()).not.toBeVisible();
         await rootCards.first().locator('summary').click();
         const listSessionBlocks = rootCards.first().getByTestId('session-block');
-        await expect(listSessionBlocks).toHaveCount(3);
+        await expect(listSessionBlocks).toHaveCount(1);
         await expect(listSessionBlocks.first()).toBeVisible();
-        await expect(listSessionBlocks.first()).toContainText('QA Lead');
+        await expect(listSessionBlocks.first()).toContainText('CTO');
 
         // Each nested session itself stays collapsed (not even mounted) until
         // it is individually maximized.
@@ -347,34 +369,9 @@ test.describe.serial('CEO orchestration flow', () => {
         await listSessionBlocks.first().getByRole('button').first().click();
         await expect(listSessionBlocks.first().getByText('Execution Log')).toBeVisible({ timeout: 15_000 });
 
-        // Task view separates the user input from the CEO-generated spec.
+        // Task view shows the untouched user input.
         await page.goto(`/companies/ceo-co/tasks/${taskId}`);
         await expect(page.locator('textarea')).toHaveValue('Add a greeting to the product.');
-        const ceoSpec = page.getByTestId('ceo-spec');
-        await expect(ceoSpec).toBeVisible();
-        await expect(ceoSpec.getByText('Generated by CEO')).toHaveCount(3);
-
-        // The refined description is shown expanded, right next to the user input.
-        await expect(ceoSpec.getByText('Refined Description')).toBeVisible();
-        await expect(ceoSpec.getByText('Show a casual greeting on the home page.')).toBeVisible();
-
-        // Acceptance criteria and test cases are minimized by default, with a
-        // verification progress badge in the header…
-        await expect(ceoSpec.getByText('Acceptance Criteria')).toBeVisible();
-        await expect(ceoSpec.getByText('Test Cases')).toBeVisible();
-        await expect(ceoSpec.getByText('1/2 passed, 1 failed')).toBeVisible();
-        await expect(ceoSpec.getByText('1/1 passed')).toBeVisible();
-        await expect(ceoSpec.getByText('Home page shows a casual greeting.')).toHaveCount(0);
-
-        // …and expand into a per-item checklist with verdicts.
-        await ceoSpec.getByRole('button', { name: /Acceptance Criteria/ }).click();
-        await expect(ceoSpec.getByText('Home page shows a casual greeting.')).toBeVisible();
-        await expect(ceoSpec.getByText('Greeting text is configurable.')).toBeVisible();
-        await expect(ceoSpec.getByText('Config option not implemented yet.')).toBeVisible();
-        await expect(ceoSpec.getByText('✅')).toHaveCount(1);
-        await expect(ceoSpec.getByText('❌')).toHaveCount(1);
-        await ceoSpec.getByRole('button', { name: /Test Cases/ }).click();
-        await expect(ceoSpec.getByText(/casual greeting is visible/)).toBeVisible();
 
         // Artifacts block at task-description level: collapsed by default,
         // expandable per artifact, with download links.
@@ -433,11 +430,11 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(builtin).toBeVisible();
         await expect(builtin).toContainText('Built-in agents');
         // Minimized by default: the cards are not rendered until expanded.
-        await expect(builtin.getByText('Chief Executive Officer — orchestrates task execution through delegation')).toBeHidden();
+        await expect(builtin.getByText('Chief Executive Officer — owns overall project execution and business decisions, works exclusively through delegation')).toBeHidden();
         await builtin.getByRole('button').first().click();
-        await expect(builtin.getByText('Chief Executive Officer — orchestrates task execution through delegation')).toBeVisible();
-        await expect(builtin.getByText('QA Lead — defines acceptance criteria and test cases')).toBeVisible();
-        await expect(builtin.getByText('Social media marketing — posts, announcements, and content plans')).toBeVisible();
+        await expect(builtin.getByText('Chief Executive Officer — owns overall project execution and business decisions, works exclusively through delegation')).toBeVisible();
+        await expect(builtin.getByText('Chief Marketing Officer — owns marketing strategy and metrics, delegates execution to SMM, PPC Specialist and Post Writer')).toBeVisible();
+        await expect(builtin.getByText('Coder — implements features from tech specs with high-quality, pattern-following code')).toBeVisible();
     });
 });
 

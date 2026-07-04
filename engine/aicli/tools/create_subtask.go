@@ -11,29 +11,31 @@ import (
 
 // absolutePathRe matches absolute filesystem paths that a sandboxed delegated
 // session cannot access (macOS/Linux home paths and Windows drive paths).
-// Delegation instructions must reference artifacts, run IDs, the codegraph
-// project, or workspace-relative paths instead.
+// Subtask instructions must reference artifacts, the codegraph project, or
+// workspace-relative paths instead.
 var absolutePathRe = regexp.MustCompile(`(?m)(/Users/[\w.-]+|/home/[\w.-]+|[A-Za-z]:\\\\?[\w.-]+)`)
 
-// DelegateTask delegates a scoped piece of work to a specialist agent by
-// creating a child task and running it as a nested execution session. The
-// call blocks until the session finishes and returns its result, so the
-// delegating agent can react to the outcome in its next turn.
-type DelegateTask struct {
+// CreateSubtask delegates a scoped piece of work to a sub-agent by creating a
+// child task and running it as a nested execution session. The call blocks
+// until the session either finishes (returning its final result and produced
+// artifacts) or asks the task owner a question (returning the question, to be
+// answered via answer_subtask_question).
+type CreateSubtask struct {
 	fn         func(ctx context.Context, title, description, agentName string) (string, error)
 	agentNames []string
 }
 
-// NewDelegateTask wraps the engine callback that creates the subtask, runs the
-// nested session synchronously, and returns the session's result summary.
-func NewDelegateTask(fn func(ctx context.Context, title, description, agentName string) (string, error), agentNames []string) *DelegateTask {
-	return &DelegateTask{fn: fn, agentNames: agentNames}
+// NewCreateSubtask wraps the engine callback that creates the subtask, runs
+// the nested session, and returns the session's result (or a pending question
+// from the sub-agent).
+func NewCreateSubtask(fn func(ctx context.Context, title, description, agentName string) (string, error), agentNames []string) *CreateSubtask {
+	return &CreateSubtask{fn: fn, agentNames: agentNames}
 }
 
-func (t *DelegateTask) Def() aicli.ToolDef {
+func (t *CreateSubtask) Def() aicli.ToolDef {
 	agentNameProp := map[string]interface{}{
 		"type":        "string",
-		"description": "Name of the specialist agent to delegate to",
+		"description": "Name of the sub-agent to assign the subtask to",
 	}
 	if len(t.agentNames) > 0 {
 		agentNameProp["enum"] = t.agentNames
@@ -43,11 +45,11 @@ func (t *DelegateTask) Def() aicli.ToolDef {
 		"properties": map[string]interface{}{
 			"title": map[string]interface{}{
 				"type":        "string",
-				"description": "Short title for the delegated subtask",
+				"description": "Short title for the subtask",
 			},
 			"description": map[string]interface{}{
 				"type":        "string",
-				"description": "Detailed, scoped instructions for the specialist: what to do, relevant context, and what the expected result looks like",
+				"description": "Detailed, scoped instructions for the sub-agent: what to do, relevant context, and what the expected result looks like",
 			},
 			"agent_name": agentNameProp,
 		},
@@ -56,22 +58,23 @@ func (t *DelegateTask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "delegate_task",
-			Description: "Delegate a scoped piece of work to a specialist agent. Creates a subtask, runs it as a nested session, " +
-				"waits for completion, and returns the specialist's result. Only one delegation can run at a time.",
+			Name: "create_subtask",
+			Description: "Create a subtask and assign it to a sub-agent. Runs the subtask as a nested session and waits: " +
+				"returns the sub-agent's final result and produced artifacts when it finishes, or the sub-agent's question " +
+				"(answer it with answer_subtask_question) when it needs input from you. Only one subtask can run at a time.",
 			Parameters: json.RawMessage(schema),
 		},
 	}
 }
 
-func (t *DelegateTask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+func (t *CreateSubtask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var p struct {
 		Title       string `json:"title"`
 		Description string `json:"description"`
 		AgentName   string `json:"agent_name"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("delegate_task: %w", err)
+		return "", fmt.Errorf("create_subtask: %w", err)
 	}
 	if p.Title == "" {
 		return "", fmt.Errorf("title is required")

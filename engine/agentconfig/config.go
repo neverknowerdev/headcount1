@@ -70,8 +70,8 @@ func (c *AgentConfig) EffectiveShortName() string {
 }
 
 // DeriveShortName abbreviates an agent name to an uppercase key segment of at
-// most 7 characters: initials for multi-word names ("QA Lead" → "QAL"),
-// a truncated uppercase for single words ("Programmer" → "PROGRAM").
+// most 7 characters: initials for multi-word names ("Post Writer" → "PW"),
+// a truncated uppercase for single words ("Debugger" → "DEBUGGE").
 func DeriveShortName(name string) string {
 	words := strings.FieldsFunc(name, func(r rune) bool {
 		return r == ' ' || r == '-' || r == '_'

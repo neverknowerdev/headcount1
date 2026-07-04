@@ -98,9 +98,9 @@ type Task struct {
 	Parent          *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
 	Title    string `json:"title" gorm:"not null"`
 	TaskType string `json:"task_type" gorm:"not null;default:'plan and implement'"`
-	// Description holds the user's original input, untouched. The three
-	// fields below are produced by the CEO orchestrator during refinement
-	// (via the update_task_details tool) and shown separately in the UI.
+	// Description holds the user's original input, untouched. For delegated
+	// subtasks the owner's instructions land in RefinedDescription instead,
+	// shown separately in the UI.
 	Description        string     `json:"description"`
 	// RefKey is the human-readable task key: "DEC-50" for a main task,
 	// "DEC-50-1", "DEC-50-2", … for its subtasks. Set on creation.

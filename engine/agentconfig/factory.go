@@ -23,7 +23,7 @@ type DefaultFactory struct {
 }
 
 // NewDefaultFactory returns a DefaultFactory pre-loaded with all built-in
-// agent configs (CEO, CTO, Programmer, QA, Writer, Researcher).
+// agent configs (CEO, CTO, CMO, Coder, Debugger, QA, …).
 func NewDefaultFactory() *DefaultFactory {
 	f := &DefaultFactory{configs: make(map[string]*AgentConfig)}
 	for _, cfg := range builtinConfigs() {

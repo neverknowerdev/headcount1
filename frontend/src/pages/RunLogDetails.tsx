@@ -86,11 +86,12 @@ export const RunLogDetails: React.FC = () => {
     const [tokenStats, setTokenStats] = useState<any>(null);
     const [agentStats, setAgentStats] = useState<AgentTokenStats[] | undefined>(undefined);
 
-    // Per-agent breakdown across the session tree; refreshed when child
-    // sessions end so the numbers stay current while the run is live.
+    // Per-agent breakdown across the whole session tree (children and
+    // grandchildren); refreshed when child sessions end so the numbers stay
+    // current while the run is live.
     const fetchAgentStats = async (rootRun: any) => {
         try {
-            const chRes = await axios.get(`/api/runs/${id}/children`);
+            const chRes = await axios.get(`/api/runs/${id}/children?deep=true`);
             const children = chRes.data || [];
             setAgentStats(children.length > 0 ? buildAgentStats(rootRun, children) : undefined);
         } catch (e) {

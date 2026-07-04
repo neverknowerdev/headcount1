@@ -23,26 +23,21 @@ func (q *Queries) GetArtifact(ctx context.Context, id int32) (Artifact, error) {
 // subtasks, so orchestrator sessions see everything their delegations
 // produced.
 func (q *Queries) ListArtifactsByTaskTree(ctx context.Context, taskID int32) ([]Artifact, error) {
+	// Walk the whole subtree level by level: delegation can nest (e.g.
+	// CEO → CTO → Coder), and artifacts are shared across the full tree.
 	taskIDs := []int32{taskID}
-	var subtaskIDs []int32
-	if err := q.db.WithContext(ctx).Model(&Task{}).Where("parent_id = ?", taskID).Pluck("id", &subtaskIDs).Error; err == nil {
+	frontier := []int32{taskID}
+	for len(frontier) > 0 {
+		var subtaskIDs []int32
+		if err := q.db.WithContext(ctx).Model(&Task{}).Where("parent_id IN ?", frontier).Pluck("id", &subtaskIDs).Error; err != nil {
+			break
+		}
 		taskIDs = append(taskIDs, subtaskIDs...)
+		frontier = subtaskIDs
 	}
 	var artifacts []Artifact
 	err := q.db.WithContext(ctx).Where("task_id IN ?", taskIDs).Order("created_at asc").Find(&artifacts).Error
 	return artifacts, err
-}
-
-// MarkTaskTreeArtifactsVerified flags every artifact of the task and its
-// subtasks as verified. Called when a QA verification session passes all of
-// the task's spec items.
-func (q *Queries) MarkTaskTreeArtifactsVerified(ctx context.Context, taskID int32) error {
-	var subtaskIDs []int32
-	taskIDs := []int32{taskID}
-	if err := q.db.WithContext(ctx).Model(&Task{}).Where("parent_id = ?", taskID).Pluck("id", &subtaskIDs).Error; err == nil {
-		taskIDs = append(taskIDs, subtaskIDs...)
-	}
-	return q.db.WithContext(ctx).Model(&Artifact{}).Where("task_id IN ?", taskIDs).Update("is_verified", true).Error
 }
 
 // GetArtifactByTaskAndFilename returns the newest artifact with the given
