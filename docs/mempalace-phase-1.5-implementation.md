@@ -144,7 +144,43 @@ Existing palaces: chunk config affects only *new* writes; do not re-chunk old da
 - The optional in-session "save checkpoint" nudge (`memory.checkpoint_nudge`) — skip unless trivial.
 - UI changes beyond what already renders (`memory_activities` feed picks up the new `engine:*` tool names automatically).
 
-## 4. Cross-cutting requirements
+## 4. E2E test cases (implement in `e2e/`)
+
+Beyond the per-item acceptance checks, these end-to-end scenarios exercise the memory system the way the pilot actually stressed it. Each should run against a real palace (temp dir, real `mempalace` binaries from the shared venv) with a scripted/mock LLM where noted. They are ordered roughly by implementation effort.
+
+**T1. Crash amnesia (the run-91/93 regression).**
+Start a run with a scripted agent that writes an artifact, produces tool output containing a unique marker string, then errors out (LLM returns an error / context canceled) *without ever calling finish_task*. Assert: `engine:auto-diary`, `engine:artifact-ingest`, `engine:transcript-mine` rows exist; `recall_memory` finds the artifact content; `recall_run` finds the marker from the tool output; `memory_facts` on the task entity returns `status = failed`. This is the single most important test — it failed silently in production.
+
+**T2. Cross-run knowledge transfer with a twist.**
+Run A stores a learning ("build needs `CGO_ENABLED=0`, else fails with X"). Run B (different agent, different task, same project) is scripted to first call `recall_memory` with a *paraphrased* query ("why does compilation break") — assert the learning is in the top-3 results despite zero keyword overlap ("build"≠"compilation"), proving vector recall works after the W2 chunking change, not just BM25 keyword matching.
+
+**T3. Paraphrase dedup gauntlet.**
+Store one fact, then attempt 5 paraphrases of it (reordered clauses, synonyms, added prefix like "IMPORTANT:", trailing task-ref noise) plus 2 genuinely *different* facts that share vocabulary with it ("agents lack shell tools" vs "agents lack browser tools"). Assert: all 5 paraphrases rejected as duplicates, both different facts stored. This pins the W3 threshold — if 0.83 fails either direction, the test tells us which way to tune.
+
+**T4. The pivot: superseded plan must not poison recall.**
+Plan-mode run stores plan v1 ("use WebSockets"). Re-plan the same task → plan v2 ("use SSE, WebSockets rejected because of proxy buffering"). Then a scripted implementation run asks `recall_memory("how should realtime updates be implemented")` and `memory_facts(task entity)`. Assert: the KG `approach` fact is v2 only (v1 invalidated); the v1 drawer carries the `[SUPERSEDED by run N]` prefix in returned text; and the *first* recall result is v2, not v1.
+
+**T5. Parallel-sibling race (the DEC-62–65 shape).**
+Launch 4 concurrent runs in the same wing. Each is scripted to discover "the same blocker" and `remember` it (different phrasing each). Assert: exactly 1 blocker drawer exists afterwards (dedup held under concurrency, no palace corruption — check `mempalace_status` health), and all 4 runs completed without memory errors. Bonus assertion for W7: a 5th run started after the TTL window gets a wake-up block that reflects the blocker.
+
+**T6. Prune survival with tool-call integrity.**
+Scripted 40-turn session where turn 5's tool result contains a unique 3-line secret, history sized to force `pruneHistory` to cut it. After the prune, the scripted agent calls `recall_run(secret keywords)`. Assert: full 3 lines come back verbatim (pre-prune sync mine worked); the request payload sent post-prune contains no dangling tool_call without its result (boundary integrity); and a variant where `MineTranscript` is forced to fail asserts the run still completes (prune proceeds, `engine:preprune-mine` row with `result_n=0`).
+
+**T7. Chunk-boundary integrity at scale.**
+Ingest via teardown a 6 KB artifact whose content is numbered sentences ("S001. … S180."). Search for a sentence in the middle (e.g. "S090"). Assert: the returned chunk contains complete sentences only (no mid-word cuts — regex the result edges against `\bS\d{3}\.`), and neighboring-chunk expansion returns the adjacent sentences. This verifies W2 against real chunking, not a hand-picked short doc.
+
+**T8. Temporal KG: "what was true then?"**
+Drive a task through: plan (approach=A) → terminal fail (status=failed, blocked_by=X) → re-plan (approach=B) → terminal complete (status=completed). Assert `memory_facts(entity)` returns exactly `{approach: B, status: completed}` as current; `as_of` a timestamp between the two plans returns approach=A; the timeline includes all 4 facts with correct validity windows; and no object anywhere contains markdown (W4).
+
+**T9. Recall precision under corpus noise.**
+Seed the wing with 200 filler drawers (realistic diary/build-log-ish text from a generator) + 1 target fact. A scripted agent recalls with a natural-language question about the target. Assert target in top-3. Then repeat the query with `room='decisions'` where the target is a decision and the fillers are not — assert top-1. Guards against the failure mode where mined transcript volume (W5) drowns out distilled facts; if this test fails after enabling checkpoint mining, mined content needs a room/ranking penalty.
+
+**T10. Memory keeps its hands off the run (chaos test).**
+Run a normal scripted task with the mempalace MCP server killed halfway through, and separately with the CLI binary replaced by one that exits 1. Assert: run completes with correct task status; memory tools return error strings to the agent (no panic, no hang); teardown logs warnings; total run wall-time within 10% of the healthy baseline (no blocking retries). Memory is an amplifier, never a dependency.
+
+Suggested split: T1, T4, T6, T10 gate merging Phase 1.5 (they cover W1–W6 end-to-end); T2, T3, T5, T7, T8, T9 land with the same PR or immediately after but must be green before Phase 2 starts, since compaction (Phase 2) leans on exactly the properties they pin.
+
+## 5. Cross-cutting requirements
 
 - Every new engine-side memory operation records a `memory_activities` row (use `recordEngineMemoryActivity`; `AgentName` stays "" for engine-initiated).
 - Memory must never fail or slow a run: all teardown/mine work in goroutines with timeouts (except the deliberate synchronous pre-prune mine, which still must swallow errors).
