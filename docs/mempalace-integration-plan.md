@@ -76,6 +76,30 @@ Decisions:
 4. **Installation:** replace the npm stub with a `uv tool install mempalace` (fallback `pipx`) step in the `pkg/setup` startup goroutine; record install status. Docker image is the fallback for hosts without Python.
 5. **Backend choice:** ChromaDB default for SQLite deployments; when `DATABASE_URL` (Postgres) is set, optionally use `pgvector` backend (`MEMPALACE_PGVECTOR_DSN`) so all state lives in one database.
 
+## 3.1 Taxonomy mapping: palace concepts ↔ orchestrator concepts
+
+MemPalace's structural model is **Wings → Rooms → Closets → Drawers** (per mempalaceofficial.com): wings are *entities* ("entity-first, always"), rooms are *discrete units of time* (days/sessions — "walk the corridor and the palace unfolds chronologically"), closets *group related drawers by topic/thread within a room*, drawers are *verbatim chunks*.
+
+Our hierarchy has more levels than the palace's four. **Do not encode every level structurally** — recall is scoped semantic search, not path navigation, and over-nesting fragments the corpus. Top levels map to structure; run/session levels go into drawer **metadata**; relationships go into the **knowledge graph**.
+
+| Orchestrator concept | Palace concept | Notes |
+|---|---|---|
+| Company | **Palace** (one per company) | Hard tenant isolation: own directory + MCP server instance. |
+| Project | **Wing** `project:<shortname>` | Entity-first. |
+| Agent | **Wing** `agent:<name>` | MemPalace's agent-diary pattern; diaries + per-agent learnings only. |
+| Cross-project knowledge | **Wing** `company` | People, conventions, org-wide decisions. |
+| Sprint | **Room** `sprint-<label>` | The natural time unit; chronological corridor. |
+| Durable knowledge | **Rooms** `architecture`, `decisions`, `requirements` | Evergreen topical rooms per project wing. |
+| Task / sub-task | **Closet** `task-<id>` | "Every drawer on that subject together." Sub-tasks get own closets; parent link via KG/hallway. Lives in the sprint room it ran in. |
+| Message / artifact / plan chunk | **Drawer** | One drawer per user/assistant message (`sweep` semantics), plus refined plans, artifacts, decisions. |
+| Run / run session / sub-session | **Drawer metadata** | `source_file = runs/<task>/<run>/<session>.jsonl`, `added_by = <agent>`. Searchable via `source_file` filter; cleanable via `delete_by_source`. |
+| Task↔subtask, decisions, dependencies | **Knowledge graph** | `mempalace_kg_add` with validity windows ("uses Postgres since sprint-3"). |
+| Related work across projects | **Tunnels** | Explicit cross-wing bridges (e.g. auth in app ↔ auth in api). |
+
+Search-scope defaults per flow: refinement → `wing=project` (all rooms); compaction recall → current task closet, widening to wing; agent recall → project wing + own agent wing + `company` wing (cross-agent diary access is a per-role permission).
+
+**Implementation note:** closet assignment happens at filing time (and `compress` buckets by closet), so writes must not freestyle the taxonomy. Centralize a "memory addressing" helper in Go that maps `(company, project, sprint, task, run, session, agent)` → `(palace, wing, room, closet, source_file, added_by)` and use it on every write path (agent tool wrapper, sweep, refinement store, UI corrections).
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
