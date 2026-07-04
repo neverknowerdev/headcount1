@@ -102,9 +102,20 @@ type Agent struct {
 	// TerminalTools are tool names that end the run: once such a tool
 	// executes successfully, the loop returns without another LLM call.
 	TerminalTools map[string]bool
-	q             *db.Queries
-	runID         int32
-	logger        RunLogger
+	// Transcript, when set, receives every history message as it is appended
+	// (mechanical capture for the memory layer). Nil-safe.
+	Transcript *TranscriptWriter
+	// OnAssistantTurn is called after each assistant turn with the running
+	// count of assistant turns this session (checkpoint hooks).
+	OnAssistantTurn func(turns int)
+	// OnPrune is called synchronously right before a request is sent whose
+	// history pruning truncated messages that were still intact on the
+	// previous turn. It must swallow its own errors — the request proceeds
+	// regardless.
+	OnPrune func()
+	q       *db.Queries
+	runID   int32
+	logger  RunLogger
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -122,9 +133,14 @@ type Config struct {
 	// TerminalTools lists tool names that end the run once they execute
 	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
 	TerminalTools []string
-	Queries       *db.Queries
-	RunID         int32
-	Logger        RunLogger
+	// Transcript, OnAssistantTurn and OnPrune mirror the Agent fields of the
+	// same names (memory-capture hooks; all optional).
+	Transcript      *TranscriptWriter
+	OnAssistantTurn func(turns int)
+	OnPrune         func()
+	Queries         *db.Queries
+	RunID           int32
+	Logger          RunLogger
 }
 
 // New creates an Agent from a Config.
@@ -147,6 +163,9 @@ func New(cfg Config) *Agent {
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
 		TerminalTools:         terminal,
+		Transcript:            cfg.Transcript,
+		OnAssistantTurn:       cfg.OnAssistantTurn,
+		OnPrune:               cfg.OnPrune,
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
@@ -197,6 +216,12 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		history = append(history, Message{Role: "system", Content: systemPrompt})
 	}
 	history = append(history, initialMessages...)
+	for _, m := range initialMessages {
+		a.Transcript.Append(m)
+	}
+
+	assistantTurns := 0
+	lastTruncated := 0
 
 	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
@@ -204,8 +229,17 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 			return "", ctx.Err()
 		}
 
+		prunedMsgs, truncated := pruneHistory(history)
+		// Content is about to leave the request payload for the first time —
+		// give the memory layer one synchronous chance to capture it. The
+		// callback swallows its own failures; the request always proceeds.
+		if truncated > lastTruncated && a.OnPrune != nil {
+			a.OnPrune()
+		}
+		lastTruncated = truncated
+
 		req := ChatRequest{
-			Messages:        pruneHistory(history),
+			Messages:        prunedMsgs,
 			Tools:           a.Registry.Defs(),
 			ReasoningEffort: reasoningEffort,
 		}
@@ -278,6 +312,11 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		// Append the assistant turn to history before processing tool calls
 		// so the next LLM call sees the full context.
 		history = append(history, assistantMsg)
+		a.Transcript.Append(assistantMsg)
+		assistantTurns++
+		if a.OnAssistantTurn != nil {
+			a.OnAssistantTurn(assistantTurns)
+		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
 			// No tools to invoke — the assistant's text is the final answer.
@@ -298,6 +337,9 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 
 		history = append(history, toolMessages...)
+		for _, m := range toolMessages {
+			a.Transcript.Append(m)
+		}
 
 		// A terminal tool (e.g. finish_task) completed — the run is over.
 		// Skip the extra wrap-up LLM round; the finish summary already exists.
@@ -452,7 +494,9 @@ func (a *Agent) appendRunLog(entryType, content string, extra map[string]interfa
 //
 // This keeps per-turn prompt growth roughly flat once results are digested,
 // instead of re-sending every historical tool dump on every LLM call.
-func pruneHistory(history []Message) []Message {
+// The second return value counts messages whose content was truncated or
+// omitted, so the caller can tell when pruning newly cuts something.
+func pruneHistory(history []Message) ([]Message, int) {
 	// Find the cut-off: index of the freshAssistantTurns-th assistant message
 	// from the end. Everything before it is "stale".
 	seen := 0
@@ -467,8 +511,9 @@ func pruneHistory(history []Message) []Message {
 		}
 	}
 	if cutoff <= 0 {
-		return history
+		return history, 0
 	}
+	truncated := 0
 	pruned := make([]Message, len(history))
 	copy(pruned, history)
 	for i := 0; i < cutoff; i++ {
@@ -477,14 +522,16 @@ func pruneHistory(history []Message) []Message {
 		}
 		if mcpDispatcherTools[pruned[i].Name] {
 			pruned[i].Content = "[omitted]"
+			truncated++
 			continue
 		}
 		if len(pruned[i].Content) > staleToolResultThreshold {
 			pruned[i].Content = pruned[i].Content[:staleToolResultKeepChars] +
 				"\n…[older tool output pruned to save context — call the tool again if you still need the full content]"
+			truncated++
 		}
 	}
-	return pruned
+	return pruned, truncated
 }
 
 // msgsToMap converts []Message to []map[string]interface{} so the proxy

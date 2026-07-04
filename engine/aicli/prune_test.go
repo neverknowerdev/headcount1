@@ -21,8 +21,11 @@ func TestPruneHistoryTruncatesStaleToolResults(t *testing.T) {
 		{Role: "tool", Name: "grep", Content: big},
 	}
 
-	pruned := pruneHistory(history)
+	pruned, truncated := pruneHistory(history)
 
+	if truncated != 1 {
+		t.Errorf("truncated = %d, want 1", truncated)
+	}
 	if len(pruned[3].Content) >= len(big) {
 		t.Errorf("stale tool result (before 2nd-last assistant turn) should be truncated")
 	}
@@ -47,9 +50,12 @@ func TestPruneHistoryOmitsOldMCPResults(t *testing.T) {
 		{Role: "assistant", Content: "a2"},
 		{Role: "assistant", Content: "a3"},
 	}
-	pruned := pruneHistory(history)
+	pruned, truncated := pruneHistory(history)
 	if pruned[1].Content != "[omitted]" {
 		t.Errorf("old MCP result should be omitted, got %q", pruned[1].Content)
+	}
+	if truncated != 1 {
+		t.Errorf("truncated = %d, want 1", truncated)
 	}
 }
 
