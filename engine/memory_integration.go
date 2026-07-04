@@ -34,9 +34,8 @@ var mineTranscriptFn = mempalace.MineTranscript
 
 // memorySession is the per-run memory context resolved once in executeSession.
 type memorySession struct {
-	server  db.MCPServer
-	scope   tools.MemoryScope
-	company db.Company
+	server db.MCPServer
+	scope  tools.MemoryScope
 
 	// transcriptDir is the run's log directory holding the transcript JSONL
 	// consumed by checkpoint/teardown/pre-prune mining ("" = no transcript).
@@ -73,8 +72,7 @@ func (e *NativeEngine) resolveMemorySession(ctx context.Context, company db.Comp
 	addr := mempalace.Resolve(company, project, &task, runID, agentName)
 	taskPath := fmt.Sprintf("tasks/%s", strings.TrimPrefix(addr.Closet, "task-"))
 	return &memorySession{
-		server:  server,
-		company: company,
+		server: server,
 		scope: tools.MemoryScope{
 			ProjectWing: addr.Wing,
 			CompanyWing: mempalace.CompanyWing,
@@ -503,7 +501,7 @@ func (e *NativeEngine) mineSessionTranscript(ctx context.Context, mem *memorySes
 	if current == mem.minedMessages.Load() {
 		return 0, nil
 	}
-	if err := mineTranscriptFn(ctx, mem.company, mem.scope.ProjectWing, mem.scope.AddedBy, mem.transcriptDir); err != nil {
+	if err := mineTranscriptFn(ctx, mem.server, mem.scope.ProjectWing, mem.scope.AddedBy, mem.transcriptDir); err != nil {
 		return 0, err
 	}
 	mem.minedMessages.Store(current)

@@ -290,28 +290,30 @@ func MineProjectAsync(company db.Company, project db.Project, workspaceDir strin
 
 // MineTranscript indexes a directory of purpose-built transcript JSONL files
 // (see engine/aicli's transcript writer) into the company palace with the
-// conversation miner. Synchronous, serialized under the company write lock,
+// conversation miner. It goes through the shared MCP client — the long-lived
+// mempalace-mcp process holds the palace writer lease, so a CLI `mine` would
+// be rejected with "palace is held by PID" whenever memory is in use.
+// Synchronous (CallServerTool serializes write tools under the company lock)
 // and idempotent: the miner keeps per-file sentinels, so re-mining a dir only
 // processes files whose content changed. Never pass raw session logs here —
 // only transcript JSONL.
-func MineTranscript(ctx context.Context, company db.Company, wing, agentName, dir string) error {
-	if !Available() {
-		return fmt.Errorf("mempalace is not installed")
-	}
+func MineTranscript(ctx context.Context, server db.MCPServer, wing, agentName, dir string) error {
 	if _, err := os.Stat(dir); err != nil {
 		return fmt.Errorf("transcript dir: %w", err)
 	}
-	unlock := LockCompany(ServerName(company))
-	defer unlock()
-
-	mineCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
-	defer cancel()
-	cmd := exec.CommandContext(mineCtx, setup.MempalaceCLIPath(),
-		"--palace", PalacePath(company),
-		"mine", dir, "--mode", "convos", "--wing", wing, "--agent", SanitizeName(agentName))
-	out, err := cmd.CombinedOutput()
+	out, err := CallServerTool(ctx, server, "mempalace_mine", map[string]any{
+		"source": dir, "mode": "convos", "wing": wing, "agent": SanitizeName(agentName),
+	})
 	if err != nil {
-		return fmt.Errorf("mempalace mine convos failed: %v — %s", err, tail(string(out), 500))
+		return fmt.Errorf("mempalace mine convos failed: %w", err)
+	}
+	// The tool reports failures as a structured error payload, not a
+	// transport error — surface those too.
+	var parsed struct {
+		Error string `json:"error"`
+	}
+	if json.Unmarshal([]byte(out), &parsed) == nil && parsed.Error != "" {
+		return fmt.Errorf("mempalace mine convos failed: %s", parsed.Error)
 	}
 	return nil
 }

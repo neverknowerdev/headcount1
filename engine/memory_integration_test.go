@@ -64,7 +64,6 @@ type memFake struct {
 	mu    sync.Mutex
 	calls []string         // tool names in order
 	args  []map[string]any // parallel to calls
-	kv    map[string]string
 }
 
 func (f *memFake) call(_ context.Context, _ db.MCPServer, tool string, args any) (string, error) {
@@ -138,15 +137,14 @@ func newTeardownFixture(t *testing.T) *teardownFixture {
 	fake := &memFake{}
 	origCall, origMine := callMemoryTool, mineTranscriptFn
 	callMemoryTool = fake.call
-	mineTranscriptFn = func(ctx context.Context, company db.Company, wing, agentName, dir string) error {
-		fake.call(ctx, db.MCPServer{}, "mine_transcript", map[string]any{"dir": dir, "wing": wing})
+	mineTranscriptFn = func(ctx context.Context, server db.MCPServer, wing, agentName, dir string) error {
+		fake.call(ctx, server, "mine_transcript", map[string]any{"dir": dir, "wing": wing})
 		return nil
 	}
 	t.Cleanup(func() { callMemoryTool, mineTranscriptFn = origCall, origMine })
 
 	mem := &memorySession{
-		server:  db.MCPServer{Name: "mempalace-acme"},
-		company: company,
+		server: db.MCPServer{Name: "mempalace-acme"},
 		scope: tools.MemoryScope{
 			ProjectWing: "project-app",
 			CompanyWing: "company",
@@ -274,14 +272,6 @@ func TestMemoryTeardownDoubleFireGuard(t *testing.T) {
 	fx := newTeardownFixture(t)
 
 	done := make(chan struct{}, 2)
-	orig := mineTranscriptFn
-	mineTranscriptFn = func(ctx context.Context, company db.Company, wing, agentName, dir string) error {
-		return nil
-	}
-	defer func() { mineTranscriptFn = orig }()
-
-	// Wrap the fake so we can tell when a teardown pass finishes: diary write
-	// is the first step, kg_add the last write of a pass without artifacts.
 	fx.mem.transcriptDir = "" // skip mining
 	go func() {
 		fx.eng.memoryTeardown(fx.mem, nil, fx.task, fx.run.ID, "execute", "completed", "all done, tests green and shipped")
@@ -317,7 +307,7 @@ func TestMemoryTeardownSkipsDiaryWhenAgentWroteOne(t *testing.T) {
 
 func TestMemoryPromptSectionMentionsEntity(t *testing.T) {
 	fx := newTeardownFixture(t)
-	section := fx.eng.memoryPromptSection(fx.mem.company, fx.mem.scope)
+	section := fx.eng.memoryPromptSection(db.Company{ShortName: "acme"}, fx.mem.scope)
 	for _, want := range []string{"task-dec-62", "memory_facts", "room='decisions'", "One fact per call"} {
 		if !strings.Contains(section, want) {
 			t.Errorf("prompt section missing %q", want)

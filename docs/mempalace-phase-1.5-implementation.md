@@ -82,6 +82,7 @@ Existing palaces: chunk config affects only *new* writes; do not re-chunk old da
 **Change** in `engine/aicli/tools/mempalace.go` `remember.execute`:
 
 1. Lower `check_duplicate` threshold to **0.83** (tune later; make it a package const `rememberDupThreshold`).
+   > **Implementation deviation (measured):** with the shipped MiniLM embeddings, the acceptance pair below scores 0.78 raw-vs-raw and only 0.67 raw-vs-stored (drawers carry a `[closet] [kind]` prefix). Comparing **stored form vs stored form** restores separation: same-task paraphrases ≈0.83, cross-task paraphrases ≈0.75, different facts with shared vocabulary ≈0.54. Shipped as: dedup-check the stored form, `rememberDupThreshold = 0.72`.
 2. If `check_duplicate` is inconclusive/unsupported, fall back to `mempalace_search` (wing-scoped, limit 1) and treat top-1 `similarity >= rememberDupThreshold` as duplicate.
 3. On duplicate, return the existing text so the agent learns what's already known: `"Already in memory (similar: \"<first 200 chars of existing>\") — not stored again."`
 4. Apply the same guard inside W1's artifact ingestion.
