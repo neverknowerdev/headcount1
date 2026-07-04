@@ -154,6 +154,27 @@ Two recall paths, two scoping rules:
 
 **Implementation:** inject the current project wing name + task closet as plain facts in the system prompt (never let the agent slugify its own names — that's the addressing helper's job). Recommended: don't expose raw `mempalace_search` to most roles — wrap it in a `recall_project_memory(query, room?, source_file?)` tool that server-side injects `wing` and can't be overridden; reserve raw/unscoped `call_mcp_tool` access to `mempalace_search` for CTO/CEO-tier roles that legitimately need cross-project recall.
 
+## 3.5 Export / import & backup integration
+
+MemPalace has **no native export/import command**, but none is needed: a palace is a local directory where **SQLite stores are authoritative and the vector index is derived** — `mempalace repair --mode from-sqlite` rebuilds vectors from SQLite; `migrate` handles ChromaDB version drift. This matches our restore philosophy exactly (`pkg/backup/restore.go` rebuilds the DB from the filesystem).
+
+**Durable truths** (must survive): drawer content + metadata, KG triples w/ validity windows, tunnels/hallways, embedder identity. **Rebuildable** (never protect, always regenerate): embeddings / HNSW index.
+
+**Format A — physical (regular backups):**
+1. Quiesce writes (hold the per-company write lock in our addressing helper; stop mempalace daemon).
+2. Add `<PaperclipHome>/memory/<company>/` to the existing tar (`addDirectoryToTar` in `pkg/backup/backup.go`). Optionally exclude HNSW binary files (bulky, 100% rebuildable) to keep the 7-backup rotation small.
+3. Restore: extract → `mempalace repair --mode from-sqlite` → `mempalace sync --dry-run` to validate. Self-heals index corruption and version drift (`mempalace migrate` as fallback).
+
+**Format B — logical JSONL (portable: migration, sharing, backend switch):**
+Self-implemented dump: one line per drawer `{wing, room, closet, content, source_file, added_by, created_at}` + KG triples + tunnels + manifest (embedder identity, versions). Import = replay via `add_drawer`/`kg_add`, idempotent (content-hash dedupe / `check_duplicate`). Slower (re-embeds everything) but version- and backend-independent — also the ChromaDB→pgvector migration path.
+
+**Flow integration:**
+- Daily backup/restore: extend `CreateBackup`/`RestoreBackup` as above.
+- Per-company export: palace-per-company makes it one self-contained directory — tar + optional JSONL, no disentangling.
+- **Addressing rule (lock in now):** wing/closet/source_file must key on stable names (company shortname, project name, task display ID), never DB auto-increment IDs — `rebuildDBFromFS` reassigns IDs on restore and would orphan every reference otherwise.
+- **Embedder identity gotcha:** vectors are meaningless under a different embedding model. Manifest records embedder; on mismatch at import, route to the logical (re-embed) path, not the physical one.
+- pgvector deployments: vectors live in Postgres, not the palace dir — logical export is the only complete file-level story (or Postgres-native backup covers both).
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
