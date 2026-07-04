@@ -10,25 +10,46 @@
 
 # Shared foundations (Phase 1, used by both phases)
 
-## F1. Runtime installation — `pkg/setup/mempalace.go`
+## F1. Runtime installation — extend the existing setup-script infra
 
-Replace the dead npm stub (`integration/mempalace.go` — **delete it**; it points at the wrong package).
+**Supersedes any bespoke Go installer.** `main` (merged in) landed a mature cross-platform dependency-install pipeline: `pkg/setup/setup.go` (`Run`/`Status`/`Failures`/`Warnings`, blocking vs soft failures, `[setup] DETAIL_BEGIN/END` parsing) driving embedded scripts `pkg/setup/scripts/{setup-linux.sh, setup-macos.sh, setup-windows.ps1}`. It already installs `python3`, creates an isolated venv for `markitdown` (`$HOME/.paperclip2/venv`, `PAPERCLIP_VENV_DIR` override — sidesteps PEP 668), and installs `codegraph` via npm as a **blocking** dependency. Mempalace is a **new block appended to all three scripts**, modeled on those two patterns. Delete the dead npm stub (`integration/mempalace.go` — wrong package, never called).
 
-```go
-package setup
+**Install strategy — reuse the markitdown venv, don't add a second one:**
 
-const MempalaceVersion = "<pin latest at impl time>"
-
-// EnsureMempalace installs the mempalace CLI + MCP server via uv (fallback pipx),
-// pinned to MempalaceVersion. Idempotent; safe to run on every startup.
-func EnsureMempalace(ctx context.Context) error
-// MempalaceAvailable reports whether the mempalace binary is on PATH and healthy.
-func MempalaceAvailable() bool   // runs `mempalace --version`, caches result
+```sh
+# ── mempalace ────────────────────────────────────────────────────────────────
+# Installed into the same isolated venv as markitdown (see above) so it never
+# fights PEP 668 / a Homebrew-managed system python3. Soft failure: memory is
+# an optional feature, absence must never block app startup.
+if [ -x "$VENV_DIR/bin/mempalace-mcp" ]; then
+    echo "[setup] mempalace: OK"
+elif [ -x "$VENV_DIR/bin/python3" ]; then
+    echo "[setup] mempalace: not found — installing..."
+    install_output=$("$VENV_DIR/bin/python3" -m pip install "mempalace==<PINNED_VERSION>" 2>&1)
+    if [ -x "$VENV_DIR/bin/mempalace-mcp" ]; then
+        echo "[setup] mempalace: installed"
+    else
+        add_soft_failure "mempalace" "could not be installed — memory features will be unavailable" "$install_output"
+    fi
+else
+    add_soft_failure "mempalace" "venv unavailable (see markitdown failure above) — memory features will be unavailable" ""
+fi
 ```
 
-- Install command: `uv tool install "mempalace==<ver>"`; if `uv` absent, `pipx install`; if both absent → log warning, feature disabled.
-- Called from the existing setup goroutine in `main.go` (next to `srv.InstallMCPNpmDeps`).
-- **Feature flag:** everything memory-related checks `MempalaceAvailable()`. When false: no MCP server seeded, no tools registered, UI section shows an install-instructions empty state. The app must run exactly as today.
+- **Version pin:** a single `<PINNED_VERSION>` constant substituted identically into all three scripts (shell vars in `.sh`, `$MempalacePinnedVersion` in `.ps1`) — keep it in one place (e.g. a generated header or a value `pkg/setup/setup.go` writes into the temp script alongside the existing `PAPERCLIP_VENV_DIR` env var, so bumping the version doesn't require editing three files by hand).
+- **Windows parity** (`setup-windows.ps1`): same idea — `& $pythonCmd -m pip install "mempalace==<ver>"`, binary check via `Test-Command`/venv `Scripts\mempalace-mcp.exe`, `Add-SoftFailure` (mirroring `Add-Failure`, the same way `gh CLI` on Linux is soft while `codegraph` is hard).
+- **Blocking vs soft:** unlike `codegraph` (hard failure — code intelligence is core), mempalace is registered via `add_soft_failure` (the `gh CLI` pattern) — the app must start normally without it; Memory UI/tools degrade gracefully instead.
+- **Go-side exposure** — extend `pkg/setup/setup.go`, no new package:
+  ```go
+  // MempalaceAvailable reports whether the setup script found/installed
+  // mempalace-mcp, independent of other (unrelated) setup failures.
+  func MempalaceAvailable() bool   // same pattern as ready/MarkitdownAvailable, its own atomic.Bool
+  // MempalacePath returns the venv-scoped mempalace-mcp binary path (mirrors PythonInterpreter()).
+  func MempalacePath() string      // filepath.Join(venvDir(), "bin", "mempalace-mcp") (.exe on Windows)
+  ```
+  Determined the same way `ready`/markitdown is: scan `runOnce`'s captured output for `"[setup] mempalace: OK"` / `"[setup] mempalace: installed"`.
+- **Feature flag:** everything memory-related checks `setup.MempalaceAvailable()`. When false: no MCP server seeded, no tools registered, UI section shows an install-instructions empty state (surfacing `setup.Warnings()` if mempalace appears there). The app must run exactly as today.
+- `SetupGate.tsx` (frontend, from the merged setup-script PR) already renders blocking vs warning failures from `/api/settings`-adjacent status; extend its warnings list to include `mempalace` the same way `gh CLI` shows up today — no new UI plumbing needed for the setup gate itself (separate from the Memory section's own empty state in §1.7).
 
 ## F2. Palace provisioning — new package `pkg/mempalace/`
 
