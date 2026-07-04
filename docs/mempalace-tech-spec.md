@@ -277,7 +277,7 @@ Pilot evidence: every stored doc capped at exactly `DEFAULT_CHUNK_SIZE = 800` ch
 
 - Set palace config `chunk_size` ≥ 2400 with sentence-boundary splitting and non-zero `chunk_overlap` (config plumbing already exists in `mempalace/config.py`; wire it into palace provisioning in `pkg/mempalace`).
 - Agent-authored `remember` payloads are already distilled units — they land as **one drawer, unchunked**, guaranteed by the input cap below.
-- **`remember` input cap (tool-enforced, not prompt-enforced):** reject content > **2,000 chars** with a corrective error: *"Too long for a memory fact — split into separate remember calls (one fact each); documents belong in write_artifact."* Sized under `chunk_size` so an accepted memory can never be chunked. Pilot payloads (600–1,200 typical, ~2,300 max) show the cap only blocks document-shaped dumps.
+- **`remember` input cap (tool-enforced, not prompt-enforced):** reject content > **500 chars** with a corrective error: *"Too long for a memory fact — split into separate remember calls (one fact each); documents belong in write_artifact."* Well under `chunk_size`, so an accepted memory can never be chunked. Deliberately tight: pilot payloads ran 600–1,200 chars and were multi-fact bundles — the cap forces the split into atomic facts, which is what makes dedup (§1.5.3) and recall precision work.
 - Prompt addition (CEO/CTO/Coder configs): "one fact per `remember` call" — the cap enforces it mechanically; the prompt line explains it.
 
 ## 1.5.3 Dedup on write
@@ -306,7 +306,7 @@ Upstream's `--mode convos` miner chunks transcripts **by Q+A exchange pair** wit
 With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redundant ceremony (and was the main source of duplicate blocker-memories). Changes:
 
 - **`write_diary` removed from the agent tool surface entirely.** Its three sections are now covered elsewhere: "what happened" = transcript mining + teardown auto-diary; "learned/matters" = `remember`. The underlying `mempalace_diary_write` stays **engine-only** (teardown auto-diary), so the per-agent chronological record survives without being the agent's job. Re-enable per role via `AllowedTools` only if a role demonstrably needs narrative journaling.
-- `remember` repositioned: only for things no pipeline can know — hard-won learnings, "don't try X, it 404s". Capped at 2,000 chars (§1.5.2), one fact per call.
+- `remember` repositioned: only for things no pipeline can know — hard-won learnings, "don't try X, it 404s". Capped at 500 chars (§1.5.2), one fact per call.
 - Remove "treat memory_facts as current truth" until 1.5.1/1.5.4 give the KG real content; reinstate afterwards.
 - Document the `room` filter on `recall_memory` with one example (pilot: never used).
 
@@ -314,7 +314,7 @@ With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redund
 
 1. A run killed with `kill -9` mid-session still yields: auto-diary, its artifacts as drawers, a `status` KG fact, and (with 1.5.5) exchange-pair drawers from the transcript-so-far.
 2. Two agents storing the same fact produce one drawer; the second `remember` returns "already known".
-3. No stored drawer ends mid-word; a 1,200-char `remember` is retrievable as a single intact result; a 2,500-char `remember` is rejected with the split-into-facts error and nothing is stored.
+3. No stored drawer ends mid-word; a 450-char `remember` is retrievable as a single intact result; a 600-char `remember` is rejected with the split-into-facts error and nothing is stored.
 3a. Agent tool listings no longer include `write_diary`; the teardown auto-diary still produces one diary entry per run.
 4. `memory_facts task-dec-<n>` returns the task's status/approach facts after any terminal run; no KG object contains markdown syntax.
 5. Runs 91/93-style failures (agent never calls `finish_task`) show `engine:auto-diary` + `engine:teardown-ingest` rows in `memory_activities`.
