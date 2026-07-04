@@ -57,17 +57,26 @@ type MempalaceProxy struct {
 	scope        MemoryScope
 	onActivity   MemoryActivityFunc
 	diaryWritten atomic.Bool
+	// callFn dispatches one mempalace MCP tool call; defaults to
+	// mempalace.CallServerTool and is only overridden in tests.
+	callFn func(ctx context.Context, server db.MCPServer, tool string, args any) (string, error)
 }
 
 // NewMempalaceProxy creates a proxy bound to one company palace and one
 // run's scope. onActivity may be nil.
 func NewMempalaceProxy(server db.MCPServer, scope MemoryScope, onActivity MemoryActivityFunc) *MempalaceProxy {
-	return &MempalaceProxy{server: server, scope: scope, onActivity: onActivity}
+	return &MempalaceProxy{server: server, scope: scope, onActivity: onActivity, callFn: mempalace.CallServerTool}
 }
 
-// DiaryWritten reports whether the agent called write_diary during the run —
-// the engine writes an auto-diary on finish_task when it didn't.
+// DiaryWritten reports whether the agent wrote a diary entry during the run —
+// the engine writes an auto-diary at teardown when it didn't. The write_diary
+// tool is no longer in the default catalog, but the flag stays meaningful for
+// roles that re-enable it via AllowedTools.
 func (p *MempalaceProxy) DiaryWritten() bool { return p.diaryWritten.Load() }
+
+// MarkDiaryWritten records that a diary entry exists for this run. Set by a
+// (re-enabled) write_diary tool or tests; suppresses the teardown auto-diary.
+func (p *MempalaceProxy) MarkDiaryWritten() { p.diaryWritten.Store(true) }
 
 // RegisterAll adds the curated memory tools to the registry. Role gating
 // happens through the agent config's AllowedTools filter, which the engine
@@ -94,7 +103,7 @@ func (p *MempalaceProxy) record(tool, kind, room, query string, resultN int) {
 }
 
 func (p *MempalaceProxy) call(ctx context.Context, mcpTool string, args map[string]any) (string, error) {
-	out, err := mempalace.CallServerTool(ctx, p.server, mcpTool, args)
+	out, err := p.callFn(ctx, p.server, mcpTool, args)
 	if err != nil {
 		// Memory must degrade gracefully mid-run: surface the failure to the
 		// model as a tool error string; never abort the session.
@@ -108,6 +117,66 @@ func (p *MempalaceProxy) call(ctx context.Context, mcpTool string, args map[stri
 // rememberMaxChars caps remember content so each memory stays one atomic
 // fact and always fits below the palace chunk size (never split mid-fact).
 const rememberMaxChars = 500
+
+// rememberDupThreshold is the cosine-similarity threshold above which content
+// counts as a duplicate. The pilot showed 0.95 misses re-phrasings of the
+// same fact ("no agent has shell tools" stored 7×). Measured with the shipped
+// MiniLM embeddings, comparing stored-form vs stored-form (both carrying the
+// "[closet] [kind]" prefix): same-task paraphrases score ≈0.83, cross-task
+// paraphrases ≈0.75, genuinely different facts with shared vocabulary ≈0.54.
+// 0.72 catches both paraphrase classes with margin against false positives.
+// Tune with the paraphrase-gauntlet e2e test.
+const rememberDupThreshold = 0.72
+
+// CheckDuplicate reports whether content is already stored in the palace and
+// returns the most similar existing text (may be empty). Primary path is
+// mempalace_check_duplicate; when that is inconclusive (vector index down,
+// error, unparseable) it falls back to a wing-scoped top-1 semantic search.
+// Both remember and the engine's artifact ingestion use this one guard.
+func (p *MempalaceProxy) CheckDuplicate(ctx context.Context, content string) (bool, string) {
+	out, err := p.call(ctx, "mempalace_check_duplicate", map[string]any{
+		"content": content, "threshold": rememberDupThreshold,
+	})
+	if err == nil {
+		var parsed struct {
+			Duplicate      *bool `json:"duplicate"`
+			IsDuplicate    *bool `json:"is_duplicate"`
+			VectorDisabled bool  `json:"vector_disabled"`
+			Matches        []struct {
+				Content string `json:"content"`
+			} `json:"matches"`
+		}
+		if json.Unmarshal([]byte(out), &parsed) == nil && !parsed.VectorDisabled &&
+			(parsed.Duplicate != nil || parsed.IsDuplicate != nil) {
+			existing := ""
+			if len(parsed.Matches) > 0 {
+				existing = parsed.Matches[0].Content
+			}
+			return isDuplicate(out), existing
+		}
+	}
+
+	// Inconclusive/unsupported — fall back to a wing-scoped search.
+	out, err = p.call(ctx, "mempalace_search", map[string]any{
+		"query": clip(content, 250), "wing": p.scope.wing(), "limit": 1,
+	})
+	if err != nil {
+		return false, ""
+	}
+	var parsed struct {
+		Results []struct {
+			Text       string  `json:"text"`
+			Similarity float64 `json:"similarity"`
+		} `json:"results"`
+	}
+	if json.Unmarshal([]byte(out), &parsed) != nil || len(parsed.Results) == 0 {
+		return false, ""
+	}
+	if parsed.Results[0].Similarity >= rememberDupThreshold {
+		return true, parsed.Results[0].Text
+	}
+	return false, ""
+}
 
 type mpToolSpec struct {
 	name     string
@@ -175,13 +244,6 @@ var mpCatalog = []mpToolSpec{
 				return "", fmt.Errorf("content is %d chars, max %d — too long for a memory fact: split into separate remember calls (one fact each); documents belong in write_artifact", len(content), rememberMaxChars)
 			}
 
-			// Duplicate guard: keep the palace clean when agents re-store the
-			// same fact across runs.
-			if dup, dupErr := p.call(ctx, "mempalace_check_duplicate", map[string]any{"content": content, "threshold": 0.95}); dupErr == nil && isDuplicate(dup) {
-				p.record("remember", "write", "", clip(content, 120), 0)
-				return "Already in memory (near-duplicate found) — not stored again.", nil
-			}
-
 			room := mempalace.RoomGeneral
 			if kind == "decision" {
 				room = mempalace.RoomDecisions
@@ -191,6 +253,20 @@ var mpCatalog = []mpToolSpec{
 				stored = fmt.Sprintf("[%s] [%s] %s", p.scope.Closet, kind, content)
 			} else {
 				stored = fmt.Sprintf("[%s] %s", kind, content)
+			}
+
+			// Duplicate guard: keep the palace clean when agents re-store the
+			// same fact across runs. Checked against the STORED form (prefix
+			// included) — existing drawers carry the same prefix shape, and
+			// like-vs-like comparison separates paraphrases from genuinely
+			// different facts much better than raw-vs-prefixed. Returning the
+			// existing text teaches the agent what memory already holds.
+			if dup, existing := p.CheckDuplicate(ctx, stored); dup {
+				p.record("remember", "write", "", clip(content, 120), 0)
+				if existing != "" {
+					return fmt.Sprintf("Already in memory (similar: %q) — not stored again.", clip(existing, 200)), nil
+				}
+				return "Already in memory (near-duplicate found) — not stored again.", nil
 			}
 			call := map[string]any{
 				"wing":     p.scope.wing(),
@@ -208,7 +284,7 @@ var mpCatalog = []mpToolSpec{
 	},
 	{
 		name: "memory_facts",
-		desc: "Query the knowledge graph for current facts about an entity (defaults to the current task). Facts are current truth — on conflict with recalled text, facts win.",
+		desc: "Query the knowledge graph for structured facts (status, approach, blockers) about an entity (defaults to the current task). Entities are named task-<ref>, e.g. task-dec-62.",
 		params: `"entity":{"type":"string","description":"Entity to query (default: the current task)"},` +
 			`"as_of":{"type":"string","description":"Optional date filter YYYY-MM-DD — only facts valid at that time"}`,
 		required: []string{},
@@ -229,27 +305,10 @@ var mpCatalog = []mpToolSpec{
 			return out, err
 		},
 	},
-	{
-		name: "write_diary",
-		desc: "Write your end-of-session diary entry: what happened, what you learned, what matters going forward. Call this before finish_task.",
-		params: `"what_happened":{"type":"string","description":"What happened this session"},` +
-			`"learned":{"type":"string","description":"What you learned"},` +
-			`"what_matters":{"type":"string","description":"What matters for whoever picks this up next"}`,
-		required: []string{"what_happened"},
-		execute: func(p *MempalaceProxy, ctx context.Context, args map[string]json.RawMessage) (string, error) {
-			entry := formatDiaryEntry(stringArg(args, "what_happened"), stringArg(args, "learned"), stringArg(args, "what_matters"))
-			call := map[string]any{"agent_name": mempalace.SanitizeName(p.scope.AddedBy), "entry": entry}
-			if p.scope.Closet != "" {
-				call["topic"] = p.scope.Closet
-			}
-			out, err := p.call(ctx, "mempalace_diary_write", call)
-			if err == nil {
-				p.diaryWritten.Store(true)
-			}
-			p.record("write_diary", "write", "diary", clip(entry, 120), 1)
-			return out, err
-		},
-	},
+	// write_diary was removed from the agent tool surface: the engine's
+	// run-teardown hook writes an auto-diary for every run (including failed
+	// and canceled ones), which made the mandatory agent diary pure ceremony.
+	// mempalace_diary_write is still called engine-side.
 	{
 		name: "memory_invalidate",
 		desc: "Mark a knowledge-graph fact as no longer true (validity window closes; history is preserved). Use when the team changes direction — invalidate what you're overturning, then remember the new decision.",
@@ -358,20 +417,6 @@ func clip(s string, n int) string {
 		return s
 	}
 	return s[:n]
-}
-
-func formatDiaryEntry(happened, learned, matters string) string {
-	var parts []string
-	if happened != "" {
-		parts = append(parts, "What happened: "+happened)
-	}
-	if learned != "" {
-		parts = append(parts, "Learned: "+learned)
-	}
-	if matters != "" {
-		parts = append(parts, "What matters: "+matters)
-	}
-	return strings.Join(parts, "\n")
 }
 
 // isDuplicate loosely parses a mempalace_check_duplicate response.

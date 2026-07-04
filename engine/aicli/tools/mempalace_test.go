@@ -26,7 +26,7 @@ func TestMempalaceProxyRegistersCatalog(t *testing.T) {
 	r := aicli.NewRegistry()
 	summary := p.RegisterAll(r)
 
-	want := []string{"recall_memory", "recall_run", "remember", "memory_facts", "write_diary", "memory_invalidate", "recall_company"}
+	want := []string{"recall_memory", "recall_run", "remember", "memory_facts", "memory_invalidate", "recall_company"}
 	defs := r.Defs()
 	byName := map[string]bool{}
 	for _, d := range defs {

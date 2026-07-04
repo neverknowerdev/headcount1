@@ -48,7 +48,6 @@ var memoryTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 }
 
 // plannerMemoryTools: planner-tier additions (CEO/CTO) — invalidating
@@ -79,7 +78,6 @@ var ceoTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 	"memory_invalidate",
 	"recall_company",
 }
@@ -105,7 +103,6 @@ var ctoTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 	"memory_invalidate",
 	"recall_company",
 }
@@ -128,7 +125,6 @@ var cmoTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 }
 
 // implementerTools: full workspace access for agents that write code.
@@ -149,7 +145,6 @@ var implementerTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 }
 
 // qaTools: QA verifies — reads, runs, and drives a browser, but never edits.
@@ -170,7 +165,6 @@ var qaTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 }
 
 // contentTools: research + artifact writing for content/design specialists.
@@ -187,7 +181,6 @@ var contentTools = []string{
 	"recall_run",
 	"remember",
 	"memory_facts",
-	"write_diary",
 }
 
 // BuiltinConfigs returns the predefined agent configurations in their
