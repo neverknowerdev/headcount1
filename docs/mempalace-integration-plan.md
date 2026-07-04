@@ -120,6 +120,21 @@ Principle: **history never becomes wrong, but conclusions do** — and MemPalace
 
 **Poisonous-memory escalation ladder** (when an abandoned approach pollutes recall): 1) supersede (usually enough once recall prefers KG-validated results); 2) retag closet to `task-<id>-abandoned` so default scoped recall skips it; 3) `mempalace_delete_by_source` on the run's `source_file` (`dry_run` first) — run/session-level `source_file` encoding is the undo granularity.
 
+## 3.3 Recall query model: what queries are possible
+
+Recall is **not a query language** — it is three complementary subsystems (verified in `searcher.py` / `knowledge_graph.py` / `layers.py`):
+
+1. **Semantic top-k search** (`mempalace_search`): hybrid ranking — vector similarity (0.6) + BM25 keyword (0.4), over-fetch + re-rank, ±1 neighbor-chunk expansion on strong hits. Handles conceptual queries ("why did we drop WebSockets?") and exact strings/identifiers (BM25). Always top-k (default 5) with optional `max_distance` gate.
+2. **Scoped search filters:** exactly `wing`, `room`, `source_file` — i.e. per-project, per-sprint/topic, per-run/session (thanks to our `source_file` encoding). **No** boolean/negation/aggregation, no date-range, no `added_by` filter. It ranks, it doesn't SELECT.
+3. **Knowledge-graph structured queries** (complete result sets, not top-k): `query_entity(name, as_of, direction)`, `query_relationship(predicate, as_of)`, `timeline(entity)` — temporal triples with validity windows. "What's true about X (as of date D)?", "all relations of type P", "history of X incl. invalidated facts".
+4. **Structural browsing:** `get_taxonomy`, `list_wings/rooms`, `traverse_graph` (BFS), `find_tunnels`/`follow_tunnels`. Plus `check_duplicate` before writes.
+5. **Layered recall stack** (`layers.py`): L0 identity → L1 critical facts (`wake-up`, ~600-900 tokens) → L2 room recall → L3 deep search.
+
+**Exhaustive queries ("fetch ALL tool errors in run DEC-10"):** not native to drawer search (top-k ≠ all). Handle by design:
+- *Approximation:* `search(query="tool error failed", source_file="runs/DEC-10/…", n_results=30)` — good for "remind me", not an audit.
+- *Ingest-time KG facts (recommended):* the sweep wrapper classifies messages and emits facts (`run:DEC-10 --had_tool_error--> tool:exec_command`, provenance → drawer id) for a curated set of event types (errors, decisions, files touched, subtask spawns). Then "all X in Y" = complete KG query linking back to verbatim drawers.
+- *Own DB:* exhaustive per-run operational queries stay on `Run.LogEntries` (`/api/runs`); MemPalace answers the semantic follow-up ("have we seen this error before in any project?").
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
