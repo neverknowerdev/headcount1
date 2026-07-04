@@ -29,11 +29,25 @@ var (
 	companyLocks sync.Map // server name → *sync.Mutex
 
 	wakeUpCache sync.Map // palacePath+wing → wakeUpEntry
+
+	// activeRuns counts in-flight runs per palace path. While a palace has
+	// active runs its wake-up cache TTL drops so parallel sibling tasks see
+	// facts written by each other within minutes, not an hour.
+	activeRunsMu sync.Mutex
+	activeRuns   = map[string]int{}
+)
+
+// Wake-up cache TTLs: long when the company is idle, short while runs are in
+// flight so sibling runs pick up fresh facts. Never go below activeWakeUpTTL —
+// wake-up shells out to the CLI.
+const (
+	idleWakeUpTTL   = time.Hour
+	activeWakeUpTTL = 5 * time.Minute
 )
 
 type wakeUpEntry struct {
 	text    string
-	expires time.Time
+	fetched time.Time
 }
 
 // Available reports whether the mempalace runtime was installed by the setup
@@ -69,6 +83,11 @@ func EnsureCompanyServer(ctx context.Context, q *db.Queries, company db.Company)
 	palace := PalacePath(company)
 	if err := os.MkdirAll(palace, 0755); err != nil {
 		return db.MCPServer{}, fmt.Errorf("create palace dir: %w", err)
+	}
+	// Chunking settings live in the shared mempalace user config — keep them
+	// in sync on every provisioning pass (they only affect new writes).
+	if err := ensureChunkConfig(); err != nil {
+		log.Printf("mempalace: could not write chunk config: %v", err)
 	}
 
 	argsJSON, _ := json.Marshal([]string{"--palace", palace})
@@ -269,6 +288,34 @@ func MineProjectAsync(company db.Company, project db.Project, workspaceDir strin
 	}()
 }
 
+// MineTranscript indexes a directory of purpose-built transcript JSONL files
+// (see engine/aicli's transcript writer) into the company palace with the
+// conversation miner. Synchronous, serialized under the company write lock,
+// and idempotent: the miner keeps per-file sentinels, so re-mining a dir only
+// processes files whose content changed. Never pass raw session logs here —
+// only transcript JSONL.
+func MineTranscript(ctx context.Context, company db.Company, wing, agentName, dir string) error {
+	if !Available() {
+		return fmt.Errorf("mempalace is not installed")
+	}
+	if _, err := os.Stat(dir); err != nil {
+		return fmt.Errorf("transcript dir: %w", err)
+	}
+	unlock := LockCompany(ServerName(company))
+	defer unlock()
+
+	mineCtx, cancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer cancel()
+	cmd := exec.CommandContext(mineCtx, setup.MempalaceCLIPath(),
+		"--palace", PalacePath(company),
+		"mine", dir, "--mode", "convos", "--wing", wing, "--agent", SanitizeName(agentName))
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("mempalace mine convos failed: %v — %s", err, tail(string(out), 500))
+	}
+	return nil
+}
+
 // WakeUp returns the palace's L0/L1 wake-up context block for a wing, cached
 // for an hour and hard-capped so it can never blow up the system prompt.
 // Returns "" on any failure — the caller treats wake-up as optional.
@@ -276,9 +323,11 @@ func WakeUp(company db.Company, wing string) string {
 	if !Available() {
 		return ""
 	}
+	// The TTL is evaluated at read time so an entry cached while the company
+	// was idle still refreshes quickly once runs go active.
 	key := PalacePath(company) + "|" + wing
 	if v, ok := wakeUpCache.Load(key); ok {
-		if e := v.(wakeUpEntry); time.Now().Before(e.expires) {
+		if e := v.(wakeUpEntry); time.Since(e.fetched) < wakeUpTTL(PalacePath(company)) {
 			return e.text
 		}
 	}
@@ -296,8 +345,39 @@ func WakeUp(company db.Company, wing string) string {
 	if len(text) > maxChars {
 		text = text[:maxChars] + "\n[wake-up truncated]"
 	}
-	wakeUpCache.Store(key, wakeUpEntry{text: text, expires: time.Now().Add(time.Hour)})
+	wakeUpCache.Store(key, wakeUpEntry{text: text, fetched: time.Now()})
 	return text
+}
+
+// RunStarted marks a run as active for a company's palace, shortening the
+// wake-up cache TTL so parallel sibling runs see each other's writes.
+// Pair every call with RunEnded.
+func RunStarted(company db.Company) {
+	activeRunsMu.Lock()
+	defer activeRunsMu.Unlock()
+	activeRuns[PalacePath(company)]++
+}
+
+// RunEnded reverses RunStarted.
+func RunEnded(company db.Company) {
+	activeRunsMu.Lock()
+	defer activeRunsMu.Unlock()
+	palace := PalacePath(company)
+	if activeRuns[palace] <= 1 {
+		delete(activeRuns, palace)
+	} else {
+		activeRuns[palace]--
+	}
+}
+
+// wakeUpTTL returns the cache TTL for a palace based on run activity.
+func wakeUpTTL(palacePath string) time.Duration {
+	activeRunsMu.Lock()
+	defer activeRunsMu.Unlock()
+	if activeRuns[palacePath] > 0 {
+		return activeWakeUpTTL
+	}
+	return idleWakeUpTTL
 }
 
 // RepairPalace rebuilds a palace's vector index from its authoritative SQLite
