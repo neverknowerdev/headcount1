@@ -276,8 +276,9 @@ Idempotency: drawer IDs keyed on content-hash + source (upstream's mined-file se
 Pilot evidence: every stored doc capped at exactly `DEFAULT_CHUNK_SIZE = 800` chars; recall returned mid-word fragments ("rontend:** React 19…", "uld block npm install"). Measured `remember` payloads: 600–1,200 chars typical, ~2,300 max — i.e. almost every memory gets sliced.
 
 - Set palace config `chunk_size` ≥ 2400 with sentence-boundary splitting and non-zero `chunk_overlap` (config plumbing already exists in `mempalace/config.py`; wire it into palace provisioning in `pkg/mempalace`).
-- Agent-authored `remember`/diary payloads are already distilled units — they should land as **one drawer, unchunked** whenever under the cap.
-- Prompt addition (CEO/CTO/Coder configs): "one fact per `remember` call" — improves recall precision and makes dedup meaningful.
+- Agent-authored `remember` payloads are already distilled units — they land as **one drawer, unchunked**, guaranteed by the input cap below.
+- **`remember` input cap (tool-enforced, not prompt-enforced):** reject content > **2,000 chars** with a corrective error: *"Too long for a memory fact — split into separate remember calls (one fact each); documents belong in write_artifact."* Sized under `chunk_size` so an accepted memory can never be chunked. Pilot payloads (600–1,200 typical, ~2,300 max) show the cap only blocks document-shaped dumps.
+- Prompt addition (CEO/CTO/Coder configs): "one fact per `remember` call" — the cap enforces it mechanically; the prompt line explains it.
 
 ## 1.5.3 Dedup on write
 
@@ -302,10 +303,10 @@ Upstream's `--mode convos` miner chunks transcripts **by Q+A exchange pair** wit
 
 ## 1.5.6 Protocol slimming
 
-With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redundant ceremony (and was the main source of duplicate blocker-memories). Prompt changes:
+With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redundant ceremony (and was the main source of duplicate blocker-memories). Changes:
 
-- `write_diary` → optional ("use it when you have judgment to add beyond the automatic record").
-- `remember` repositioned: only for things no pipeline can know — hard-won learnings, "don't try X, it 404s".
+- **`write_diary` removed from the agent tool surface entirely.** Its three sections are now covered elsewhere: "what happened" = transcript mining + teardown auto-diary; "learned/matters" = `remember`. The underlying `mempalace_diary_write` stays **engine-only** (teardown auto-diary), so the per-agent chronological record survives without being the agent's job. Re-enable per role via `AllowedTools` only if a role demonstrably needs narrative journaling.
+- `remember` repositioned: only for things no pipeline can know — hard-won learnings, "don't try X, it 404s". Capped at 2,000 chars (§1.5.2), one fact per call.
 - Remove "treat memory_facts as current truth" until 1.5.1/1.5.4 give the KG real content; reinstate afterwards.
 - Document the `room` filter on `recall_memory` with one example (pilot: never used).
 
@@ -313,7 +314,8 @@ With 1.5.1 in place the mandatory pre-`finish_task` `write_diary` becomes redund
 
 1. A run killed with `kill -9` mid-session still yields: auto-diary, its artifacts as drawers, a `status` KG fact, and (with 1.5.5) exchange-pair drawers from the transcript-so-far.
 2. Two agents storing the same fact produce one drawer; the second `remember` returns "already known".
-3. No stored drawer ends mid-word; a 1,200-char `remember` is retrievable as a single intact result.
+3. No stored drawer ends mid-word; a 1,200-char `remember` is retrievable as a single intact result; a 2,500-char `remember` is rejected with the split-into-facts error and nothing is stored.
+3a. Agent tool listings no longer include `write_diary`; the teardown auto-diary still produces one diary entry per run.
 4. `memory_facts task-dec-<n>` returns the task's status/approach facts after any terminal run; no KG object contains markdown syntax.
 5. Runs 91/93-style failures (agent never calls `finish_task`) show `engine:auto-diary` + `engine:teardown-ingest` rows in `memory_activities`.
 5a. A fact present only in a tool result that `pruneHistory` truncates is retrievable via `recall_run` afterwards (pre-prune mine verified); a failed mine never blocks or delays the prune.
