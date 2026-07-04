@@ -18,6 +18,7 @@ import (
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/mempalace"
 	"gorm.io/gorm"
 )
 
@@ -531,22 +532,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			e.hub.BroadcastEvent("comment_created", comment)
 		}
 
-		// Memory hooks: persist plan-mode refinements and write an auto-diary
-		// when the agent didn't leave one. Non-blocking and best-effort — a
-		// memory hiccup must never affect run completion.
-		if memSess != nil {
-			finishedTask := t
-			go func() {
-				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
-				defer bgCancel()
-				if mode == "plan" {
-					e.storeRefinementMemory(bgCtx, memSess, finishedTask, run.ID, resultDetails)
-				}
-				if mpProxy == nil || !mpProxy.DiaryWritten() {
-					e.autoDiary(memSess, finishedTask, status, resultDetails)
-				}
-			}()
-		}
+		// Memory teardown: auto-diary, artifact ingestion, KG facts, plan
+		// refinement store and transcript mine. Detached, best-effort and
+		// once-guarded — a memory hiccup must never affect run completion.
+		e.memoryTeardown(memSess, mpProxy, t, run.ID, mode, status, resultDetails)
 		return nil
 	}))
 
@@ -784,6 +773,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, mpProxy.RegisterAll(registry))
 		defer mpProxy.Close()
 
+		// While runs are active the palace's wake-up cache refreshes faster,
+		// so parallel sibling tasks see each other's fresh facts.
+		mempalace.RunStarted(company)
+		defer mempalace.RunEnded(company)
+
 		systemPrompt += e.memoryPromptSection(company, memSess.scope)
 
 		// Plan-mode (refinement) seeds get a recall digest of prior relevant
@@ -900,6 +894,25 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		RunID:                 run.ID,
 		Logger:                proxyLogger,
 	}
+
+	// Transcript capture + mining hooks (memory layer). The transcript JSONL
+	// lives next to the session logs and is the ONLY thing ever passed to the
+	// conversation miner — raw session logs are 99% noise.
+	if memSess != nil && proxyLogger != nil {
+		transcriptDir := filepath.Dir(proxyLogger.FilePath())
+		transcriptPath := filepath.Join(transcriptDir, fmt.Sprintf("transcript-%d.jsonl", run.ID))
+		if tw, twErr := aicli.NewTranscriptWriter(transcriptPath, fmt.Sprintf("run-%d", run.ID)); twErr == nil {
+			defer tw.Close()
+			memSess.transcript = tw
+			memSess.transcriptDir = transcriptDir
+			agentCfgObj.Transcript = tw
+			agentCfgObj.OnAssistantTurn = e.memoryCheckpointHook(memSess, task)
+			agentCfgObj.OnPrune = e.memoryPrePruneHook(memSess, task)
+		} else {
+			e.logInfo(proxyLogger, "Warning: transcript capture disabled: "+twErr.Error())
+		}
+	}
+
 	aiAgent := aicli.New(agentCfgObj)
 
 	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
@@ -917,6 +930,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
+			// Canceled runs never reach finish_task — capture what exists
+			// (auto-diary, artifacts, status fact, transcript) before exit.
+			e.memoryTeardown(memSess, mpProxy, task, run.ID, mode, "canceled", "")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
@@ -924,6 +940,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		status = "failed"
 		runErrMsg = agentErr.Error()
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
+		// The catch-all memoryTeardown below captures this failed run.
 	}
 
 	// If finish_task was not called, force a follow-up turn.
@@ -950,6 +967,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			finalStats.ToolOutputTokens, finalStats.TotalTokens,
 		))
 	}
+
+	// Catch-all memory teardown for terminal paths that bypassed finish_task
+	// (e.g. loop ended without it and the follow-up failed too). No-op when
+	// the finish_task closure already fired it — the hook is once-guarded.
+	e.memoryTeardown(memSess, mpProxy, task, run.ID, mode, status, runErrMsg)
 
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
