@@ -41,8 +41,9 @@ var postWriterPrompt string
 // delegated (child) sessions.
 
 // ceoTools: the CEO delegates all real work — no file/shell/web access.
-// It can LIST artifacts (to know what exists and reference filenames in
-// delegations) but deliberately cannot READ them: consuming deliverables is
+// It can LIST artifacts and VERIFY their content by asking targeted
+// questions (ask_artifact — answered by a separate cheap reader call), but
+// deliberately cannot READ full artifact content: consuming deliverables is
 // the sub-agents' job, and the CEO acts on their finish_task handoffs.
 // read_file is withheld too — the artifacts dir is readable by the file
 // sandbox, so read_file would be a trivial bypass of that restriction.
@@ -53,6 +54,7 @@ var ceoTools = []string{
 	"report_status",
 	"finish_task",
 	"list_artifacts",
+	"ask_artifact",
 }
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
@@ -70,6 +72,7 @@ var ctoTools = []string{
 	"grep",
 	"list_artifacts",
 	"read_artifact",
+	"ask_artifact",
 	"write_artifact",
 }
 
@@ -85,6 +88,7 @@ var cmoTools = []string{
 	"web_fetch",
 	"list_artifacts",
 	"read_artifact",
+	"ask_artifact",
 	"write_artifact",
 }
 

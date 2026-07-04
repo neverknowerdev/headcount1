@@ -6,7 +6,7 @@ export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
-    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '', provider_type: '' });
+    const [formData, setFormData] = useState({ name: '', base_url: '', api_key: '', default_model: '', utility_model: '', provider_type: '' });
     const [originalModels, setOriginalModels] = useState<string[]>([]);
     const [supportedModels, setSupportedModels] = useState<string[]>(['']);
     const [testResult, setTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
@@ -46,13 +46,13 @@ export const ProvidersManager: React.FC = () => {
         setTestingProgress('');
         if (p) {
             setEditingId(p.id);
-            setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '', provider_type: p.provider_type || '' });
+            setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '', utility_model: p.utility_model || '', provider_type: p.provider_type || '' });
             const existingModels = p.supported_models ? p.supported_models.split(',').map((m:string) => m.trim()) : [];
             setSupportedModels(existingModels.length ? existingModels : ['']);
             setOriginalModels(existingModels);
         } else {
             setEditingId(null);
-            setFormData({ name: '', base_url: '', api_key: '', default_model: '', provider_type: '' });
+            setFormData({ name: '', base_url: '', api_key: '', default_model: '', utility_model: '', provider_type: '' });
             setSupportedModels(['']);
             setOriginalModels([]);
         }
@@ -194,6 +194,7 @@ export const ProvidersManager: React.FC = () => {
                         </div>
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
+                        {p.utility_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Utility Model:</span> {p.utility_model}</p>}
                         {p.supported_models && <p className="text-xs text-gray-500 mt-2 break-words"><span className="font-semibold">Models:</span> {p.supported_models.split(',').join(', ')}</p>}
                     </div>
                 ))}
@@ -235,6 +236,10 @@ export const ProvidersManager: React.FC = () => {
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Default Model</label>
                                 <input required type="text" value={formData.default_model} onChange={e => setFormData({...formData, default_model: e.target.value})} placeholder="e.g. gpt-4o" className="w-full border rounded p-2" />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Utility Model <span className="text-gray-400 font-normal">(optional — cheap model for internal tasks like artifact Q&A and commit messages)</span></label>
+                                <input type="text" value={formData.utility_model} onChange={e => setFormData({...formData, utility_model: e.target.value})} placeholder="e.g. gpt-4o-mini" className="w-full border rounded p-2" />
                             </div>
 
                             <div>

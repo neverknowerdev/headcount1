@@ -72,6 +72,7 @@ test.describe.serial('CEO orchestration flow', () => {
             provider_type: 'openai',
             default_model: 'e2e-mock-model',
             supported_models: 'e2e-mock-model',
+            utility_model: 'e2e-mock-model',
         });
         providerId = provider.id;
         const company = await postJSON(request, '/api/companies', {
@@ -150,8 +151,16 @@ test.describe.serial('CEO orchestration flow', () => {
                     finish_status: 'Greeting implemented and verified.',
                     result_details: 'Coder implemented the greeting (greeting-report.md), QA verified it on the home page.',
                 } } },
-                // CEO turn 5: finish the root task
-                { tool_call: { id: 'c5', name: 'finish_task', arguments: {
+                // CEO turn 5: spot-check the deliverable without reading it —
+                // ask_artifact runs a separate one-shot reader call.
+                { tool_call: { id: 'c5', name: 'ask_artifact', arguments: {
+                    filename: 'greeting-report.md',
+                    question: 'Does the report confirm the greeting is casual?',
+                } } },
+                // Consumed by the one-shot reader call (utility model).
+                { text: 'Yes — the report states the casual greeting was implemented.' },
+                // CEO turn 6: finish the root task
+                { tool_call: { id: 'c6', name: 'finish_task', arguments: {
                     task_status: 'in-review',
                     finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
@@ -272,6 +281,9 @@ test.describe.serial('CEO orchestration flow', () => {
         // The final answer_subtask_question result carries the CTO's handoff.
         expect(toolResults.some(c => c.includes('Greeting implemented and verified.') && c.includes('Coder implemented the greeting')),
             'CEO should have received the CTO final result with details').toBeTruthy();
+        // ask_artifact returned only the reader's short answer, never the raw content.
+        expect(toolResults.some(c => c.includes('Answer about "greeting-report.md"') && c.includes('casual greeting was implemented')),
+            'CEO should have received the ask_artifact answer').toBeTruthy();
 
         // ── Task spec: user input untouched, no forced refinement fields ─────
         const finalTask = await (await request.get(`/api/tasks/${taskId}`)).json();

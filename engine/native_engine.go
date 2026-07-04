@@ -709,6 +709,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
 	}))
+
+	// ask_artifact: verify artifact content through a separate one-shot LLM
+	// call — the artifact never enters this session's context, only the short
+	// answer does. Uses the provider's cheap utility model when configured.
+	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
+		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question)
+	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
 	// The set of sub-agents an agent may delegate to comes from its config's
 	// Subagents list (falling back to every known config when unset).
@@ -1263,6 +1270,80 @@ func (e *NativeEngine) buildSubtaskReply(
 	return reply, nil
 }
 
+// askArtifact answers a question about one artifact via a separate one-shot
+// LLM call, so the artifact's content never enters the asking agent's
+// context — only the short answer is returned as the tool result. It uses the
+// provider's cheap UtilityModel when configured, falling back to the asking
+// session's model, and bills the reader call's tokens to the asking run.
+func (e *NativeEngine) askArtifact(
+	ctx context.Context,
+	runID, rootTaskID int32,
+	provider db.LLMProvider,
+	sessionModel string,
+	filename, question string,
+) (string, error) {
+	arts, err := e.q.ListArtifactsByTaskTree(ctx, rootTaskID)
+	if err != nil {
+		return "", err
+	}
+	content, found := "", false
+	for i := len(arts) - 1; i >= 0; i-- {
+		if arts[i].Filename == filename {
+			content = arts[i].Content
+			found = true
+			break
+		}
+	}
+	if !found {
+		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
+	}
+
+	const maxArtifactChars = 100000
+	truncNote := ""
+	if len(content) > maxArtifactChars {
+		content = content[:maxArtifactChars]
+		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
+	}
+
+	model := provider.UtilityModel
+	if model == "" {
+		model = sessionModel
+	}
+
+	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
+
+Document %q:
+%s%s
+
+Question: %s`, filename, content, truncNote, question)
+
+	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
+		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
+		MaxTokens: 500,
+	})
+	if err != nil {
+		return "", fmt.Errorf("artifact reader call failed: %w", err)
+	}
+	if len(resp.Choices) == 0 {
+		return "", fmt.Errorf("artifact reader returned no answer")
+	}
+	// Bill the reader call to the asking session's run.
+	if runID > 0 {
+		if statErr := e.q.AddRunTokenStats(context.Background(), runID, db.RunTokenStats{
+			PromptTokens:     resp.Usage.PromptTokens,
+			CompletionTokens: resp.Usage.CompletionTokens,
+		}); statErr != nil {
+			fmt.Printf("Warning: failed to record ask_artifact token stats: %v\n", statErr)
+		}
+	}
+	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
+	if answer == "" {
+		return "", fmt.Errorf("artifact reader returned an empty answer")
+	}
+	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
+}
+
 // recordSubtaskQA stores an ask_task_owner question or the owner's answer as
 // a comment on the subtask, so the exchange is visible in the task activity.
 func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32, commentType, content string) {
@@ -1411,7 +1492,12 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if err != nil {
 		return "", err
 	}
-	model := agent.Model
+	// Commit messages are a lightweight internal task: prefer the provider's
+	// cheap utility model when one is configured.
+	model := provider.UtilityModel
+	if model == "" {
+		model = agent.Model
+	}
 	if model == "" {
 		model = provider.DefaultModel
 	}

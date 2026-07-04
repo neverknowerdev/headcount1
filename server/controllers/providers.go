@@ -57,6 +57,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		UtilityModel    string `json:"utility_model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -74,6 +75,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.ProviderType = req.ProviderType
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
+	provider.UtilityModel = req.UtilityModel
 	if req.ApiKey != "" {
 		provider.ApiKey = req.ApiKey
 	}
@@ -97,6 +99,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		UtilityModel    string `json:"utility_model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -109,6 +112,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
+		UtilityModel:    req.UtilityModel,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

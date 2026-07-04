@@ -636,6 +636,81 @@ func TestNativeEngineAskTaskOwner(t *testing.T) {
 	assert.True(t, sawAnswer, "owner_answer comment should be recorded on the subtask")
 }
 
+// TestNativeEngineAskArtifact verifies the artifact Q&A flow: the agent asks
+// a question about an artifact via ask_artifact, the engine answers it with a
+// separate one-shot LLM call on the provider's utility model (the artifact
+// content goes into the reader call, never into the asking session), and the
+// short answer comes back as the tool result.
+func TestNativeEngineAskArtifact(t *testing.T) {
+	var count atomic.Int32
+	var readerRequest atomic.Value // body of the one-shot reader call
+	var answerToolResult atomic.Value
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		body := string(bodyBytes)
+		w.Header().Set("Content-Type", "application/json")
+		switch count.Add(1) {
+		case 1:
+			// Root agent asks about the seeded artifact.
+			json.NewEncoder(w).Encode(toolCallJSON("aa-001", "ask_artifact",
+				`{"filename":"plan.md","question":"Does the document contain a Roadmap section?"}`))
+		case 2:
+			// The reader call: plain completion carrying the artifact + question.
+			readerRequest.Store(body)
+			json.NewEncoder(w).Encode(textJSON("aa-002", "Yes — the document has a \"## Roadmap\" section listing three milestones."))
+		default:
+			answerToolResult.Store(lastToolResult(body))
+			json.NewEncoder(w).Encode(toolCallJSON("aa-003", "finish_task",
+				`{"task_status":"in-review","finish_status":"Verified the plan has a roadmap."}`))
+		}
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	q := db.New(database)
+
+	// Configure a cheap utility model on the provider and seed an artifact.
+	require.NoError(t, database.Model(&db.LLMProvider{}).Where("name = ?", "mock-provider").
+		Update("utility_model", "cheap-model").Error)
+	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})
+	require.NoError(t, err)
+	_, err = q.CreateArtifact(context.Background(), db.Artifact{
+		TaskID: task.ID, RunID: seedRun.ID, Filename: "plan.md", FilePath: "/x/plan.md",
+		Content: "# Plan\n\n## Roadmap\n- m1\n- m2\n- m3\n",
+	})
+	require.NoError(t, err)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	// The seeded run is older; wait for the engine's run specifically.
+	require.Eventually(t, func() bool {
+		var id sql.NullInt64
+		if err := database.Raw("SELECT id FROM runs WHERE task_id = ? AND id > ? ORDER BY id DESC LIMIT 1", task.ID, seedRun.ID).Scan(&id).Error; err == nil && id.Valid {
+			runID = int32(id.Int64)
+			return true
+		}
+		return false
+	}, 10*time.Second, 50*time.Millisecond)
+	run := waitForRunDone(t, q, runID, 30*time.Second)
+	assert.Equal(t, "completed", run.Status)
+
+	// The reader call used the utility model and carried the artifact content
+	// plus the question — but no tool definitions (it's a one-shot call).
+	reader, _ := readerRequest.Load().(string)
+	assert.Contains(t, reader, `"model":"cheap-model"`)
+	assert.Contains(t, reader, "## Roadmap")
+	assert.Contains(t, reader, "Does the document contain a Roadmap section?")
+
+	// The asking session received only the short answer.
+	answer, _ := answerToolResult.Load().(string)
+	assert.Contains(t, answer, "three milestones")
+	assert.NotContains(t, answer, "- m1", "raw artifact content must not leak into the asking session")
+}
+
 // lastToolResult extracts the content of the last role:"tool" message in an
 // OpenAI-style chat completions request body.
 func lastToolResult(body string) string {
