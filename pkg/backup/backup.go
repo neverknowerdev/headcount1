@@ -33,16 +33,26 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 
 	// Timestamps are second-granular; if a backup with the same name already
 	// exists (two backups within one second), add a numeric suffix instead of
-	// silently overwriting the earlier archive.
+	// silently overwriting the earlier archive. Bounded so an unexpected
+	// filesystem condition surfaces as an error, never an endless loop.
+	const maxNameAttempts = 100
 	timestamp := time.Now().Format("2006-01-02_150405")
-	archiveName := fmt.Sprintf("backup_%s.tar.gz", timestamp)
-	archivePath := filepath.Join(backupDir, archiveName)
-	for n := 2; ; n++ {
-		if _, err := os.Stat(archivePath); os.IsNotExist(err) {
-			break
+	archivePath := ""
+	for n := 1; n <= maxNameAttempts; n++ {
+		name := fmt.Sprintf("backup_%s.tar.gz", timestamp)
+		if n > 1 {
+			name = fmt.Sprintf("backup_%s-%d.tar.gz", timestamp, n)
 		}
-		archiveName = fmt.Sprintf("backup_%s-%d.tar.gz", timestamp, n)
-		archivePath = filepath.Join(backupDir, archiveName)
+		candidate := filepath.Join(backupDir, name)
+		if _, err := os.Stat(candidate); os.IsNotExist(err) {
+			archivePath = candidate
+			break
+		} else if err != nil {
+			return "", fmt.Errorf("failed to check backup name %s: %w", name, err)
+		}
+	}
+	if archivePath == "" {
+		return "", fmt.Errorf("could not find a free backup filename for %s after %d attempts", timestamp, maxNameAttempts)
 	}
 
 	archiveFile, err := os.Create(archivePath)

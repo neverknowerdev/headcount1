@@ -57,8 +57,10 @@ test.describe.serial('CEO orchestration flow', () => {
     });
 
     test.afterAll(async ({ request }) => {
-        // Leave no filesystem or DB state behind for the specs that follow.
+        // Leave no filesystem, DB or settings state behind for the specs that follow.
         cleanFilesystem();
+        const settings = await (await request.get('/api/settings')).json();
+        await request.post('/api/settings', { data: { ...settings, utility_provider_id: 0, utility_model: '' } });
         await request.post('/api/e2e/wipe-db');
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
     });
@@ -72,9 +74,17 @@ test.describe.serial('CEO orchestration flow', () => {
             provider_type: 'openai',
             default_model: 'e2e-mock-model',
             supported_models: 'e2e-mock-model',
-            utility_model: 'e2e-mock-model',
         });
         providerId = provider.id;
+
+        // The utility LLM (used by ask_artifact's one-shot reader) is an
+        // app-level setting: any provider/model pair.
+        const currentSettings = await (await request.get('/api/settings')).json();
+        await postJSON(request, '/api/settings', {
+            ...currentSettings,
+            utility_provider_id: provider.id,
+            utility_model: 'e2e-mock-model',
+        });
         const company = await postJSON(request, '/api/companies', {
             name: 'CEO Co', short_name: 'ceo-co', color: '#4f46e5',
         });

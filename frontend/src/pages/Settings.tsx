@@ -22,7 +22,9 @@ export const Settings: React.FC = () => {
     const [basePath, setBasePath] = useState('');
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
     const [githubPat, setGithubPat] = useState('');
-    const [systemLlmModel, setSystemLlmModel] = useState('');
+    const [utilityProviderId, setUtilityProviderId] = useState<number>(0);
+    const [utilityModel, setUtilityModel] = useState('');
+    const [providers, setProviders] = useState<any[]>([]);
     const [saving, setSaving] = useState(false);
     const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
@@ -37,8 +39,15 @@ export const Settings: React.FC = () => {
                     setBasePath(res.data.base_path || '');
                     setGitRemoteUrl(res.data.git_remote_url || '');
                     setGithubPat(res.data.github_pat || '');
-                    setSystemLlmModel(res.data.system_llm_model || '');
+                    setUtilityProviderId(res.data.utility_provider_id || 0);
+                    setUtilityModel(res.data.utility_model || '');
                 }
+            } catch (e) {
+                console.error(e);
+            }
+            try {
+                const provRes = await axios.get('/api/providers');
+                setProviders(provRes.data || []);
             } catch (e) {
                 console.error(e);
             }
@@ -54,7 +63,8 @@ export const Settings: React.FC = () => {
                 base_path: basePath,
                 git_remote_url: gitRemoteUrl,
                 github_pat: githubPat,
-                system_llm_model: systemLlmModel
+                utility_provider_id: utilityProviderId,
+                utility_model: utilityModel
             });
 
             if (sshKey) {
@@ -194,15 +204,30 @@ export const Settings: React.FC = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                            System LLM Model
+                            Utility LLM
                         </label>
-                        <input
-                            type="text"
-                            value={systemLlmModel}
-                            onChange={e => setSystemLlmModel(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="gpt-4o-mini"
-                        />
+                        <p className="text-xs text-gray-500 mb-2">
+                            Cheap model used for lightweight internal calls (artifact Q&A, commit message generation). Any provider/model; leave the model empty to use each session's own LLM.
+                        </p>
+                        <div className="flex gap-2">
+                            <select
+                                value={utilityProviderId}
+                                onChange={e => setUtilityProviderId(Number(e.target.value))}
+                                className="border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                            >
+                                <option value={0}>Session's provider</option>
+                                {providers.map(p => (
+                                    <option key={p.id} value={p.id}>{p.name}</option>
+                                ))}
+                            </select>
+                            <input
+                                type="text"
+                                value={utilityModel}
+                                onChange={e => setUtilityModel(e.target.value)}
+                                className="flex-1 border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                                placeholder="gpt-4o-mini"
+                            />
+                        </div>
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">

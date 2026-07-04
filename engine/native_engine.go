@@ -1383,6 +1383,27 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	return reply, nil
 }
 
+// utilityLLM resolves the provider/model pair for lightweight internal calls
+// (artifact Q&A, commit message generation) from the app settings, which may
+// point at any provider/model combination. When no utility model is
+// configured — or its provider can't be loaded — it falls back to the
+// session's own provider and model.
+func (e *NativeEngine) utilityLLM(ctx context.Context, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
+	settings := loadSettings()
+	if settings.UtilityModel == "" {
+		return sessionProvider, sessionModel
+	}
+	if settings.UtilityProviderID != 0 && settings.UtilityProviderID != sessionProvider.ID {
+		p, err := e.q.GetLLMProvider(ctx, settings.UtilityProviderID)
+		if err != nil {
+			fmt.Printf("Warning: utility provider %d not found (%v), falling back to the session LLM\n", settings.UtilityProviderID, err)
+			return sessionProvider, sessionModel
+		}
+		return p, settings.UtilityModel
+	}
+	return sessionProvider, settings.UtilityModel
+}
+
 // askArtifact answers a question about one artifact via a separate one-shot
 // LLM call, so the artifact's content never enters the asking agent's
 // context — only the short answer is returned as the tool result. It uses the
@@ -1420,10 +1441,7 @@ func (e *NativeEngine) askArtifact(
 		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
 	}
 
-	model := provider.UtilityModel
-	if model == "" {
-		model = sessionModel
-	}
+	provider, model := e.utilityLLM(ctx, provider, sessionModel)
 
 	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
 
@@ -1639,15 +1657,13 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if err != nil {
 		return "", err
 	}
-	// Commit messages are a lightweight internal task: prefer the provider's
-	// cheap utility model when one is configured.
-	model := provider.UtilityModel
-	if model == "" {
-		model = agent.Model
+	// Commit messages are a lightweight internal task: prefer the app-level
+	// utility LLM when one is configured.
+	sessionModel := agent.Model
+	if sessionModel == "" {
+		sessionModel = provider.DefaultModel
 	}
-	if model == "" {
-		model = provider.DefaultModel
-	}
+	provider, model := e.utilityLLM(ctx, provider, sessionModel)
 	if len(diff) > 8000 {
 		diff = diff[:8000] + "\n... (truncated)"
 	}

@@ -12,7 +12,8 @@ test.describe('Settings and Sync', () => {
                         base_path: '/tmp/.paperclip2',
                         git_remote_url: 'git@github.com:test/repo.git',
                         github_pat: 'test_pat',
-                        system_llm_model: 'gpt-4o-mini'
+                        utility_provider_id: 0,
+                        utility_model: 'gpt-4o-mini'
                     })
                 });
             } else if (route.request().method() === 'POST') {

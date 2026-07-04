@@ -39,19 +39,15 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID              int32  `json:"id" gorm:"primaryKey"`
-	Name            string `json:"name" gorm:"not null"`
-	BaseUrl         string `json:"base_url" gorm:"not null"`
-	ApiKey          string `json:"api_key" gorm:"not null"`
-	ProviderType    string `json:"provider_type"`
-	DefaultModel    string `json:"default_model"`
-	SupportedModels string `json:"supported_models"`
-	// UtilityModel is a cheap model used for lightweight internal calls
-	// (artifact Q&A, commit message generation). Empty = fall back to the
-	// session's resolved model.
-	UtilityModel string    `json:"utility_model"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID              int32     `json:"id" gorm:"primaryKey"`
+	Name            string    `json:"name" gorm:"not null"`
+	BaseUrl         string    `json:"base_url" gorm:"not null"`
+	ApiKey          string    `json:"api_key" gorm:"not null"`
+	ProviderType    string    `json:"provider_type"`
+	DefaultModel    string    `json:"default_model"`
+	SupportedModels string    `json:"supported_models"`
+	CreatedAt       time.Time `json:"created_at"`
+	UpdatedAt       time.Time `json:"updated_at"`
 }
 
 type Agent struct {
