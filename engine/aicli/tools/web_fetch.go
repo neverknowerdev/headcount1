@@ -107,7 +107,7 @@ md = MarkItDown()
 result = md.convert_stream(sys.stdin.buffer, file_extension='.html')
 sys.stdout.write(result.text_content)
 `
-	cmd := exec.CommandContext(ctx, "python3", "-c", script)
+	cmd := exec.CommandContext(ctx, setup.PythonInterpreter(), "-c", script)
 	cmd.Stdin = bytes.NewReader(html)
 
 	var out, stderr bytes.Buffer

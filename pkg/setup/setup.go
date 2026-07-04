@@ -8,19 +8,35 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
+
+	"agent-orchestrator/db"
 )
 
 //go:embed scripts
 var scripts embed.FS
 
+// Failure describes one dependency that the setup script could not install.
+// Detail, when present, is the raw command output explaining why — meant to
+// be shown behind an expandable disclosure rather than inline.
+type Failure struct {
+	Name   string `json:"name"`
+	Reason string `json:"reason"`
+	Detail string `json:"detail,omitempty"`
+}
+
 var (
-	ready    atomic.Bool
-	errStore atomic.Value // holds string
-	once     sync.Once
+	ready         atomic.Bool
+	finished      atomic.Bool
+	errStore      atomic.Value // holds string
+	warnStore     atomic.Value // holds string
+	failuresStore atomic.Value // holds []Failure — blocking failures
+	warningsStore atomic.Value // holds []Failure — non-blocking (e.g. gh CLI)
+	once          sync.Once
 )
 
 // Run executes the platform-appropriate setup script exactly once, blocking
@@ -48,7 +64,56 @@ func StartupError() string {
 	return s
 }
 
+// Status reports setup progress without blocking on the setup script. While
+// the script is still running (or hasn't been started yet), pending is true.
+// Once it has finished, ok reports whether it succeeded and errMsg describes
+// the failure otherwise. warning describes any optional dependencies (e.g.
+// gh CLI) that failed to install — these never block the app from starting.
+func Status() (pending bool, ok bool, errMsg string, warning string) {
+	if !finished.Load() {
+		return true, false, "", ""
+	}
+	s, _ := errStore.Load().(string)
+	w, _ := warnStore.Load().(string)
+	return false, s == "", s, w
+}
+
+// Failures returns the structured list of blocking dependency failures from
+// the last setup run, each with a raw-output Detail where one was captured.
+func Failures() []Failure {
+	f, _ := failuresStore.Load().([]Failure)
+	return f
+}
+
+// Warnings returns the structured list of non-blocking dependency failures
+// (currently just gh CLI) from the last setup run.
+func Warnings() []Failure {
+	f, _ := warningsStore.Load().([]Failure)
+	return f
+}
+
+// PythonInterpreter returns the path to the python3 interpreter that has
+// markitdown installed and ready to use. On Linux/macOS this is a dedicated
+// virtualenv created by the setup script — isolated from the system Python,
+// so it never runs into PEP 668's "externally managed environment" guard
+// and never risks upgrading a shared dependency out from under some other
+// system/Homebrew-managed tool. On Windows, PEP 668 doesn't apply (the
+// official installer's Python isn't shared with OS package management), so
+// this is just the system python3.
+func PythonInterpreter() string {
+	if runtime.GOOS == "windows" {
+		return "python3"
+	}
+	return filepath.Join(venvDir(), "bin", "python3")
+}
+
+func venvDir() string {
+	return filepath.Join(db.PaperclipHome(), "venv")
+}
+
 func runOnce() {
+	defer finished.Store(true)
+
 	scriptData, scriptName, err := selectScript()
 	if err != nil {
 		store(err.Error())
@@ -73,6 +138,7 @@ func runOnce() {
 		store(err.Error())
 		return
 	}
+	cmd.Env = append(os.Environ(), "PAPERCLIP_VENV_DIR="+venvDir())
 
 	var out bytes.Buffer
 	cmd.Stdout = &out
@@ -88,13 +154,90 @@ func runOnce() {
 		ready.Store(true)
 	}
 
+	if w := extractSoftFailures(output); w != "" {
+		log.Printf("[setup] WARNING: %s", w)
+		warnStore.Store(w)
+	}
+	if softFailures := parseSoftFailures(output); len(softFailures) > 0 {
+		warningsStore.Store(softFailures)
+	}
+
 	if runErr != nil {
 		msg := fmt.Sprintf("setup script failed: %v\n%s", runErr, output)
 		store(msg)
+		if hardFailures := parseFailures(output); len(hardFailures) > 0 {
+			failuresStore.Store(hardFailures)
+		}
 		return
 	}
 
 	log.Print(output)
+}
+
+// extractSoftFailures collects "[setup] SOFT_FAIL: ..." lines emitted for
+// optional dependencies (currently just gh CLI) that failed to install but
+// shouldn't block the app from starting.
+func extractSoftFailures(output string) string {
+	var lines []string
+	for _, line := range strings.Split(output, "\n") {
+		if msg, ok := strings.CutPrefix(line, "[setup] SOFT_FAIL: "); ok {
+			lines = append(lines, msg)
+		}
+	}
+	return strings.Join(lines, "; ")
+}
+
+var (
+	detailBlockRe = regexp.MustCompile(`(?s)\[setup\] DETAIL_BEGIN (\S+)\n(.*?)\n\[setup\] DETAIL_END`)
+	bulletRe      = regexp.MustCompile(`(?m)^\s*•\s*([^:]+):\s*(.+)$`)
+	softFailRe    = regexp.MustCompile(`(?m)^\[setup\] SOFT_FAIL: (.+?) — (.+)$`)
+)
+
+const hardFailureHeader = "[setup] Some dependencies are missing or could not be installed:"
+
+// parseDetails extracts the raw per-dependency command output the setup
+// scripts emit between "[setup] DETAIL_BEGIN <id>" / "[setup] DETAIL_END"
+// markers, keyed by id (the dependency name with spaces replaced by "_").
+func parseDetails(output string) map[string]string {
+	details := map[string]string{}
+	for _, m := range detailBlockRe.FindAllStringSubmatch(output, -1) {
+		details[m[1]] = strings.TrimSpace(m[2])
+	}
+	return details
+}
+
+// parseFailures extracts the structured list of blocking dependency failures
+// from the setup script's final summary block, attaching each one's raw
+// command output (if captured) from parseDetails.
+func parseFailures(output string) []Failure {
+	idx := strings.Index(output, hardFailureHeader)
+	if idx == -1 {
+		return nil
+	}
+	details := parseDetails(output)
+	section := output[idx+len(hardFailureHeader):]
+	var failures []Failure
+	for _, m := range bulletRe.FindAllStringSubmatch(section, -1) {
+		name := strings.TrimSpace(m[1])
+		reason := strings.TrimSpace(m[2])
+		id := strings.ReplaceAll(name, " ", "_")
+		failures = append(failures, Failure{Name: name, Reason: reason, Detail: details[id]})
+	}
+	return failures
+}
+
+// parseSoftFailures extracts the structured list of non-blocking dependency
+// failures (currently just gh CLI) from "[setup] SOFT_FAIL: ..." lines.
+func parseSoftFailures(output string) []Failure {
+	details := parseDetails(output)
+	var failures []Failure
+	for _, m := range softFailRe.FindAllStringSubmatch(output, -1) {
+		name := strings.TrimSpace(m[1])
+		reason := strings.TrimSpace(m[2])
+		id := strings.ReplaceAll(name, " ", "_")
+		failures = append(failures, Failure{Name: name, Reason: reason, Detail: details[id]})
+	}
+	return failures
 }
 
 func store(msg string) {
