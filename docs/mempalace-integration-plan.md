@@ -135,6 +135,25 @@ Recall is **not a query language** — it is three complementary subsystems (ver
 - *Ingest-time KG facts (recommended):* the sweep wrapper classifies messages and emits facts (`run:DEC-10 --had_tool_error--> tool:exec_command`, provenance → drawer id) for a curated set of event types (errors, decisions, files touched, subtask spawns). Then "all X in Y" = complete KG query linking back to verbatim drawers.
 - *Own DB:* exhaustive per-run operational queries stay on `Run.LogEntries` (`/api/runs`); MemPalace answers the semantic follow-up ("have we seen this error before in any project?").
 
+## 3.4 Recall scoping: does the agent name wings/rooms?
+
+**Rule: the agent must never invent wing/room names; the engine provides the current scope, the agent may widen/narrow within permission.**
+
+Two recall paths, two scoping rules:
+
+- **Engine-injected recall** (refinement digest, compaction digest, wake-up): fully automatic. The engine's addressing helper resolves `(company, project, sprint, task)` → `(wing, room, source_file)` and injects results into the prompt — the agent never calls a tool or names anything.
+- **Agent-initiated recall** (mid-session `mempalace_search` via `call_mcp_tool`): `wing` is effectively mandatory in practice (search within one company's palace but across projects mixes unrelated drawers into top-k ranking — no query language exists to exclude them after the fact). `room`/`source_file` are optional, added when the question is sprint- or run-scoped.
+
+| Ask | Scope to pass |
+|---|---|
+| "recall anything about the current task" | `wing=<project>` only |
+| "what did we decide this sprint" | `wing=<project>`, `room=<sprint>` |
+| "what happened in that earlier run" | `wing=<project>`, `source_file=<run path>` |
+| explicit cross-project ask ("have we hit this error anywhere before?") | `wing` omitted or set to `company` wing — **permission-gated**, not every role |
+| agent doesn't specify | fallback default: current project wing, never a fully unscoped palace search |
+
+**Implementation:** inject the current project wing name + task closet as plain facts in the system prompt (never let the agent slugify its own names — that's the addressing helper's job). Recommended: don't expose raw `mempalace_search` to most roles — wrap it in a `recall_project_memory(query, room?, source_file?)` tool that server-side injects `wing` and can't be overridden; reserve raw/unscoped `call_mcp_tool` access to `mempalace_search` for CTO/CEO-tier roles that legitimately need cross-project recall.
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
