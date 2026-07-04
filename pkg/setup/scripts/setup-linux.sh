@@ -237,9 +237,10 @@ else
 fi
 
 # ── mempalace ────────────────────────────────────────────────────────────────
-# Installed into the same isolated venv as markitdown (see above) so it never
-# fights PEP 668 / a distro-managed system python3. Soft failure: memory is an
-# optional feature, absence must never block app startup.
+# Installed into the shared paperclip2 dependency venv (created above for
+# markitdown) so it never fights PEP 668 / a distro-managed system python3.
+# Soft failure: memory is an optional feature, absence must never block app
+# startup.
 MEMPALACE_VERSION="3.5.0"
 if [ -x "$VENV_DIR/bin/mempalace-mcp" ]; then
     echo "[setup] mempalace: OK"

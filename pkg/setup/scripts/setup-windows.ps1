@@ -221,8 +221,9 @@ if (Test-Command codegraph) {
 
 # ── mempalace ────────────────────────────────────────────────────────────────
 # Installed into the system python (like markitdown above — PEP 668 doesn't
-# apply on Windows). Soft failure: memory is an optional feature, absence must
-# never block app startup.
+# apply on Windows, so there is no dedicated venv to share on this platform).
+# Soft failure: memory is an optional feature, absence must never block app
+# startup.
 $MempalacePinnedVersion = '3.5.0'
 if ($pythonCmd) {
     & $pythonCmd -c "import mempalace" 2>&1 | Out-Null
