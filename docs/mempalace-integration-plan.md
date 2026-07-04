@@ -175,6 +175,28 @@ Self-implemented dump: one line per drawer `{wing, room, closet, content, source
 - **Embedder identity gotcha:** vectors are meaningless under a different embedding model. Manifest records embedder; on mismatch at import, route to the logical (re-embed) path, not the physical one.
 - pgvector deployments: vectors live in Postgres, not the palace dir — logical export is the only complete file-level story (or Postgres-native backup covers both).
 
+## 3.6 Integration depth: raw MCP exposure vs curated native tools
+
+MCP is the transport either way (mempalace is a Python process; Go can't embed it). The design question is the **agent-facing surface**. Decision: **MCP server underneath, curated native tools on top** — the codegraph pattern (`CodegraphProxy.RegisterAll`, `engine/aicli/tools/codegraph.go`).
+
+Rejected extremes:
+- *Raw 34-tool exposure via `call_mcp_tool`*: breaks taxonomy discipline (agents freestyle wing/room names), prompt bloat, two-step discover/call overhead, scoping becomes prompt-discipline instead of code, dangerous tools (`delete_by_source`, `kg_invalidate`) visible to all roles.
+- *Deep embedding/fork*: mempalace has no stable public Python API (`__all__ = ["__version__"]`); MCP+CLI is the documented contract — staying on it keeps upstream updates free.
+
+Agent-facing `MempalaceProxy` (~5 tools, engine-injected scope):
+
+| Tool | Wraps | Engine injects |
+|---|---|---|
+| `recall_memory(query, room?)` | `mempalace_search` | wing = current project |
+| `recall_run(query, run_id)` | `mempalace_search` + `source_file` | wing + run source path |
+| `remember(content, kind)` | `add_drawer` + `check_duplicate` | wing/room/closet/added_by from task context |
+| `memory_facts(entity?, as_of?)` | KG query/timeline | project scoping |
+| `write_diary(...)` | `diary_write` | agent wing |
+
+Per-role filtering via existing `AllowedTools`; `kg_invalidate`/cross-wing search planner-tier only; raw `call_mcp_tool` to mempalace optionally kept as CTO/CEO escape hatch.
+
+Three consumers of the same per-company MCP server: agents (curated tools), engine (direct `engine/mcp` client for wake-up/refinement/compaction), UI (`/api/memory` via Go client + CLI for maintenance jobs).
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
