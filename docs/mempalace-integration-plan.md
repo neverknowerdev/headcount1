@@ -100,6 +100,26 @@ Search-scope defaults per flow: refinement → `wing=project` (all rooms); compa
 
 **Implementation note:** closet assignment happens at filing time (and `compress` buckets by closet), so writes must not freestyle the taxonomy. Centralize a "memory addressing" helper in Go that maps `(company, project, sprint, task, run, session, agent)` → `(palace, wing, room, closet, source_file, added_by)` and use it on every write path (agent tool wrapper, sweep, refinement store, UI corrections).
 
+## 3.2 Invalidation: handling pivots ("we went another way")
+
+Principle: **history never becomes wrong, but conclusions do** — and MemPalace separates the two. Rule of thumb: *delete is for wrong, supersede is for outdated.*
+
+**Tier 1 — verbatim record (message/run drawers): never invalidated.** "We tried approach A" stays true after pivoting to B; it answers later questions like "why didn't A work?". The risk is only that recall presents old plans as current — solved at the recall layer, not by deletion.
+
+**Tier 2 — current truth (KG + decision records): explicitly superseded on pivot.**
+1. `mempalace_kg_invalidate` the overturned facts (temporal KG closes their validity window; timeline preserved).
+2. `mempalace_kg_add` the new facts, with a `supersedes` relation + reason.
+3. Write a superseding ADR-style drawer in the `decisions` room ("Decision 12 supersedes 9: WebSockets → SSE because…"), hallway-linked to the old one; mark the old plan drawer superseded via `mempalace_update_drawer`.
+
+**Epistemic ordering at recall (Palace Protocol addition):** agents (and our recall-digest injection) check valid KG facts first; drawers are historical record. On conflict, KG wins. Digest snippets carry their date and superseded markers.
+
+**Who invalidates:**
+- **Engine (automatic, primary):** when a task re-enters `refinement` or a new plan replaces an existing one — supersede old plan drawer, write superseding decision, swap KG facts.
+- **Agents:** planner-level roles (CEO/CTO) get `kg_invalidate` + prompt instruction "when you change direction, invalidate what you're overturning"; specialists don't invalidate.
+- **Humans (Memory UI):** per-node actions *edit* / *delete* / **mark superseded** (safe default), plus a KG timeline view.
+
+**Poisonous-memory escalation ladder** (when an abandoned approach pollutes recall): 1) supersede (usually enough once recall prefers KG-validated results); 2) retag closet to `task-<id>-abandoned` so default scoped recall skips it; 3) `mempalace_delete_by_source` on the run's `source_file` (`dry_run` first) — run/session-level `source_file` encoding is the undo granularity.
+
 ## 4. Use-case mapping
 
 ### 4.1 Memory MCP tools for agents (recall) — ✅ easiest, near-zero engine change
