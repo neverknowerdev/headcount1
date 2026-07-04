@@ -72,8 +72,6 @@ func (q *Queries) computeTaskRefKey(ctx context.Context, t Task) (string, error)
 	return fmt.Sprintf("%s-%d", parentRef, maxIdx+1), nil
 }
 
-// BackfillTaskRefKeys assigns ref keys to tasks created before the field
-// existed. Main tasks are keyed first so subtask keys can build on them.
 func (q *Queries) BackfillTaskRefKeys(ctx context.Context) error {
 	for _, scope := range []string{"parent_id IS NULL", "parent_id IS NOT NULL"} {
 		var tasks []Task

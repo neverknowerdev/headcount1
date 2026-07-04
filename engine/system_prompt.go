@@ -28,28 +28,36 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 type Settings struct {
 	BasePath         string   `yaml:"base_path"`
 	WorkspaceFolders []string `yaml:"workspace_folders"`
+	// UtilityProviderID / UtilityModel select a cheap LLM for lightweight
+	// internal calls (artifact Q&A, commit message generation). Set on the
+	// app settings page; empty model = fall back to the session's LLM.
+	UtilityProviderID int32  `yaml:"utility_provider_id"`
+	UtilityModel      string `yaml:"utility_model"`
 }
 
+// loadSettings reads the app settings. The canonical file is the one the
+// settings API writes (PaperclipHome()/settings.yaml); the legacy
+// ~/.paperclip2_settings.yaml location is kept as a fallback.
 func loadSettings() Settings {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
+	paths := []string{db.SettingsFilePath()}
+	if homeDir, err := os.UserHomeDir(); err == nil {
+		paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
 	}
-	settingsPath := filepath.Join(homeDir, ".paperclip2_settings.yaml")
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
+	for _, settingsPath := range paths {
+		data, err := os.ReadFile(settingsPath)
+		if err != nil {
+			continue
+		}
+		var settings Settings
+		if err := yaml.Unmarshal(data, &settings); err != nil {
+			continue
+		}
+		if settings.BasePath == "" {
+			settings.BasePath = db.PaperclipHome()
+		}
+		return settings
 	}
-
-	var settings Settings
-	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
-	}
-
-	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
-	}
-	return settings
+	return Settings{BasePath: db.PaperclipHome()}
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.

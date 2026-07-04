@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"strings"
 	"sync/atomic"
@@ -670,9 +671,15 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	task := seedTestData(t, database, mockSrv.URL)
 	q := db.New(database)
 
-	// Configure a cheap utility model on the provider and seed an artifact.
-	require.NoError(t, database.Model(&db.LLMProvider{}).Where("name = ?", "mock-provider").
-		Update("utility_model", "cheap-model").Error)
+	// Configure the app-level utility model (any provider/model; here the
+	// same provider, cheaper model) in an isolated settings home.
+	tmpHome := t.TempDir()
+	t.Setenv("E2E_PAPERCLIP_HOME", tmpHome)
+	paperclipDir := filepath.Join(tmpHome, ".paperclip2")
+	require.NoError(t, os.MkdirAll(paperclipDir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(paperclipDir, "settings.yaml"),
+		[]byte("utility_model: cheap-model\n"), 0644))
+
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})
 	require.NoError(t, err)
 	_, err = q.CreateArtifact(context.Background(), db.Artifact{
@@ -709,6 +716,22 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	answer, _ := answerToolResult.Load().(string)
 	assert.Contains(t, answer, "three milestones")
 	assert.NotContains(t, answer, "- m1", "raw artifact content must not leak into the asking session")
+
+	// The reader exchange was persisted to its own log file in the run folder.
+	var askLogs []string
+	require.NoError(t, filepath.WalkDir(paperclipDir, func(path string, d os.DirEntry, err error) error {
+		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "ask-artifact-") && strings.HasSuffix(d.Name(), ".log") {
+			askLogs = append(askLogs, path)
+		}
+		return nil
+	}))
+	require.Len(t, askLogs, 1, "each ask_artifact call gets its own log file")
+	logContent, err := os.ReadFile(askLogs[0])
+	require.NoError(t, err)
+	assert.Contains(t, string(logContent), "Reader model: cheap-model")
+	assert.Contains(t, string(logContent), "Does the document contain a Roadmap section?")
+	assert.Contains(t, string(logContent), "## Roadmap")
+	assert.Contains(t, string(logContent), "three milestones")
 }
 
 // TestNativeEngineCreateTaskOnBoard verifies create_task: a new TOP-LEVEL
