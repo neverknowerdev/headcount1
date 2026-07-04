@@ -152,6 +152,13 @@ historical record — on conflict, facts win. Before finish_task, call write_dia
 ```
 
 - Wake-up content: `mempalace wake-up --wing project:<name>` via CLI, cached per project for 1h, hard-capped at 1200 tokens (truncate).
+- **Scope note — two context layers, don't conflate them.** Wake-up is wing-granular only (no `--room`/`--closet` flag) and emits L0/L1 *identity + essential story*: slowly-changing, query-independent → cacheable, lives in the system prompt. Task-level context is the opposite (fast-moving, query-dependent) and is NOT a wake-up: it's the **task briefing** — pinned DB facts + valid KG facts + closet-scoped search with a current-state query. One shared builder serves all three task-briefing call sites so they can't drift apart:
+  ```go
+  // engine/briefing.go — used by refinement injection (§1.3), seed slimming (§2.5),
+  // and bridge sections 1–3 (§2.4). querySeed: task description at run start;
+  // recent messages at compaction time.
+  func BuildTaskBriefing(ctx context.Context, task *db.Task, querySeed string, maxTokens int) (string, error)
+  ```
 - Replace `engine/memory.go` `initTaskMemory` (static `memory.md`) with a wake-up snapshot written to the workspace; keep the function name/callsite (`native_engine.go:455`).
 
 ## 1.3 Refinement integration
@@ -291,7 +298,7 @@ Loop changes in `runMessageHistory`:
 
 ## 2.4 Bridge message content (engine-side implementation of `Compactor`, `engine/compactor.go`)
 
-Ordered sections, total ≤ `BridgeMaxTokens`:
+Sections 1–3 are produced by the shared `BuildTaskBriefing` builder (§1.2 scope note) with `querySeed` = last 2 user/assistant messages. Ordered sections, total ≤ `BridgeMaxTokens`:
 1. **Pinned (from DB, never recall-dependent):** task title, refined description, acceptance criteria, mode — ~400 tokens.
 2. **Current facts (complete):** valid KG facts for the task entity (`memory_facts` equivalent via Go client) — decisions, approach, state.
 3. **Recall digest (adaptive):** `mempalace_search` scoped to the task closet; query = task title + last 2 user/assistant messages; top `DigestResults`, each entry: `[date, room] excerpt…` — trimmed to fit budget.
