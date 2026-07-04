@@ -105,6 +105,10 @@ func (p *MempalaceProxy) call(ctx context.Context, mcpTool string, args map[stri
 
 // ---- tool catalog ----
 
+// rememberMaxChars caps remember content so each memory stays one atomic
+// fact and always fits below the palace chunk size (never split mid-fact).
+const rememberMaxChars = 500
+
 type mpToolSpec struct {
 	name     string
 	desc     string
@@ -155,8 +159,8 @@ var mpCatalog = []mpToolSpec{
 	},
 	{
 		name: "remember",
-		desc: "Store an important note, decision or learning in the project's long-term memory so future tasks and agents can recall it. Content is stored verbatim — write it self-contained.",
-		params: `"content":{"type":"string","description":"Verbatim content to store — exact words, self-contained"},` +
+		desc: "Store ONE important note, decision or learning in the project's long-term memory so future tasks and agents can recall it. Exactly one fact per call, max 500 characters — split multiple facts into separate calls; longer documents belong in write_artifact. Content is stored verbatim — write it self-contained.",
+		params: `"content":{"type":"string","description":"One self-contained fact, verbatim, max 500 characters"},` +
 			`"kind":{"type":"string","enum":["note","decision","learning"],"description":"What this is — decisions are filed in the decisions room"}`,
 		required: []string{"content", "kind"},
 		execute: func(p *MempalaceProxy, ctx context.Context, args map[string]json.RawMessage) (string, error) {
@@ -164,6 +168,11 @@ var mpCatalog = []mpToolSpec{
 			kind := stringArg(args, "kind")
 			if strings.TrimSpace(content) == "" {
 				return "", fmt.Errorf("content is required")
+			}
+			// Cap keeps memories atomic (one fact) and always below the palace
+			// chunk size, so a stored fact is never split across drawers.
+			if len(content) > rememberMaxChars {
+				return "", fmt.Errorf("content is %d chars, max %d — too long for a memory fact: split into separate remember calls (one fact each); documents belong in write_artifact", len(content), rememberMaxChars)
 			}
 
 			// Duplicate guard: keep the palace clean when agents re-store the
