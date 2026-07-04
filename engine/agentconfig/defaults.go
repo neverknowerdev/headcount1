@@ -40,16 +40,19 @@ var postWriterPrompt string
 // while the delegation depth cap allows it, and ask_task_owner only in
 // delegated (child) sessions.
 
-// ceoTools: the CEO delegates all real work — no file-write/shell/web access.
+// ceoTools: the CEO delegates all real work — no file/shell/web access.
+// It can LIST artifacts (to know what exists and reference filenames in
+// delegations) but deliberately cannot READ them: consuming deliverables is
+// the sub-agents' job, and the CEO acts on their finish_task handoffs.
+// read_file is withheld too — the artifacts dir is readable by the file
+// sandbox, so read_file would be a trivial bypass of that restriction.
 var ceoTools = []string{
 	"create_subtask",
 	"answer_subtask_question",
 	"ask_human",
 	"report_status",
 	"finish_task",
-	"read_file",
 	"list_artifacts",
-	"read_artifact",
 }
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
