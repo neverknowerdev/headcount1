@@ -226,6 +226,23 @@ MemPalace's philosophy matches the request exactly: it does **not** summarize �
 - **Cross-run continuity for free:** `buildInitialMessages` currently replays all past run results/comments; with memory in place it can inject only recent ones plus recalled highlights, shrinking seed size for long-lived tasks.
 - Optional: nightly `mempalace compress` (AAAK, ~30x) on old wings to bound disk while keeping searchability.
 
+**Detailed compaction cycle** (design note: MemPalace deliberately does not summarize — compaction = externalize verbatim + selectively re-inject, not compress into prose):
+
+1. **Continuous offload (every turn):** append each message to the run's `.jsonl` and file as drawer (`closet=task`, `source_file=runs/<task>/<run>/<session>.jsonl`) — idempotent `sweep` semantics. The palace always holds full verbatim history.
+2. **Trigger:** history crosses a token budget (~70% of context window) — threshold-based, not per-message.
+3. **Cut and replace:** keep system prompt + last N turns verbatim; replace everything older with ONE synthetic "memory bridge" message containing:
+   - *Pinned facts* (from DB, immune to recall misses): task title, refined description, acceptance criteria;
+   - *Valid KG facts* for the task (complete, not top-k): current decisions/approach/state;
+   - *Recall digest*: top-k search scoped to the task closet, queried with CURRENT task state (description + recent messages) — relevance tracks what the agent is doing now, not what seemed important when written;
+   - *Self-serve instruction*: "Earlier conversation (X messages) is in memory — `recall_run(query, run_id=…)` retrieves any exchange verbatim."
+4. **Refresh:** each subsequent compaction rebuilds (not appends) the bridge with re-queried digest.
+
+Properties: nothing lost, only demoted (any exchange is one tool call away); digest is adaptive (returning to an old subproblem re-ranks its content into the digest — impossible with static summaries).
+
+**Optional hybrid (iteration 2):** on each compaction, one cheap `UtilityModel` call writes a 5-10 line "session so far" narrative → top of bridge message + stored as drawer (recallable later). Narrative continuity + zero information loss underneath. Ship the pure recall-bridge first; the summary call adds latency/cost per compaction.
+
+Guardrails: never cut inside a tool-call/result pair; bridge message capped (~2-3k tokens); e2e test = plant fact early → force compaction → verify agent still answers (digest or self-recall). `mempalace compress`/AAAK is unrelated (offline storage compression, not context management).
+
 ### 4.4 "Memory" section in the UI — ✅ feasible; only real gap is a graph-viz library
 
 Backend — new `/api/memory` chi router (`server/handlers.go`) that proxies MCP read tools through `engine/mcp` and shells to the CLI for maintenance:
