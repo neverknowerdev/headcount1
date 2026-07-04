@@ -94,6 +94,7 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.MemoryActivity{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
@@ -141,8 +142,12 @@ func main() {
 		}
 		srv.InstallMCPNpmDeps(context.Background())
 		srv.CacheMCPTools(context.Background())
+		// Memory palaces can only be provisioned once setup has decided
+		// whether mempalace is available.
+		srv.EnsureCompanyPalaces(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
+	go srv.StartMemoryActivityPurge(context.Background())
 
 	// Resume codegraph init for any project whose knowledge graph isn't ready yet.
 	go srv.InitPendingCodegraphServers(context.Background())

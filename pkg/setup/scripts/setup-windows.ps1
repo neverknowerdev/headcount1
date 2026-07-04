@@ -219,6 +219,29 @@ if (Test-Command codegraph) {
     }
 }
 
+# ── mempalace ────────────────────────────────────────────────────────────────
+# Installed into the system python (like markitdown above — PEP 668 doesn't
+# apply on Windows). Soft failure: memory is an optional feature, absence must
+# never block app startup.
+$MempalacePinnedVersion = '3.5.0'
+if ($pythonCmd) {
+    & $pythonCmd -c "import mempalace" 2>&1 | Out-Null
+    if ($LASTEXITCODE -eq 0) {
+        Write-Host "[setup] mempalace: OK"
+    } else {
+        Write-Host "[setup] mempalace: not found — installing..."
+        $pipOutput = & $pythonCmd -m pip install "mempalace==$MempalacePinnedVersion" 2>&1 | Out-String
+        & $pythonCmd -c "import mempalace" 2>&1 | Out-Null
+        if ($LASTEXITCODE -eq 0) {
+            Write-Host "[setup] mempalace: installed"
+        } else {
+            Add-SoftFailure 'mempalace' 'could not be installed — memory features will be unavailable' $pipOutput
+        }
+    }
+} else {
+    Add-SoftFailure 'mempalace' 'python3 unavailable (see failure above) — memory features will be unavailable' ''
+}
+
 # ── summary ──────────────────────────────────────────────────────────────────
 if ($Details.Count -gt 0) {
     Write-Host ($Details -join "`n")

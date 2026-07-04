@@ -3,6 +3,7 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"context"
 	"fmt"
 	"io"
 	"log"
@@ -13,6 +14,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/mempalace"
 	"gorm.io/gorm"
 )
 
@@ -117,6 +119,32 @@ func restoreFilesystem(tempDir, basePath string) error {
 		dstCompanies := filepath.Join(basePath, "companies")
 		if err := copyDir(srcCompanies, dstCompanies); err != nil {
 			return fmt.Errorf("failed to restore companies directory: %w", err)
+		}
+	}
+
+	// Restore memory palaces, then rebuild each palace's derived vector index
+	// from its authoritative SQLite stores (best-effort — a failed repair
+	// leaves memory degraded, never blocks the restore).
+	srcMemory := filepath.Join(tempDir, "memory")
+	if _, err := os.Stat(srcMemory); err == nil {
+		dstMemory := filepath.Join(basePath, "memory")
+		if err := copyDir(srcMemory, dstMemory); err != nil {
+			return fmt.Errorf("failed to restore memory directory: %w", err)
+		}
+		if entries, err := os.ReadDir(dstMemory); err == nil {
+			for _, e := range entries {
+				if !e.IsDir() {
+					continue
+				}
+				palaceDir := filepath.Join(dstMemory, e.Name())
+				go func() {
+					ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
+					defer cancel()
+					if err := mempalace.RepairPalace(ctx, palaceDir); err != nil {
+						log.Printf("Warning: %v", err)
+					}
+				}()
+			}
 		}
 	}
 

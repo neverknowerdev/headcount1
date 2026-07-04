@@ -307,6 +307,24 @@ type ActivityLog struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// MemoryActivity records every memory (mempalace) operation — agent tool
+// calls, engine hooks and UI/API actions — for the Memory section's activity
+// feed and per-agent stats. Rows older than 90 days are purged.
+type MemoryActivity struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	CompanyID int32     `json:"company_id" gorm:"index"`
+	AgentName string    `json:"agent_name" gorm:"index"` // "" = engine/UI-initiated
+	TaskID    *int32    `json:"task_id" gorm:"index"`
+	RunID     *int32    `json:"run_id"`
+	Tool      string    `json:"tool"`              // recall_memory, remember, api:search, engine:refinement-recall, ...
+	Kind      string    `json:"kind" gorm:"index"` // "read" | "write" | "maintenance"
+	Wing      string    `json:"wing"`
+	Room      string    `json:"room"`
+	Query     string    `json:"query" gorm:"type:text"` // truncated to 500 chars
+	ResultN   int       `json:"result_n"`
+	CreatedAt time.Time `json:"created_at" gorm:"index"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`

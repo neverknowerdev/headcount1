@@ -99,6 +99,12 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		log.Printf("Warning: failed to backup companies directory: %v", err)
 	}
 
+	// Backup memory palaces (mempalace: SQLite stores are authoritative, the
+	// vector index is rebuilt on restore via `mempalace repair`).
+	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "memory"), "memory", &itemCount); err != nil {
+		log.Printf("Warning: failed to backup memory directory: %v", err)
+	}
+
 	// Update manifest with item count
 	manifest.Items = itemCount
 	manifestBytes, _ = json.MarshalIndent(manifest, "", "  ")

@@ -4,8 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"os"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/mempalace"
 	"agent-orchestrator/pkg/utils"
 )
 
@@ -19,6 +21,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 
 	tables := []string{
 		"activity_logs",
+		"memory_activities",
 		"proxy_request_logs",
 		"runs",
 		"comments",
@@ -46,6 +49,11 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
+
+	// Memory palaces live on disk keyed by company shortname — wipe them (and
+	// their running MCP subprocesses) so drawer content never leaks between tests.
+	mempalace.CloseAll()
+	_ = os.RemoveAll(mempalace.MemoryBasePath())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

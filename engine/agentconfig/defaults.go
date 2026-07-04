@@ -40,6 +40,25 @@ var postWriterPrompt string
 // while the delegation depth cap allows it, and ask_task_owner only in
 // delegated (child) sessions.
 
+// memoryTools: curated MemPalace recall/write tools every role gets when the
+// memory layer is available (see engine/aicli/tools/mempalace.go). Scoping is
+// engine-injected, so read+write access is safe for all roles.
+var memoryTools = []string{
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
+}
+
+// plannerMemoryTools: planner-tier additions (CEO/CTO) — invalidating
+// knowledge-graph facts and cross-project recall are direction-setting
+// operations, not specialist ones.
+var plannerMemoryTools = []string{
+	"memory_invalidate",
+	"recall_company",
+}
+
 // ceoTools: the CEO delegates all real work — no file/shell/web access.
 // It can LIST artifacts and VERIFY their content by asking targeted
 // questions (ask_artifact — answered by a separate cheap reader call), but
@@ -56,6 +75,13 @@ var ceoTools = []string{
 	"finish_task",
 	"list_artifacts",
 	"ask_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
+	"memory_invalidate",
+	"recall_company",
 }
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
@@ -75,6 +101,13 @@ var ctoTools = []string{
 	"read_artifact",
 	"ask_artifact",
 	"write_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
+	"memory_invalidate",
+	"recall_company",
 }
 
 // cmoTools: the CMO plans and delegates marketing work, owning strategy docs.
@@ -91,6 +124,11 @@ var cmoTools = []string{
 	"read_artifact",
 	"ask_artifact",
 	"write_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
 }
 
 // implementerTools: full workspace access for agents that write code.
@@ -107,6 +145,11 @@ var implementerTools = []string{
 	"list_artifacts",
 	"read_artifact",
 	"write_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
 }
 
 // qaTools: QA verifies — reads, runs, and drives a browser, but never edits.
@@ -123,6 +166,11 @@ var qaTools = []string{
 	"list_artifacts",
 	"read_artifact",
 	"write_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
 }
 
 // contentTools: research + artifact writing for content/design specialists.
@@ -135,6 +183,11 @@ var contentTools = []string{
 	"list_artifacts",
 	"read_artifact",
 	"write_artifact",
+	"recall_memory",
+	"recall_run",
+	"remember",
+	"memory_facts",
+	"write_diary",
 }
 
 // BuiltinConfigs returns the predefined agent configurations in their

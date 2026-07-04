@@ -236,6 +236,25 @@ else
     fi
 fi
 
+# ── mempalace ────────────────────────────────────────────────────────────────
+# Installed into the same isolated venv as markitdown (see above) so it never
+# fights PEP 668 / a distro-managed system python3. Soft failure: memory is an
+# optional feature, absence must never block app startup.
+MEMPALACE_VERSION="3.5.0"
+if [ -x "$VENV_DIR/bin/mempalace-mcp" ]; then
+    echo "[setup] mempalace: OK"
+elif [ -x "$VENV_DIR/bin/python3" ]; then
+    echo "[setup] mempalace: not found — installing..."
+    install_output=$("$VENV_DIR/bin/python3" -m pip install "mempalace==$MEMPALACE_VERSION" 2>&1)
+    if [ -x "$VENV_DIR/bin/mempalace-mcp" ]; then
+        echo "[setup] mempalace: installed"
+    else
+        add_soft_failure "mempalace" "could not be installed — memory features will be unavailable" "$install_output"
+    fi
+else
+    add_soft_failure "mempalace" "venv unavailable (see markitdown failure above) — memory features will be unavailable" ""
+fi
+
 # ── summary ──────────────────────────────────────────────────────────────────
 if [ -n "$DETAILS" ]; then
     printf '%s\n' "$DETAILS"

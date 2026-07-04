@@ -51,6 +51,30 @@ func (s *Server) InitPendingCodegraphServers(ctx context.Context) {
 	api.InitPendingCodegraphServers(ctx)
 }
 
+// EnsureCompanyPalaces provisions memory palaces for all companies. Runs
+// after the setup script so mempalace availability is known.
+func (s *Server) EnsureCompanyPalaces(ctx context.Context) {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api.EnsureCompanyPalaces(ctx)
+}
+
+// StartMemoryActivityPurge deletes memory-activity rows older than the
+// retention window once a day. Run in a goroutine — blocks until ctx ends.
+func (s *Server) StartMemoryActivityPurge(ctx context.Context) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if err := db.New(s.db).PurgeOldMemoryActivity(ctx); err != nil {
+				log.Printf("memory activity purge failed: %v", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // StartMCPCacheScheduler refreshes the MCP tool cache every 24 hours.
 // Run in a goroutine — blocks until ctx is cancelled.
 func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
@@ -226,6 +250,25 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/agents/{id}/mcp-tool-filters", func(r chi.Router) {
 		r.Get("/", api.GetAgentMCPToolFilters)
 		r.Put("/", api.SetAgentMCPToolFilters)
+	})
+
+	r.Route("/memory", func(r chi.Router) {
+		r.Get("/status", api.GetMemoryStatus)
+		r.Get("/taxonomy", api.GetMemoryTaxonomy)
+		r.Get("/search", api.SearchMemory)
+		r.Get("/graph", api.GetMemoryGraph)
+		r.Get("/drawers", api.ListMemoryDrawers)
+		r.Get("/drawers/{drawerID}", api.GetMemoryDrawer)
+		r.Put("/drawers/{drawerID}", api.UpdateMemoryDrawer)
+		r.Delete("/drawers/{drawerID}", api.DeleteMemoryDrawer)
+		r.Post("/drawers/{drawerID}/supersede", api.SupersedeMemoryDrawer)
+		r.Get("/facts", api.GetMemoryFacts)
+		r.Get("/facts/timeline", api.GetMemoryFactTimeline)
+		r.Post("/facts", api.AddMemoryFact)
+		r.Post("/facts/invalidate", api.InvalidateMemoryFact)
+		r.Get("/activity", api.ListMemoryActivityFeed)
+		r.Get("/agents", api.GetMemoryAgents)
+		r.Post("/maintenance/{job}", api.RunMemoryMaintenance)
 	})
 }
 

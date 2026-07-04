@@ -10,6 +10,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/mempalace"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -68,6 +69,15 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	storage := filesystem.NewStorage(settings.BasePath)
 	if err := storage.WriteCompany(comp); err != nil {
 		log.Printf("Warning: failed to write company metadata: %v", err)
+	}
+
+	// Provision the company's memory palace (no-op when mempalace is absent
+	// or setup hasn't finished yet — the startup sweep and lazy provisioning
+	// in the memory API cover those cases).
+	if mempalace.Available() {
+		if _, err := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); err != nil {
+			log.Printf("Warning: failed to provision memory palace for company %d: %v", comp.ID, err)
+		}
 	}
 
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")

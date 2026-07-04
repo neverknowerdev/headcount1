@@ -55,6 +55,14 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     env.E2E_PAPERCLIP_HOME = e2eHome;
 
     const projectRoot = path.resolve(__dirname, '..');
+
+    // Persistent python venv cache: the setup script installs markitdown and
+    // mempalace into PAPERCLIP_VENV_DIR. The e2e home is recreated per run, so
+    // without this override every run would reinstall them from scratch.
+    if (!env.PAPERCLIP_VENV_DIR) {
+        env.PAPERCLIP_VENV_DIR = path.join(__dirname, '.venv-cache');
+    }
+
     serverProcess = spawn('go', ['run', '.'], {
         cwd: projectRoot,
         env,

@@ -15,6 +15,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/mempalace"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -141,6 +142,14 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		log.Printf("Warning: failed to create codegraph MCP server for project %d: %v", proj.ID, cgErr)
 	} else if req.RepositoryUrl != "" {
 		api.startCodegraphInit(proj.ID, newCGServer.ID, repoPath)
+	}
+
+	// Mine the project workspace into the company's memory palace in the
+	// background (best-effort; requires mempalace + an on-disk repo).
+	if mempalace.Available() {
+		if _, memErr := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); memErr == nil {
+			mempalace.MineProjectAsync(comp, proj, repoPath)
+		}
 	}
 
 	api.logActivity(req.CompanyID, "project_created", int32(proj.ID), "project", "")

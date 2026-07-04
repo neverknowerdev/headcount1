@@ -497,6 +497,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
 
+	// Memory context — resolved after the tool registry is assembled (below);
+	// declared here so the finish_task closure can hook refinement persistence
+	// and the auto-diary once the run completes.
+	var memSess *memorySession
+	var mpProxy *tools.MempalaceProxy
+
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
@@ -523,6 +529,23 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		})
 		if cErr == nil {
 			e.hub.BroadcastEvent("comment_created", comment)
+		}
+
+		// Memory hooks: persist plan-mode refinements and write an auto-diary
+		// when the agent didn't leave one. Non-blocking and best-effort — a
+		// memory hiccup must never affect run completion.
+		if memSess != nil {
+			finishedTask := t
+			go func() {
+				bgCtx, bgCancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer bgCancel()
+				if mode == "plan" {
+					e.storeRefinementMemory(bgCtx, memSess, finishedTask, run.ID, resultDetails)
+				}
+				if mpProxy == nil || !mpProxy.DiaryWritten() {
+					e.autoDiary(memSess, finishedTask, status, resultDetails)
+				}
+			}()
 		}
 		return nil
 	}))
@@ -747,6 +770,31 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
+	// Wire the MemPalace memory proxy (one palace per company). Registered
+	// before the AllowedTools filter so role configs gate memory access; when
+	// mempalace is missing or the palace isn't ready this is a silent no-op.
+	agentDisplayName := agent.Name
+	if agentCfg != nil && agentCfg.Name != "" {
+		agentDisplayName = agentCfg.Name
+	}
+	memSess = e.resolveMemorySession(ctx, company, task, run.ID, agentDisplayName)
+	if memSess != nil {
+		mpProxy = tools.NewMempalaceProxy(memSess.server, memSess.scope,
+			e.memoryActivityRecorder(company.ID, task.ID, run.ID, agentDisplayName))
+		e.logInfo(proxyLogger, mpProxy.RegisterAll(registry))
+		defer mpProxy.Close()
+
+		systemPrompt += e.memoryPromptSection(company, memSess.scope)
+
+		// Plan-mode (refinement) seeds get a recall digest of prior relevant
+		// work so planning starts from institutional memory, not a cold start.
+		if mode == "plan" && len(initialMessages) > 0 {
+			if recall := e.planModeRecall(ctx, memSess, task); recall != "" {
+				initialMessages[0].Content += recall
+			}
+		}
+	}
+
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
@@ -833,14 +881,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Wire the proxy logger as the agent's RunLogger so request/response entries
 	// appear in the log file and the DB (identical format to the gateway).
-	// The display name comes from the agent CONFIG when set — delegated
-	// sessions reuse the parent's DB agent row, and labeling every
-	// sub-session with the parent's name ("CEO") made log forensics
-	// unreliable.
-	agentDisplayName := agent.Name
-	if agentCfg != nil && agentCfg.Name != "" {
-		agentDisplayName = agentCfg.Name
-	}
+	// The display name comes from the agent CONFIG when set (agentDisplayName,
+	// resolved above with the memory proxy) — delegated sessions reuse the
+	// parent's DB agent row, and labeling every sub-session with the parent's
+	// name ("CEO") made log forensics unreliable.
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,

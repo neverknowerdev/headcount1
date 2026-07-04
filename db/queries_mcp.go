@@ -37,9 +37,9 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPSer
 			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
 		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
-		// for codegraph servers (ProjectID set) which are managed by init_status,
-		// not by accounts.
-		if servers[i].Transport != "builtin" && servers[i].ProjectID == nil {
+		// for codegraph servers (ProjectID set) and mempalace palace servers,
+		// which are managed by init_status, not by accounts.
+		if servers[i].Transport != "builtin" && servers[i].ProjectID == nil && !strings.HasPrefix(servers[i].Name, "mempalace-") {
 			servers[i].Enabled = len(servers[i].Accounts) > 0
 		}
 		// Check whether a dedicated CLI binary is installed.
@@ -54,6 +54,13 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPSer
 		}
 	}
 	return servers, nil
+}
+
+// GetMCPServerByName returns the MCP server with the given unique name slug.
+func (q *Queries) GetMCPServerByName(ctx context.Context, name string) (MCPServer, error) {
+	var s MCPServer
+	err := q.db.WithContext(ctx).Where("name = ?", name).First(&s).Error
+	return s, err
 }
 
 func (q *Queries) GetMCPServer(ctx context.Context, id int32) (MCPServer, error) {

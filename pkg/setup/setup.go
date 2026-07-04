@@ -30,8 +30,9 @@ type Failure struct {
 }
 
 var (
-	ready         atomic.Bool
-	finished      atomic.Bool
+	ready          atomic.Bool
+	mempalaceReady atomic.Bool
+	finished       atomic.Bool
 	errStore      atomic.Value // holds string
 	warnStore     atomic.Value // holds string
 	failuresStore atomic.Value // holds []Failure — blocking failures
@@ -54,6 +55,41 @@ func Run() error {
 func MarkitdownAvailable() bool {
 	once.Do(runOnce)
 	return ready.Load()
+}
+
+// MempalaceAvailable reports whether the setup script found/installed the
+// mempalace memory engine, independent of other (unrelated) setup failures.
+// Blocks until the setup script has run once.
+func MempalaceAvailable() bool {
+	once.Do(runOnce)
+	return mempalaceReady.Load()
+}
+
+// MempalaceReadyNonBlocking reports mempalace availability without triggering
+// or waiting for the setup script — for request-path checks that must not
+// block while setup is still running in the background.
+func MempalaceReadyNonBlocking() bool {
+	return mempalaceReady.Load()
+}
+
+// MempalaceMCPPath returns the path of the mempalace-mcp server binary
+// installed by the setup script. On Linux/macOS it lives in the dedicated
+// virtualenv (see PythonInterpreter); on Windows it is installed into the
+// system python and resolved via PATH.
+func MempalaceMCPPath() string {
+	if runtime.GOOS == "windows" {
+		return "mempalace-mcp"
+	}
+	return filepath.Join(venvDir(), "bin", "mempalace-mcp")
+}
+
+// MempalaceCLIPath returns the path of the mempalace CLI binary (lifecycle
+// operations: init, mine, sweep, repair, wake-up).
+func MempalaceCLIPath() string {
+	if runtime.GOOS == "windows" {
+		return "mempalace"
+	}
+	return filepath.Join(venvDir(), "bin", "mempalace")
 }
 
 // StartupError returns a human-readable description of the setup failure, or
@@ -108,6 +144,12 @@ func PythonInterpreter() string {
 }
 
 func venvDir() string {
+	// PAPERCLIP_VENV_DIR lets deployments (and the e2e harness) point the
+	// dependency venv at a persistent location so python installs survive
+	// across ephemeral home directories.
+	if v := os.Getenv("PAPERCLIP_VENV_DIR"); v != "" {
+		return v
+	}
 	return filepath.Join(db.PaperclipHome(), "venv")
 }
 
@@ -152,6 +194,12 @@ func runOnce() {
 	// whether other dependencies (e.g. github-mcp-server) failed to install.
 	if strings.Contains(output, "[setup] markitdown: OK") || strings.Contains(output, "[setup] markitdown: installed") {
 		ready.Store(true)
+	}
+
+	// mempalace availability follows the same script-output contract. It is a
+	// soft dependency: memory features simply stay off when it's absent.
+	if strings.Contains(output, "[setup] mempalace: OK") || strings.Contains(output, "[setup] mempalace: installed") {
+		mempalaceReady.Store(true)
 	}
 
 	if w := extractSoftFailures(output); w != "" {
