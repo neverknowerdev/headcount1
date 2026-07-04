@@ -489,93 +489,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
-	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
-	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
-	pastRuns, _ := e.q.ListCompletedRunsByTask(ctx, task.ID)
-	// Build initial messages: task description as the first user message,
-	// then past run results and human/agent comments interleaved chronologically.
-	// Delegated subtasks carry no raw user input — their description IS the
-	// refined description written by the orchestrator.
-	taskDesc := task.Description
-	if taskDesc == "" {
-		taskDesc = task.RefinedDescription
-	}
-	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, taskDesc, mode)
-	if len(attachments) > 0 {
-		taskContent += "\nAttachments:"
-		for _, a := range attachments {
-			if strings.HasPrefix(a.MimeType, "image/") {
-				taskContent += fmt.Sprintf("\n- %s (image)", a.Filename)
-			} else {
-				taskContent += fmt.Sprintf("\n- %s", a.Filename)
-			}
-		}
-	}
-
-	type timelineEntry struct {
-		t    time.Time
-		role string
-		text string
-	}
-	var timeline []timelineEntry
-
-	// Add past completed runs as compact JSON agent messages (description only, not explanation).
-	for _, r := range pastRuns {
-		ts := r.StartedAt
-		if r.EndedAt != nil {
-			ts = *r.EndedAt
-		}
-		msg := fmt.Sprintf(`{"run_id":%d,"completed_at":"%s","result":%q}`,
-			r.ID, ts.Format(time.RFC3339), r.ResultDescription)
-		timeline = append(timeline, timelineEntry{t: ts, role: "assistant", text: msg})
-	}
-
-	// Add human comments and non-task_done agent comments; format status changes readably.
-	for _, c := range comments {
-		if c.AuthorType == "agent" && c.CommentType == "task_done" {
-			continue // already represented by the run result JSON above
-		}
-		role := "user"
-		if c.AuthorType == "agent" || c.AuthorType == "system" {
-			role = "assistant"
-		}
-		text := c.Content
-		switch c.CommentType {
-		case "status_change":
-			var meta struct {
-				From string `json:"from"`
-				To   string `json:"to"`
-			}
-			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
-				actor := "User"
-				if c.AuthorType != "human" {
-					actor = "System"
-				}
-				text = fmt.Sprintf("[%s changed task status: %s → %s]", actor, meta.From, meta.To)
-			}
-		case "artifact_created":
-			var meta struct {
-				Filename string `json:"filename"`
-			}
-			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
-				text = fmt.Sprintf(`[Artifact created: "%s"]`, meta.Filename)
-			}
-		}
-		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: text})
-	}
-
-
-	// Sort chronologically.
-	for i := 1; i < len(timeline); i++ {
-		for j := i; j > 0 && timeline[j].t.Before(timeline[j-1].t); j-- {
-			timeline[j], timeline[j-1] = timeline[j-1], timeline[j]
-		}
-	}
-
-	initialMessages := []aicli.Message{{Role: "user", Content: taskContent}}
-	for _, entry := range timeline {
-		initialMessages = append(initialMessages, aicli.Message{Role: entry.role, Content: entry.text})
-	}
+	initialMessages := e.buildInitialMessages(ctx, task, mode)
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
@@ -583,7 +497,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Track whether finish_task was called so we can force it if not.
 	var taskFinished bool
 
-	registry.Register(tools.NewFinishTask(func(finCtx context.Context, status, finishStatus, resultDetails string) error {
+	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
@@ -614,6 +528,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}))
 
 	registry.Register(tools.NewWriteArtifactFile(func(wCtx context.Context, filename, content, description string) (string, error) {
+		// Artifacts are flat files in the shared artifacts dir: a filename
+		// with path separators (or "..") could escape it.
+		if filename != filepath.Base(filename) || filename == "." || filename == ".." {
+			return "", fmt.Errorf("invalid artifact filename %q — use a plain filename without directories", filename)
+		}
 		if err := os.MkdirAll(artifactDir, 0755); err != nil {
 			return "", fmt.Errorf("could not create artifact directory: %w", err)
 		}
@@ -714,7 +633,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// call — the artifact never enters this session's context, only the short
 	// answer does. Uses the provider's cheap utility model when configured.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
-		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question)
+		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
 	// The set of sub-agents an agent may delegate to comes from its config's
@@ -746,6 +665,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return e.waitForSubtaskEvent(aCtx, state, rootTaskID, pending, proxyLogger, run)
 		}))
 	}
+
+	// create_task: plan new TOP-LEVEL board tasks (gated to the CEO via its
+	// tool allowlist). Unlike create_subtask it neither runs nor blocks.
+	registry.Register(tools.NewCreateTask(func(cCtx context.Context, p tools.CreateTaskParams) (string, error) {
+		return e.createBoardTask(cCtx, task, agent.ID, company, p)
+	}))
 
 	registry.Register(tools.NewAskHuman(func(qCtx context.Context, question string) (string, error) {
 		return e.askHuman(qCtx, task.ID, run.ID, question)
@@ -957,12 +882,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
-
 	// If finish_task was not called, force a follow-up turn.
 	if agentErr == nil && !taskFinished {
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
-			"You must call finish_task before ending. Choose the appropriate status: 'in-review' if done, 'blocked' if stuck, 'done' if fully complete, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
+			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 		}
@@ -996,6 +920,100 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
 
 	return status
+}
+
+// buildInitialMessages assembles a session's conversation seed: the task
+// description (plus attachment names) as the first user message, followed by
+// past run results and human/agent comments interleaved chronologically.
+// Delegated subtasks carry no raw user input — their description IS the
+// refined description written by the task owner.
+func (e *NativeEngine) buildInitialMessages(ctx context.Context, task db.Task, mode string) []aicli.Message {
+	comments, _ := e.q.ListCommentsByTask(ctx, task.ID)
+	attachments, _ := e.q.ListAttachmentsByTask(ctx, task.ID)
+	pastRuns, _ := e.q.ListCompletedRunsByTask(ctx, task.ID)
+
+	taskDesc := task.Description
+	if taskDesc == "" {
+		taskDesc = task.RefinedDescription
+	}
+	taskContent := fmt.Sprintf("Task: %s\nDescription: %s\nMode: %s", task.Title, taskDesc, mode)
+	if len(attachments) > 0 {
+		taskContent += "\nAttachments:"
+		for _, a := range attachments {
+			if strings.HasPrefix(a.MimeType, "image/") {
+				taskContent += fmt.Sprintf("\n- %s (image)", a.Filename)
+			} else {
+				taskContent += fmt.Sprintf("\n- %s", a.Filename)
+			}
+		}
+	}
+
+	type timelineEntry struct {
+		t    time.Time
+		role string
+		text string
+	}
+	var timeline []timelineEntry
+
+	// Past completed runs as compact JSON agent messages (description only,
+	// not the full explanation).
+	for _, r := range pastRuns {
+		ts := r.StartedAt
+		if r.EndedAt != nil {
+			ts = *r.EndedAt
+		}
+		msg := fmt.Sprintf(`{"run_id":%d,"completed_at":"%s","result":%q}`,
+			r.ID, ts.Format(time.RFC3339), r.ResultDescription)
+		timeline = append(timeline, timelineEntry{t: ts, role: "assistant", text: msg})
+	}
+
+	// Human comments and non-task_done agent comments; status changes and
+	// artifact notifications get a readable rendering.
+	for _, c := range comments {
+		if c.AuthorType == "agent" && c.CommentType == "task_done" {
+			continue // already represented by the run result JSON above
+		}
+		role := "user"
+		if c.AuthorType == "agent" || c.AuthorType == "system" {
+			role = "assistant"
+		}
+		text := c.Content
+		switch c.CommentType {
+		case "status_change":
+			var meta struct {
+				From string `json:"from"`
+				To   string `json:"to"`
+			}
+			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
+				actor := "User"
+				if c.AuthorType != "human" {
+					actor = "System"
+				}
+				text = fmt.Sprintf("[%s changed task status: %s → %s]", actor, meta.From, meta.To)
+			}
+		case "artifact_created":
+			var meta struct {
+				Filename string `json:"filename"`
+			}
+			if jsonErr := json.Unmarshal([]byte(c.Content), &meta); jsonErr == nil {
+				text = fmt.Sprintf(`[Artifact created: "%s"]`, meta.Filename)
+			}
+		}
+		timeline = append(timeline, timelineEntry{t: c.CreatedAt, role: role, text: text})
+	}
+
+	// Sort chronologically.
+	for i := 1; i < len(timeline); i++ {
+		for j := i; j > 0 && timeline[j].t.Before(timeline[j-1].t); j-- {
+			timeline[j], timeline[j-1] = timeline[j-1], timeline[j]
+		}
+	}
+
+	messages := []aicli.Message{{Role: "user", Content: taskContent}}
+	for _, entry := range timeline {
+		messages = append(messages, aicli.Message{Role: entry.role, Content: entry.text})
+	}
+	return messages
 }
 
 // askHuman posts the agent's question as an ask_user comment and blocks until
@@ -1270,17 +1288,114 @@ func (e *NativeEngine) buildSubtaskReply(
 	return reply, nil
 }
 
+// createBoardTask is the callback behind the create_task tool: it creates a
+// new top-level task on the board (mirroring the API's CreateTask endpoint)
+// and, when created in "to-do", kicks off its execution as an independent
+// root run — exactly as if a human had moved the card there.
+func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, agentID int32, company db.Company, p tools.CreateTaskParams) (string, error) {
+	status := p.Status
+	if status == "" {
+		status = "backlog"
+	}
+	if status != "backlog" && status != "to-do" {
+		return "", fmt.Errorf("status must be \"backlog\" or \"to-do\", got %q", status)
+	}
+	priority := p.Priority
+	if priority == "" {
+		priority = "Normal"
+	}
+	taskType := p.TaskType
+	if taskType == "" {
+		taskType = db.TaskTypePlanAndImplement
+	}
+	if p.AgentConfigName != "" && e.agentFactory != nil {
+		if _, err := e.agentFactory.GetConfig(p.AgentConfigName); err != nil {
+			return "", fmt.Errorf("unknown agent config %q", p.AgentConfigName)
+		}
+	}
+
+	sprintID := creator.SprintID
+	if p.SprintID != 0 {
+		sprintID = p.SprintID
+	}
+	projectID := creator.ProjectID
+	if p.ProjectID != 0 {
+		project, err := e.q.GetProject(ctx, p.ProjectID)
+		if err != nil {
+			return "", fmt.Errorf("project %d not found", p.ProjectID)
+		}
+		if project.CompanyID != company.ID {
+			return "", fmt.Errorf("project %d belongs to another company", p.ProjectID)
+		}
+		pid := project.ID
+		projectID = &pid
+	}
+	var dueDate *time.Time
+	if p.DueDate != "" {
+		t, err := time.Parse(time.RFC3339, p.DueDate)
+		if err != nil {
+			return "", fmt.Errorf("invalid due_date %q — use RFC3339, e.g. 2026-08-01T00:00:00Z", p.DueDate)
+		}
+		dueDate = &t
+	}
+
+	newTask, err := e.q.CreateTask(ctx, db.Task{
+		CompanyID:       company.ID,
+		ProjectID:       projectID,
+		SprintID:        sprintID,
+		AgentID:         &agentID,
+		Title:           p.Title,
+		Description:     p.Description,
+		TaskType:        taskType,
+		Status:          status,
+		Priority:        priority,
+		DueDate:         dueDate,
+		AgentConfigName: p.AgentConfigName,
+	})
+	if err != nil {
+		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+	e.hub.BroadcastEvent("task_created", newTask)
+
+	// Mirror the API endpoint's filesystem bookkeeping so the task shows up
+	// in exports/sync exactly like a human-created one.
+	fsMgr := filesystem.NewManager(loadSettings().BasePath)
+	fsMgr.SaveTask(company, newTask)
+
+	if status == "to-do" {
+		// Independent root run, same as a human moving the card to "to-do".
+		newTaskID := newTask.ID
+		go func() {
+			if perr := e.ProcessTask(context.Background(), newTaskID); perr != nil {
+				fmt.Printf("Warning: failed to start created task %d: %v\n", newTaskID, perr)
+			}
+		}()
+	}
+
+	ref := newTask.RefKey
+	if ref == "" {
+		ref = fmt.Sprintf("#%d", newTask.ID)
+	}
+	reply := fmt.Sprintf("Task %s created on the board: %q (status %s, priority %s).", ref, newTask.Title, status, priority)
+	if status == "to-do" {
+		reply += " It starts executing independently of this session."
+	}
+	return reply, nil
+}
+
 // askArtifact answers a question about one artifact via a separate one-shot
 // LLM call, so the artifact's content never enters the asking agent's
 // context — only the short answer is returned as the tool result. It uses the
 // provider's cheap UtilityModel when configured, falling back to the asking
 // session's model, and bills the reader call's tokens to the asking run.
+// Each reader call is logged to its own file in the run's log folder.
 func (e *NativeEngine) askArtifact(
 	ctx context.Context,
 	runID, rootTaskID int32,
 	provider db.LLMProvider,
 	sessionModel string,
 	filename, question string,
+	logger *logging.ProxyLogger,
 ) (string, error) {
 	arts, err := e.q.ListArtifactsByTaskTree(ctx, rootTaskID)
 	if err != nil {
@@ -1341,7 +1456,39 @@ Question: %s`, filename, content, truncNote, question)
 	if answer == "" {
 		return "", fmt.Errorf("artifact reader returned an empty answer")
 	}
+	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
+}
+
+// logAskArtifact persists one ask_artifact reader exchange to its own file in
+// the run's log folder (alongside main.log / session-N.log), so the short
+// answer in the session log can always be traced back to the full reader
+// prompt and the exact artifact content it saw.
+func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
+	if logger == nil {
+		return
+	}
+	logName := fmt.Sprintf("ask-artifact-%d-%d.log", runID, time.Now().UnixMilli())
+	logPath := filepath.Join(filepath.Dir(logger.FilePath()), logName)
+	content := fmt.Sprintf(`=== ask_artifact ===
+Time: %s
+Asking run: #%d
+Artifact: %s
+Reader model: %s
+Question: %s
+Usage: prompt_tokens=%d completion_tokens=%d
+
+--- Reader prompt (artifact content as sent) ---
+%s
+
+--- Answer ---
+%s
+`, time.Now().UTC().Format(time.RFC3339), runID, filename, model, question, promptTokens, completionTokens, prompt, answer)
+	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
+		e.logInfo(logger, fmt.Sprintf("Warning: failed to write ask_artifact log: %v", err))
+		return
+	}
+	e.logInfo(logger, fmt.Sprintf("ask_artifact %q (model %s) — full exchange in %s", filename, model, logName))
 }
 
 // recordSubtaskQA stores an ask_task_owner question or the owner's answer as
@@ -1383,9 +1530,9 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 	}
 	e.hub.BroadcastEvent("comment_created", comment)
 	e.hub.BroadcastEvent("subtask_completed", map[string]interface{}{
-		"subtask_id":  subtask.ID,
-		"parent_id":   *subtask.ParentID,
-		"status":      status,
+		"subtask_id":    subtask.ID,
+		"parent_id":     *subtask.ParentID,
+		"status":        status,
 		"subtask_title": subtask.Title,
 	})
 }
@@ -1531,4 +1678,3 @@ Changes:
 
 	return msg, nil
 }
-

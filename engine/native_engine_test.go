@@ -711,6 +711,105 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	assert.NotContains(t, answer, "- m1", "raw artifact content must not leak into the asking session")
 }
 
+// TestNativeEngineCreateTaskOnBoard verifies create_task: a new TOP-LEVEL
+// task appears on the board with its own ref key and the requested params,
+// and nothing is executed for it while it sits in the backlog.
+func TestNativeEngineCreateTaskOnBoard(t *testing.T) {
+	var count atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch count.Add(1) {
+		case 1:
+			json.NewEncoder(w).Encode(toolCallJSON("ct-001", "create_task",
+				`{"title":"Plan marketing launch","description":"Prepare the launch plan for Q4.","priority":"High","due_date":"2026-09-01T00:00:00Z"}`))
+		default:
+			json.NewEncoder(w).Encode(toolCallJSON("ct-002", "finish_task",
+				`{"task_status":"done","finish_status":"Follow-up task planned."}`))
+		}
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	q := db.New(database)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	// The new task is top-level: own ref key, no parent, requested params.
+	var created db.Task
+	require.NoError(t, database.First(&created, "title = ?", "Plan marketing launch").Error)
+	assert.Nil(t, created.ParentID, "create_task must create a TOP-LEVEL task")
+	assert.Equal(t, "backlog", created.Status)
+	assert.Equal(t, "High", created.Priority)
+	assert.Equal(t, "Prepare the launch plan for Q4.", created.Description)
+	assert.Regexp(t, `^[A-Z]+-\d+$`, created.RefKey, "top-level tasks get a company-level ref key")
+	require.NotNil(t, created.DueDate)
+	assert.Equal(t, 2026, created.DueDate.Year())
+
+	// Backlog tasks are not executed.
+	var runCount int64
+	require.NoError(t, database.Model(&db.Run{}).Where("task_id = ?", created.ID).Count(&runCount).Error)
+	assert.Zero(t, runCount, "a backlog task must not start running")
+}
+
+// TestNativeEngineCreateTaskToDoStartsRun verifies that a task created via
+// create_task with status "to-do" starts executing as an independent root
+// run, decoupled from the creating session.
+func TestNativeEngineCreateTaskToDoStartsRun(t *testing.T) {
+	var creatorCalls atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		bodyBytes, _ := io.ReadAll(r.Body)
+		body := string(bodyBytes)
+		w.Header().Set("Content-Type", "application/json")
+		// The spawned task's session carries its own task header in the first
+		// user message; the creator session never has that exact string.
+		if strings.Contains(body, "Task: Spawned work") {
+			json.NewEncoder(w).Encode(toolCallJSON("sp-001", "finish_task",
+				`{"task_status":"done","finish_status":"Spawned work finished."}`))
+			return
+		}
+		switch creatorCalls.Add(1) {
+		case 1:
+			json.NewEncoder(w).Encode(toolCallJSON("ct-101", "create_task",
+				`{"title":"Spawned work","description":"Do it now.","status":"to-do"}`))
+		default:
+			json.NewEncoder(w).Encode(toolCallJSON("ct-102", "finish_task",
+				`{"task_status":"done","finish_status":"Spawned and moving on."}`))
+		}
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	q := db.New(database)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+
+	var created db.Task
+	require.NoError(t, database.First(&created, "title = ?", "Spawned work").Error)
+	assert.Nil(t, created.ParentID)
+
+	// The spawned task runs to completion on its own root run.
+	spawnedRunID := waitForRunCreated(t, database, created.ID, 10*time.Second)
+	spawnedRun := waitForRunDone(t, q, spawnedRunID, 30*time.Second)
+	assert.Equal(t, "completed", spawnedRun.Status)
+	assert.Nil(t, spawnedRun.ParentRunID, "created tasks run as independent root runs")
+	require.Eventually(t, func() bool {
+		updated, err := q.GetTask(context.Background(), created.ID)
+		return err == nil && updated.Status == "done"
+	}, 10*time.Second, 100*time.Millisecond, "spawned task should finish as done")
+}
+
 // lastToolResult extracts the content of the last role:"tool" message in an
 // OpenAI-style chat completions request body.
 func lastToolResult(body string) string {

@@ -38,9 +38,9 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(&struct {
 		Alias
-		IsLatest    bool          `json:"is_latest"`
-		LogEntries  []interface{} `json:"log_entries"`
-		TokenStats  interface{}   `json:"token_stats"`
+		IsLatest   bool          `json:"is_latest"`
+		LogEntries []interface{} `json:"log_entries"`
+		TokenStats interface{}   `json:"token_stats"`
 	}{
 		Alias:      Alias(r),
 		IsLatest:   r.IsLatest,

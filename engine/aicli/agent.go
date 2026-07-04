@@ -15,7 +15,7 @@ import (
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
 var mcpDispatcherTools = map[string]bool{
-	"call_mcp_tool":    true,
+	"call_mcp_tool":     true,
 	"discover_mcp_tool": true,
 }
 
@@ -97,34 +97,34 @@ type Agent struct {
 	ReasoningLevel string // "low", "medium", "max" → mapped to API values
 	// MCPListingCostPerTurn is the estimated token cost of the MCP CompactListing
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
-	MCPListingCostPerTurn    int
-	MCPServerListingCosts    map[string]int
+	MCPListingCostPerTurn int
+	MCPServerListingCosts map[string]int
 	// TerminalTools are tool names that end the run: once such a tool
 	// executes successfully, the loop returns without another LLM call.
-	TerminalTools            map[string]bool
-	q                        *db.Queries
-	runID                    int32
-	logger                   RunLogger
+	TerminalTools map[string]bool
+	q             *db.Queries
+	runID         int32
+	logger        RunLogger
 }
 
 // Config collects all the dependencies needed to create an Agent.
 type Config struct {
-	Client         *Client
-	Registry       *Registry
-	Mode           Mode
-	ProviderName   string
-	AgentName      string
+	Client       *Client
+	Registry     *Registry
+	Mode         Mode
+	ProviderName string
+	AgentName    string
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
-	ReasoningLevel           string
-	MCPListingCostPerTurn    int
-	MCPServerListingCosts    map[string]int
+	ReasoningLevel        string
+	MCPListingCostPerTurn int
+	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
 	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
-	TerminalTools            []string
-	Queries                  *db.Queries
-	RunID                    int32
-	Logger                   RunLogger
+	TerminalTools []string
+	Queries       *db.Queries
+	RunID         int32
+	Logger        RunLogger
 }
 
 // New creates an Agent from a Config.

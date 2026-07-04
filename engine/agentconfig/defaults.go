@@ -50,6 +50,7 @@ var postWriterPrompt string
 var ceoTools = []string{
 	"create_subtask",
 	"answer_subtask_question",
+	"create_task",
 	"ask_human",
 	"report_status",
 	"finish_task",

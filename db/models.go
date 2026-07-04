@@ -27,31 +27,31 @@ type Project struct {
 }
 
 type Sprint struct {
-	ID          int32      `json:"id" gorm:"primaryKey"`
-	CompanyID   int32      `json:"company_id" gorm:"not null"`
-	Company     Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Name        string     `json:"name" gorm:"not null"`
-	Goal        string     `json:"goal"`
-	StartDate   *time.Time `json:"start_date"`
-	EndDate     *time.Time `json:"end_date"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID        int32      `json:"id" gorm:"primaryKey"`
+	CompanyID int32      `json:"company_id" gorm:"not null"`
+	Company   Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Name      string     `json:"name" gorm:"not null"`
+	Goal      string     `json:"goal"`
+	StartDate *time.Time `json:"start_date"`
+	EndDate   *time.Time `json:"end_date"`
+	CreatedAt time.Time  `json:"created_at"`
+	UpdatedAt time.Time  `json:"updated_at"`
 }
 
 type LLMProvider struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	Name            string    `json:"name" gorm:"not null"`
-	BaseUrl         string    `json:"base_url" gorm:"not null"`
-	ApiKey          string    `json:"api_key" gorm:"not null"`
-	ProviderType    string    `json:"provider_type"`
-	DefaultModel    string    `json:"default_model"`
-	SupportedModels string    `json:"supported_models"`
+	ID              int32  `json:"id" gorm:"primaryKey"`
+	Name            string `json:"name" gorm:"not null"`
+	BaseUrl         string `json:"base_url" gorm:"not null"`
+	ApiKey          string `json:"api_key" gorm:"not null"`
+	ProviderType    string `json:"provider_type"`
+	DefaultModel    string `json:"default_model"`
+	SupportedModels string `json:"supported_models"`
 	// UtilityModel is a cheap model used for lightweight internal calls
 	// (artifact Q&A, commit message generation). Empty = fall back to the
 	// session's resolved model.
-	UtilityModel string `json:"utility_model"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	UtilityModel string    `json:"utility_model"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Agent struct {
@@ -89,37 +89,37 @@ const (
 )
 
 type Task struct {
-	ID              int32      `json:"id" gorm:"primaryKey"`
-	CompanyID       int32      `json:"company_id" gorm:"not null"`
-	Company         Company    `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	ProjectID       *int32     `json:"project_id"`
-	Project         *Project   `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
-	SprintID        int32      `json:"sprint_id" gorm:"not null"`
-	Sprint          Sprint     `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
-	AgentID         *int32     `json:"agent_id"`
-	Agent           *Agent     `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
-	ParentID        *int32     `json:"parent_id"`
-	Parent          *Task      `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
-	Title    string `json:"title" gorm:"not null"`
-	TaskType string `json:"task_type" gorm:"not null;default:'plan and implement'"`
+	ID        int32    `json:"id" gorm:"primaryKey"`
+	CompanyID int32    `json:"company_id" gorm:"not null"`
+	Company   Company  `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID *int32   `json:"project_id"`
+	Project   *Project `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
+	SprintID  int32    `json:"sprint_id" gorm:"not null"`
+	Sprint    Sprint   `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
+	AgentID   *int32   `json:"agent_id"`
+	Agent     *Agent   `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
+	ParentID  *int32   `json:"parent_id"`
+	Parent    *Task    `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
+	Title     string   `json:"title" gorm:"not null"`
+	TaskType  string   `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	// Description holds the user's original input, untouched. For delegated
 	// subtasks the owner's instructions land in RefinedDescription instead,
 	// shown separately in the UI.
-	Description        string     `json:"description"`
+	Description string `json:"description"`
 	// RefKey is the human-readable task key: "DEC-50" for a main task,
 	// "DEC-50-1", "DEC-50-2", … for its subtasks. Set on creation.
 	RefKey             string     `json:"ref_key" gorm:"index"`
 	RefinedDescription string     `json:"refined_description" gorm:"type:text;default:''"`
 	AcceptanceCriteria string     `json:"acceptance_criteria" gorm:"type:text;default:''"`
 	TestCases          string     `json:"test_cases" gorm:"type:text;default:''"`
-	Priority        string     `json:"priority" gorm:"not null;default:'Normal'"`
-	Status          string     `json:"status" gorm:"not null;default:'backlog'"`
-	DueDate         *time.Time `json:"due_date"`
-	IsArchived      bool       `json:"is_archived" gorm:"not null;default:false"`
-	RunID           *int32     `json:"run_id"`
-	AgentConfigName string     `json:"agent_config_name" gorm:"default:''"`
-	CreatedAt       time.Time  `json:"created_at"`
-	UpdatedAt       time.Time  `json:"updated_at"`
+	Priority           string     `json:"priority" gorm:"not null;default:'Normal'"`
+	Status             string     `json:"status" gorm:"not null;default:'backlog'"`
+	DueDate            *time.Time `json:"due_date"`
+	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
+	RunID              *int32     `json:"run_id"`
+	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type Comment struct {
@@ -148,14 +148,14 @@ type Attachment struct {
 }
 
 type Run struct {
-	ID                int32      `json:"id" gorm:"primaryKey"`
-	TaskID            int32      `json:"task_id" gorm:"not null"`
-	Task              Task       `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
-	AgentID           int32      `json:"agent_id" gorm:"not null"`
-	Agent             Agent      `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
+	ID      int32 `json:"id" gorm:"primaryKey"`
+	TaskID  int32 `json:"task_id" gorm:"not null"`
+	Task    Task  `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	AgentID int32 `json:"agent_id" gorm:"not null"`
+	Agent   Agent `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
 	// Name is the human-readable run key: "<task ref>-<AGENTSHORT>[-n]",
 	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". Set when the run starts.
-	Name              string     `json:"name" gorm:"index"`
+	Name string `json:"name" gorm:"index"`
 	// ParentRunID links a delegated session to the run that spawned it.
 	// RootRunID points at the top-level (CEO) run of the whole execution tree;
 	// it equals ID for root runs so log files can be grouped per main run.
@@ -170,7 +170,7 @@ type Run struct {
 	LogFilePath       string     `json:"log_file_path"`
 	LogContent        string     `json:"log_content"`
 	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
-	TokenStats        string     `json:"token_stats" gorm:"type:text"`         // JSON object with aggregated token counts
+	TokenStats        string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
 	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
 	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
 	StartedAt         time.Time  `json:"started_at"`
@@ -212,19 +212,19 @@ type MCPServer struct {
 	Args          string       `json:"args" gorm:"type:text"`
 	URL           string       `json:"url"`
 	Headers       string       `json:"headers" gorm:"type:text"`
-	AuthType      string       `json:"auth_type"`                         // "none", "bearer", "credentials-file"
+	AuthType      string       `json:"auth_type"`                            // "none", "bearer", "credentials-file"
 	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text"` // legacy; migrated to MCPAccount on startup
 	AuthEnvVar    string       `json:"auth_env_var"`
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
 	InitStatus    string       `json:"init_status" gorm:"default:''"` // codegraph lifecycle: "initializing", "ready", "error: ..."
-	DepsInstalled  bool         `json:"deps_installed" gorm:"-"` // computed at runtime
-	Deps           string       `json:"deps" gorm:"type:text"`   // JSON array of npm packages to pre-install, e.g. ["@modelcontextprotocol/server-gdrive"]
-	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
-	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
-	WorkDir        string       `json:"work_dir"` // working directory for stdio servers (e.g. project repo path)
-	ProjectID      *int32       `json:"project_id" gorm:"index"`
-	Project        *Project     `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	DepsInstalled bool         `json:"deps_installed" gorm:"-"`       // computed at runtime
+	Deps          string       `json:"deps" gorm:"type:text"`         // JSON array of npm packages to pre-install, e.g. ["@modelcontextprotocol/server-gdrive"]
+	Enabled       bool         `json:"enabled" gorm:"not null;default:true"`
+	Builtin       bool         `json:"builtin" gorm:"not null;default:false"`
+	WorkDir       string       `json:"work_dir"` // working directory for stdio servers (e.g. project repo path)
+	ProjectID     *int32       `json:"project_id" gorm:"index"`
+	Project       *Project     `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
 	Accounts      []MCPAccount `json:"accounts,omitempty" gorm:"foreignKey:MCPServerID"`
 	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt     time.Time    `json:"created_at"`
@@ -279,18 +279,18 @@ type AgentMCPToolFilter struct {
 }
 
 type Artifact struct {
-	ID        int32     `json:"id" gorm:"primaryKey"`
-	CompanyID *int32    `json:"company_id" gorm:"index"`
-	Company   *Company  `json:"company,omitempty" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	ProjectID *int32    `json:"project_id" gorm:"index"`
-	Project   *Project  `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
-	TaskID    int32     `json:"task_id" gorm:"not null"`
-	Task      Task      `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
-	RunID     int32     `json:"run_id" gorm:"not null"`
-	Run       Run       `json:"run" gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE;"`
-	Filename  string    `json:"filename" gorm:"not null"`
-	FilePath  string    `json:"file_path" gorm:"not null"`
-	Content   string    `json:"content" gorm:"type:text"`
+	ID        int32    `json:"id" gorm:"primaryKey"`
+	CompanyID *int32   `json:"company_id" gorm:"index"`
+	Company   *Company `json:"company,omitempty" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID *int32   `json:"project_id" gorm:"index"`
+	Project   *Project `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	TaskID    int32    `json:"task_id" gorm:"not null"`
+	Task      Task     `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
+	RunID     int32    `json:"run_id" gorm:"not null"`
+	Run       Run      `json:"run" gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE;"`
+	Filename  string   `json:"filename" gorm:"not null"`
+	FilePath  string   `json:"file_path" gorm:"not null"`
+	Content   string   `json:"content" gorm:"type:text"`
 	// Description is a one-line summary provided by the producing agent.
 	// IsVerified is set when a QA verification session passes all spec items
 	// for the artifact's task.
@@ -304,10 +304,10 @@ type ActivityLog struct {
 	ID         int32     `json:"id" gorm:"primaryKey"`
 	CompanyID  int32     `json:"company_id" gorm:"not null"`
 	Company    Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Action     string    `json:"action" gorm:"not null"`      // e.g., "task_created", "task_status_updated", "agent_run_started"
-	EntityID   int32     `json:"entity_id"`                   // Optional, ID of the task, agent, etc.
-	EntityType string    `json:"entity_type"`                 // e.g., "task", "agent", "skill"
-	Details    string    `json:"details"`                     // JSON string with more context
+	Action     string    `json:"action" gorm:"not null"` // e.g., "task_created", "task_status_updated", "agent_run_started"
+	EntityID   int32     `json:"entity_id"`              // Optional, ID of the task, agent, etc.
+	EntityType string    `json:"entity_type"`            // e.g., "task", "agent", "skill"
+	Details    string    `json:"details"`                // JSON string with more context
 	CreatedAt  time.Time `json:"created_at"`
 }
 

@@ -13,23 +13,34 @@ import (
 // a detailed result that is handed back to the task owner when the session
 // ran as a delegated subtask.
 type FinishTask struct {
-	onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error
+	delegated bool
+	onFinish  func(ctx context.Context, status, finishStatus, resultDetails string) error
 }
 
-func NewFinishTask(onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error) *FinishTask {
-	return &FinishTask{onFinish: onFinish}
+// NewFinishTask builds the finish_task tool. delegated marks sessions that
+// run a subtask created by another agent: their result is reviewed by the
+// task owner automatically, so "done" is the normal completion status and
+// "in-review" is reserved for work a human specifically must approve.
+func NewFinishTask(delegated bool, onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error) *FinishTask {
+	return &FinishTask{delegated: delegated, onFinish: onFinish}
 }
 
 func (t *FinishTask) Def() aicli.ToolDef {
+	statusGuidance := "Choose the final status yourself: " +
+		"use 'done' when the work is complete and needs no human attention; " +
+		"use 'in-review' when the result should be reviewed or approved by a human before it counts as finished. "
+	if t.delegated {
+		statusGuidance = "This session runs a subtask created by another agent, and that task owner receives your full result automatically. " +
+			"Use 'done' when your work is complete — do NOT use 'in-review' unless a human specifically must approve something. "
+	}
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
 			Name: "finish_task",
 			Description: "MUST be called at the end of every run to record the outcome and update the task status. " +
-				"Use 'in-review' when the work is done and ready for human review. " +
+				statusGuidance +
 				"Use 'blocked' when you are stuck and need user input — including when you cannot actually verify or complete " +
 				"what was asked (never report success you did not verify). " +
-				"Use 'done' when the task is fully complete and no review is needed. " +
 				"Use 'refinement' when you need clarification before you can proceed. " +
 				"finish_status is a short one-sentence summary shown to the user. " +
 				"result_details is the full handoff for whoever consumes your work: key findings, decisions, artifact filenames, " +
@@ -39,7 +50,7 @@ func (t *FinishTask) Def() aicli.ToolDef {
 				"properties":{
 					"task_status":{
 						"type":"string",
-						"enum":["in-review","blocked","done","refinement"],
+						"enum":["done","in-review","blocked","refinement"],
 						"description":"New status for the task"
 					},
 					"finish_status":{

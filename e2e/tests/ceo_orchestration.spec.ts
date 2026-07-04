@@ -159,8 +159,15 @@ test.describe.serial('CEO orchestration flow', () => {
                 } } },
                 // Consumed by the one-shot reader call (utility model).
                 { text: 'Yes — the report states the casual greeting was implemented.' },
-                // CEO turn 6: finish the root task
-                { tool_call: { id: 'c6', name: 'finish_task', arguments: {
+                // CEO turn 6: plan follow-up work as a separate TOP-LEVEL task
+                // on the board (backlog — nothing executes).
+                { tool_call: { id: 'c6', name: 'create_task', arguments: {
+                    title: 'Announce the greeting feature',
+                    description: 'Prepare and publish an announcement once the greeting ships.',
+                    priority: 'High',
+                } } },
+                // CEO turn 7: finish the root task
+                { tool_call: { id: 'c7', name: 'finish_task', arguments: {
                     task_status: 'in-review',
                     finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
@@ -285,6 +292,18 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(toolResults.some(c => c.includes('Answer about "greeting-report.md"') && c.includes('casual greeting was implemented')),
             'CEO should have received the ask_artifact answer').toBeTruthy();
 
+        // ── create_task: a follow-up task landed on the board as a TOP-LEVEL
+        //    task in the backlog, with its own ref key and no runs ───────────
+        const boardTasks = await (await request.get(`/api/tasks?company_id=${companyId}`)).json();
+        const planned = (boardTasks as any[]).find(t => t.title === 'Announce the greeting feature');
+        expect(planned, 'create_task should place a task on the board').toBeTruthy();
+        expect(planned.parent_id).toBeFalsy();
+        expect(planned.status).toBe('backlog');
+        expect(planned.priority).toBe('High');
+        expect(planned.ref_key).toMatch(/^[A-Z-]+-\d+$/);
+        const plannedRuns = await (await request.get(`/api/tasks/${planned.id}/runs`)).json();
+        expect(plannedRuns.length).toBe(0);
+
         // ── Task spec: user input untouched, no forced refinement fields ─────
         const finalTask = await (await request.get(`/api/tasks/${taskId}`)).json();
         expect(finalTask.description).toBe('Add a greeting to the product.');
@@ -332,6 +351,15 @@ test.describe.serial('CEO orchestration flow', () => {
             const sessionContent = fs.readFileSync(sessionLog, 'utf8');
             expect(sessionContent).toContain('LLM Request');
         }
+
+        // The ask_artifact reader exchange got its own log file in the run
+        // folder, holding the full prompt (artifact content) and the answer.
+        const askLogs = fs.readdirSync(runDir).filter(f => f.startsWith(`ask-artifact-${rootRun.id}-`) && f.endsWith('.log'));
+        expect(askLogs.length).toBe(1);
+        const askLogContent = fs.readFileSync(path.join(runDir, askLogs[0]), 'utf8');
+        expect(askLogContent).toContain('Does the report confirm the greeting is casual?');
+        expect(askLogContent).toContain('Implemented the casual greeting.');
+        expect(askLogContent).toContain('casual greeting was implemented');
 
         // ── UI: Run Log view shows the main flow with expandable sessions ────
         await page.goto(`/companies/ceo-co/run-logs/${rootRun.id}`);

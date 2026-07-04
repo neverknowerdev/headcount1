@@ -25,7 +25,7 @@ type MCPSessionStore struct {
 	mu            sync.Mutex
 	sessions      map[string]*mcpSession
 	servers       map[string]db.MCPServer
-	cachedTools   map[string][]mcp.Tool    // parsed from ToolsCache at startup
+	cachedTools   map[string][]mcp.Tool      // parsed from ToolsCache at startup
 	disabledTools map[string]map[string]bool // serverName → toolName → disabled
 	onAuthError   func(serverName, errMsg string)
 	onToolCall    func(serverName, toolName string)

@@ -54,10 +54,10 @@ func loadSettings() Settings {
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
 
-At the end of every run you MUST call finish_task — there are no exceptions:
-- in-review: work is done, ready for human review
+At the end of every run you MUST call finish_task — there are no exceptions. Choose the final status yourself:
+- done: work is complete and needs no human attention (the normal completion status, especially for delegated subtasks — your task owner reviews the result)
+- in-review: work is complete but a human should review or approve it before it counts as finished
 - blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
-- done: task is fully complete, no review needed
 - refinement: you need clarification before you can start
 Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — it is returned to your task owner when your session completes.
 
