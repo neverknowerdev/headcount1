@@ -116,7 +116,7 @@ func TestLoadFromFile_NonExistentFile(t *testing.T) {
 func TestDefaultFactory_BuiltinAgents(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 	names := f.ListNames()
-	expected := []string{"CEO", "CTO", "Programmer", "QA", "Writer", "Researcher"}
+	expected := []string{"CEO", "CTO", "CMO", "Coder", "Debugger", "QA", "Designer", "SMM", "PPC Specialist", "Post Writer"}
 	for _, name := range expected {
 		assert.Contains(t, names, name, "builtin agent %q should be registered", name)
 	}
@@ -129,13 +129,13 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "CEO", cfg.Name)
 	assert.NotEmpty(t, cfg.Prompt)
-	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
+	assert.Equal(t, agentconfig.ChatTypeCompactThinking, cfg.ChatType)
 	assert.Equal(t, agentconfig.ReasoningLevelMax, cfg.ReasoningLevel)
 	// Builtin configs intentionally have no hardcoded models so that the
 	// runtime resolver picks from the configured provider's supported list.
 	assert.Empty(t, cfg.AllowedModels)
 
-	cfg, err = f.GetConfig("Programmer")
+	cfg, err = f.GetConfig("Coder")
 	require.NoError(t, err)
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Empty(t, cfg.AllowedModels)
@@ -173,7 +173,7 @@ func TestEmptyFactory_Register(t *testing.T) {
 
 func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
-	for _, name := range []string{"CEO", "CTO", "Programmer", "QA", "Writer", "Researcher"} {
+	for _, name := range []string{"CEO", "CTO", "CMO", "Coder", "Debugger", "QA", "Designer", "SMM", "PPC Specialist", "Post Writer"} {
 		cfg, err := f.GetConfig(name)
 		require.NoError(t, err)
 		assert.NotEmpty(t, cfg.Prompt, "agent %q should have a non-empty prompt", name)
@@ -185,12 +185,21 @@ func TestDefaultFactory_SubagentHierarchy(t *testing.T) {
 
 	ceo, _ := f.GetConfig("CEO")
 	assert.Contains(t, ceo.Subagents, "CTO")
+	assert.Contains(t, ceo.Subagents, "CMO")
+	assert.Contains(t, ceo.Subagents, "Designer")
 
 	cto, _ := f.GetConfig("CTO")
 	assert.Equal(t, "CEO", cto.ParentAgent)
-	assert.Contains(t, cto.Subagents, "Programmer")
+	assert.Contains(t, cto.Subagents, "Coder")
+	assert.Contains(t, cto.Subagents, "Debugger")
 	assert.Contains(t, cto.Subagents, "QA")
 
-	prog, _ := f.GetConfig("Programmer")
-	assert.Equal(t, "CTO", prog.ParentAgent)
+	cmo, _ := f.GetConfig("CMO")
+	assert.Equal(t, "CEO", cmo.ParentAgent)
+	assert.Contains(t, cmo.Subagents, "SMM")
+	assert.Contains(t, cmo.Subagents, "PPC Specialist")
+	assert.Contains(t, cmo.Subagents, "Post Writer")
+
+	coder, _ := f.GetConfig("Coder")
+	assert.Equal(t, "CTO", coder.ParentAgent)
 }

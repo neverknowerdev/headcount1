@@ -15,7 +15,12 @@ type Settings struct {
 	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
 	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
 	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-	SystemLLMModel   string   `json:"system_llm_model" yaml:"system_llm_model"`
+	// UtilityProviderID / UtilityModel select a cheap LLM for lightweight
+	// internal calls (artifact Q&A, commit message generation). Any
+	// provider/model combination; when the model is empty the engine falls
+	// back to the session's own provider and model.
+	UtilityProviderID int32  `json:"utility_provider_id" yaml:"utility_provider_id"`
+	UtilityModel      string `json:"utility_model" yaml:"utility_model"`
 }
 
 type SSHKeyPayload struct {

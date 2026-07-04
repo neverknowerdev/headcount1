@@ -100,9 +100,12 @@ type AttachmentMeta struct {
 
 // RunMeta is the filesystem representation of a run
 type RunMeta struct {
-	ID         int32  `json:"id"`
-	TaskID     int32  `json:"task_id"`
-	AgentID    int32  `json:"agent_id"`
+	ID              int32  `json:"id"`
+	TaskID          int32  `json:"task_id"`
+	AgentID         int32  `json:"agent_id"`
+	ParentRunID     *int32 `json:"parent_run_id,omitempty"`
+	RootRunID       *int32 `json:"root_run_id,omitempty"`
+	AgentConfigName string `json:"agent_config_name,omitempty"`
 	Status     string `json:"status"`
 	StartedAt  string `json:"started_at,omitempty"`
 	EndedAt    string `json:"ended_at,omitempty"`
@@ -396,9 +399,12 @@ func (s *Storage) WriteRun(run db.Run, companyShortName string) error {
 		return err
 	}
 	meta := RunMeta{
-		ID:         run.ID,
-		TaskID:     run.TaskID,
-		AgentID:    run.AgentID,
+		ID:              run.ID,
+		TaskID:          run.TaskID,
+		AgentID:         run.AgentID,
+		ParentRunID:     run.ParentRunID,
+		RootRunID:       run.RootRunID,
+		AgentConfigName: run.AgentConfigName,
 		Status:     run.Status,
 		SessionID:  run.SessionID,
 		LogContent: run.LogContent,

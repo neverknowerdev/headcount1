@@ -15,11 +15,13 @@ import (
 // Grep searches for regex patterns inside the workspace sandbox.
 type Grep struct {
 	workspacePath string
+	readOnlyDirs  []string
 }
 
-// NewGrep creates a Grep tool sandboxed to workspacePath.
-func NewGrep(workspacePath string) *Grep {
-	return &Grep{workspacePath: workspacePath}
+// NewGrep creates a Grep tool sandboxed to workspacePath plus optional
+// read-only roots.
+func NewGrep(workspacePath string, readOnlyDirs ...string) *Grep {
+	return &Grep{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
 
 func (t *Grep) Def() aicli.ToolDef {
@@ -58,7 +60,7 @@ func (t *Grep) Execute(_ context.Context, args json.RawMessage) (string, error) 
 
 	searchPath := t.workspacePath
 	if p.Path != "" {
-		sp, err := resolvePath(t.workspacePath, p.Path)
+		sp, err := resolveReadPath(t.workspacePath, t.readOnlyDirs, p.Path)
 		if err != nil {
 			return "", err
 		}

@@ -9,6 +9,17 @@ import remarkGfm from 'remark-gfm';
 import { RunLogViewer } from './RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 
+// parseSpecItems decodes a structured acceptance-criteria / test-cases item
+// list. Returns null for legacy plain-text content (rendered as markdown).
+function parseSpecItems(raw: string): any[] | null {
+    try {
+        const v = JSON.parse(raw);
+        return Array.isArray(v) ? v : null;
+    } catch {
+        return null;
+    }
+}
+
 interface TaskModalProps {
     taskId?: number | null; // If null, we are creating a new task
     projectId?: number;
@@ -33,6 +44,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
     const [expandedArtifact, setExpandedArtifact] = useState<number | null>(null);
     const [openRunMenu, setOpenRunMenu] = useState<number | null>(null);
+    // Acceptance Criteria / Test Cases sections are minimized by default.
+    const [expandedSpecs, setExpandedSpecs] = useState<Set<string>>(new Set());
+    // Artifacts block (task-level deliverables) — minimized by default.
+    const [artifacts, setArtifacts] = useState<any[]>([]);
+    const [artifactsExpanded, setArtifactsExpanded] = useState(false);
+    const [expandedArtifactIds, setExpandedArtifactIds] = useState<Set<number>>(new Set());
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -86,16 +103,19 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCompanyId, taskId]);
 
-    // Fetches only comments + runs — safe to call for re-sync without resetting the form.
+    // Fetches only comments + runs + artifacts — safe to call for re-sync
+    // without resetting the form.
     const fetchActivity = useCallback(async () => {
         if (!taskId) return;
         try {
-            const [commentsRes, runsRes] = await Promise.all([
+            const [commentsRes, runsRes, artifactsRes] = await Promise.all([
                 axios.get(`/api/comments?task_id=${taskId}`),
                 axios.get(`/api/tasks/${taskId}/runs`),
+                axios.get(`/api/tasks/${taskId}/artifacts`),
             ]);
             setComments(commentsRes.data || []);
             setRuns(runsRes.data || []);
+            setArtifacts(artifactsRes.data || []);
         } catch (e) {
             console.error(e);
         }
@@ -151,6 +171,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 if (prev.some((c: any) => c.id === msg.payload.id)) return prev;
                 return [...prev, msg.payload];
             });
+        }
+        if (msg.type === 'artifact_created') {
+            // Artifacts can be produced by delegated subtask sessions (their
+            // own task ids), so refetch the whole tree instead of filtering.
+            axios.get(`/api/tasks/${taskId}/artifacts`).then(res => setArtifacts(res.data || [])).catch(() => {});
         }
         if (msg.type === 'task_updated' && (msg.payload.id === taskId || msg.payload.task_id === taskId)) {
             setTask((prev: any) => prev ? { ...prev, ...msg.payload } : prev);
@@ -271,7 +296,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             )}
             {taskId ? (
                 <div className="flex flex-col min-w-0">
-                    <span className="text-xs font-mono text-gray-400">{prefix}-{task.id}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
+                    <span className="text-xs font-mono text-gray-400">{task.ref_key || `${prefix}-${task.id}`}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
                     <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
                 </div>
             ) : (
@@ -293,16 +318,177 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 <div className="flex-1 overflow-y-auto flex min-w-0">
                     {/* Left content area */}
                     <div className="flex-1 p-6 bg-gray-50 flex flex-col min-w-0">
+                        {task?.parent_id && (
+                            <div className="mb-4 flex items-start gap-2 border border-violet-200 bg-violet-50 text-violet-900 px-3 py-2 rounded-lg text-xs" data-testid="subtask-banner">
+                                <span className="mt-0.5">🧩</span>
+                                <div>
+                                    <span className="font-semibold">Delegated subtask</span> of{' '}
+                                    <Link to={`/companies/${shortName}/tasks/${task.parent_id}`} className="font-medium text-violet-700 underline hover:text-violet-900">
+                                        task #{task.parent_id}
+                                    </Link>
+                                    . Runs listed here are sub-sessions of the parent task's main run — re-running restarts the parent's main session.
+                                </div>
+                            </div>
+                        )}
                         <form id="task-form" onSubmit={handleSaveTask} className="space-y-4">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Title</label>
                                 <input required type="text" value={formData.title} onChange={e => setFormData({...formData, title: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task title" />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Description <span className="font-normal text-gray-400">(user input)</span></label>
                                 <textarea rows={5} value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2 shadow-sm" placeholder="Task details..." />
                             </div>
                         </form>
+
+                        {/* CEO-generated spec: kept separate from the user's original input.
+                            The refined description stays visible next to the user input;
+                            acceptance criteria and test cases are collapsed by default. */}
+                        {task && (task.refined_description || task.acceptance_criteria || task.test_cases) && (
+                            <div className="mt-4 space-y-3" data-testid="ceo-spec">
+                                {task.refined_description && (
+                                    <div className="border border-violet-200 rounded-lg bg-violet-50/40 overflow-hidden">
+                                        <div className="flex items-center justify-between px-3 py-1.5 bg-violet-50 border-b border-violet-100">
+                                            <span className="text-xs font-semibold text-violet-800">Refined Description</span>
+                                            <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full" title="This field was produced by the CEO orchestrator during refinement">
+                                                🤖 Generated by CEO
+                                            </span>
+                                        </div>
+                                        <div className="px-3 py-2 bg-white prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm">
+                                            <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.refined_description}</ReactMarkdown>
+                                        </div>
+                                    </div>
+                                )}
+                                {([
+                                    ['Acceptance Criteria', task.acceptance_criteria],
+                                    ['Test Cases', task.test_cases],
+                                ] as [string, string][]).filter(([, value]) => value).map(([label, value]) => {
+                                    const isExpanded = expandedSpecs.has(label);
+                                    const items = parseSpecItems(value);
+                                    const passed = items ? items.filter((it: any) => it.status === 'passed').length : 0;
+                                    const failed = items ? items.filter((it: any) => it.status === 'failed').length : 0;
+                                    return (
+                                        <div key={label} className="border border-violet-200 rounded-lg bg-violet-50/40 overflow-hidden">
+                                            <button
+                                                type="button"
+                                                onClick={() => setExpandedSpecs(prev => {
+                                                    const next = new Set(prev);
+                                                    if (next.has(label)) next.delete(label); else next.add(label);
+                                                    return next;
+                                                })}
+                                                className="w-full flex items-center justify-between px-3 py-1.5 bg-violet-50 hover:bg-violet-100 transition-colors text-left"
+                                            >
+                                                <span className="flex items-center gap-1.5 text-xs font-semibold text-violet-800">
+                                                    {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                                    {label}
+                                                    {items && (
+                                                        <span className={`font-normal px-1.5 py-0.5 rounded-full ${
+                                                            failed > 0 ? 'bg-red-100 text-red-700'
+                                                            : passed === items.length ? 'bg-green-100 text-green-700'
+                                                            : 'bg-gray-100 text-gray-600'
+                                                        }`}>
+                                                            {passed + failed > 0 ? `${passed}/${items.length} passed${failed > 0 ? `, ${failed} failed` : ''}` : `${items.length} items`}
+                                                        </span>
+                                                    )}
+                                                </span>
+                                                <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full" title="This field was produced by the CEO orchestrator during refinement">
+                                                    🤖 Generated by CEO
+                                                </span>
+                                            </button>
+                                            {isExpanded && (
+                                                items ? (
+                                                    <ul className="bg-white border-t border-violet-100 divide-y divide-gray-50">
+                                                        {items.map((it: any) => (
+                                                            <li key={it.id} className="flex items-start gap-2 px-3 py-1.5 text-sm">
+                                                                <span className="mt-0.5 shrink-0" title={it.status}>
+                                                                    {it.status === 'passed' ? '✅' : it.status === 'failed' ? '❌' : '⬜'}
+                                                                </span>
+                                                                <span className="min-w-0">
+                                                                    <span className="text-gray-800">{it.text}</span>
+                                                                    {it.note && <span className="ml-2 text-xs text-gray-500 italic">{it.note}</span>}
+                                                                </span>
+                                                            </li>
+                                                        ))}
+                                                    </ul>
+                                                ) : (
+                                                    // Legacy plain-text spec from before structured items.
+                                                    <div className="px-3 py-2 bg-white border-t border-violet-100 prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm">
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{value}</ReactMarkdown>
+                                                    </div>
+                                                )
+                                            )}
+                                        </div>
+                                    );
+                                })}
+                            </div>
+                        )}
+
+                        {/* Artifacts: task-level deliverables, minimized by default */}
+                        {taskId && artifacts.length > 0 && (
+                            <div className="mt-4 border border-emerald-200 rounded-lg bg-emerald-50/40 overflow-hidden" data-testid="artifacts-block">
+                                <div className="flex items-center justify-between px-3 py-1.5 bg-emerald-50">
+                                    <button
+                                        type="button"
+                                        onClick={() => setArtifactsExpanded(v => !v)}
+                                        className="flex items-center gap-1.5 text-xs font-semibold text-emerald-800 hover:text-emerald-900"
+                                    >
+                                        {artifactsExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                        📄 {artifacts.length} artifact{artifacts.length > 1 ? 's' : ''}
+                                    </button>
+                                    <a
+                                        href={`/api/tasks/${taskId}/artifacts/download`}
+                                        className="text-xs text-emerald-700 hover:underline"
+                                        title="Download all artifacts as a zip archive"
+                                    >
+                                        ⬇ Download all
+                                    </a>
+                                </div>
+                                {artifactsExpanded && (
+                                    <ul className="bg-white border-t border-emerald-100 divide-y divide-gray-50">
+                                        {artifacts.map((a: any) => {
+                                            const isOpen = expandedArtifactIds.has(a.id);
+                                            return (
+                                                <li key={a.id}>
+                                                    <div className="flex items-center gap-2 px-3 py-1.5 text-xs">
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setExpandedArtifactIds(prev => {
+                                                                const next = new Set(prev);
+                                                                if (next.has(a.id)) next.delete(a.id); else next.add(a.id);
+                                                                return next;
+                                                            })}
+                                                            className="flex items-center gap-1.5 min-w-0 flex-1 text-left hover:text-emerald-800"
+                                                        >
+                                                            {isOpen ? <ChevronUp size={11} /> : <ChevronDown size={11} />}
+                                                            <span className="font-semibold text-gray-800 truncate">{a.filename}</span>
+                                                            <span className="text-gray-400 shrink-0">{(a.content || '').length} bytes</span>
+                                                            {a.is_verified && (
+                                                                <span className="bg-green-100 text-green-700 px-1.5 py-0.5 rounded-full shrink-0">✓ verified</span>
+                                                            )}
+                                                            {a.description && <span className="text-gray-500 italic truncate">{a.description}</span>}
+                                                        </button>
+                                                        <a
+                                                            href={`/api/artifacts/${a.id}/download`}
+                                                            className="text-emerald-700 hover:underline shrink-0"
+                                                            title={`Download ${a.filename}`}
+                                                        >
+                                                            ⬇
+                                                        </a>
+                                                    </div>
+                                                    {isOpen && (
+                                                        <div className="px-3 pb-2 border-t border-gray-50">
+                                                            <div className="prose prose-sm max-w-none mt-2 prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm max-h-64 overflow-y-auto">
+                                                                <ReactMarkdown remarkPlugins={[remarkGfm]}>{a.content || ''}</ReactMarkdown>
+                                                            </div>
+                                                        </div>
+                                                    )}
+                                                </li>
+                                            );
+                                        })}
+                                    </ul>
+                                )}
+                            </div>
+                        )}
 
                         {taskId && (
                             <div className="flex-1 mt-8">
@@ -498,7 +684,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <div key={`r-${r.id}`} className="w-full min-w-0">
                                                         <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
-                                                                <span className="font-semibold text-gray-600">⚙️ Run #{r.id}</span>
+                                                                <span className="font-semibold text-gray-600 flex items-center gap-1.5">
+                                                                    ⚙️ Run {r.name || `#${r.id}`}
+                                                                    {r.parent_run_id ? (
+                                                                        <span className="font-normal bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full" title={`Sub-session of run #${r.parent_run_id}`}>sub-session</span>
+                                                                    ) : (
+                                                                        <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
+                                                                    )}
+                                                                    {!r.name && r.agent_config_name && <span className="font-normal text-gray-400">{r.agent_config_name}</span>}
+                                                                </span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
                                                                     <span className="text-gray-400">{startStr}</span>
@@ -680,7 +874,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 setShowParentDropdown(false);
                                             }}
                                         >
-                                            <span className="text-xs text-gray-500 font-mono mr-2">{prefix}-{t.id}</span>
+                                            <span className="text-xs text-gray-500 font-mono mr-2">{t.ref_key || `${prefix}-${t.id}`}</span>
                                             {t.title}
                                         </div>
                                     ))}

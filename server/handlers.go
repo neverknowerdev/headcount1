@@ -131,7 +131,12 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/{id}/runs", api.ListTaskRuns)
 		r.Post("/{id}/rerun", api.RerunTask)
 		r.Get("/{id}/artifacts", api.ListTaskArtifacts)
+		r.Get("/{id}/artifacts/download", api.DownloadTaskArtifacts)
 	})
+
+	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
+
+	r.Get("/agent-configs", api.ListAgentConfigs)
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
@@ -160,6 +165,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)
 		r.Get("/{id}", api.GetRun)
+		r.Get("/{id}/children", api.ListChildRuns)
 		r.Post("/{id}/stop", api.StopRun)
 	})
 

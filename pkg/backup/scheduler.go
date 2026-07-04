@@ -24,9 +24,13 @@ func GetLatestBackup(basePath string) (*time.Time, error) {
 			continue
 		}
 
-		// Parse timestamp from filename: backup_2006-01-02_150405.tar.gz
+		// Parse timestamp from filename: backup_2006-01-02_150405.tar.gz,
+		// optionally with a collision suffix: backup_2006-01-02_150405-2.tar.gz.
 		name := strings.TrimPrefix(entry.Name(), "backup_")
 		name = strings.TrimSuffix(name, ".tar.gz")
+		if len(name) > len("2006-01-02_150405") {
+			name = name[:len("2006-01-02_150405")]
+		}
 
 		t, err := time.Parse("2006-01-02_150405", name)
 		if err != nil {

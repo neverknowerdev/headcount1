@@ -8,6 +8,8 @@ export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
+    const [builtinConfigs, setBuiltinConfigs] = useState<any[]>([]);
+    const [builtinExpanded, setBuiltinExpanded] = useState(false);
     const [showModal, setShowModal] = useState(false);
     const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
     const [saving, setSaving] = useState(false);
@@ -18,6 +20,12 @@ export const AgentManager: React.FC = () => {
         try {
             const res = await axios.get(`/api/agents?company_id=${selectedCompanyId}`);
             setAgents(res.data || []);
+        } catch (e) {
+            console.error(e);
+        }
+        try {
+            const cfgRes = await axios.get('/api/agent-configs');
+            setBuiltinConfigs(cfgRes.data || []);
         } catch (e) {
             console.error(e);
         }
@@ -92,6 +100,54 @@ export const AgentManager: React.FC = () => {
                     >
                         + Add your first agent
                     </button>
+                </div>
+            )}
+
+            {builtinConfigs.length > 0 && (
+                <div className="border rounded-lg bg-gray-50" data-testid="builtin-agents">
+                    <button
+                        onClick={() => setBuiltinExpanded(v => !v)}
+                        className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-100 transition-colors rounded-lg"
+                    >
+                        <div className="flex items-center gap-2">
+                            <span className="font-semibold text-gray-700">Built-in agents</span>
+                            <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{builtinConfigs.length}</span>
+                            <span className="text-xs text-gray-400">Specialist roles the orchestrator can delegate to</span>
+                        </div>
+                        <span className="text-gray-400 text-sm">{builtinExpanded ? '▾' : '▸'}</span>
+                    </button>
+                    {builtinExpanded && (
+                        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4 p-4 pt-1">
+                            {builtinConfigs.map(cfg => (
+                                <div key={cfg.name} className="bg-white p-4 rounded-lg border shadow-sm flex flex-col gap-2">
+                                    <div className="flex justify-between items-start gap-2">
+                                        <h3 className="text-sm font-bold text-gray-900">{cfg.name}</h3>
+                                        <span className="bg-violet-100 text-violet-800 text-xs px-2 py-0.5 rounded-full shrink-0">built-in</span>
+                                    </div>
+                                    {cfg.description && <p className="text-xs text-gray-600">{cfg.description}</p>}
+                                    <div className="flex flex-wrap gap-1 text-xs">
+                                        {cfg.reasoning_level && (
+                                            <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded">reasoning: {cfg.reasoning_level}</span>
+                                        )}
+                                        {cfg.parent_agent && (
+                                            <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">reports to {cfg.parent_agent}</span>
+                                        )}
+                                    </div>
+                                    {cfg.subagents?.length > 0 && (
+                                        <div className="text-xs text-gray-500">
+                                            <span className="font-medium text-gray-600">Delegates to:</span> {cfg.subagents.join(', ')}
+                                        </div>
+                                    )}
+                                    <details className="mt-auto">
+                                        <summary className="text-xs text-indigo-600 cursor-pointer hover:underline">System prompt</summary>
+                                        <div className="mt-1 text-xs text-gray-700 bg-gray-50 p-2 rounded border overflow-y-auto max-h-40 whitespace-pre-wrap font-mono">
+                                            {cfg.prompt}
+                                        </div>
+                                    </details>
+                                </div>
+                            ))}
+                        </div>
+                    )}
                 </div>
             )}
 

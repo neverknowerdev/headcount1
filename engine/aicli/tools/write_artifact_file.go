@@ -38,10 +38,13 @@ var codeExtensions = map[string]bool{
 // WriteArtifactFile lets the agent publish output artifacts for the current task.
 // Any file type is allowed except source code and config files.
 type WriteArtifactFile struct {
-	onWrite func(ctx context.Context, filename, content string) error
+	// onWrite persists the artifact and returns a human-readable result
+	// message (e.g. noting that an existing artifact was overwritten and by
+	// which run it was originally written).
+	onWrite func(ctx context.Context, filename, content, description string) (string, error)
 }
 
-func NewWriteArtifactFile(onWrite func(ctx context.Context, filename, content string) error) *WriteArtifactFile {
+func NewWriteArtifactFile(onWrite func(ctx context.Context, filename, content, description string) (string, error)) *WriteArtifactFile {
 	return &WriteArtifactFile{onWrite: onWrite}
 }
 
@@ -65,6 +68,10 @@ func (t *WriteArtifactFile) Def() aicli.ToolDef {
 					"content":{
 						"type":"string",
 						"description":"File content (text for .md/.svg/.html/.txt; base64-encoded for binary formats)"
+					},
+					"description":{
+						"type":"string",
+						"description":"One short sentence describing what this artifact contains (shown in artifact listings)"
 					}
 				},
 				"required":["filename","content"]
@@ -75,8 +82,9 @@ func (t *WriteArtifactFile) Def() aicli.ToolDef {
 
 func (t *WriteArtifactFile) Execute(ctx context.Context, args json.RawMessage) (string, error) {
 	var p struct {
-		Filename string `json:"filename"`
-		Content  string `json:"content"`
+		Filename    string `json:"filename"`
+		Content     string `json:"content"`
+		Description string `json:"description"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
@@ -91,8 +99,12 @@ func (t *WriteArtifactFile) Execute(ctx context.Context, args json.RawMessage) (
 	if codeExtensions[ext] {
 		return "", fmt.Errorf("write_artifact: %q is a code/config file type and cannot be an artifact; use write instead", ext)
 	}
-	if err := t.onWrite(ctx, p.Filename, p.Content); err != nil {
+	msg, err := t.onWrite(ctx, p.Filename, p.Content, p.Description)
+	if err != nil {
 		return "", fmt.Errorf("write_artifact: %w", err)
 	}
-	return fmt.Sprintf("Artifact %q written.", p.Filename), nil
+	if msg == "" {
+		msg = fmt.Sprintf("Artifact %q written.", p.Filename)
+	}
+	return msg, nil
 }

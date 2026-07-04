@@ -14,11 +14,13 @@ import (
 // ListDir lists files inside the workspace sandbox.
 type ListDir struct {
 	workspacePath string
+	readOnlyDirs  []string
 }
 
-// NewListDir creates a ListDir tool sandboxed to workspacePath.
-func NewListDir(workspacePath string) *ListDir {
-	return &ListDir{workspacePath: workspacePath}
+// NewListDir creates a ListDir tool sandboxed to workspacePath plus optional
+// read-only roots.
+func NewListDir(workspacePath string, readOnlyDirs ...string) *ListDir {
+	return &ListDir{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
 
 func (t *ListDir) Def() aicli.ToolDef {
@@ -47,7 +49,7 @@ func (t *ListDir) Execute(_ context.Context, args json.RawMessage) (string, erro
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	resolved, err := resolvePath(t.workspacePath, p.Path)
+	resolved, err := resolveReadPath(t.workspacePath, t.readOnlyDirs, p.Path)
 	if err != nil {
 		return "", err
 	}

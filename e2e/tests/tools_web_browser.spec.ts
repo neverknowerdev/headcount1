@@ -160,6 +160,10 @@ async function runTask(
             title,
             task_type: 'implement',
             agent_id: agentId,
+            // Pin the QA config (web_fetch + browser_use): these tests exercise
+            // direct tool execution, not the CEO delegation flow (the default
+            // for root tasks).
+            agent_config_name: 'QA',
         },
     });
     expect(taskRes.ok(), `create task: ${await taskRes.text()}`).toBeTruthy();
@@ -727,7 +731,10 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             const toolResults = extractToolResults(reqs);
 
             // Both tool calls should have produced results containing the marker.
-            const matchingResults = toolResults.filter((r) => r.includes('DUAL_TOOL_TEST'));
+            // web_fetch renders to Markdown by default, which escapes "_" as "\_"
+            // (standard CommonMark behavior to avoid accidental emphasis) — strip
+            // that escaping before matching so both tools' results count.
+            const matchingResults = toolResults.filter((r) => r.replace(/\\_/g, '_').includes('DUAL_TOOL_TEST'));
             expect(matchingResults.length).toBeGreaterThanOrEqual(2);
         } finally {
             await server.stop();

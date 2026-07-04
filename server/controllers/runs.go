@@ -38,9 +38,9 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(&struct {
 		Alias
-		IsLatest    bool          `json:"is_latest"`
-		LogEntries  []interface{} `json:"log_entries"`
-		TokenStats  interface{}   `json:"token_stats"`
+		IsLatest   bool          `json:"is_latest"`
+		LogEntries []interface{} `json:"log_entries"`
+		TokenStats interface{}   `json:"token_stats"`
 	}{
 		Alias:      Alias(r),
 		IsLatest:   r.IsLatest,
@@ -79,6 +79,8 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 
 	var runs []db.Run
 	err := api.db.
+		Preload("Task").
+		Preload("Agent").
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error
@@ -107,11 +109,48 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	resp := toRunResponse(run)
-	// Mark is_latest so the frontend can show the Re-run button only on the most recent run.
-	var maxID int64
-	api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
-	resp.IsLatest = int64(run.ID) == maxID
+	// Mark is_latest so the frontend can show the Re-run button only on the
+	// most recent run. Delegated child sessions are never re-runnable entry
+	// points — only the main (root) session of a task can be re-run.
+	if run.ParentRunID == nil {
+		var maxID int64
+		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
+		resp.IsLatest = int64(run.ID) == maxID
+	}
 	api.respondJSON(w, http.StatusOK, resp)
+}
+
+// ListChildRuns returns the delegated session runs spawned by the given run,
+// so the Run Log UI can render nested sessions. With ?deep=true it returns
+// every descendant session in the run's tree (children, grandchildren, …),
+// which the UI uses for whole-tree per-agent token stats.
+func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	var runs []db.Run
+	if r.URL.Query().Get("deep") == "true" {
+		// Descendants are resolved via root_run_id, which only works for root
+		// runs (they point at themselves); for child sessions fall back to
+		// direct children.
+		runs, err = api.q.ListDescendantRuns(r.Context(), int32(id))
+		if err == nil && len(runs) == 0 {
+			runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+		}
+	} else {
+		runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+	}
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
 }
 
 func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
@@ -125,15 +164,27 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
+
+	// Subtasks are delegated sessions owned by the orchestrator — re-running
+	// one in isolation would spawn an orphan session outside the main flow.
+	// Walk up to the root task so a re-run always restarts the main session.
+	for task.ParentID != nil {
+		parent, perr := api.q.GetTask(r.Context(), *task.ParentID)
+		if perr != nil {
+			break
+		}
+		task = parent
+	}
+
 	if task.AgentID == nil {
 		api.respondError(w, http.StatusBadRequest, "task has no assigned agent")
 		return
 	}
-	if err := api.engine.RerunTask(r.Context(), int32(id)); err != nil {
+	if err := api.engine.RerunTask(r.Context(), task.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"status": "queued"})
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "task_id": task.ID})
 }
 
 func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {

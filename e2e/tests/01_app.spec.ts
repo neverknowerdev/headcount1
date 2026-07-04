@@ -120,7 +120,9 @@ test.describe.serial('Paperclip2 App', () => {
         expect(runs.length).toBeGreaterThan(0);
         const run = runs[0];
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}.log`);
+        // Session-based layout: logs are grouped per main run in run-{id}/, with
+        // the root session writing main.log.
+        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.log');
         expect(fs.existsSync(logFile)).toBeTruthy();
         const logContent = fs.readFileSync(logFile, 'utf8');
         expect(logContent).toContain('LLM Request');
@@ -131,11 +133,13 @@ test.describe.serial('Paperclip2 App', () => {
         await page.click('text=Write E2E Tests');
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
         await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
-        await expect(page.getByText('Let us see if the agent works')).toBeVisible();
+        // Scope to the comments list: the text can also appear in the run-log
+        // preview of the agent run this comment triggers.
+        await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
 
         // Verify Agent Run Logs
-        await expect(page.getByText(/Run #\d/).first()).toBeVisible();
-        await page.locator('summary:has-text("Run #")').first().click();
+        await expect(page.getByText(/Run (#\d|[A-Z0-9-]+-[A-Z0-9]+)/).first()).toBeVisible();
+        await page.locator('summary:has-text("Run ")').first().click();
 
         // Verify Run Logs page
         await page.keyboard.press('Escape');

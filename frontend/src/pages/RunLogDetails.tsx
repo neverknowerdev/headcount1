@@ -2,8 +2,37 @@ import React, { useState, useEffect, useRef, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
-import { RunLogViewer } from '../components/RunLogViewer';
+import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+
+// buildAgentStats aggregates token stats per agent across the whole session
+// tree: the root run plus each delegated child session, keyed by agent config
+// name (multiple sessions of the same agent are summed).
+function buildAgentStats(root: any, children: any[]): AgentTokenStats[] {
+    const order: string[] = [];
+    const byAgent = new Map<string, any>();
+    const numericKeys = [
+        'prompt_tokens', 'completion_tokens', 'reasoning_tokens',
+        'tool_input_tokens', 'tool_output_tokens', 'cached_tokens',
+        'total_tokens', 'mcp_tool_tokens',
+    ];
+    const add = (label: string, s: any) => {
+        if (!s) return;
+        if (!byAgent.has(label)) {
+            byAgent.set(label, {});
+            order.push(label);
+        }
+        const agg = byAgent.get(label);
+        for (const k of numericKeys) {
+            agg[k] = (agg[k] || 0) + (s[k] || 0);
+        }
+    };
+    add(root.agent_config_name || root.agent?.name || 'agent', root.token_stats);
+    for (const c of children) {
+        add(c.agent_config_name || c.agent?.name || `run #${c.id}`, c.token_stats);
+    }
+    return order.map(agent => ({ agent, stats: byAgent.get(agent) }));
+}
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -55,12 +84,27 @@ export const RunLogDetails: React.FC = () => {
     const [streamStalled, setStreamStalled] = useState<{at: number, message: string} | null>(null);
     const lastEventAtRef = useRef<number>(Date.now());
     const [tokenStats, setTokenStats] = useState<any>(null);
+    const [agentStats, setAgentStats] = useState<AgentTokenStats[] | undefined>(undefined);
+
+    // Per-agent breakdown across the whole session tree (children and
+    // grandchildren); refreshed when child sessions end so the numbers stay
+    // current while the run is live.
+    const fetchAgentStats = async (rootRun: any) => {
+        try {
+            const chRes = await axios.get(`/api/runs/${id}/children?deep=true`);
+            const children = chRes.data || [];
+            setAgentStats(children.length > 0 ? buildAgentStats(rootRun, children) : undefined);
+        } catch (e) {
+            console.error('failed to load child runs', e);
+        }
+    };
 
     const fetchRun = useCallback(async () => {
             try {
                 const res = await axios.get(`/api/runs/${id}`);
                 setRun(res.data);
                 setTokenStats(res.data?.token_stats || null);
+                fetchAgentStats(res.data);
 
                 let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
@@ -131,6 +175,13 @@ export const RunLogDetails: React.FC = () => {
             }
         } else if (msg.type === 'run_ended' && msg.payload.run_id === runIdInt) {
             setRun((prev: any) => prev ? { ...prev, status: msg.payload.status } : prev);
+        } else if (msg.type === 'run_ended' && run) {
+            // Another run ended — likely one of our child sessions. Refresh
+            // the per-agent token breakdown.
+            fetchAgentStats(run);
+        } else if (msg.type === 'run_status' && msg.payload.run_id === runIdInt) {
+            lastEventAtRef.current = Date.now();
+            setRun((prev: any) => prev ? { ...prev, current_status: msg.payload.status } : prev);
         } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
@@ -177,7 +228,7 @@ export const RunLogDetails: React.FC = () => {
                     <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
                         <ArrowLeft size={20} />
                     </Link>
-                    <h1 className="text-2xl font-bold">Run #{run.id} Details</h1>
+                    <h1 className="text-2xl font-bold">Run {run.name || `#${run.id}`} Details</h1>
                 </div>
                 <div className="flex items-center gap-2">
                     {run.status === 'running' && (
@@ -220,13 +271,27 @@ export const RunLogDetails: React.FC = () => {
                         <p className="text-sm text-gray-500">Status</p>
                         <p className="font-medium capitalize">{run.status}</p>
                     </div>
+                    {run.current_status && (
+                        <div>
+                            <p className="text-sm text-gray-500">Current Activity</p>
+                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.current_status}</p>
+                        </div>
+                    )}
                     <div>
                         <p className="text-sm text-gray-500">Agent</p>
-                        <p className="font-medium">{run.agent?.name}</p>
+                        <p className="font-medium">{run.agent?.name}{run.agent_config_name ? ` (${run.agent_config_name})` : ''}</p>
                     </div>
+                    {run.parent_run_id && (
+                        <div>
+                            <p className="text-sm text-gray-500">Parent Session</p>
+                            <Link to={`/companies/${shortName}/run-logs/${run.parent_run_id}`} className="font-medium text-violet-600 hover:underline">
+                                Run #{run.parent_run_id}
+                            </Link>
+                        </div>
+                    )}
                     <div>
                         <p className="text-sm text-gray-500">Task</p>
-                        <Link to={`/companies/${shortName}/tasks`} className="font-medium text-indigo-600 hover:underline">{run.task?.title} (#{run.task_id})</Link>
+                        <Link to={`/companies/${shortName}/tasks`} className="font-medium text-indigo-600 hover:underline">{run.task?.title} ({run.task?.ref_key || `#${run.task_id}`})</Link>
                     </div>
                     <div>
                         <p className="text-sm text-gray-500">Started At</p>
@@ -235,7 +300,7 @@ export const RunLogDetails: React.FC = () => {
                 </div>
 
                 <div className="col-span-2 bg-gray-50 rounded-lg shadow border flex flex-col min-h-0">
-                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} />
+                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} />
                 </div>
             </div>
         </div>
