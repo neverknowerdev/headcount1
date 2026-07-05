@@ -46,8 +46,12 @@ type LLMProvider struct {
 	ProviderType    string    `json:"provider_type"`
 	DefaultModel    string    `json:"default_model"`
 	SupportedModels string    `json:"supported_models"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// Builtin marks providers seeded automatically on startup (e.g. OpenRouter,
+	// OpenCode Zen) rather than added by hand. Used to know which providers'
+	// model catalogs are safe to refresh from a live discovery fetch.
+	Builtin   bool      `json:"builtin" gorm:"not null;default:false"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 type Agent struct {

@@ -179,7 +179,12 @@ export const ProvidersManager: React.FC = () => {
                 {providers.map(p => (
                     <div key={p.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden">
                         <div className="flex justify-between items-start mb-4">
-                            <h3 className="text-lg font-bold text-gray-900">{p.name}</h3>
+                            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                                {p.name}
+                                {p.builtin && (
+                                    <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Built-in</span>
+                                )}
+                            </h3>
                             <div className="flex space-x-2">
                                 <button onClick={() => handleTest(p)} className="text-blue-500 hover:text-blue-700" title="Test Connection">
                                     <Play size={18} />
@@ -195,6 +200,9 @@ export const ProvidersManager: React.FC = () => {
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
                         {p.supported_models && <p className="text-xs text-gray-500 mt-2 break-words"><span className="font-semibold">Models:</span> {p.supported_models.split(',').join(', ')}</p>}
+                        {p.builtin && !p.api_key && (
+                            <p className="text-xs text-amber-600 mt-2">Free to use — add your API key to enable this provider.</p>
+                        )}
                     </div>
                 ))}
             </div>

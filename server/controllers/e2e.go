@@ -47,6 +47,12 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
 
+	// Re-seed built-in LLM providers (OpenRouter, OpenCode Zen) so tests that
+	// list providers get a consistent baseline. Their model catalogs are
+	// fetched live only at real server startup, not here — a wipe should
+	// stay fast and offline.
+	_ = db.New(api.db).EnsureBuiltinLLMProviders(context.Background())
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
