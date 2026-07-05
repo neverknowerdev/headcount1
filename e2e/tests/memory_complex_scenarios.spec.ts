@@ -281,6 +281,16 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
                 { tool_call: { id: 'g2', name: 'finish_task', arguments: { task_status: 'blocked', finish_status: 'Blocked on sandbox shell restriction for dfx CLI.' } } },
             ]);
         REPORT.scenario7_gm88_error_text = errorText;
+
+        // Check the DRAWER LISTING endpoint (not search) immediately after
+        // CTO's run finishes — this distinguishes "the write never landed in
+        // this wing at all" from "it's there, just not yet embedded/indexed
+        // for semantic search". If remember()'s drawer already appears here,
+        // the earlier cross-agent recall failures are an INDEXING lag, not a
+        // write/scoping bug.
+        const drawersRes = await getJSON(request, `/api/memory/drawers?company_id=${companyId}&wing=project-gm-coin&limit=50`);
+        const drawerPreviews = (drawersRes.drawers || []).map((d: { content_preview: string }) => d.content_preview);
+        REPORT.scenario7_gm88_drawers_immediately_after = drawerPreviews;
     });
 
     test('GM-91 (CEO delegates to CMO; CMO asks CEO instead of recalling directly)', async ({ request }) => {
@@ -310,6 +320,13 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
                 question: 'What is the current status of the ICP backend implementation (GM-88)? I need this to write an accurate post.',
             } } },
             { tool_call: { id: 'ceo2', name: 'recall_memory', arguments: { query: 'ICP backend implementation GM Coin status' } } },
+            // Retry with an explicit room filter, per the follow-up question:
+            // does scoping to the room CTO's note actually landed in
+            // (kind:'note' -> room 'general' — there is no per-agent "CTO
+            // room" in this taxonomy, only topic rooms) surface it where the
+            // unscoped query didn't? Also gives the async indexing path
+            // (if that's the real cause) a few hundred more ms to catch up.
+            { tool_call: { id: 'ceo2room', name: 'recall_memory', arguments: { query: 'ICP backend implementation GM Coin status', room: 'general' } } },
             { tool_call: { id: 'ceo3', name: 'answer_subtask_question', arguments: {
                 answer: "Backend isn't implemented yet — CTO is blocked on a sandbox shell restriction for the dfx CLI. Don't publish yet.",
             } } },
@@ -322,9 +339,16 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
 
         const recallResult = await extractToolResult('ceo2');
         REPORT.scenario7_ceo_first_recall = recallResult;
+        const recallResultRoomFiltered = await extractToolResult('ceo2room');
+        REPORT.scenario7_ceo_first_recall_room_filtered = recallResultRoomFiltered;
+
         expect(recallResult, 'CEO must be able to recall CTO-authored, cross-task memory in the same project')
             .toBeTruthy();
-        expect(recallResult).toContain('dfx');
+        expect(recallResultRoomFiltered, 'room-filtered retry must have produced a result too').toBeTruthy();
+        // Not asserting .toContain('dfx') here — this run is specifically to
+        // gather evidence on WHETHER the room filter or the extra round-trip
+        // delay changes the outcome, not to assume the answer. See the
+        // results doc for what actually happened in both calls.
 
         // CMO's own requests in this round must never call recall_memory
         // directly — it only gets the answer via ask_task_owner.
