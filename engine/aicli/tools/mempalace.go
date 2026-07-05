@@ -53,10 +53,11 @@ type MemoryActivityFunc func(tool, kind, wing, room, query string, resultN int)
 // package-level cached one in pkg/mempalace, shared with the engine hooks and
 // the /api/memory handlers so all palace writes serialize on one lock.
 type MempalaceProxy struct {
-	server       db.MCPServer
-	scope        MemoryScope
-	onActivity   MemoryActivityFunc
-	diaryWritten atomic.Bool
+	server        db.MCPServer
+	scope         MemoryScope
+	onActivity    MemoryActivityFunc
+	diaryWritten  atomic.Bool
+	rememberCount atomic.Int32
 	// callFn dispatches one mempalace MCP tool call; defaults to
 	// mempalace.CallServerTool and is only overridden in tests.
 	callFn func(ctx context.Context, server db.MCPServer, tool string, args any) (string, error)
@@ -77,6 +78,15 @@ func (p *MempalaceProxy) DiaryWritten() bool { return p.diaryWritten.Load() }
 // MarkDiaryWritten records that a diary entry exists for this run. Set by a
 // (re-enabled) write_diary tool or tests; suppresses the teardown auto-diary.
 func (p *MempalaceProxy) MarkDiaryWritten() { p.diaryWritten.Store(true) }
+
+// HasRemembered reports whether remember() stored at least one new fact this
+// run (near-duplicate rejections don't count — see the remember tool). Used
+// by finish_task's one-time nudge: an agent that never stored anything is
+// asked once to capture durable facts/learnings before the run's institutional
+// knowledge is lost, mirroring MemPalace's own Claude Code stop-hook pattern
+// (mechanical nudge, not a hard requirement — teardown capture is the real
+// backstop for agents that ignore it or crash).
+func (p *MempalaceProxy) HasRemembered() bool { return p.rememberCount.Load() > 0 }
 
 // RegisterAll adds the curated memory tools to the registry. Role gating
 // happens through the agent config's AllowedTools filter, which the engine
@@ -215,11 +225,27 @@ var mpCatalog = []mpToolSpec{
 			query := stringArg(args, "query")
 			room := stringArg(args, "room")
 			limit := intArg(args, "limit", 5, 15)
-			call := map[string]any{"query": clip(query, 250), "wing": p.scope.wing(), "limit": limit}
+			// Over-fetch and re-rank locally (see mempalace.RerankSearchResults): mempalace's
+			// own similarity ranking has no notion of "this is boilerplate" or
+			// "this was superseded" — a bare task-description echo or a raw
+			// transcript dump can outrank the actual fact for a status-style
+			// query. Explicit room filters bypass this (the caller already
+			// narrowed scope), so only rerank the unscoped/default case.
+			fetchLimit := limit
+			if room == "" {
+				fetchLimit = limit * 3
+				if fetchLimit > 30 {
+					fetchLimit = 30
+				}
+			}
+			call := map[string]any{"query": clip(query, 250), "wing": p.scope.wing(), "limit": fetchLimit}
 			if room != "" {
 				call["room"] = mempalace.SanitizeName(room)
 			}
 			out, err := p.call(ctx, "mempalace_search", call)
+			if err == nil && room == "" {
+				out = mempalace.RerankSearchResults(out, limit)
+			}
 			p.record("recall_memory", "read", room, query, countResults(out))
 			return out, err
 		},
@@ -293,6 +319,9 @@ var mpCatalog = []mpToolSpec{
 				call["source_file"] = src
 			}
 			out, err := p.call(ctx, "mempalace_add_drawer", call)
+			if err == nil {
+				p.rememberCount.Add(1)
+			}
 			p.record("remember", "write", room, clip(content, 120), 1)
 			return out, err
 		},
@@ -334,12 +363,60 @@ var mpCatalog = []mpToolSpec{
 		required: []string{"subject", "predicate", "object"},
 		execute: func(p *MempalaceProxy, ctx context.Context, args map[string]json.RawMessage) (string, error) {
 			subject, predicate, object := stringArg(args, "subject"), stringArg(args, "predicate"), stringArg(args, "object")
-			out, err := p.call(ctx, "mempalace_kg_invalidate", map[string]any{
-				"subject": subject, "predicate": predicate, "object": object,
-			})
-			if err != nil {
-				return "", err
+
+			// Honesty check: mempalace_kg_invalidate reports "success" even
+			// for a (subject, predicate, object) that was never actually
+			// added as a KG fact — agents can't add arbitrary KG facts
+			// themselves (only engine hooks write the KG), so most facts an
+			// agent tries to invalidate here don't exist as KG triples at
+			// all. Blindly reporting success gave false confidence that the
+			// invalidation had a real effect on future recall, when it
+			// couldn't have. Check first; if nothing matches, say so.
+			factExists := false
+			if kgOut, kgErr := p.call(ctx, "mempalace_kg_query", map[string]any{"entity": subject}); kgErr == nil {
+				var parsed struct {
+					Facts []struct {
+						Predicate string `json:"predicate"`
+						Object    string `json:"object"`
+						Current   bool   `json:"current"`
+					} `json:"facts"`
+				}
+				if json.Unmarshal([]byte(kgOut), &parsed) == nil {
+					for _, f := range parsed.Facts {
+						if f.Current && f.Predicate == predicate && f.Object == object {
+							factExists = true
+							break
+						}
+					}
+				}
 			}
+
+			if factExists {
+				if _, err := p.call(ctx, "mempalace_kg_invalidate", map[string]any{
+					"subject": subject, "predicate": predicate, "object": object,
+				}); err != nil {
+					return "", err
+				}
+			}
+
+			// Mark the actual drawer(s) being overturned, not just a new
+			// companion note — otherwise the substantive stale content (e.g.
+			// the original decision text) never gets demoted at recall time
+			// and can keep outranking the new, current decision. Scoped to
+			// general + decisions (where remember() files notes/decisions),
+			// substring-matched on the object (mempalace_search doesn't
+			// return drawer_id, so list_drawers + prefix match is the
+			// available mechanism — same pattern as supersedePreviousPlan).
+			markedCount := 0
+			if object != "" {
+				for _, room := range []string{mempalace.RoomDecisions, mempalace.RoomGeneral} {
+					if markedCount >= 3 {
+						break
+					}
+					markedCount += markMatchingDrawersSuperseded(ctx, p, room, object, 3-markedCount)
+				}
+			}
+
 			// Superseding note in the decisions room keeps the "why" recallable.
 			if reason := stringArg(args, "reason"); reason != "" {
 				note := fmt.Sprintf("[superseded] %s %s %s — no longer true: %s", subject, predicate, object, reason)
@@ -349,7 +426,13 @@ var mpCatalog = []mpToolSpec{
 				})
 			}
 			p.record("memory_invalidate", "write", "", fmt.Sprintf("%s %s %s", subject, predicate, object), 1)
-			return out, nil
+
+			if !factExists {
+				return fmt.Sprintf("No current KG fact found for %s %s %s — nothing to invalidate in the knowledge graph. "+
+					"Marked %d matching drawer(s) as superseded and recorded a note; "+
+					"if you meant to overturn an earlier written decision, this is that.", subject, predicate, object, markedCount), nil
+			}
+			return fmt.Sprintf(`{"success":true,"fact":"%s %s %s","drawers_marked_superseded":%d}`, subject, predicate, object, markedCount), nil
 		},
 	},
 	{
@@ -360,9 +443,17 @@ var mpCatalog = []mpToolSpec{
 		required: []string{"query"},
 		execute: func(p *MempalaceProxy, ctx context.Context, args map[string]json.RawMessage) (string, error) {
 			query := stringArg(args, "query")
+			limit := intArg(args, "limit", 5, 15)
+			fetchLimit := limit * 3
+			if fetchLimit > 30 {
+				fetchLimit = 30
+			}
 			out, err := p.call(ctx, "mempalace_search", map[string]any{
-				"query": clip(query, 250), "limit": intArg(args, "limit", 5, 15),
+				"query": clip(query, 250), "limit": fetchLimit,
 			})
+			if err == nil {
+				out = mempalace.RerankSearchResults(out, limit)
+			}
 			p.record("recall_company", "read", "", query, countResults(out))
 			return out, err
 		},
@@ -449,6 +540,68 @@ func isDuplicate(out string) bool {
 		}
 	}
 	return strings.Contains(out, `"duplicate": true`) || strings.Contains(out, `"is_duplicate": true`)
+}
+
+// markMatchingDrawersSuperseded prefixes drawers in the given room whose
+// preview contains needle (case-insensitive substring — mempalace_search
+// doesn't return drawer_id, so semantic matching isn't available here; this
+// mirrors the engine's existing supersedePreviousPlan pattern: list, filter,
+// fetch full content, update) with a [SUPERSEDED] marker, so
+// mempalace.RerankSearchResults demotes the real overturned content at recall time —
+// not just the small companion note memory_invalidate also writes. Returns
+// the number of drawers marked, capped at maxMark.
+func markMatchingDrawersSuperseded(ctx context.Context, p *MempalaceProxy, room, needle string, maxMark int) int {
+	if maxMark <= 0 {
+		return 0
+	}
+	out, err := p.call(ctx, "mempalace_list_drawers", map[string]any{
+		"wing": p.scope.wing(), "room": room, "limit": 100,
+	})
+	if err != nil {
+		return 0
+	}
+	var parsed struct {
+		Drawers []struct {
+			DrawerID string `json:"drawer_id"`
+			Preview  string `json:"content_preview"`
+		} `json:"drawers"`
+	}
+	if json.Unmarshal([]byte(out), &parsed) != nil {
+		return 0
+	}
+	needleLower := strings.ToLower(needle)
+	marked := 0
+	for _, d := range parsed.Drawers {
+		if marked >= maxMark {
+			break
+		}
+		if strings.HasPrefix(d.Preview, "[SUPERSEDED") || strings.HasPrefix(d.Preview, "[superseded]") {
+			continue
+		}
+		if !strings.Contains(strings.ToLower(d.Preview), needleLower) {
+			continue
+		}
+		full, fErr := p.call(ctx, "mempalace_get_drawer", map[string]any{"drawer_id": d.DrawerID})
+		if fErr != nil {
+			continue
+		}
+		var drawer struct {
+			Content string `json:"content"`
+		}
+		if json.Unmarshal([]byte(full), &drawer) != nil || drawer.Content == "" {
+			continue
+		}
+		if strings.HasPrefix(drawer.Content, "[SUPERSEDED") || strings.HasPrefix(drawer.Content, "[superseded]") {
+			continue
+		}
+		if _, uErr := p.call(ctx, "mempalace_update_drawer", map[string]any{
+			"drawer_id": d.DrawerID,
+			"content":   fmt.Sprintf("[SUPERSEDED] %s", drawer.Content),
+		}); uErr == nil {
+			marked++
+		}
+	}
+	return marked
 }
 
 // countResults extracts the result count from a mempalace_search response for

@@ -15,14 +15,24 @@ import (
 type FinishTask struct {
 	delegated bool
 	onFinish  func(ctx context.Context, status, finishStatus, resultDetails string) error
+	// hasRemembered reports whether this run has already stored at least one
+	// memory fact (nil when the memory layer isn't available for this run —
+	// then the nudge never fires). Checked once: an agent that hasn't stored
+	// anything gets a single reminder instead of finishing silently, mirroring
+	// upstream MemPalace's own stop-hook nudge pattern. Teardown's mechanical
+	// capture remains the real backstop for agents that ignore this or crash
+	// — this is a nudge, not a dependency.
+	hasRemembered func() bool
+	nudged        bool
 }
 
 // NewFinishTask builds the finish_task tool. delegated marks sessions that
 // run a subtask created by another agent: their result is reviewed by the
 // task owner automatically, so "done" is the normal completion status and
 // "in-review" is reserved for work a human specifically must approve.
-func NewFinishTask(delegated bool, onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error) *FinishTask {
-	return &FinishTask{delegated: delegated, onFinish: onFinish}
+// hasRemembered may be nil to disable the end-of-task memory nudge entirely.
+func NewFinishTask(delegated bool, hasRemembered func() bool, onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error) *FinishTask {
+	return &FinishTask{delegated: delegated, hasRemembered: hasRemembered, onFinish: onFinish}
 }
 
 func (t *FinishTask) Def() aicli.ToolDef {
@@ -76,6 +86,12 @@ func (t *FinishTask) Execute(ctx context.Context, args json.RawMessage) (string,
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
+	}
+	if !t.nudged && t.hasRemembered != nil && !t.hasRemembered() {
+		t.nudged = true
+		return "Before finishing: store 1-3 remember() calls capturing durable facts, decisions or learnings from " +
+			"this task that future tasks/agents would need — then call finish_task again. " +
+			"(This is a one-time reminder; calling finish_task again proceeds regardless.)", nil
 	}
 	if err := t.onFinish(ctx, p.TaskStatus, p.FinishStatus, p.ResultDetails); err != nil {
 		return "", fmt.Errorf("finish_task: %w", err)

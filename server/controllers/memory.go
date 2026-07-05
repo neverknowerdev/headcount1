@@ -160,19 +160,38 @@ func (api *API) SearchMemory(w http.ResponseWriter, r *http.Request) {
 	if len(query) > 250 {
 		query = query[:250]
 	}
-	args := map[string]any{"query": query, "limit": 10}
+	requestedLimit := 10
+	if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 && limit <= 50 {
+		requestedLimit = limit
+	}
+	room := r.URL.Query().Get("room")
+
+	// Over-fetch and re-rank unless the caller already narrowed to a room —
+	// same rationale as the recall_memory/recall_company agent tools (see
+	// mempalace.RerankSearchResults): mempalace's own ranking has no notion
+	// of "this is boilerplate" or "this was superseded", so a bare
+	// task-description echo or raw transcript dump can outrank a genuinely
+	// relevant fact for a status-style query.
+	fetchLimit := requestedLimit
+	if room == "" {
+		fetchLimit = requestedLimit * 3
+		if fetchLimit > 50 {
+			fetchLimit = 50
+		}
+	}
+	args := map[string]any{"query": query, "limit": fetchLimit}
 	if wing := r.URL.Query().Get("wing"); wing != "" {
 		args["wing"] = wing
 	}
-	if room := r.URL.Query().Get("room"); room != "" {
+	if room != "" {
 		args["room"] = room
-	}
-	if limit, _ := strconv.Atoi(r.URL.Query().Get("limit")); limit > 0 && limit <= 50 {
-		args["limit"] = limit
 	}
 	out, callOK := api.memoryCall(w, r, server, "mempalace_search", args)
 	if !callOK {
 		return
+	}
+	if room == "" {
+		out = mempalace.RerankSearchResults(out, requestedLimit)
 	}
 	api.logMemoryActivity(r.Context(), company.ID, "api:search", "read", str(args["wing"]), str(args["room"]), query, 0)
 	api.respondRawJSON(w, out)

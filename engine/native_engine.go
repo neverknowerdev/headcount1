@@ -504,7 +504,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	var memSess *memorySession
 	var mpProxy *tools.MempalaceProxy
 
-	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
+	registry.Register(tools.NewFinishTask(parent != nil, func() bool {
+		// mpProxy is assigned later in this function, before the agent loop
+		// runs any tool — by the time finish_task actually executes it's
+		// always set if memory is available for this run. nil here means "no
+		// memory layer for this run", which must never block finishing.
+		return mpProxy == nil || mpProxy.HasRemembered()
+	}, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err

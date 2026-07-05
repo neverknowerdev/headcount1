@@ -133,7 +133,10 @@ func (e *NativeEngine) memoryPromptSection(company db.Company, scope tools.Memor
 		fmt.Fprintf(&b, "Knowledge-graph entities are named task-<ref> (e.g. task-dec-62); the current task is %s. ", scope.TaskEntity)
 	}
 	b.WriteString("Use remember only for durable learnings no log can convey (e.g. 'X fails because Y — do Z instead'). " +
-		"One fact per call, max 500 chars. The engine records run history, artifacts and status automatically.")
+		"One fact per call, max 500 chars. The engine records run history, artifacts and status automatically. " +
+		"Before finish_task, store the durable facts, decisions and learnings from this task that a future task or " +
+		"agent would need — a few remember() calls, not a summary of everything you did. " +
+		"When overturning an earlier decision, call memory_invalidate first (it also marks the old decision's text as superseded), then remember the new one.")
 	return b.String()
 }
 

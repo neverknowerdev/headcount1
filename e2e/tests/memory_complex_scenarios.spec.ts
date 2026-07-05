@@ -71,24 +71,39 @@ test.describe.serial('Complex memory scenario 1: The Pivot (recency/current-trut
 
     test('DEC-19: the pivot to SSE, superseding WebSockets', async ({ request }) => {
         test.setTimeout(300_000);
+        // Order matters here: memory_invalidate runs BEFORE the SSE decision
+        // is written. memory_invalidate marks matching drawers by substring
+        // on `object` ("WebSockets") — the SSE decision text below naturally
+        // ALSO contains the word "WebSockets" (explaining what it replaced),
+        // so if it existed yet it would get wrongly marked superseded too.
+        // Invalidating first means only the actual stale decision (p1, from
+        // the previous test) exists to match. This is also the order the
+        // Palace Protocol prompt now recommends: "call memory_invalidate
+        // first ... then remember the new one."
         await runTask(request, companyId, agentId, sprintId, projectId, 'WebSocket disconnects under load', [
             rememberCall('p3',
                 "Investigation note: gorilla/websocket connections drop silently behind the company's corporate proxy after ~60s idle; reproduced with curl --http1.1 through a Squid proxy.",
                 'note'),
-            rememberCall('p4',
-                "Decision: replace WebSockets with Server-Sent Events (SSE) for task status push. WebSockets get silently dropped by common corporate proxies; SSE survives because it's plain HTTP/1.1 chunked response. Supersedes the earlier WebSockets decision.",
-                'decision'),
-            // memory_invalidate targets an engine-owned KG fact that was never
-            // actually written (agents can't kg_add arbitrary triples) — this
-            // call is expected to be accepted but have no matching fact to
-            // close. We keep it in the scenario to test that this doesn't
-            // error the run, and record its actual tool result for the report.
-            { tool_call: { id: 'p5', name: 'memory_invalidate', arguments: {
+            // No matching KG fact exists (agents can't kg_add arbitrary
+            // triples), so this reports "no current fact found" rather than
+            // fabricating success — but it still marks p1 (DEC-12's decision
+            // drawer) as [SUPERSEDED], which is what lets recall demote it.
+            { tool_call: { id: 'p4inv', name: 'memory_invalidate', arguments: {
                 subject: 'task-status-transport', predicate: 'uses', object: 'WebSockets',
                 reason: 'dropped by corporate proxies, see DEC-19',
             } } },
+            rememberCall('p5',
+                "Decision: replace WebSockets with Server-Sent Events (SSE) for task status push. WebSockets get silently dropped by common corporate proxies; SSE survives because it's plain HTTP/1.1 chunked response. Supersedes the earlier WebSockets decision.",
+                'decision'),
             finishCall('p6', 'Switched to SSE.'),
         ]);
+
+        const invalidateResult = await extractToolResult('p4inv');
+        REPORT.scenario1_invalidate_result = invalidateResult;
+        expect(invalidateResult, 'memory_invalidate must not fabricate success for a KG fact that was never added')
+            .toContain('No current KG fact found');
+        expect(invalidateResult, 'memory_invalidate must report marking the stale decision drawer')
+            .toMatch(/Marked 1 matching drawer/);
     });
 
     test('DEC-41 (different agent/task): recall must prefer the current (SSE) decision', async ({ request }) => {
@@ -102,14 +117,28 @@ test.describe.serial('Complex memory scenario 1: The Pivot (recency/current-trut
 
         const recallResult = await extractToolResult('p7');
         expect(recallResult, 'recall_memory must have returned something').toBeTruthy();
+        REPORT.scenario1_recall_memory_tool_result = recallResult;
 
-        // Direct search-ranking check (independent of the scripted call above):
-        // ask mempalace search directly and inspect result order/content.
+        // Hard requirement: the SSE decision (current truth) must outrank
+        // the WebSockets decision (superseded — marked by the previous
+        // test's memory_invalidate call) for a general status query. This is
+        // the exact case that failed before the ranking fix: both decisions
+        // are genuinely relevant by similarity, but only one is still true.
+        const parsedRecall = JSON.parse(recallResult!);
+        const recallTexts: string[] = (parsedRecall.results || []).map((r: { text: string }) => r.text);
+        const sseRank = recallTexts.findIndex((t) => t.includes('Server-Sent Events'));
+        const wsRank = recallTexts.findIndex((t) => t.includes('use WebSockets for real-time task status push'));
+        expect(sseRank, 'the current SSE decision must appear in recall_memory results').toBeGreaterThanOrEqual(0);
+        if (wsRank >= 0) {
+            expect(sseRank, 'SSE (current) must outrank the superseded WebSockets decision').toBeLessThan(wsRank);
+        }
+
+        // Cross-check directly against the raw search API (now reranked the
+        // same way) for an independent view of the ordering.
         const search = await getJSON(request, `/api/memory/search?company_id=${companyId}&q=${encodeURIComponent('real-time task status update transport mechanism')}`);
         const results: { text: string }[] = search.results || [];
         expect(results.length, 'search must return at least one hit').toBeGreaterThan(0);
-        const topText = results[0].text;
-        REPORT.scenario1_top_hit = topText;
+        REPORT.scenario1_top_hit = results[0].text;
         REPORT.scenario1_all_hits = results.map((r) => r.text);
     });
 
@@ -117,6 +146,11 @@ test.describe.serial('Complex memory scenario 1: The Pivot (recency/current-trut
         const search = await getJSON(request, `/api/memory/search?company_id=${companyId}&q=${encodeURIComponent('why did we reject WebSockets for status updates')}`);
         const texts = (search.results || []).map((r: { text: string }) => r.text);
         REPORT.scenario1_historical_hits = texts;
+        // Verbatim history must survive being marked [SUPERSEDED] — the
+        // original decision text (now prefixed) must still be findable when
+        // explicitly asked about the historical decision, not deleted.
+        expect(texts.some((t) => t.includes('use WebSockets for real-time task status push')),
+            'the original WebSockets decision must still be recallable for a historical query').toBe(true);
     });
 });
 
@@ -136,14 +170,30 @@ test.describe.serial('Complex memory scenario 2: disguised contradiction inside 
         await waitForMemoryReady(request, companyId);
     });
 
-    test('4 agents/writes: 3 genuine near-dupes, then a real pivot, then an overstated near-dupe of the pivot', async ({ request }) => {
+    test('4 agents/writes: 3 genuine near-dupes, then a real pivot (invalidated per protocol), then an overstated near-dupe of the pivot', async ({ request }) => {
         test.setTimeout(300_000);
 
+        // s4 is the real pivot. A protocol-following agent (per the updated
+        // Palace Protocol prompt: "when overturning an earlier decision, call
+        // memory_invalidate first") marks the stale claims superseded instead
+        // of just piling a new note on top. object="landlock blocks" is
+        // chosen deliberately: it's a substring of s1 ("landlock blocks
+        // /bin/sh") and s2 ("landlock blocks it"), but NOT of s4 ("landlock
+        // policy was updated") or s5 ("landlock restrictions were lifted") —
+        // memory_invalidate's drawer-marking is substring-based (mempalace
+        // search doesn't return drawer_id for semantic matching), so the
+        // needle has to be chosen to actually discriminate stale text from
+        // current text, same as a real agent would have to reference what's
+        // actually being overturned rather than a generic topic word.
         const entries = [
             rememberCall('s1', 'The sandboxed exec environment has no shell — landlock blocks /bin/sh, /bin/bash, and sh -c invocations entirely.', 'note'),
             rememberCall('s2', "Learned the hard way: you can't use shell tooling in this sandbox, no /bin/sh available, landlock blocks it.", 'note'),
             rememberCall('s3', 'No shell access in the exec sandbox (landlock restriction) — confirmed while trying to run a test script via sh -c.', 'note'),
             rememberCall('s4', 'Shell tooling is now available in the exec sandbox for allow-listed paths — landlock policy was updated to permit /usr/bin/git and /usr/bin/npm via exec.LookPath allowlist, general /bin/sh is still blocked.', 'note'),
+            { tool_call: { id: 's4inv', name: 'memory_invalidate', arguments: {
+                subject: 'sandbox-shell-access', predicate: 'status', object: 'landlock blocks',
+                reason: 'landlock policy updated to allowlist dfx/git/npm — see the new remember() note',
+            } } },
             rememberCall('s5', 'Shell tooling is now fully available in the exec sandbox, landlock restrictions were lifted.', 'note'),
             finishCall('s6', 'Environment facts recorded.'),
         ];
@@ -151,16 +201,35 @@ test.describe.serial('Complex memory scenario 2: disguised contradiction inside 
 
         const results = await Promise.all(['s1', 's2', 's3', 's4', 's5'].map((id) => extractToolResult(id)));
         REPORT.scenario2_results = { s1: results[0], s2: results[1], s3: results[2], s4: results[3], s5: results[4] };
+        REPORT.scenario2_invalidate_result = await extractToolResult('s4inv');
 
         const dupCount = results.filter((r) => (r || '').includes('Already in memory')).length;
         REPORT.scenario2_dup_count_of_5 = dupCount;
 
-        // Hard requirement regardless of tuning: the search-recall answer to
-        // the real current-state question must reflect the narrow-allowlist
-        // truth (s4), not the overstated "fully lifted" claim (s5) and not
-        // the stale "no shell at all" claim (s1-s3).
+        // Hard requirement: the search-recall answer to the real
+        // current-state question must rank the narrow-allowlist truth (s4)
+        // above the now-superseded "no shell at all" claims (s1/s2). The
+        // overstated "fully lifted" claim (s5) is deliberately NOT asserted
+        // against — nothing in this scenario gives the system a way to know
+        // s5 is wrong (no one invalidated it), so requiring s4 to beat s5
+        // would be asserting on omniscience, not on the fix. That gap is a
+        // real, separate limitation (see RESULTS.md), not something this
+        // fix claims to solve.
         const search = await getJSON(request, `/api/memory/search?company_id=${companyId}&q=${encodeURIComponent('can I use shell commands in the sandbox')}`);
-        REPORT.scenario2_recall_hits = (search.results || []).map((r: { text: string }) => r.text);
+        const hits = (search.results || []).map((r: { text: string }) => r.text as string);
+        REPORT.scenario2_recall_hits = hits;
+
+        const rankOf = (needle: string) => hits.findIndex((t) => t.includes(needle));
+        const s4Rank = rankOf('landlock policy was updated');
+        const s1Rank = rankOf('has no shell');
+        const s2Rank = rankOf("can't use shell tooling");
+        expect(s4Rank, 's4 (the current, correct fact) must appear in results').toBeGreaterThanOrEqual(0);
+        if (s1Rank >= 0) {
+            expect(s4Rank, 's4 must outrank the now-superseded s1').toBeLessThan(s1Rank);
+        }
+        if (s2Rank >= 0) {
+            expect(s4Rank, 's4 must outrank the now-superseded s2').toBeLessThan(s2Rank);
+        }
     });
 });
 
