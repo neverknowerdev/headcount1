@@ -48,9 +48,17 @@ export async function waitForTaskStatus(
                     });
                 if (mine.length > 0) {
                     const latest = mine[0];
-                    const log = latest.log_content || latest.LogContent || '';
-                    const status = latest.status || latest.Status || '';
-                    const sess = latest.session_id || latest.SessionID || '';
+                    // The list endpoint omits log_content/log_entries (they're
+                    // full transcripts, only fetched lazily by the Run Log
+                    // Details page) — re-fetch the single run for diagnostics.
+                    let full: any = latest;
+                    try {
+                        const runRes = await request.get(`/api/runs/${latest.id}`);
+                        if (runRes.ok()) full = await runRes.json();
+                    } catch { /* fall back to list data below */ }
+                    const log = full.log_content || full.LogContent || '';
+                    const status = full.status || full.Status || '';
+                    const sess = full.session_id || full.SessionID || '';
                     runLogHint =
                         `\nLatest run for task ${taskId}: status="${status}" session="${sess}"\n` +
                         `Run log (last 2000 chars):\n${log.slice(-2000)}`;

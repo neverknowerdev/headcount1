@@ -4,35 +4,7 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
-
-// buildAgentStats aggregates token stats per agent across the whole session
-// tree: the root run plus each delegated child session, keyed by agent config
-// name (multiple sessions of the same agent are summed).
-function buildAgentStats(root: any, children: any[]): AgentTokenStats[] {
-    const order: string[] = [];
-    const byAgent = new Map<string, any>();
-    const numericKeys = [
-        'prompt_tokens', 'completion_tokens', 'reasoning_tokens',
-        'tool_input_tokens', 'tool_output_tokens', 'cached_tokens',
-        'total_tokens', 'mcp_tool_tokens',
-    ];
-    const add = (label: string, s: any) => {
-        if (!s) return;
-        if (!byAgent.has(label)) {
-            byAgent.set(label, {});
-            order.push(label);
-        }
-        const agg = byAgent.get(label);
-        for (const k of numericKeys) {
-            agg[k] = (agg[k] || 0) + (s[k] || 0);
-        }
-    };
-    add(root.agent_config_name || root.agent?.name || 'agent', root.token_stats);
-    for (const c of children) {
-        add(c.agent_config_name || c.agent?.name || `run #${c.id}`, c.token_stats);
-    }
-    return order.map(agent => ({ agent, stats: byAgent.get(agent) }));
-}
+import { buildAgentStats } from '../utils/runStats';
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
