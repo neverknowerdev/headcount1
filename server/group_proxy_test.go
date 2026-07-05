@@ -23,9 +23,14 @@ func setupGroupTestDB(t *testing.T) *gorm.DB {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// One connection only: every pooled connection to a ":memory:" SQLite
+	// DSN would otherwise get its own empty database.
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
 	if err := database.AutoMigrate(
 		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
+		&db.Sprint{}, &db.Task{}, &db.Run{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -200,5 +205,133 @@ func TestGroupProxyAllFail(t *testing.T) {
 	}
 	if !strings.Contains(w.Body.String(), "model_group_exhausted") {
 		t.Fatalf("expected model_group_exhausted error, got %s", w.Body.String())
+	}
+}
+
+// TestAgentProxyUsesModelGroup: an agent bound to a model group must be
+// served by the group router on the agent proxy endpoint, including model
+// rewriting and failover.
+func TestAgentProxyUsesModelGroup(t *testing.T) {
+	database := setupGroupTestDB(t)
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+		if payload["model"] != "grp-model" {
+			t.Errorf("expected group member model grp-model, got %v", payload["model"])
+		}
+		w.Write([]byte(`{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}`))
+	}))
+	defer srv.Close()
+
+	comp := db.Company{Name: "T", ShortName: "t"}
+	database.Create(&comp)
+	p := db.LLMProvider{Name: "P", BaseUrl: srv.URL, ApiKey: "k"}
+	database.Create(&p)
+	group := db.ModelGroup{Name: "Agent Group", Slug: "agent-group"}
+	database.Create(&group)
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: p.ID, Model: "grp-model", IsFree: true})
+	agent := db.Agent{CompanyID: comp.ID, Name: "A", ModelGroupID: &group.ID}
+	database.Create(&agent)
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+
+	req := httptest.NewRequest("POST", "/proxy/agent/1/v1/chat/completions", strings.NewReader(`{"model":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("agent_id", "1")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	time.Sleep(100 * time.Millisecond)
+	var stat db.ModelRequestStat
+	if err := database.First(&stat).Error; err != nil {
+		t.Fatalf("expected a group stat row: %v", err)
+	}
+	if !stat.Success || stat.Model != "grp-model" {
+		t.Errorf("unexpected stat row: %+v", stat)
+	}
+}
+
+// TestGroupProxySwitchesOnlyLogging: with X-Proxy-Log-Mode: switches-only
+// (set by the native engine), the router writes model_switch entries into
+// the run log but never request/response entries — the engine's own agent
+// loop logs those.
+func TestGroupProxySwitchesOnlyLogging(t *testing.T) {
+	database := setupGroupTestDB(t)
+
+	failServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": {"message": "boom"}}`))
+	}))
+	defer failServer.Close()
+	okServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3}}`))
+	}))
+	defer okServer.Close()
+
+	comp := db.Company{Name: "T", ShortName: "t"}
+	database.Create(&comp)
+	sprint := db.Sprint{CompanyID: comp.ID, Name: "S"}
+	database.Create(&sprint)
+	p1 := db.LLMProvider{Name: "Bad", BaseUrl: failServer.URL, ApiKey: "k"}
+	p2 := db.LLMProvider{Name: "Good", BaseUrl: okServer.URL, ApiKey: "k"}
+	database.Create(&p1)
+	database.Create(&p2)
+	group := db.ModelGroup{Name: "Run Group", Slug: "run-group"}
+	database.Create(&group)
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: p1.ID, Model: "m1", IsFree: true, Priority: 0})
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: p2.ID, Model: "m2", IsFree: true, Priority: 1})
+	agent := db.Agent{CompanyID: comp.ID, Name: "A", ModelGroupID: &group.ID}
+	database.Create(&agent)
+	task := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "T"}
+	database.Create(&task)
+	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running"}
+	database.Create(&run)
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+
+	req := httptest.NewRequest("POST", "/proxy/group/run-group/v1/chat/completions", strings.NewReader(`{"model":"x"}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Run-ID", "1")
+	req.Header.Set("X-Proxy-Log-Mode", "switches-only")
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("group_key", "run-group")
+	req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	time.Sleep(200 * time.Millisecond)
+
+	var reloaded db.Run
+	database.First(&reloaded, run.ID)
+	var entries []map[string]interface{}
+	json.Unmarshal([]byte(reloaded.LogEntries), &entries)
+	var switches, other int
+	for _, e := range entries {
+		switch e["type"] {
+		case "model_switch":
+			switches++
+		case "request", "response":
+			other++
+		}
+	}
+	if switches != 1 {
+		t.Errorf("expected 1 model_switch entry, got %d (entries: %s)", switches, reloaded.LogEntries)
+	}
+	if other != 0 {
+		t.Errorf("switches-only mode must not log request/response entries, got %d", other)
 	}
 }

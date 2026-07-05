@@ -172,6 +172,9 @@ type Client struct {
 	// a zero value falls back to that default in Complete so a Client built
 	// via a bare struct literal (as some tests do) still behaves sanely.
 	RetryBaseDelay time.Duration
+	// ExtraHeaders are added to every request. Used when the client targets
+	// the in-process model-group gateway (X-Run-ID, log-mode hints).
+	ExtraHeaders map[string]string
 }
 
 // NewClient creates a Client with sensible defaults.
@@ -248,6 +251,9 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	for k, v := range c.ExtraHeaders {
+		httpReq.Header.Set(k, v)
 	}
 
 	httpResp, err := c.HTTPClient.Do(httpReq)

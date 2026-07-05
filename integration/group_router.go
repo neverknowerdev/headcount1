@@ -189,6 +189,12 @@ func (g *LLMGateway) recordStat(stat db.ModelRequestStat) {
 	}()
 }
 
+// proxyLogModeHeader selects how much run logging the group router does when
+// an X-Run-ID is present. The native engine sets "switches-only" because its
+// agent loop already logs requests/responses and token stats itself; the
+// router then only contributes model_switch and exhaustion entries.
+const proxyLogModeHeader = "X-Proxy-Log-Mode"
+
 // proxyChatCompletionsForGroup is the OpenAI-compatible entrypoint for a
 // model group. It tries the group's members in health order, failing over on
 // errors and rate limits, and records a ModelRequestStat row per attempt.
@@ -199,6 +205,10 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
+	g.serveGroupChatCompletions(w, r, group)
+}
+
+func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Request, group db.ModelGroup) {
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
@@ -226,9 +236,13 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 	}
 
 	runID := parseRunID(r)
-	proxyLogger := g.loggerForRun(r.Context(), runID, reqPayload.Model, group.Name, bodyBytes, reqPayload.Messages)
-	if proxyLogger != nil {
-		defer proxyLogger.Close()
+	switchesOnly := r.Header.Get(proxyLogModeHeader) == "switches-only"
+	var proxyLogger *logging.ProxyLogger
+	if !switchesOnly {
+		proxyLogger = g.loggerForRun(r.Context(), runID, reqPayload.Model, group.Name, bodyBytes, reqPayload.Messages)
+		if proxyLogger != nil {
+			defer proxyLogger.Close()
+		}
 	}
 
 	candidates := g.orderCandidates(group.Members, time.Now())
@@ -242,11 +256,22 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 
 		if i > 0 {
 			prev := candidates[i-1]
+			reason := truncateMsg(lastErrMsg, 160)
 			msg := fmt.Sprintf("Switching model: %s @ %s failed (%s), trying %s @ %s",
-				prev.Model, prev.Provider.Name, truncateMsg(lastErrMsg, 160), member.Model, provider.Name)
+				prev.Model, prev.Provider.Name, reason, member.Model, provider.Name)
 			log.Printf("[model-group %s] %s", group.Slug, msg)
 			if proxyLogger != nil {
-				proxyLogger.LogModelSwitch(prev.Provider.Name, prev.Model, provider.Name, member.Model, truncateMsg(lastErrMsg, 160))
+				proxyLogger.LogModelSwitch(prev.Provider.Name, prev.Model, provider.Name, member.Model, reason)
+			} else if runID > 0 {
+				g.logRunEvent(runID, "model_switch",
+					fmt.Sprintf("Model switch: %s @ %s → %s @ %s (%s)", prev.Model, prev.Provider.Name, member.Model, provider.Name, reason),
+					map[string]interface{}{
+						"from_provider": prev.Provider.Name,
+						"from_model":    prev.Model,
+						"to_provider":   provider.Name,
+						"to_model":      member.Model,
+						"reason":        reason,
+					})
 			}
 		}
 
@@ -258,7 +283,7 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 		}
 		for k, vv := range r.Header {
 			lk := strings.ToLower(k)
-			if lk == "authorization" || lk == "x-run-id" || lk == "content-length" {
+			if lk == "authorization" || lk == "x-run-id" || lk == "content-length" || lk == strings.ToLower(proxyLogModeHeader) {
 				continue
 			}
 			for _, v := range vv {
@@ -307,7 +332,9 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 
 			usage, reasoning := parseNonStreamUsage(respBody)
 			g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration, usage.PromptTokens, usage.CompletionTokens, "")
-			g.finishRunAccounting(r.Context(), runID, member, usage)
+			if !switchesOnly {
+				g.finishRunAccounting(r.Context(), runID, member, usage)
+			}
 			if proxyLogger != nil {
 				proxyLogger.LogResponse(member.Model, provider.Name, resp.StatusCode, respBody, reasoning, usage)
 			}
@@ -345,7 +372,9 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 			usage = *lastUsage
 		}
 		g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration, usage.PromptTokens, usage.CompletionTokens, "")
-		g.finishRunAccounting(r.Context(), runID, member, usage)
+		if !switchesOnly {
+			g.finishRunAccounting(r.Context(), runID, member, usage)
+		}
 		if proxyLogger != nil {
 			proxyLogger.LogStreamResponse(member.Model, provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
 		}
@@ -355,6 +384,8 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 	msg := fmt.Sprintf("All %d models in group %q failed; last error: %s", len(candidates), group.Name, lastErrMsg)
 	if proxyLogger != nil {
 		proxyLogger.LogErrorMsg(msg)
+	} else if switchesOnly && runID > 0 {
+		g.logRunEvent(runID, "error", msg, nil)
 	}
 	if lastStatus == 0 {
 		lastStatus = http.StatusBadGateway
@@ -484,6 +515,35 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 	return proxyLogger
 }
 
+// logRunEvent appends a structured entry to a run's log and broadcasts it
+// over the WebSocket hub. Used in switches-only log mode, where no
+// ProxyLogger (and thus no log file) is created — the engine's session
+// logger owns the file; the router only contributes routing events.
+func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map[string]interface{}) {
+	entry := map[string]interface{}{
+		"type":    entryType,
+		"content": content,
+		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	for k, v := range extra {
+		entry[k] = v
+	}
+	if g.hub != nil {
+		g.hub.BroadcastEvent("run_log", map[string]interface{}{
+			"run_id": int32(runID),
+			"entry":  entry,
+		})
+	}
+	go func() {
+		for i := 0; i < 3; i++ {
+			if err := g.q.AppendRunLogEntry(context.Background(), int32(runID), entry); err == nil {
+				return
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
+}
+
 func parseRunID(r *http.Request) int {
 	runIDStr := r.Header.Get("X-Run-ID")
 	if runIDStr == "" {
@@ -564,6 +624,10 @@ func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
+	g.serveGroupModels(w, group)
+}
+
+func (g *LLMGateway) serveGroupModels(w http.ResponseWriter, group db.ModelGroup) {
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`

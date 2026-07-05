@@ -63,6 +63,11 @@ type Agent struct {
 	SystemPrompt string       `json:"system_prompt" gorm:"not null"`
 	ProviderID   *int32       `json:"provider_id"`
 	Provider     *LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
+	// ModelGroupID, when set, takes precedence over ProviderID/Model: the
+	// agent's LLM calls go through the model-group router (free-first,
+	// auto-failover) instead of a fixed provider+model.
+	ModelGroupID *int32       `json:"model_group_id"`
+	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
 	Model        string       `json:"model"`
 	Mode         string       `json:"mode" gorm:"not null;default:'primary'"`
 	Permissions  string       `json:"permissions"`

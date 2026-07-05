@@ -324,8 +324,25 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil || agent.ProviderID == nil {
-		http.Error(w, "Agent or provider not found", http.StatusNotFound)
+	if err != nil {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	// Agents bound to a model group route through the group router
+	// (free-first ordering, failover, per-attempt stats).
+	if agent.ModelGroupID != nil {
+		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
+		if gErr != nil {
+			http.Error(w, "Model group not found", http.StatusNotFound)
+			return
+		}
+		g.serveGroupChatCompletions(w, r, group)
+		return
+	}
+
+	if agent.ProviderID == nil {
+		http.Error(w, "Agent has no provider or model group configured", http.StatusNotFound)
 		return
 	}
 
@@ -571,8 +588,23 @@ func (g *LLMGateway) getModelsForAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil || agent.ProviderID == nil {
-		http.Error(w, "Agent or provider not found", http.StatusNotFound)
+	if err != nil {
+		http.Error(w, "Agent not found", http.StatusNotFound)
+		return
+	}
+
+	if agent.ModelGroupID != nil {
+		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
+		if gErr != nil {
+			http.Error(w, "Model group not found", http.StatusNotFound)
+			return
+		}
+		g.serveGroupModels(w, group)
+		return
+	}
+
+	if agent.ProviderID == nil {
+		http.Error(w, "Agent has no provider or model group configured", http.StatusNotFound)
 		return
 	}
 

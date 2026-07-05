@@ -57,6 +57,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		Mode         string `json:"mode"`
 		Permissions  string `json:"permissions"`
 		ProviderID   *int32 `json:"provider_id"`
+		ModelGroupID *int32 `json:"model_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -86,6 +87,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		agent.Permissions = req.Permissions
 	}
 	agent.ProviderID = req.ProviderID
+	agent.ModelGroupID = req.ModelGroupID
 
 	agent, err = api.q.UpdateAgent(r.Context(), agent)
 	if err != nil {
@@ -137,6 +139,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Mode         string `json:"mode"`
 		Permissions  string `json:"permissions"`
 		ProviderID   *int32 `json:"provider_id"`
+		ModelGroupID *int32 `json:"model_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -151,6 +154,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Mode:         req.Mode,
 		Permissions:  req.Permissions,
 		ProviderID:   req.ProviderID,
+		ModelGroupID: req.ModelGroupID,
 	}
 
 	agent, err := api.q.CreateAgent(r.Context(), p)

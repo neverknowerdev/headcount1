@@ -339,17 +339,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		depth = parent.depth
 	}
 
-	// Resolve provider from the agent configuration.
-	if agent.ProviderID == nil {
-		e.failRun(ctx, run.ID, "agent has no provider configured")
-		return "failed"
-	}
-	provider, err := e.q.GetLLMProvider(ctx, *agent.ProviderID)
-	if err != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("failed to get provider: %v", err))
-		return "failed"
-	}
-
 	// Load agent config early so model resolution can use AllowedModels.
 	// The proxy logger isn't ready yet, so fall back to stdout for this warning.
 	var agentCfg *agentconfig.AgentConfig
@@ -361,12 +350,48 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
-	// Resolve the model: intersect AgentConfig.AllowedModels with the
-	// provider's SupportedModels, falling back to the agent/provider default.
-	model, err := resolveModel(agentCfg, provider, agent.Model)
-	if err != nil {
-		e.failRun(ctx, run.ID, fmt.Sprintf("model resolution failed: %v", err))
-		return "failed"
+	// Resolve the LLM target. Agents bound to a model group talk to the
+	// in-process group router (free-first ordering, failover, stats) through
+	// a synthetic provider pointing at the local gateway; otherwise the
+	// agent's fixed provider+model is used directly.
+	var provider db.LLMProvider
+	var model string
+	groupMode := agent.ModelGroupID != nil
+	if groupMode {
+		group, gErr := e.q.GetModelGroup(ctx, *agent.ModelGroupID)
+		if gErr != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("failed to get model group: %v", gErr))
+			return "failed"
+		}
+		if len(group.Members) == 0 {
+			e.failRun(ctx, run.ID, fmt.Sprintf("model group %q has no members", group.Name))
+			return "failed"
+		}
+		provider = db.LLMProvider{
+			Name:         group.Name + " (model group)",
+			BaseUrl:      modelGroupProxyBaseURL(group.Slug),
+			ProviderType: "openai",
+		}
+		model = group.Slug
+	} else {
+		if agent.ProviderID == nil {
+			e.failRun(ctx, run.ID, "agent has no provider or model group configured")
+			return "failed"
+		}
+		var err error
+		provider, err = e.q.GetLLMProvider(ctx, *agent.ProviderID)
+		if err != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("failed to get provider: %v", err))
+			return "failed"
+		}
+
+		// Resolve the model: intersect AgentConfig.AllowedModels with the
+		// provider's SupportedModels, falling back to the agent/provider default.
+		model, err = resolveModel(agentCfg, provider, agent.Model)
+		if err != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("model resolution failed: %v", err))
+			return "failed"
+		}
 	}
 
 	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
@@ -842,6 +867,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		agentDisplayName = agentCfg.Name
 	}
 	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	if groupMode {
+		// The group router picks the real provider+model per request. X-Run-ID
+		// lets it write model_switch entries into this run's log; switches-only
+		// keeps it from double-logging requests/responses (the agent loop
+		// below already does that).
+		llmClient.ExtraHeaders = map[string]string{
+			"X-Run-ID":         fmt.Sprintf("%d", run.ID),
+			"X-Proxy-Log-Mode": "switches-only",
+		}
+	}
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,
 		Registry:              registry,
