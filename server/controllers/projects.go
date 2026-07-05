@@ -147,8 +147,8 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	// Mine the project workspace into the company's memory palace in the
 	// background (best-effort; requires mempalace + an on-disk repo).
 	if mempalace.Available() {
-		if _, memErr := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); memErr == nil {
-			mempalace.MineProjectAsync(comp, proj, repoPath)
+		if memServer, memErr := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); memErr == nil {
+			mempalace.MineProjectAsync(memServer, comp, proj, repoPath)
 		}
 	}
 

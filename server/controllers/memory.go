@@ -538,7 +538,7 @@ func (api *API) RunMemoryMaintenance(w http.ResponseWriter, r *http.Request) {
 		}
 		settings := LoadSettings()
 		workspaceDir := filesystem.NewManager(settings.BasePath).GetProjectRepoPath(company, project)
-		mempalace.MineProjectAsync(company, project, workspaceDir)
+		mempalace.MineProjectAsync(server, company, project, workspaceDir)
 		api.logMemoryActivity(r.Context(), company.ID, "api:mine", "maintenance", mempalace.ProjectWing(project.Name), "", project.Name, 0)
 		api.respondJSON(w, http.StatusOK, map[string]string{"status": "mining started"})
 	case "sync":

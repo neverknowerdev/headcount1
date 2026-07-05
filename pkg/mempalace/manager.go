@@ -260,7 +260,18 @@ func CloseAll() {
 // MineProjectAsync indexes a project workspace into the company palace in a
 // background goroutine (codegraph-init pattern). Failures are logged only —
 // mining is an enrichment, not a dependency of memory availability.
-func MineProjectAsync(company db.Company, project db.Project, workspaceDir string) {
+//
+// Goes through the shared MCP client (CallServerTool), NOT a CLI subprocess.
+// The long-lived mempalace-mcp process holds the palace's writer lease for as
+// long as memory is in use — a competing CLI `mine` process trying to grab
+// its own writer lease on the same palace directory gets rejected (and, worse,
+// can force the MCP server to demote itself to read-only for the duration:
+// "Peer MCP writer active; this server is read-only for mutating tools"),
+// which was silently dropping/delaying concurrent agent writes (remember(),
+// diary, KG facts) during exactly this project-creation-time mining window.
+// This mirrors MineTranscript's existing (correct) pattern — see its comment
+// for the "palace is held by PID" failure mode this avoids.
+func MineProjectAsync(server db.MCPServer, company db.Company, project db.Project, workspaceDir string) {
 	if !Available() || workspaceDir == "" {
 		return
 	}
@@ -268,20 +279,22 @@ func MineProjectAsync(company db.Company, project db.Project, workspaceDir strin
 		if _, err := os.Stat(workspaceDir); err != nil {
 			return
 		}
-		serverName := ServerName(company)
-		unlock := LockCompany(serverName)
-		defer unlock()
-
 		wing := ProjectWing(project.Name)
 		log.Printf("mempalace: mining project %q into wing %q...", project.Name, wing)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Minute)
 		defer cancel()
-		cmd := exec.CommandContext(ctx, setup.MempalaceCLIPath(),
-			"--palace", PalacePath(company),
-			"mine", workspaceDir, "--wing", wing, "--agent", "system")
-		out, err := cmd.CombinedOutput()
+		out, err := CallServerTool(ctx, server, "mempalace_mine", map[string]any{
+			"source": workspaceDir, "mode": "projects", "wing": wing, "agent": "system",
+		})
 		if err != nil {
-			log.Printf("mempalace: mine failed for project %q: %v — %s", project.Name, err, tail(string(out), 500))
+			log.Printf("mempalace: mine failed for project %q: %v — %s", project.Name, err, tail(out, 500))
+			return
+		}
+		var parsed struct {
+			Error string `json:"error"`
+		}
+		if json.Unmarshal([]byte(out), &parsed) == nil && parsed.Error != "" {
+			log.Printf("mempalace: mine failed for project %q: %s", project.Name, tail(parsed.Error, 500))
 			return
 		}
 		log.Printf("mempalace: mine completed for project %q", project.Name)
