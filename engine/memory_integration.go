@@ -90,7 +90,7 @@ func (e *NativeEngine) resolveMemorySession(ctx context.Context, company db.Comp
 // memory proxy. Rows are written asynchronously — the feed must never slow a
 // tool call down.
 func (e *NativeEngine) memoryActivityRecorder(companyID, taskID, runID int32, agentName string) tools.MemoryActivityFunc {
-	return func(tool, kind, wing, room, query string, resultN int) {
+	return func(tool, kind, wing, room, query string, resultN int, args, response string) {
 		go func() {
 			tid, rid := taskID, runID
 			if _, err := e.q.CreateMemoryActivity(context.Background(), db.MemoryActivity{
@@ -104,6 +104,8 @@ func (e *NativeEngine) memoryActivityRecorder(companyID, taskID, runID int32, ag
 				Room:      room,
 				Query:     query,
 				ResultN:   resultN,
+				Args:      args,
+				Response:  response,
 			}); err != nil {
 				fmt.Printf("Warning: failed to record memory activity: %v\n", err)
 			}

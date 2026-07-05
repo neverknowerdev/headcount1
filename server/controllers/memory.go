@@ -79,9 +79,23 @@ func (api *API) memoryCall(w http.ResponseWriter, r *http.Request, server db.MCP
 }
 
 func (api *API) logMemoryActivity(ctx context.Context, companyID int32, tool, kind, wing, room, query string, resultN int) {
+	api.logMemoryActivityFull(ctx, companyID, tool, kind, wing, room, query, resultN, nil, "")
+}
+
+// logMemoryActivityFull is logMemoryActivity plus the full command (args)
+// and mempalace's raw reply (response), for the Activity tab's "view full
+// log" detail (GetMemoryActivityDetail).
+func (api *API) logMemoryActivityFull(ctx context.Context, companyID int32, tool, kind, wing, room, query string, resultN int, args map[string]any, response string) {
+	argsJSON := ""
+	if len(args) > 0 {
+		if b, err := json.Marshal(args); err == nil {
+			argsJSON = string(b)
+		}
+	}
 	_, _ = api.q.CreateMemoryActivity(ctx, db.MemoryActivity{
 		CompanyID: companyID, AgentName: "", Tool: tool, Kind: kind,
 		Wing: wing, Room: room, Query: query, ResultN: resultN,
+		Args: argsJSON, Response: response,
 	})
 }
 
@@ -137,14 +151,76 @@ func (api *API) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, resp)
 }
 
+// standardRooms are the rooms every wing can hold, regardless of whether
+// anything has been filed in them yet — shown so the Explorer/Graph tabs
+// reflect the taxonomy that's AVAILABLE, not just what happens to be
+// populated (request: "show all available room/wings, even if empty").
+var standardRooms = []string{mempalace.RoomGeneral, mempalace.RoomDecisions}
+
 func (api *API) GetMemoryTaxonomy(w http.ResponseWriter, r *http.Request) {
-	_, server, ok := api.memoryCompany(w, r)
+	company, server, ok := api.memoryCompany(w, r)
 	if !ok {
 		return
 	}
-	if out, ok := api.memoryCall(w, r, server, "mempalace_get_taxonomy", map[string]any{}); ok {
-		api.respondRawJSON(w, out)
+	taxonomy, err := api.buildEnrichedTaxonomy(r.Context(), company, server)
+	if err != nil {
+		api.respondError(w, http.StatusBadGateway, "unexpected taxonomy payload")
+		return
 	}
+	api.respondJSON(w, http.StatusOK, map[string]any{"taxonomy": taxonomy})
+}
+
+// buildEnrichedTaxonomy merges mempalace's actual taxonomy (wings/rooms that
+// have content) with every wing/room that COULD exist for this company — the
+// company wing, one wing per project, one wing per agent (diary), and the
+// standard rooms in each — defaulting to a count of 0 when empty. Wing/room
+// naming mirrors pkg/mempalace.ProjectWing/AgentWing/SanitizeName exactly so
+// keys match what mempalace_search/list_drawers actually use.
+func (api *API) buildEnrichedTaxonomy(ctx context.Context, company db.Company, server db.MCPServer) (map[string]map[string]int, error) {
+	out, err := mempalace.CallServerTool(ctx, server, "mempalace_get_taxonomy", map[string]any{})
+	if err != nil {
+		return nil, err
+	}
+	var parsed struct {
+		Taxonomy map[string]map[string]int `json:"taxonomy"`
+	}
+	if jErr := json.Unmarshal([]byte(out), &parsed); jErr != nil {
+		return nil, jErr
+	}
+	taxonomy := parsed.Taxonomy
+	if taxonomy == nil {
+		taxonomy = map[string]map[string]int{}
+	}
+
+	ensure := func(wing string) {
+		if _, ok := taxonomy[wing]; !ok {
+			taxonomy[wing] = map[string]int{}
+		}
+		for _, room := range standardRooms {
+			if _, ok := taxonomy[wing][room]; !ok {
+				taxonomy[wing][room] = 0
+			}
+		}
+	}
+
+	ensure(mempalace.CompanyWing)
+	if projects, pErr := api.q.ListProjectsByCompany(ctx, company.ID); pErr == nil {
+		for _, p := range projects {
+			ensure(mempalace.ProjectWing(p.Name))
+		}
+	}
+	if agents, aErr := api.q.ListAgentsByCompany(ctx, company.ID); aErr == nil {
+		for _, a := range agents {
+			wing := mempalace.AgentWing(a.Name)
+			if _, ok := taxonomy[wing]; !ok {
+				taxonomy[wing] = map[string]int{}
+			}
+			if _, ok := taxonomy[wing]["diary"]; !ok {
+				taxonomy[wing]["diary"] = 0
+			}
+		}
+	}
+	return taxonomy, nil
 }
 
 func (api *API) SearchMemory(w http.ResponseWriter, r *http.Request) {
@@ -193,54 +269,54 @@ func (api *API) SearchMemory(w http.ResponseWriter, r *http.Request) {
 	if room == "" {
 		out = mempalace.RerankSearchResults(out, requestedLimit)
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:search", "read", str(args["wing"]), str(args["room"]), query, 0)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:search", "read", str(args["wing"]), str(args["room"]), query, 0, args, out)
 	api.respondRawJSON(w, out)
 }
 
+type memoryGraphNode struct {
+	ID          string `json:"id"`
+	Label       string `json:"label"`
+	Kind        string `json:"kind"` // "wing" | "room"
+	Wing        string `json:"wing,omitempty"`
+	Room        string `json:"room,omitempty"`
+	DrawerCount int    `json:"drawer_count"`
+}
+type memoryGraphEdge struct {
+	From  string `json:"from"`
+	To    string `json:"to"`
+	Kind  string `json:"kind"` // "contains" | "tunnel" | "hallway"
+	Label string `json:"label,omitempty"`
+}
+
 // GetMemoryGraph composes the palace's structural data into a nodes+edges
-// document for the UI graph tab: wings and rooms as nodes, wing→room
-// containment plus tunnels/hallways as edges.
+// document for the UI graph tab: every wing/room (including empty ones, from
+// buildEnrichedTaxonomy) as nodes carrying their drawer counts, wing→room
+// containment plus cross-wing tunnels/hallways ("which one depends on
+// which") as edges. Node IDs are wing/room so the frontend can drive the
+// Explorer's drawer list directly off a click.
 func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
-	_, server, ok := api.memoryCompany(w, r)
+	company, server, ok := api.memoryCompany(w, r)
 	if !ok {
 		return
 	}
 
-	type node struct {
-		ID          string `json:"id"`
-		Label       string `json:"label"`
-		Kind        string `json:"kind"` // "wing" | "room"
-		DrawerCount int    `json:"drawer_count"`
-	}
-	type edge struct {
-		From  string `json:"from"`
-		To    string `json:"to"`
-		Kind  string `json:"kind"` // "contains" | "tunnel" | "hallway"
-		Label string `json:"label,omitempty"`
-	}
-	var nodes []node
-	var edges []edge
+	var nodes []memoryGraphNode
+	var edges []memoryGraphEdge
 
-	taxOut, callOK := api.memoryCall(w, r, server, "mempalace_get_taxonomy", map[string]any{})
-	if !callOK {
-		return
-	}
-	var tax struct {
-		Taxonomy map[string]map[string]int `json:"taxonomy"`
-	}
-	if err := json.Unmarshal([]byte(taxOut), &tax); err != nil {
+	taxonomy, err := api.buildEnrichedTaxonomy(r.Context(), company, server)
+	if err != nil {
 		api.respondError(w, http.StatusBadGateway, "unexpected taxonomy payload")
 		return
 	}
-	for wing, rooms := range tax.Taxonomy {
+	for wing, rooms := range taxonomy {
 		total := 0
 		for room, count := range rooms {
 			roomID := wing + "/" + room
-			nodes = append(nodes, node{ID: roomID, Label: room, Kind: "room", DrawerCount: count})
-			edges = append(edges, edge{From: wing, To: roomID, Kind: "contains"})
+			nodes = append(nodes, memoryGraphNode{ID: roomID, Label: room, Kind: "room", Wing: wing, Room: room, DrawerCount: count})
+			edges = append(edges, memoryGraphEdge{From: wing, To: roomID, Kind: "contains"})
 			total += count
 		}
-		nodes = append(nodes, node{ID: wing, Label: wing, Kind: "wing", DrawerCount: total})
+		nodes = append(nodes, memoryGraphNode{ID: wing, Label: wing, Kind: "wing", Wing: wing, DrawerCount: total})
 	}
 
 	// Tunnels/hallways are best-effort decoration; ignore failures.
@@ -256,7 +332,7 @@ func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
 		}
 		if json.Unmarshal([]byte(out), &parsed) == nil {
 			for _, t := range parsed.Tunnels {
-				edges = append(edges, edge{
+				edges = append(edges, memoryGraphEdge{
 					From: t.SourceWing + "/" + t.SourceRoom, To: t.TargetWing + "/" + t.TargetRoom,
 					Kind: "tunnel", Label: t.Label,
 				})
@@ -273,7 +349,7 @@ func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
 		}
 		if json.Unmarshal([]byte(out), &parsed) == nil {
 			for _, h := range parsed.Hallways {
-				edges = append(edges, edge{
+				edges = append(edges, memoryGraphEdge{
 					From: h.Wing + "/" + h.SourceRoom, To: h.Wing + "/" + h.TargetRoom, Kind: "hallway",
 				})
 			}
@@ -330,12 +406,12 @@ func (api *API) UpdateMemoryDrawer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	drawerID := chi.URLParam(r, "drawerID")
-	out, callOK := api.memoryCall(w, r, server, "mempalace_update_drawer",
-		map[string]any{"drawer_id": drawerID, "content": req.Content})
+	updateArgs := map[string]any{"drawer_id": drawerID, "content": req.Content}
+	out, callOK := api.memoryCall(w, r, server, "mempalace_update_drawer", updateArgs)
 	if !callOK {
 		return
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:update-drawer", "write", "", "", drawerID, 1)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:update-drawer", "write", "", "", drawerID, 1, updateArgs, out)
 	api.respondRawJSON(w, out)
 }
 
@@ -345,11 +421,12 @@ func (api *API) DeleteMemoryDrawer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	drawerID := chi.URLParam(r, "drawerID")
-	out, callOK := api.memoryCall(w, r, server, "mempalace_delete_drawer", map[string]any{"drawer_id": drawerID})
+	deleteArgs := map[string]any{"drawer_id": drawerID}
+	out, callOK := api.memoryCall(w, r, server, "mempalace_delete_drawer", deleteArgs)
 	if !callOK {
 		return
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:delete-drawer", "write", "", "", drawerID, 1)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:delete-drawer", "write", "", "", drawerID, 1, deleteArgs, out)
 	api.respondRawJSON(w, out)
 }
 
@@ -386,12 +463,12 @@ func (api *API) SupersedeMemoryDrawer(w http.ResponseWriter, r *http.Request) {
 	if req.Reason != "" {
 		prefix = "[SUPERSEDED: " + req.Reason + "]"
 	}
-	out, callOK := api.memoryCall(w, r, server, "mempalace_update_drawer",
-		map[string]any{"drawer_id": drawerID, "content": prefix + " " + drawer.Content})
+	supersedeArgs := map[string]any{"drawer_id": drawerID, "content": prefix + " " + drawer.Content}
+	out, callOK := api.memoryCall(w, r, server, "mempalace_update_drawer", supersedeArgs)
 	if !callOK {
 		return
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:supersede-drawer", "write", "", "", drawerID, 1)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:supersede-drawer", "write", "", "", drawerID, 1, supersedeArgs, out)
 	api.respondRawJSON(w, out)
 }
 
@@ -455,8 +532,8 @@ func (api *API) AddMemoryFact(w http.ResponseWriter, r *http.Request) {
 	if !callOK {
 		return
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:add-fact", "write", "", "",
-		req.Subject+" "+req.Predicate+" "+req.Object, 1)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:add-fact", "write", "", "",
+		req.Subject+" "+req.Predicate+" "+req.Object, 1, args, out)
 	api.respondRawJSON(w, out)
 }
 
@@ -475,13 +552,13 @@ func (api *API) InvalidateMemoryFact(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "subject, predicate and object are required")
 		return
 	}
-	out, callOK := api.memoryCall(w, r, server, "mempalace_kg_invalidate",
-		map[string]any{"subject": req.Subject, "predicate": req.Predicate, "object": req.Object})
+	invalidateArgs := map[string]any{"subject": req.Subject, "predicate": req.Predicate, "object": req.Object}
+	out, callOK := api.memoryCall(w, r, server, "mempalace_kg_invalidate", invalidateArgs)
 	if !callOK {
 		return
 	}
-	api.logMemoryActivity(r.Context(), company.ID, "api:invalidate-fact", "write", "", "",
-		req.Subject+" "+req.Predicate+" "+req.Object, 1)
+	api.logMemoryActivityFull(r.Context(), company.ID, "api:invalidate-fact", "write", "", "",
+		req.Subject+" "+req.Predicate+" "+req.Object, 1, invalidateArgs, out)
 	api.respondRawJSON(w, out)
 }
 
@@ -502,6 +579,28 @@ func (api *API) ListMemoryActivityFeed(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, map[string]any{"items": rows, "total": total})
+}
+
+// GetMemoryActivityDetail returns one activity row's full log — the command
+// (Args) and mempalace's raw reply (Response) — for the Activity tab's
+// click-to-expand detail. Omitted from the list endpoint to keep it light.
+func (api *API) GetMemoryActivityDetail(w http.ResponseWriter, r *http.Request) {
+	companyID, _ := strconv.Atoi(r.URL.Query().Get("company_id"))
+	if companyID == 0 {
+		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	activityID, _ := strconv.Atoi(chi.URLParam(r, "activityID"))
+	if activityID == 0 {
+		api.respondError(w, http.StatusBadRequest, "invalid activity id")
+		return
+	}
+	row, err := api.q.GetMemoryActivity(r.Context(), int32(companyID), int32(activityID))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "activity row not found")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, row)
 }
 
 // GetMemoryAgents returns per-agent memory usage aggregates plus each
@@ -558,15 +657,17 @@ func (api *API) RunMemoryMaintenance(w http.ResponseWriter, r *http.Request) {
 		settings := LoadSettings()
 		workspaceDir := filesystem.NewManager(settings.BasePath).GetProjectRepoPath(company, project)
 		mempalace.MineProjectAsync(server, company, project, workspaceDir)
-		api.logMemoryActivity(r.Context(), company.ID, "api:mine", "maintenance", mempalace.ProjectWing(project.Name), "", project.Name, 0)
+		api.logMemoryActivityFull(r.Context(), company.ID, "api:mine", "maintenance", mempalace.ProjectWing(project.Name), "", project.Name, 0,
+			map[string]any{"project_id": req.ProjectID, "workspace_dir": workspaceDir}, "mining started (async)")
 		api.respondJSON(w, http.StatusOK, map[string]string{"status": "mining started"})
 	case "sync":
 		apply := r.URL.Query().Get("apply") == "true"
-		out, callOK := api.memoryCall(w, r, server, "mempalace_sync", map[string]any{"apply": apply})
+		syncArgs := map[string]any{"apply": apply}
+		out, callOK := api.memoryCall(w, r, server, "mempalace_sync", syncArgs)
 		if !callOK {
 			return
 		}
-		api.logMemoryActivity(r.Context(), company.ID, "api:sync", "maintenance", "", "", "", 0)
+		api.logMemoryActivityFull(r.Context(), company.ID, "api:sync", "maintenance", "", "", "", 0, syncArgs, out)
 		api.respondRawJSON(w, out)
 	default:
 		api.respondError(w, http.StatusBadRequest, "unknown job — use mine or sync")

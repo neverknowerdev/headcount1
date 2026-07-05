@@ -45,7 +45,10 @@ func (s MemoryScope) sourceFile(runID int32) string {
 }
 
 // MemoryActivityFunc records one memory operation for the activity feed.
-type MemoryActivityFunc func(tool, kind, wing, room, query string, resultN int)
+// args/response are the full command and mempalace's raw reply, shown by the
+// Activity tab's "view full log" detail; pass "" when not cheaply available
+// (most engine hooks — their query field already carries a preview).
+type MemoryActivityFunc func(tool, kind, wing, room, query string, resultN int, args, response string)
 
 // MempalaceProxy exposes curated memory tools backed by the company's
 // mempalace MCP server (codegraph-proxy pattern: register on the run's
@@ -106,9 +109,20 @@ func (p *MempalaceProxy) RegisterAll(r *aicli.Registry) string {
 // treats both uniformly.
 func (p *MempalaceProxy) Close() {}
 
-func (p *MempalaceProxy) record(tool, kind, room, query string, resultN int) {
+// record logs one memory operation for the activity feed. args is the raw
+// call the agent made (marshaled to JSON for the detail view — never nil,
+// pass map[string]any{} if there's nothing to show); response is mempalace's
+// raw reply. Both are truncated on write (see CreateMemoryActivity) so it's
+// fine to pass them in full here.
+func (p *MempalaceProxy) record(tool, kind, room, query string, resultN int, args map[string]any, response string) {
 	if p.onActivity != nil {
-		p.onActivity(tool, kind, p.scope.wing(), room, query, resultN)
+		argsJSON := ""
+		if len(args) > 0 {
+			if b, err := json.Marshal(args); err == nil {
+				argsJSON = string(b)
+			}
+		}
+		p.onActivity(tool, kind, p.scope.wing(), room, query, resultN, argsJSON, response)
 	}
 }
 
@@ -246,7 +260,7 @@ var mpCatalog = []mpToolSpec{
 			if err == nil && room == "" {
 				out = mempalace.RerankSearchResults(out, limit)
 			}
-			p.record("recall_memory", "read", room, query, countResults(out))
+			p.record("recall_memory", "read", room, query, countResults(out), call, out)
 			return out, err
 		},
 	},
@@ -265,7 +279,7 @@ var mpCatalog = []mpToolSpec{
 			}
 			call := map[string]any{"query": clip(query, 250), "wing": p.scope.wing(), "source_file": src, "limit": 8}
 			out, err := p.call(ctx, "mempalace_search", call)
-			p.record("recall_run", "read", "", query, countResults(out))
+			p.record("recall_run", "read", "", query, countResults(out), call, out)
 			return out, err
 		},
 	},
@@ -303,7 +317,8 @@ var mpCatalog = []mpToolSpec{
 			// search results echo back. Returning the existing text teaches
 			// the agent what memory already holds.
 			if dup, existing := p.CheckDuplicate(ctx, content); dup {
-				p.record("remember", "write", "", clip(content, 120), 0)
+				p.record("remember", "write", "", clip(content, 120), 0,
+					map[string]any{"content": content, "kind": kind}, "duplicate — not stored: "+existing)
 				if existing != "" {
 					return fmt.Sprintf("Already in memory (similar: %q) — not stored again.", clip(existing, 200)), nil
 				}
@@ -322,7 +337,7 @@ var mpCatalog = []mpToolSpec{
 			if err == nil {
 				p.rememberCount.Add(1)
 			}
-			p.record("remember", "write", room, clip(content, 120), 1)
+			p.record("remember", "write", room, clip(content, 120), 1, call, out)
 			return out, err
 		},
 	},
@@ -345,7 +360,7 @@ var mpCatalog = []mpToolSpec{
 				call["as_of"] = asOf
 			}
 			out, err := p.call(ctx, "mempalace_kg_query", call)
-			p.record("memory_facts", "read", "", entity, countFacts(out))
+			p.record("memory_facts", "read", "", entity, countFacts(out), call, out)
 			return out, err
 		},
 	},
@@ -425,7 +440,9 @@ var mpCatalog = []mpToolSpec{
 					"content": note, "added_by": p.scope.AddedBy,
 				})
 			}
-			p.record("memory_invalidate", "write", "", fmt.Sprintf("%s %s %s", subject, predicate, object), 1)
+			invalidateArgs := map[string]any{"subject": subject, "predicate": predicate, "object": object, "reason": stringArg(args, "reason")}
+			invalidateResp := fmt.Sprintf("fact_existed=%v, drawers_marked_superseded=%d", factExists, markedCount)
+			p.record("memory_invalidate", "write", "", fmt.Sprintf("%s %s %s", subject, predicate, object), 1, invalidateArgs, invalidateResp)
 
 			if !factExists {
 				return fmt.Sprintf("No current KG fact found for %s %s %s — nothing to invalidate in the knowledge graph. "+
@@ -448,13 +465,12 @@ var mpCatalog = []mpToolSpec{
 			if fetchLimit > 30 {
 				fetchLimit = 30
 			}
-			out, err := p.call(ctx, "mempalace_search", map[string]any{
-				"query": clip(query, 250), "limit": fetchLimit,
-			})
+			companyCall := map[string]any{"query": clip(query, 250), "limit": fetchLimit}
+			out, err := p.call(ctx, "mempalace_search", companyCall)
 			if err == nil {
 				out = mempalace.RerankSearchResults(out, limit)
 			}
-			p.record("recall_company", "read", "", query, countResults(out))
+			p.record("recall_company", "read", "", query, countResults(out), companyCall, out)
 			return out, err
 		},
 	},

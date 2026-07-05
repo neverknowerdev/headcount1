@@ -246,7 +246,7 @@ test.describe.serial('MemPalace memory integration', () => {
         expect(status.palace.total_drawers).toBeGreaterThanOrEqual(2);
     });
 
-    test('memory UI: page renders explorer, search and activity against the palace', async ({ page }) => {
+    test('memory UI: page renders explorer, search and activity against the palace', async ({ page, request }) => {
         await page.goto('/companies/mem-co/memory');
 
         // Header + stat tiles.
@@ -258,15 +258,53 @@ test.describe.serial('MemPalace memory integration', () => {
         await page.getByRole('button', { name: 'company', exact: true }).click();
         await expect(page.getByText('ap-northeast-1').first()).toBeVisible();
 
+        // A brand-new project with zero memory activity must still show up in
+        // the taxonomy (with its rooms at count 0) — "show all available
+        // wings/rooms, even if empty", not just what happens to be populated.
+        const project = await postJSON(request, '/api/projects', {
+            company_id: companyId, name: 'Empty Project',
+        });
+        await page.reload();
+        await expect(page.getByRole('button', { name: 'project-empty-project', exact: true })).toBeVisible({ timeout: 15_000 });
+        await page.getByRole('button', { name: 'project-empty-project', exact: true }).click();
+        await expect(page.getByText('No drawers here yet.')).toBeVisible();
+
+        // Relationships panel renders (empty is fine — no tunnels/hallways
+        // exist in this fixture, but the panel and its explanatory label must
+        // be present).
+        await expect(page.getByText(/which room\/wing depends on which/)).toBeVisible();
+
         // Search tab round-trip.
         await page.getByRole('button', { name: 'Search' }).first().click();
         await page.getByPlaceholder(/Semantic search/).fill('jwt token expiry');
         await page.getByRole('button', { name: 'Search', exact: true }).last().click();
         await expect(page.getByText('15 minutes').first()).toBeVisible({ timeout: 30_000 });
 
-        // Activity tab shows the recorded operations.
-        await page.getByRole('button', { name: 'Activity' }).click();
+        // Graph tab: nodes render with drawer-count badges, and clicking one
+        // opens the combined drawer browser panel (Explorer+Graph merge).
+        await page.getByRole('button', { name: 'Graph' }).click();
+        const companyNode = page.locator('.react-flow__node', { hasText: 'company' }).first();
+        await expect(companyNode).toBeVisible({ timeout: 15_000 });
+        await companyNode.click();
+        await expect(page.getByText(/drawers\)/)).toBeVisible();
+
+        // Activity tab: clicking a row opens the full-log detail modal with
+        // the command and mempalace's raw response.
+        await page.getByRole('button', { name: 'Activity', exact: true }).click();
         await expect(page.getByText('remember').first()).toBeVisible();
+        await page.getByText('remember').first().click();
+        await expect(page.getByText('Command (args)')).toBeVisible();
+        await expect(page.getByText('MemPalace response')).toBeVisible();
+        await expect(page.getByText(/"content"/).first()).toBeVisible();
+        // Close the detail modal (click its X button) before switching tabs —
+        // the modal is a fixed full-screen overlay and would otherwise block
+        // clicks on the tab bar underneath.
+        await page.locator('.fixed.inset-0').getByRole('button').click();
+        await expect(page.getByText('Command (args)')).not.toBeVisible();
+
+        // Facts tab: explanatory blurb addresses "where is the fact's content".
+        await page.getByRole('button', { name: 'Facts', exact: true }).click();
+        await expect(page.getByText(/Object.*column IS the fact's content/)).toBeVisible();
     });
 });
 

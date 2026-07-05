@@ -5,18 +5,25 @@ import (
 	"time"
 )
 
-// CreateMemoryActivity inserts one memory-activity row. Query text is
-// truncated so freeform recall queries can't bloat the table.
+// CreateMemoryActivity inserts one memory-activity row. Query/Args/Response
+// text are truncated so freeform content can't bloat the table.
 func (q *Queries) CreateMemoryActivity(ctx context.Context, a MemoryActivity) (MemoryActivity, error) {
 	if len(a.Query) > 500 {
 		a.Query = a.Query[:500]
+	}
+	if len(a.Args) > 4000 {
+		a.Args = a.Args[:4000]
+	}
+	if len(a.Response) > 8000 {
+		a.Response = a.Response[:8000]
 	}
 	err := q.db.WithContext(ctx).Create(&a).Error
 	return a, err
 }
 
 // ListMemoryActivity returns activity rows for a company, newest first, with
-// optional agent/kind filters and offset paging.
+// optional agent/kind filters and offset paging. Args/Response are omitted —
+// the list is meant to stay light; fetch GetMemoryActivity for the full log.
 func (q *Queries) ListMemoryActivity(ctx context.Context, companyID int32, agentName, kind string, limit, offset int) ([]MemoryActivity, int64, error) {
 	if limit <= 0 || limit > 200 {
 		limit = 50
@@ -33,8 +40,16 @@ func (q *Queries) ListMemoryActivity(ctx context.Context, companyID int32, agent
 		return nil, 0, err
 	}
 	var rows []MemoryActivity
-	err := tx.Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error
+	err := tx.Omit("args", "response").Order("id DESC").Limit(limit).Offset(offset).Find(&rows).Error
 	return rows, total, err
+}
+
+// GetMemoryActivity returns one activity row (with Args/Response) for the
+// Activity tab's "view full log" detail, scoped to a company.
+func (q *Queries) GetMemoryActivity(ctx context.Context, companyID, id int32) (MemoryActivity, error) {
+	var row MemoryActivity
+	err := q.db.WithContext(ctx).Where("company_id = ? AND id = ?", companyID, id).First(&row).Error
+	return row, err
 }
 
 // MemoryAgentStat aggregates memory usage per agent for the Agents tab.

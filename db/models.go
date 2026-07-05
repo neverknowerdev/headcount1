@@ -322,6 +322,15 @@ type MemoryActivity struct {
 	Room      string    `json:"room"`
 	Query     string    `json:"query" gorm:"type:text"` // truncated to 500 chars
 	ResultN   int       `json:"result_n"`
+	// Args and Response hold the full command/content and the mempalace
+	// tool's raw reply, for the Activity tab's "view full log" detail — the
+	// list endpoint omits them (see ListMemoryActivity's Select), the detail
+	// endpoint (GetMemoryActivityDetail) returns them. Both truncated to keep
+	// the table bounded; "" for call sites that don't have them cheaply
+	// available (most engine hooks — the Query field already carries a
+	// preview for those).
+	Args      string    `json:"args,omitempty" gorm:"type:text"`
+	Response  string    `json:"response,omitempty" gorm:"type:text"`
 	CreatedAt time.Time `json:"created_at" gorm:"index"`
 }
 

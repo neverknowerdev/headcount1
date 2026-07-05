@@ -267,6 +267,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/facts", api.AddMemoryFact)
 		r.Post("/facts/invalidate", api.InvalidateMemoryFact)
 		r.Get("/activity", api.ListMemoryActivityFeed)
+		r.Get("/activity/{activityID}", api.GetMemoryActivityDetail)
 		r.Get("/agents", api.GetMemoryAgents)
 		r.Post("/maintenance/{job}", api.RunMemoryMaintenance)
 	})
