@@ -1,6 +1,6 @@
 # Complex Memory Scenarios — Implementation & Results
 
-**Status:** Scenario 7's root cause found and fixed (see "Fix applied" below) — `pkg/mempalace/manager.go`. All other findings below remain observation-only, as originally scoped.
+**Status:** Four fixes implemented and verified: the scenario-7 write-contention bug (`pkg/mempalace/manager.go`), plus the three follow-up fixes from the scenario-1/2 findings — ranking demotion, `memory_invalidate` honesty/marking, and an end-of-task memory nudge. See "Fix applied" (scenario 7) and "Follow-up fixes" (below) for details and verification.
 **Spec:** `docs/mempalace-memory-test-scenarios.md`
 **Test file:** `e2e/tests/memory_complex_scenarios.spec.ts`
 **Run:** real engine (`go run .`), real palace, real MiniLM embeddings, scripted mock LLM — same harness as the existing `memory_recall.spec.ts`/`memory_dedup_gauntlet.spec.ts`.
@@ -96,19 +96,47 @@ No hard failures, because the test (correctly, in hindsight) only asserted "reca
 
 | Scenario | Ran? | Result | Real finding |
 |---|---|---|---|
-| 1. The Pivot | Yes | All assertions passed (assertions were left deliberately non-strict) | KG-based epistemic ordering is not wired into recall at all; `memory_invalidate` silently "succeeds" on facts that were never added |
-| 2. Disguised contradiction | Yes | All assertions passed (by design; ambiguity was intentionally left open) | Recall ranks a stale claim and a wrong overstated claim above the correct current fact for a realistic query |
+| 1. The Pivot | Yes | **Fixed** — hardened from logged-only observation to hard pass/fail assertions, now passing | Was: KG-based epistemic ordering not wired into recall; `memory_invalidate` fabricated success. Fixed below. |
+| 2. Disguised contradiction | Yes | **Fixed** — hardened to hard assertions, now passing | Was: recall ranked a stale claim above the correct current fact. Fixed below. |
 | 4. Cross-tenant leakage | Yes | Core assertion passed | No leak on the agent-tool path; a supplementary HTTP-endpoint check was inconclusive, not proof of anything either way |
-| 7. Cross-role blocker | Yes | **Fixed** — was intermittent (up to 60s write-to-search gap / never resolving); now 5/5 sub-tests pass consistently across 4 verification runs | Root cause: `MineProjectAsync` raced a CLI subprocess against the live MCP server for the palace's writer lease, causing `"Peer MCP writer active"` and silently degraded writes. Fixed by routing through `CallServerTool` like `MineTranscript` already did. Separate, still-open finding: `technical`-room transcript noise can outrank real content in ranking — `room` filtering mitigates this but wasn't the cause of the write-contention bug. |
+| 7. Cross-role blocker | Yes | **Fixed** — was intermittent (up to 60s write-to-search gap / never resolving); now 5/5 sub-tests pass consistently across 4 verification runs | Root cause: `MineProjectAsync` raced a CLI subprocess against the live MCP server for the palace's writer lease, causing `"Peer MCP writer active"` and silently degraded writes. Fixed by routing through `CallServerTool` like `MineTranscript` already did. |
 | 3, 5, 6, 8, 9, 10 | No | — | Deferred (compaction/concurrency need heavier harnesses; Dreaming isn't built; 8-10 not reached this pass) |
+
+## Follow-up fixes: ranking demotion, `memory_invalidate` honesty, end-of-task memory nudge
+
+Three more fixes, addressing the Scenario 1/2 findings directly (root-caused and implemented, not just observed):
+
+### 1. Ranking: demote boilerplate and superseded content
+
+**Problem (Scenario 1 & 2):** mempalace's own ranking is pure similarity/BM25 — it has no notion of "this is boilerplate" or "this was superseded." A bare task-description echo or a raw transcript dump (`technical` room) could outrank a genuinely relevant fact; a decision that had been explicitly overturned kept ranking as if still current.
+
+**Fix:** `recall_memory` and `recall_company` (agent tools) and `/api/memory/search` (HTTP API, used by the Memory UI) now over-fetch (3x the requested limit, capped) and re-rank locally via the new shared `pkg/mempalace.RerankSearchResults`: `technical`-room/transcript hits get a 0.55x similarity penalty, `[SUPERSEDED`-marked content gets a 0.15x penalty, then results are re-sorted and trimmed to the originally-requested limit. Explicit `room` filters bypass this (the caller already narrowed scope).
+
+### 2. `memory_invalidate`: stop fabricating success, actually mark the overturned content
+
+**Problem (Scenario 1):** `memory_invalidate` reported `"success": true` for a KG fact that structurally never existed (agents can't add arbitrary KG triples — only engine hooks write the KG), and only ever added a small companion note, never touching the actual stale decision text that needed demoting.
+
+**Fix:** now queries `mempalace_kg_query` first; if no current fact matches, it says so explicitly ("No current KG fact found... nothing to invalidate") instead of claiming success. It also marks the actual overturned drawer(s) with a `[SUPERSEDED]` prefix — substring-matched on `object` against `general`/`decisions` room drawers (mempalace search doesn't return `drawer_id`, so this reuses the engine's existing `supersedePreviousPlan` list/get/update pattern), capped at 3 drawers. This is what lets the ranking fix in #1 actually demote the real stale content, not just a note about it.
+
+**Real bug caught during implementation:** the object-substring match can accidentally mark the *new* decision too, if its text naturally mentions the old term (e.g., "replaced WebSockets with SSE" contains "WebSockets"). Fixed by updating the Palace Protocol prompt to recommend invalidate-then-remember ordering (invalidate while only the old drawer exists, before the new one is written) — verified in the updated Scenario 1 test, which reordered its script to match and confirmed no false-positive marking.
+
+### 3. End-of-task memory nudge
+
+**Per follow-up request** ("ask agent to make memories with facts and learnings at the end of each task"): `finish_task` now nudges once per run — if the agent hasn't called `remember()` at all, the first `finish_task` call returns a reminder instead of completing ("store durable facts, decisions or learnings, then call finish_task again"); the second call always proceeds regardless. Wired via `MempalaceProxy.HasRemembered()`; a nil check means it's a no-op when memory isn't available for the run. Palace Protocol prompt text updated to match.
+
+**Design tradeoff considered and rejected:** a "soft" nudge (finish immediately, just append a note to the result) would be simpler for callers but can't actually change agent behavior — by the time `finish_task` returns, the run is over; nothing reads that note. The blocking, once-per-run version is the only one that functions as an actual nudge, matching upstream MemPalace's own stop-hook pattern.
+
+**Real side-effect discovered:** every company gets memory provisioned unconditionally on creation (`mempalace.Available()` is the only gate — see `server/controllers/companies.go`), so this affects **any** scripted e2e test whose agent finishes a run without ever calling `remember()`, not just memory-focused specs. Confirmed by `ceo_orchestration.spec.ts` hanging the same way `memory_recall.spec.ts`'s recall-only task did. Fixed in both those files plus the new `memory_complex_scenarios.spec.ts` via a `withFinishRetries()` transform (splice an identical `finish_task` retry after each scripted one — unused if the first already finishes, consumed if the nudge fires). **Other e2e spec files not touched by this pass may have the same latent gap** — flagging as a known follow-up rather than claiming full-suite coverage.
+
+**Verification:** `go build`/`go vet`/`go test ./...` all clean. `memory_complex_scenarios.spec.ts` (14 tests, including the newly-hardened Scenario 1/2 ranking assertions), `memory_recall.spec.ts`, `memory_dedup_gauntlet.spec.ts`, `memory_teardown.spec.ts`, and `ceo_orchestration.spec.ts` all pass together (29 tests). Confirmed via report data: `memory_invalidate` correctly said "No current KG fact found... Marked 1 matching drawer(s)" (Scenario 1) and "Marked 2 matching drawer(s)" (Scenario 2); Scenario 2's corrected fact (s4) ranked first in search results, ahead of the two now-`[SUPERSEDED]`-marked stale claims.
 
 ## Suggested next steps
 
-**Done:** the `MineProjectAsync`/`"Peer MCP writer active"` write-contention bug (former item 1) is fixed and verified above.
+**Done:** the `MineProjectAsync` write-contention bug, the ranking-demotion fix, `memory_invalidate`'s honesty/marking, and the end-of-task nudge are all implemented and verified above.
 
 Remaining, not acted on:
 
-1. Consider whether `recall_memory` should down-weight or exclude the `technical` room (transcript-mined content) by default for status-style queries, or ship a documented recommendation that callers pass `room` when asking about current state — the room-filter experiment showed this is a real, fixable precision problem, independent of the write-contention issue that's now fixed.
-2. Decide, as a design question (not urgent): should `recall_memory` actually consult the KG for current-truth preference, matching the design docs, or should the docs be corrected to describe the shipped (pure-search) behavior? Right now the two disagree (Scenario 1 finding).
+1. Audit other e2e spec files for the same finish_task-nudge gap (any scripted task that finishes without a preceding `remember()` call) — only `memory_complex_scenarios.spec.ts`, `memory_recall.spec.ts`, and `ceo_orchestration.spec.ts` were checked/fixed this pass.
+2. Consider whether the `technicalRoomPenalty`/`SupersededPenalty` constants (0.55/0.15 in `pkg/mempalace/rerank.go`) need tuning against more real data — chosen from this pass's scenarios, not a broader calibration.
 3. Audit other call sites for the same CLI-subprocess-vs-MCP-client anti-pattern that caused the `MineProjectAsync` bug — `WakeUp` still shells out to the CLI (`pkg/mempalace/manager.go`), though it's read-only so lower risk; worth confirming it can't also trip the writer-lease conflict or be starved by a peer writer.
 4. Pick up Scenarios 3, 5, 6, 8, 9, 10 — deferred from the original pass (compaction/concurrency need heavier harnesses; Dreaming isn't built; 8-10 not reached). Scenario 5 (concurrent writes) in particular now has a known, closely-related bug class to specifically probe for.
