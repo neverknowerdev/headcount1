@@ -282,15 +282,27 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
             ]);
         REPORT.scenario7_gm88_error_text = errorText;
 
+        // Capture g1's (remember's) OWN tool result directly — this is the
+        // ground truth on whether the write itself reported success or an
+        // error. A prior run showed the write apparently missing from the
+        // drawer listing entirely (not just slow to index), coinciding with
+        // "Peer MCP writer active; this server is read-only for mutating
+        // tools" server warnings — capturing g1's result lets a future
+        // failing run show directly which side of that gap it's on, instead
+        // of inferring it from downstream endpoints alone.
+        const g1Result = await extractToolResult('g1');
+        REPORT.scenario7_gm88_remember_tool_result = g1Result;
+        expect(g1Result, "CTO's remember() call must itself report success").toContain('success');
+
         // Check the DRAWER LISTING endpoint (not search) immediately after
         // CTO's run finishes — this distinguishes "the write never landed in
         // this wing at all" from "it's there, just not yet embedded/indexed
-        // for semantic search". If remember()'s drawer already appears here,
-        // the earlier cross-agent recall failures are an INDEXING lag, not a
-        // write/scoping bug.
+        // for semantic search".
         const drawersRes = await getJSON(request, `/api/memory/drawers?company_id=${companyId}&wing=project-gm-coin&limit=50`);
         const drawerPreviews = (drawersRes.drawers || []).map((d: { content_preview: string }) => d.content_preview);
         REPORT.scenario7_gm88_drawers_immediately_after = drawerPreviews;
+        expect(drawerPreviews.some((p: string) => p.includes('ICP backend blocked')),
+            "CTO's drawer must be listed immediately after its write, even if search hasn't indexed it yet").toBe(true);
     });
 
     test('GM-91 (CEO delegates to CMO; CMO asks CEO instead of recalling directly)', async ({ request }) => {
@@ -299,15 +311,17 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
 
         // Realistic pacing: in the real workflow this scenario models, a
         // human (or at minimum a task-board notification cycle) sits between
-        // GM-88 being marked blocked and someone picking up GM-91 - minutes,
+        // GM-88 being marked blocked and someone picking up GM-91 — minutes,
         // not milliseconds. Firing CEO's recall immediately after GM-88's
-        // finish_task response was stress-testing a sub-second write-to-
-        // search indexing race that doesn't occur in the real usage pattern
-        // this scenario is meant to represent (see RESULTS.md for that
-        // finding — real, but out of scope for this test's purpose). A
-        // short pause here reflects the realistic gap instead of asserting
-        // on that race.
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        // finish_task response was stress-testing a write-to-search indexing
+        // race that doesn't occur in the real usage pattern this scenario
+        // models (see RESULTS.md — real finding, out of scope for this
+        // test's purpose). A flat 5s delay turned out NOT to be enough
+        // (empirically — 3/3 runs still missed it), so wait for the fact to
+        // actually become searchable instead of guessing a bigger constant.
+        const wait = await waitForSearchable(request, companyId, 'project-gm-coin', 'ICP backend', 'dfx', 60_000);
+        REPORT.scenario7_gm88_indexing_wait_ms = wait.elapsedMs;
+        expect(wait.found, `CTO's fact never became searchable within ${wait.elapsedMs}ms — this is the real gap, not a race`).toBe(true);
 
         // Chronological order of model decision points across the two nested
         // sessions (see ceo_orchestration.spec.ts for the same pattern):
@@ -390,12 +404,12 @@ test.describe.serial('Complex memory scenario 7: cross-role blocker flow (ICP ba
         test.setTimeout(300_000);
         await resetMock();
 
-        // Same realistic-pacing rationale as round 1: give the just-written
-        // implementation facts (from the previous test) real time to be
-        // indexed before CEO's recall fires, matching how this handoff would
-        // actually happen (a human moves the post task back to in-progress
-        // sometime after the backend work lands, not the same instant).
-        await new Promise((resolve) => setTimeout(resolve, 5_000));
+        // Same realistic-pacing rationale as round 1: wait for the
+        // just-written implementation facts to actually be searchable
+        // before CEO's recall fires, rather than guessing a delay.
+        const wait2 = await waitForSearchable(request, companyId, 'project-gm-coin', 'ICP backend implemented', 'ic-cdk', 60_000);
+        REPORT.scenario7_gm88_unblocked_indexing_wait_ms = wait2.elapsedMs;
+        expect(wait2.found, `implementation fact never became searchable within ${wait2.elapsedMs}ms`).toBe(true);
 
         // Same delegation shape as round 1, rerun on the SAME CEO task
         // (ceoTaskId) — this is a NEW run of the CEO's task, so ceo2b is a
@@ -565,6 +579,29 @@ async function getJSON(request: APIRequestContext, url: string) {
     const res = await request.get(url);
     if (!res.ok()) throw new Error(`GET ${url} failed (${res.status()}): ${await res.text()}`);
     return res.json();
+}
+
+/**
+ * Polls the raw search API until `mustContain` shows up in a result's text
+ * for the given wing/query, or the timeout elapses. Used to wait out
+ * whatever real write-to-search indexing latency the palace has, instead of
+ * guessing a fixed delay (a flat 5s wait was empirically NOT enough — see
+ * RESULTS.md) or asserting on the race directly. Returns the elapsed ms so
+ * callers can log/report the actual latency observed.
+ */
+async function waitForSearchable(
+    request: APIRequestContext, companyId: number, wing: string, query: string, mustContain: string, timeoutMs = 60_000,
+): Promise<{ found: boolean; elapsedMs: number }> {
+    const start = Date.now();
+    while (Date.now() - start < timeoutMs) {
+        const res = await getJSON(request, `/api/memory/search?company_id=${companyId}&q=${encodeURIComponent(query)}&wing=${encodeURIComponent(wing)}`);
+        const texts = (res.results || []).map((r: { text: string }) => r.text as string);
+        if (texts.some((t) => t.includes(mustContain))) {
+            return { found: true, elapsedMs: Date.now() - start };
+        }
+        await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    return { found: false, elapsedMs: Date.now() - start };
 }
 
 test.afterAll(async () => {
