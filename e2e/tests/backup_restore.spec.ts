@@ -3,6 +3,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 
+const env = loadE2EEnv();
+
+async function dumpHindsightBanks(): Promise<Record<string, any[]>> {
+    const res = await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/dump`);
+    expect(res.ok).toBeTruthy();
+    return (await res.json()).banks as Record<string, any[]>;
+}
+
 test.describe.serial('Backup & Restore', () => {
     test('can create backup via API', async ({ request }) => {
         const res = await request.post('/api/backup');
@@ -47,6 +55,33 @@ test.describe.serial('Backup & Restore', () => {
         });
         expect(projectRes.ok()).toBeTruthy();
         const project = await projectRes.json();
+
+        // Create a second project WITH a git repo so its .md docs get ingested
+        // into the memory layer — the backup must carry the memory banks too.
+        // (Kept separate from 'Test Project': cloning wipes project.json from
+        // the artifacts dir, so repo projects don't round-trip as DB rows; the
+        // memory banks themselves must round-trip regardless.)
+        const memProjectRes = await request.post('/api/projects', {
+            data: {
+                company_id: company.id,
+                name: 'Mem Project',
+                description: 'Repo project seeding memory for backup',
+                workspace_folder: 'bt/mem-project',
+                repository_url: env.E2E_TEST_REPO_URL,
+            },
+        });
+        expect(memProjectRes.ok()).toBeTruthy();
+        const memProject = await memProjectRes.json();
+        const projBank = `proj-${memProject.id}`;
+
+        // Wait for the background doc ingestion to populate the project bank.
+        await expect.poll(async () => {
+            const banks = await dumpHindsightBanks();
+            return (banks[projBank] || []).length;
+        }, { timeout: 120_000, intervals: [2000], message: 'project docs should be ingested before backup' })
+            .toBe(3);
+        const memTextsBefore = (await dumpHindsightBanks())[projBank]
+            .map((m: any) => m.text).sort();
 
         // Create a sprint
         const sprintRes = await request.post('/api/sprints', {
@@ -98,6 +133,12 @@ test.describe.serial('Backup & Restore', () => {
         const wipeRes = await request.post('/api/e2e/wipe-db');
         expect(wipeRes.ok()).toBeTruthy();
 
+        // Wipe the memory backend too — the memory is truly lost and must
+        // come back only through the backup archive.
+        const resetRes = await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });
+        expect(resetRes.ok).toBeTruthy();
+        expect(Object.keys(await dumpHindsightBanks()).length).toBe(0);
+
         // Verify data is gone
         const companiesAfterWipe = await request.get('/api/companies');
         const companiesList = await companiesAfterWipe.json();
@@ -124,7 +165,7 @@ test.describe.serial('Backup & Restore', () => {
         const projectsRes = await request.get(`/api/projects?company_id=${restoredCompany.id}`);
         const projects = await projectsRes.json();
         expect(projects.length).toBeGreaterThanOrEqual(1);
-        expect(projects[0].name).toBe('Test Project');
+        expect((projects as any[]).some((p: any) => p.name === 'Test Project')).toBeTruthy();
 
         // Verify sprints
         const sprintsRes = await request.get(`/api/sprints?company_id=${restoredCompany.id}`);
@@ -146,6 +187,22 @@ test.describe.serial('Backup & Restore', () => {
         const comments = await commentsRes.json();
         expect(comments.length).toBeGreaterThanOrEqual(1);
         expect(comments[0].content).toBe('Test comment for backup');
+
+        // ── Memory: the bank was repopulated from the archive without loss ──
+        await expect.poll(async () => {
+            const banks = await dumpHindsightBanks();
+            return (banks[projBank] || []).length;
+        }, { timeout: 60_000, message: 'memory bank should be re-imported on restore' }).toBe(3);
+        const memTextsAfter = (await dumpHindsightBanks())[projBank]
+            .map((m: any) => m.text).sort();
+        expect(memTextsAfter).toEqual(memTextsBefore);
+
+        // And it is served through the /api/memory proxy again.
+        const memList = await request.get(`/api/memory/banks/${projBank}/memories?limit=50`);
+        expect(memList.ok()).toBeTruthy();
+        const memBody = await memList.json();
+        expect(memBody.total).toBe(3);
+        expect((memBody.items as any[]).some((i: any) => i.text.includes('GM Coin'))).toBeTruthy();
     });
 
     test('backup via Settings UI button', async ({ page }) => {
@@ -182,11 +239,12 @@ test.describe.serial('Backup & Restore', () => {
         // Remove bt's filesystem data so its comment IDs (written before the roundtrip
         // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
         // when sync_filesystem.spec.ts calls POST /api/settings/sync.
-        const env = loadE2EEnv();
         const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        for (const subDir of ['data/bt', 'companies/bt']) {
+        for (const subDir of ['data/bt', 'companies/bt', 'data/artifacts/bt']) {
             const fullPath = path.join(paperclipBase, subDir);
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
+        // Leave the mock memory backend clean for the specs that follow.
+        await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });
     });
 });

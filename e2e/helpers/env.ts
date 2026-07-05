@@ -7,6 +7,8 @@ interface E2EEnv {
     E2E_MOCK_PROVIDER_URL: string;
     E2E_TEST_REPO_URL: string;
     E2E_PAPERCLIP_HOME: string;
+    /** Base URL of the mock Hindsight memory server (also the Go server's HINDSIGHT_API_URL). */
+    E2E_HINDSIGHT_URL: string;
 }
 
 let cached: E2EEnv | null = null;
@@ -30,6 +32,6 @@ export function loadE2EEnv(): E2EEnv {
             `Got: ${JSON.stringify(data)}`,
         );
     }
-    cached = { E2E_MOCK_PROVIDER_URL: data.E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL: data.E2E_TEST_REPO_URL, E2E_PAPERCLIP_HOME: data.E2E_PAPERCLIP_HOME };
+    cached = { E2E_MOCK_PROVIDER_URL: data.E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL: data.E2E_TEST_REPO_URL, E2E_PAPERCLIP_HOME: data.E2E_PAPERCLIP_HOME, E2E_HINDSIGHT_URL: data.E2E_HINDSIGHT_URL };
     return cached;
 }

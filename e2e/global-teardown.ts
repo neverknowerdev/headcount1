@@ -11,6 +11,15 @@ const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '.e2e-env.json'
  * global-setup so the test run doesn't leave it running.
  */
 export default async function globalTeardown(): Promise<void> {
+    // Stop the mock Hindsight server if global-setup started one in this process.
+    const stopHindsight = (globalThis as any).__e2eMockHindsightStop;
+    if (typeof stopHindsight === 'function') {
+        try {
+            await stopHindsight();
+            console.log('[globalTeardown] stopped mock hindsight server');
+        } catch { /* ignore */ }
+    }
+
     if (!fs.existsSync(pidFile)) {
         console.log('[globalTeardown] no pid file found, nothing to stop');
         return;
