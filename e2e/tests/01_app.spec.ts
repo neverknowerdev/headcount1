@@ -30,8 +30,11 @@ test.describe.serial('Paperclip2 App', () => {
         await page.fill('input[placeholder="acme"]', 'pw-inc');
         await page.click('button:has-text("Next Step")');
 
-        // Step 2: Setup LLM Provider — point at the local mock provider server
+        // Step 2: Setup LLM Provider. The default onboarding path offers the
+        // builtin free providers (OpenRouter / OpenCode Zen); switch to the
+        // custom-provider form to point at the local mock provider server.
         await expect(page.getByText('Setup LLM Provider')).toBeVisible();
+        await page.click('button:has-text("Use a custom provider instead")');
         await page.fill('input[type="text"]', env.E2E_MOCK_PROVIDER_URL);
         await page.fill('input[type="password"]', 'test-api-key');
         await page.locator('label:has-text("Model Name") + input').fill('e2e-mock-model');
@@ -51,10 +54,16 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10_000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
 
-        // Verify CEO agent settings initialized correctly
+        // Verify CEO agent settings initialized correctly. The provider ID is
+        // looked up dynamically — builtin providers (OpenRouter, OpenCode
+        // Zen) are seeded first, so "Main Provider" isn't necessarily ID 1.
+        const providers = await (await request.get('/api/providers')).json();
+        const mainProvider = providers.find((p: any) => p.name === 'Main Provider');
+        expect(mainProvider).toBeDefined();
+
         await page.goto('/companies/pw-inc/agents/1');
         await page.click('button:has-text("Settings")');
-        await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
+        await expect(page.locator('select').nth(0)).toHaveValue(String(mainProvider.id)); // Provider
         await expect(page.locator('select').nth(1)).toHaveValue("e2e-mock-model"); // Model
         await page.goto('/companies/pw-inc');
 

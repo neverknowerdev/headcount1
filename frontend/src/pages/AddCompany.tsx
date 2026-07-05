@@ -6,6 +6,23 @@ import { useStore } from '../store';
 // Predefined popular vibrant colors
 const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3f51b5', '#2196f3', '#03a9f4', '#00bcd4', '#009688', '#4caf50', '#8bc34a', '#cddc39', '#ffeb3b', '#ffc107', '#ff9800', '#ff5722', '#795548'];
 
+// Copy + "get an API key" links for the builtin free-model providers seeded on
+// startup (see db.ProviderNameOpenRouter / db.ProviderNameOpenCodeZen). Keyed
+// by the provider's DB name so this stays in sync automatically if the list
+// of builtin providers ever grows.
+const FREE_PROVIDER_INFO: Record<string, { blurb: string; keyUrl: string; keyUrlLabel: string }> = {
+    'OpenRouter': {
+        blurb: 'A gateway to dozens of free community models — no credit card required.',
+        keyUrl: 'https://openrouter.ai/keys',
+        keyUrlLabel: 'openrouter.ai/keys',
+    },
+    'OpenCode Zen': {
+        blurb: 'Free models curated for coding agents — no credit card required.',
+        keyUrl: 'https://opencode.ai/auth',
+        keyUrlLabel: 'opencode.ai/auth',
+    },
+};
+
 export const AddCompany: React.FC = () => {
     const { companies } = useStore();
     const isInitialOnboarding = companies.length === 0;
@@ -22,6 +39,9 @@ export const AddCompany: React.FC = () => {
     const [color, setColor] = useState('#4f46e5');
 
     // Step 2: Provider
+    // providerMode picks between the default "free" path (builtin OpenRouter /
+    // OpenCode Zen providers) and "custom" (the original from-scratch form).
+    const [providerMode, setProviderMode] = useState<'free' | 'custom'>('free');
     const [providerUrl, setProviderUrl] = useState('https://api.openai.com/');
     const [providerKey, setProviderKey] = useState('');
     const [providerModel, setProviderModel] = useState('gpt-4');
@@ -31,6 +51,12 @@ export const AddCompany: React.FC = () => {
     const [showLog, setShowLog] = useState(false);
     const [providerType, setProviderType] = useState<string | null>(null);
     const [resolvedUrl, setResolvedUrl] = useState<string | null>(null);
+
+    // Free builtin providers (OpenRouter / OpenCode Zen), fetched on mount.
+    const [builtinProviders, setBuiltinProviders] = useState<any[]>([]);
+    const [builtinProvidersLoaded, setBuiltinProvidersLoaded] = useState(false);
+    const [freeProviderName, setFreeProviderName] = useState<string>('OpenRouter');
+    const [freeApiKey, setFreeApiKey] = useState('');
 
     // Existing Providers (for step 2 if !isInitialOnboarding)
     const [existingProviders, setExistingProviders] = useState<any[]>([]);
@@ -52,6 +78,8 @@ export const AddCompany: React.FC = () => {
                 if (parsed.shortName) setShortName(parsed.shortName);
                 if (parsed.color) setColor(parsed.color);
 
+                if (parsed.providerMode) setProviderMode(parsed.providerMode);
+                if (parsed.freeProviderName) setFreeProviderName(parsed.freeProviderName);
                 if (parsed.providerUrl) setProviderUrl(parsed.providerUrl);
                 if (parsed.providerKey) setProviderKey(parsed.providerKey);
                 if (parsed.providerModel) setProviderModel(parsed.providerModel);
@@ -74,16 +102,33 @@ export const AddCompany: React.FC = () => {
                     setProviderModel(res.data[0].default_model);
                 }
             }).catch(console.error);
+        } else {
+            // Fetch the builtin free-model providers (OpenRouter, OpenCode Zen)
+            // seeded automatically on server startup, so the default onboarding
+            // path can offer them instead of a from-scratch provider form.
+            axios.get('/api/providers').then(res => {
+                const builtins = (res.data || []).filter((p: any) => p.builtin);
+                setBuiltinProviders(builtins);
+                if (builtins.length > 0) {
+                    setFreeProviderName(prev => builtins.some((p: any) => p.name === prev) ? prev : builtins[0].name);
+                } else {
+                    // No builtin providers available (e.g. an older server) —
+                    // go straight to the custom provider form.
+                    setProviderMode('custom');
+                }
+            }).catch(() => setProviderMode('custom')).finally(() => setBuiltinProvidersLoaded(true));
         }
     }, [isInitialOnboarding]);
 
-    // Save to LocalStorage whenever state changes
+    // Save to LocalStorage whenever state changes. The free-provider API key
+    // is intentionally excluded — it's only needed transiently to test+save
+    // the builtin provider row, not worth persisting in plaintext.
     useEffect(() => {
         const stateToSave = {
-            step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt
+            step, name, shortName, color, providerMode, freeProviderName, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt
         };
         localStorage.setItem(LS_KEY, JSON.stringify(stateToSave));
-    }, [step, name, shortName, color, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt]);
+    }, [step, name, shortName, color, providerMode, freeProviderName, providerUrl, providerKey, providerModel, selectedExistingProviderId, ceoName, ceoPrompt, hasManuallyEditedPrompt]);
 
 
     useEffect(() => {
@@ -97,7 +142,10 @@ export const AddCompany: React.FC = () => {
         setStep(2);
     };
 
-    const handleTestProvider = async () => {
+    // runProviderTest POSTs to /api/providers/test and updates the shared
+    // test-result state. Used by both the custom-provider form and the
+    // free-provider (OpenRouter/OpenCode Zen) picker.
+    const runProviderTest = async (payload: Record<string, unknown>) => {
         setIsTesting(true);
         setTestResult(null);
         setTestLog(null);
@@ -105,11 +153,7 @@ export const AddCompany: React.FC = () => {
         setProviderType(null);
         setResolvedUrl(null);
         try {
-            const res = await axios.post('/api/providers/test', {
-                base_url: providerUrl,
-                api_key: providerKey,
-                model: providerModel
-            });
+            const res = await axios.post('/api/providers/test', payload);
             setTestResult('success');
             if (res.data) {
                 if (res.data.log) setTestLog(res.data.log);
@@ -133,6 +177,41 @@ export const AddCompany: React.FC = () => {
         }
     };
 
+    const handleTestProvider = () => runProviderTest({
+        base_url: providerUrl,
+        api_key: providerKey,
+        model: providerModel,
+    });
+
+    const selectedFreeProvider = builtinProviders.find(p => p.name === freeProviderName) || null;
+
+    const handleTestFreeProvider = () => {
+        if (!selectedFreeProvider) return;
+        return runProviderTest({
+            provider_id: selectedFreeProvider.id,
+            base_url: selectedFreeProvider.base_url,
+            api_key: freeApiKey,
+            model: selectedFreeProvider.default_model,
+            provider_type: selectedFreeProvider.provider_type,
+        });
+    };
+
+    // Switching the provider mode or the selected free provider invalidates
+    // whatever test result is currently shown.
+    const switchProviderMode = (mode: 'free' | 'custom') => {
+        setProviderMode(mode);
+        setTestResult(null);
+        setTestLog(null);
+        setShowLog(false);
+    };
+
+    const selectFreeProvider = (providerName: string) => {
+        setFreeProviderName(providerName);
+        setTestResult(null);
+        setTestLog(null);
+        setShowLog(false);
+    };
+
     const handleProviderNext = (e: React.FormEvent) => {
         e.preventDefault();
         setStep(3);
@@ -149,7 +228,27 @@ export const AddCompany: React.FC = () => {
             let finalProviderId: number | null = null;
             let finalProviderModel = providerModel;
 
-            if (isInitialOnboarding) {
+            if (isInitialOnboarding && providerMode === 'free' && selectedFreeProvider) {
+                // Reuse the builtin provider row seeded on startup — just fill
+                // in the API key the user just verified, preserving its
+                // discovered model catalog (name/base_url/default_model/
+                // supported_models) rather than overwriting it. Deliberately
+                // ignore the test probe's auto-detected url/provider_type: these
+                // builtin providers are known OpenAI-compatible gateways, and
+                // the probe races an OpenAI- and an Anthropic-shaped request
+                // concurrently — whichever happens to respond first "wins",
+                // which could otherwise clobber base_url with the wrong shape.
+                await axios.put(`/api/providers/${selectedFreeProvider.id}`, {
+                    name: selectedFreeProvider.name,
+                    base_url: selectedFreeProvider.base_url,
+                    api_key: freeApiKey,
+                    provider_type: selectedFreeProvider.provider_type,
+                    default_model: selectedFreeProvider.default_model,
+                    supported_models: selectedFreeProvider.supported_models,
+                });
+                finalProviderId = selectedFreeProvider.id;
+                finalProviderModel = selectedFreeProvider.default_model;
+            } else if (isInitialOnboarding) {
                 // 1. Create Provider
                 const providerRes = await axios.post('/api/providers', {
                     name: 'Main Provider',
@@ -242,25 +341,112 @@ export const AddCompany: React.FC = () => {
 
                 {step === 2 && isInitialOnboarding && (
                     <form className="mt-8 space-y-6" onSubmit={handleProviderNext}>
+                        <p className="text-xs text-gray-500 -mt-4">
+                            You can add, edit, or switch providers anytime later from <span className="font-medium text-gray-600">Settings → LLM Providers</span>.
+                        </p>
+
                         <div className="flex flex-col gap-4">
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
-                                <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">API Key</label>
-                                <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
+                            {providerMode === 'free' ? (
+                                <>
+                                    {!builtinProvidersLoaded ? (
+                                        <p className="text-sm text-gray-400">Loading available free providers…</p>
+                                    ) : (
+                                        <>
+                                            <div className="flex flex-col gap-2">
+                                                {builtinProviders.map(p => {
+                                                    const info = FREE_PROVIDER_INFO[p.name] || { blurb: 'Free models.', keyUrl: '#', keyUrlLabel: '' };
+                                                    const selected = p.name === freeProviderName;
+                                                    return (
+                                                        <button
+                                                            key={p.id}
+                                                            type="button"
+                                                            onClick={() => selectFreeProvider(p.name)}
+                                                            className={`text-left p-3 rounded-md border transition-colors ${selected ? 'border-indigo-600 bg-indigo-50 ring-1 ring-indigo-200' : 'border-gray-300 hover:border-gray-400'}`}
+                                                        >
+                                                            <div className="flex items-center justify-between">
+                                                                <span className="font-semibold text-gray-900">{p.name}</span>
+                                                                <span className="text-xs font-medium bg-green-100 text-green-700 px-2 py-0.5 rounded-full">Free</span>
+                                                            </div>
+                                                            <p className="text-xs text-gray-500 mt-1">{info.blurb}</p>
+                                                        </button>
+                                                    );
+                                                })}
+                                            </div>
 
-                            <button type="button" onClick={handleTestProvider} disabled={isTesting} className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200">
-                                {isTesting ? 'Testing...' : 'Test Connection'}
-                            </button>
+                                            {selectedFreeProvider && (
+                                                <>
+                                                    <p className="text-xs text-gray-500">
+                                                        Get a free API key at{' '}
+                                                        <a
+                                                            href={FREE_PROVIDER_INFO[selectedFreeProvider.name]?.keyUrl || '#'}
+                                                            target="_blank"
+                                                            rel="noreferrer"
+                                                            className="text-indigo-600 underline font-medium"
+                                                        >
+                                                            {FREE_PROVIDER_INFO[selectedFreeProvider.name]?.keyUrlLabel || selectedFreeProvider.base_url}
+                                                        </a>
+                                                        {' '}— no credit card required.
+                                                    </p>
+                                                    <div>
+                                                        <label className="text-sm font-medium text-gray-700">{selectedFreeProvider.name} API Key</label>
+                                                        <input
+                                                            required
+                                                            type="password"
+                                                            value={freeApiKey}
+                                                            onChange={e => setFreeApiKey(e.target.value)}
+                                                            className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                                            placeholder="Paste your API key"
+                                                        />
+                                                    </div>
+                                                </>
+                                            )}
 
-                            {testResult === 'success' && <p className="text-green-600 text-sm font-semibold">Connection successful! ({providerType || 'unknown'} detected)</p>}
+                                            <button type="button" onClick={() => switchProviderMode('custom')} className="text-xs text-gray-500 underline hover:text-gray-700 text-center">
+                                                Use a custom provider instead
+                                            </button>
+                                        </>
+                                    )}
+                                </>
+                            ) : (
+                                <>
+                                    {builtinProviders.length > 0 && (
+                                        <button type="button" onClick={() => switchProviderMode('free')} className="text-xs text-gray-500 underline hover:text-gray-700 self-start">
+                                            ← Back to free providers
+                                        </button>
+                                    )}
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">OpenAI/Anthropic Compatible URL</label>
+                                        <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">API Key</label>
+                                        <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Model Name</label>
+                                        <input required type="text" value={providerModel} onChange={e => setProviderModel(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
+                                    </div>
+                                </>
+                            )}
+
+                            {(providerMode === 'custom' || selectedFreeProvider) && (
+                                <button
+                                    type="button"
+                                    onClick={providerMode === 'free' ? handleTestFreeProvider : handleTestProvider}
+                                    disabled={isTesting || (providerMode === 'free' && !freeApiKey)}
+                                    className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200 disabled:opacity-50"
+                                >
+                                    {isTesting ? 'Testing...' : 'Test Connection'}
+                                </button>
+                            )}
+
+                            {testResult === 'success' && (
+                                <p className="text-green-600 text-sm font-semibold">
+                                    {providerMode === 'free' && selectedFreeProvider
+                                        ? `Connection successful! ${selectedFreeProvider.name} is ready to use.`
+                                        : `Connection successful! (${providerType || 'unknown'} detected)`}
+                                </p>
+                            )}
                             {testResult && testResult !== 'success' && <p className="text-red-600 text-sm font-semibold whitespace-pre-wrap">{testResult}</p>}
 
                             {testLog && (
