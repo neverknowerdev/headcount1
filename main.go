@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -19,6 +20,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -94,6 +96,7 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.HindsightDocument{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
@@ -134,6 +137,40 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
+	// Hindsight long-term memory layer. The manager runs a bare-metal
+	// hindsight-api process (installed into the app venv by the setup script)
+	// configured with the cheap utility model as its LLM; HINDSIGHT_API_URL
+	// overrides with an external server (also used by e2e tests).
+	memManager := hindsight.NewManager(func(ctx context.Context) (hindsight.LLMConfig, bool) {
+		settings := endpoints.LoadSettings()
+		if settings.UtilityModel == "" || settings.UtilityProviderID == 0 {
+			return hindsight.LLMConfig{}, false
+		}
+		p, err := db.New(database).GetLLMProvider(ctx, settings.UtilityProviderID)
+		if err != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		return hindsight.LLMConfig{BaseURL: p.BaseUrl, APIKey: p.ApiKey, Model: settings.UtilityModel}, true
+	})
+	memService := hindsight.NewService(db.New(database), memManager.Client)
+	eng.SetMemoryService(memService)
+	endpoints.SetMemoryService(memService, memManager)
+
+	// Memory rides the backup archive: banks are exported to data/hindsight
+	// before each backup and re-imported after a restore.
+	backup.PreBackupHook = func(ctx context.Context) {
+		dir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		if err := memService.ExportAllToDir(ctx, dir); err != nil {
+			log.Printf("Warning: memory export before backup failed: %v", err)
+		}
+	}
+	backup.PostRestoreHook = func() {
+		dir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		if err := memService.ImportAllFromDir(context.Background(), dir); err != nil {
+			log.Printf("Warning: memory import after restore failed: %v", err)
+		}
+	}
+
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
@@ -141,6 +178,14 @@ func main() {
 		}
 		srv.InstallMCPNpmDeps(context.Background())
 		srv.CacheMCPTools(context.Background())
+
+		// Bring the memory backend up (after setup so hindsight-api is
+		// installed), then feed every project's docs into it.
+		if err := memManager.Start(context.Background()); err != nil {
+			log.Printf("WARNING: memory layer unavailable: %v", err)
+			return
+		}
+		srv.SyncAllProjectMemory(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 

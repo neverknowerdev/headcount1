@@ -307,6 +307,21 @@ type ActivityLog struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// HindsightDocument tracks a doc file (.md) fed into the Hindsight memory
+// layer for a project, so sync can detect changed/removed files by hash.
+// DocumentID is the stable Hindsight document id ("doc:<relative path>");
+// retaining with the same id upserts, replacing the old extracted memories.
+type HindsightDocument struct {
+	ID         int32     `json:"id" gorm:"primaryKey"`
+	ProjectID  int32     `json:"project_id" gorm:"not null;uniqueIndex:idx_hindsight_doc"`
+	Project    Project   `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	Path       string    `json:"path" gorm:"not null;uniqueIndex:idx_hindsight_doc"` // relative to the project repo root
+	DocumentID string    `json:"document_id" gorm:"not null"`
+	SHA256     string    `json:"sha256" gorm:"not null"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`

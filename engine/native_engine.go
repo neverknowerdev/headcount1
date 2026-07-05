@@ -17,6 +17,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/logging"
 	"gorm.io/gorm"
 )
@@ -27,7 +28,14 @@ type NativeEngine struct {
 	hub          *eventhub.Hub
 	agentFactory agentconfig.Factory
 	cancelFuncs  sync.Map // runID -> context.CancelFunc
+	// memory is the Hindsight long-term memory layer. Optional: when nil (or
+	// the backend is down) sessions run without memory_recall and the
+	// pre-task briefing, and run outcomes are simply not retained.
+	memory *hindsight.Service
 }
+
+// SetMemoryService wires the Hindsight memory layer into the engine.
+func (e *NativeEngine) SetMemoryService(s *hindsight.Service) { e.memory = s }
 
 // NewNativeEngine creates a NativeEngine pre-loaded with the default agent
 // config factory.
@@ -489,6 +497,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
+	// Pre-task memory refinement: before execution starts, recall related
+	// facts and past experience from long-term memory (project docs, prior
+	// runs of any agent) and put them in front of the agent.
+	if e.memory.Available() {
+		if briefing := e.memory.TaskBriefing(ctx, task.CompanyID, task.ProjectID, task); briefing != "" {
+			systemPrompt += "\n\n## Memory briefing\nRecalled from the company's long-term memory (may be outdated — verify anything critical, use memory_recall to dig deeper):\n" + briefing
+			e.logInfo(proxyLogger, "Memory briefing injected from long-term memory")
+		}
+	}
+
 	initialMessages := e.buildInitialMessages(ctx, task, mode)
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
@@ -747,6 +765,18 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
+	// Long-term memory recall (Hindsight). Read-only by design: retention is
+	// automatic (docs on sync, run outcomes on session end).
+	if e.memory.Available() {
+		registry.Register(tools.NewMemoryRecall(func(mrCtx context.Context, query, agentFilter string, maxTokens int) (string, error) {
+			results, rerr := e.memory.Recall(mrCtx, task.CompanyID, task.ProjectID, agentFilter, query, maxTokens)
+			if rerr != nil {
+				return "", rerr
+			}
+			return hindsight.FormatResults(results), nil
+		}))
+	}
+
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
@@ -912,6 +942,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Update run metadata in filesystem.
 	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
 		storage.WriteRun(updatedRun, company.ShortName)
+
+		// Feed the session outcome into long-term memory (async; failures
+		// only logged — memory must never block or fail a run).
+		if e.memory.Available() {
+			finalTask, tErr := e.q.GetTask(ctx, task.ID)
+			if tErr != nil {
+				finalTask = task
+			}
+			go func() {
+				mCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if rErr := e.memory.RetainRunOutcome(mCtx, company, finalTask, updatedRun, status, runErrMsg); rErr != nil {
+					fmt.Printf("Warning: failed to retain run %d outcome in memory: %v\n", updatedRun.ID, rErr)
+				}
+			}()
+		}
 	}
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
