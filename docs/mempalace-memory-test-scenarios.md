@@ -144,7 +144,55 @@ Then a 5th write, deliberately near-identical in wording to #4 but factually wro
 
 ---
 
-## Why these six, and what's deliberately out of scope
+## Scenario 7 — Cross-role, cross-task blocker resolved entirely through memory (the "ICP backend" flow)
+
+**Risk targeted:** everything upstream tests one mechanism at a time within a single task/agent. This scenario tests the thing paperclip2's memory layer actually exists for: two *different agent roles*, on two *different tasks*, with no explicit task-link between them, coordinating a block/unblock cycle **purely through recall** — plus a new risk not covered above: a non-technical role (CMO) must correctly interpret engineering memory *and* filter out internal/technical detail that shouldn't leak into external-facing output.
+
+**Near-real data — GM Coin's ICP backend:**
+
+**Task `GM-88`** — "Implement ICP (Internet Computer Protocol) backend for GM Coin," owner: CTO agent.
+
+- Run 1: CTO attempts to scaffold the canister, needs the `dfx` CLI (ICP SDK) to build/deploy locally, which shells out internally (`dfx canister create` invokes `sh -c` under the hood). Tool call fails with the sandbox's shell restriction (continuity with Scenario 2's landlock fact):
+  ```
+  exec error: dfx canister create gm_coin_backend: fork/exec /bin/sh: operation not permitted (landlock: execute denied for /bin/sh)
+  ```
+- CTO writes memory and blocks the task:
+  - `remember(kind=note, content="ICP backend (GM-88) blocked: dfx CLI shells out to /bin/sh internally for canister create/build/deploy, sandbox landlock policy blocks /bin/sh entirely. Need a landlock allowlist entry for dfx (or its child processes) before this can proceed. Exact error: fork/exec /bin/sh: operation not permitted.")`
+  - `mempalace_kg_add(subject="task:GM-88", predicate="blocked_by", object="no landlock allowlist for dfx shell invocation")`
+  - Task status → `blocked` (via the normal task-status API, not memory — the memory fact and the DB status are two separate signals the test must check are consistent with each other, not just individually correct).
+
+**Task `GM-91`** — "Write an X/Twitter post about our ICP backend for GM Coin," owner: CMO agent, created ~concurrently with GM-88 but with **no explicit task dependency link** to it.
+
+- CMO run 1, before writing anything: calls `recall_memory("ICP backend implementation GM Coin")` — this must surface GM-88's blocker note (same company, cross-agent, cross-role recall — nothing here is scoped to "CTO's memory," it's project-wing memory).
+- CMO also checks GM-88's task status via the normal task API (not memory) and sees `blocked`, and — this is the part that requires the agent to actually reason, not just template a response — the run log shows the `dfx`/landlock error.
+- CMO correctly concludes there's nothing to post about yet: `remember(kind=note, content="Blocking GM-91 (ICP post) — GM-88 (ICP backend implementation) is blocked, sandbox can't run dfx CLI yet (landlock blocks shell invocation). Can't accurately post about a backend that doesn't exist yet.")`, `mempalace_kg_add(subject="task:GM-91", predicate="blocked_by", object="task:GM-88")`, task status → `blocked`.
+
+**Unblock, part 1 — devops fixes the sandbox** (mirrors Scenario 2's landlock-allowlist fix): a landlock policy update allowlists `dfx` and its child processes. User moves `GM-88` back to `in_progress`.
+
+- CTO run 2: before retrying, calls `recall_memory("ICP backend dfx error")` or `recall_run(run_id=<run 1>)` — must retrieve the **exact** error text from run 1 verbatim (this is Scenario 3's compaction-recall risk, now applied across separate *runs* of the same task rather than within one long run — a materially different code path, since it's not a context-window compaction bridge, it's a fresh run with no prior transcript in context at all).
+- CTO verifies the fix works (e.g. a tool call `dfx --version` or a trivial `dfx canister create` succeeds this time), then implements: writes several facts as the work lands —
+  - `remember(kind=decision, content="GM Coin ICP backend implemented as a Rust canister using ic-cdk 0.13, exposing mint/transfer/balance methods. Deployed to local replica for testing via dfx; mainnet deploy is pending a security audit, not yet live.")`
+  - `mempalace_kg_invalidate(subject="task:GM-88", predicate="blocked_by", object="no landlock allowlist for dfx shell invocation", reason="landlock policy updated to allowlist dfx")`
+  - `mempalace_kg_add(subject="task:GM-88", predicate="status", object="implemented (canister deployed to local replica; mainnet pending audit)")`
+- `finish_task` → status `done`.
+
+**Unblock, part 2 — the actual point of the scenario.** User moves `GM-91` back to `in_progress`. CMO run 2:
+
+- Calls `recall_memory("ICP backend implementation status GM Coin")`.
+- Calls `memory_facts(entity="task:GM-88")` to check current status before writing anything (this is the step a shallow implementation skips — an agent that just re-runs its *previous* query and reuses the old blocked-conclusion from its own run-1 reasoning, rather than re-checking current truth, is the exact failure this scenario is designed to catch).
+- Drafts the post using the scripted mock LLM.
+
+**Assertions:**
+1. **Cross-agent, cross-task recall works at all:** CMO's run-1 `recall_memory` call returns GM-88's blocker note despite CMO never having written to or been assigned GM-88 — proves project-wing scoping is shared across agents/roles correctly (contrast with Scenario 4, which proves the *opposite* — that it's NOT shared across projects; together these bound the scoping radius precisely: shared within a project across roles, isolated across projects).
+2. **Blocked state actually causes blocking, not just noting:** assert `GM-91`'s task status transitions to `blocked` as a consequence of the CMO's memory check + reasoning (via the scripted LLM's tool calls), not merely that a note was written — a passing "recall found the blocker" test with no consequent task-status change would be a false positive.
+3. **Verbatim error survives a run boundary:** CTO run 2's recall of the exact string `fork/exec /bin/sh: operation not permitted` must match run 1's tool-error text byte-for-byte — this specifically exercises `recall_run`/cross-run recall (no shared in-memory transcript exists between run 1 and run 2), distinguishing it from Scenario 3's within-run compaction recall.
+4. **Pivot correctness, cross-agent version of Scenario 1:** CMO run 2's `recall_memory`/`memory_facts` calls must surface the *implemented* status and the ic-cdk/Rust/canister facts, and must **not** surface the stale "blocked" conclusion as current — even though CMO's own run-1 note ("Blocking GM-91... backend doesn't exist yet") is sitting right there in memory and is topically the closest-matching prior CMO-authored content. The hard part: the model must prefer GM-88's current KG status over its *own* prior reasoning, which is a stronger pull toward staleness than an unrelated agent's stale note would be.
+5. **Role-appropriate filtering (new risk, not covered by Scenarios 1–6):** the generated post text must contain the user-facing facts (ICP/Internet Computer, mint/transfer/balance capability, that it's live in testing) but must **not** contain internal engineering/ops detail — assert the post text does not contain `landlock`, `dfx`, `/bin/sh`, `sandbox`, or the literal error string. This is a case where *correct recall* (finding the true, current, technical facts) is necessary but not sufficient — the agent also has to exercise role-appropriate judgment about what belongs in a public tweet, which is a prompt/role-instruction concern layered on top of a memory-correctness concern. Also assert the post does **not** claim mainnet/production deployment (the implementation fact explicitly says local-replica-only, audit pending) — a subtler overclaim that a careless summarization could easily produce.
+6. **No false dependency invented:** assert nothing in the system created an explicit DB-level task dependency link between GM-91 and GM-88 — the entire coordination happened through memory + agent judgment, matching the real scenario (task dependencies aren't always modeled explicitly; memory is what lets loosely-coupled tasks stay consistent with each other).
+
+---
+
+## Why these seven, and what's deliberately out of scope
 
 These were chosen to each isolate a *specific* mechanism whose failure mode is silent (returns *a* plausible-looking answer, just the wrong one) rather than loud (crashes, 500s) — silent failures are the ones that survive to production undetected:
 
@@ -156,5 +204,6 @@ These were chosen to each isolate a *specific* mechanism whose failure mode is s
 | 4. Cross-tenant leakage | Search returns *relevant* results that are also a confidentiality breach — "working correctly" and "leaking" look the same from a functional-only test |
 | 5. Concurrent writes | Works fine in every manual/sequential test, fails only under real production-like concurrency |
 | 6. Dreaming adversarial input | Synthesized memory looks legitimate (has evidence_ids, has confidence, has reasoning) while being subtly wrong or manipulated |
+| 7. Cross-role blocker flow | Coordination "works" in a demo (recall returns *something* relevant) while silently using stale self-authored conclusions or leaking internal detail into public output |
 
 **Explicitly out of scope for this batch** (real risks, but different in kind — worth their own scenarios later): backup/restore round-trip fidelity with an embedder-mismatch (integration plan §3.5's "embedder identity gotcha"), palace corruption/repair (`mempalace repair --mode from-sqlite`) under a killed-mid-write process, and multi-company scale/performance (hundreds of companies dreaming nightly). These are lower-frequency/lower-silent-failure-risk than the six above and are better tested with targeted chaos/load tooling than with scripted-LLM e2e specs.
