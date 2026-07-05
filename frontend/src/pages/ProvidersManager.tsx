@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Minus } from 'lucide-react';
+import { ModelGroups } from '../components/ModelGroups';
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
@@ -206,6 +207,8 @@ export const ProvidersManager: React.FC = () => {
                     </div>
                 ))}
             </div>
+
+            <ModelGroups providers={providers} />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">

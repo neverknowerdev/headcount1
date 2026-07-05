@@ -89,6 +89,9 @@ func main() {
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.ModelGroup{},
+		&db.ModelGroupMember{},
+		&db.ModelRequestStat{},
 		&db.MCPServer{},
 		&db.MCPAccount{},
 		&db.AgentMCPServer{},
@@ -274,6 +277,12 @@ func refreshBuiltinLLMProviderModels(database *gorm.DB) {
 		log.Printf("Warning: %v", err)
 	}
 	ensureDefaultUtilityModel(q)
+
+	// Seed the default "Memory Management" model group once the free-model
+	// catalogs are populated, so its gpt-oss* members can be resolved.
+	if err := q.EnsureDefaultModelGroups(ctx); err != nil {
+		log.Printf("Warning: failed to seed default model groups: %v", err)
+	}
 }
 
 // ensureDefaultUtilityModel points the app-level cheap/utility LLM at a

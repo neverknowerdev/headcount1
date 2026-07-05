@@ -23,23 +23,26 @@ import (
 )
 
 type LLMGateway struct {
-	q        *db.Queries
-	basePath string
-	hub      interface{ BroadcastEvent(string, interface{}) }
+	q           *db.Queries
+	basePath    string
+	hub         interface{ BroadcastEvent(string, interface{}) }
+	groupHealth *groupHealthState
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
 	return &LLMGateway{
-		q:        db.New(database),
-		basePath: db.PaperclipHome(),
+		q:           db.New(database),
+		basePath:    db.PaperclipHome(),
+		groupHealth: newGroupHealthState(),
 	}
 }
 
 func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(string, interface{}) }) *LLMGateway {
 	return &LLMGateway{
-		q:        db.New(database),
-		basePath: db.PaperclipHome(),
-		hub:      hub,
+		q:           db.New(database),
+		basePath:    db.PaperclipHome(),
+		hub:         hub,
+		groupHealth: newGroupHealthState(),
 	}
 }
 
@@ -48,6 +51,10 @@ func (g *LLMGateway) Mount(r chi.Router) {
 	r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
 		r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
 		r.Get("/v1/models", g.getModelsForAgent)
+	})
+	r.Route("/proxy/group/{group_key}", func(r chi.Router) {
+		r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
+		r.Get("/v1/models", g.getModelsForGroup)
 	})
 }
 

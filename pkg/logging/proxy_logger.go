@@ -648,6 +648,28 @@ func (l *ProxyLogger) LogSessionEnded(childRunID int32, status, result string) {
 	l.persistLog("session_ended", string(content), extra)
 }
 
+// LogModelSwitch records a model-group failover: the request to
+// fromProvider/fromModel failed (or was rate limited) and the router is
+// retrying with toProvider/toModel. Rendered as its own row in the Run Log.
+func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toModel, reason string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	ts := time.Now().UTC().Format(time.RFC3339)
+	msg := fmt.Sprintf("Model switch: %s @ %s → %s @ %s (%s)", fromModel, fromProvider, toModel, toProvider, reason)
+	l.file.WriteString(fmt.Sprintf("\n=== Model Switch [%s] ===\n%s\n\n", ts, msg))
+
+	extra := map[string]interface{}{
+		"from_provider": fromProvider,
+		"from_model":    fromModel,
+		"to_provider":   toProvider,
+		"to_model":      toModel,
+		"reason":        reason,
+	}
+	l.broadcastLog("model_switch", msg, extra)
+	l.persistLog("model_switch", msg, extra)
+}
+
 // LogInfo writes a plain informational line to the log file and persists an
 // "info" entry in the run's log_entries column.
 func (l *ProxyLogger) LogInfo(msg string) {

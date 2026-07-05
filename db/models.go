@@ -311,6 +311,58 @@ type ActivityLog struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// ModelGroup is a named set of provider+model pairs exposed behind a single
+// OpenAI-compatible proxy URL (/api/proxy/group/{slug}/v1). The gateway
+// routes each request to the healthiest member, preferring free models and
+// failing over automatically on errors or rate limits.
+type ModelGroup struct {
+	ID          int32              `json:"id" gorm:"primaryKey"`
+	Name        string             `json:"name" gorm:"not null"`
+	Slug        string             `json:"slug" gorm:"not null;uniqueIndex"`
+	Description string             `json:"description"`
+	Builtin     bool               `json:"builtin" gorm:"not null;default:false"`
+	Members     []ModelGroupMember `json:"members" gorm:"foreignKey:GroupID"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+}
+
+// ModelGroupMember is one provider+model pair inside a ModelGroup. Free
+// members are always tried before paid ones; Priority orders members within
+// the same tier (lower = tried first).
+type ModelGroupMember struct {
+	ID         int32       `json:"id" gorm:"primaryKey"`
+	GroupID    int32       `json:"group_id" gorm:"not null;index"`
+	ProviderID int32       `json:"provider_id" gorm:"not null"`
+	Provider   LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:CASCADE;"`
+	Model      string      `json:"model" gorm:"not null"`
+	IsFree     bool        `json:"is_free" gorm:"not null;default:false"`
+	Priority   int         `json:"priority" gorm:"not null;default:0"`
+	CreatedAt  time.Time   `json:"created_at"`
+}
+
+// ModelRequestStat records the outcome of a single LLM request routed by the
+// gateway: success, hard failure, or rate limit. Rate limits are tracked
+// separately from failures so they don't count against a model's failure %.
+// TokensPerSec is completion tokens divided by wall-clock duration.
+type ModelRequestStat struct {
+	ID               int32     `json:"id" gorm:"primaryKey"`
+	GroupID          *int32    `json:"group_id" gorm:"index"`
+	ProviderID       int32     `json:"provider_id" gorm:"not null;index"`
+	Model            string    `json:"model" gorm:"not null;index"`
+	Success          bool      `json:"success" gorm:"not null;default:false"`
+	RateLimited      bool      `json:"rate_limited" gorm:"not null;default:false"`
+	StatusCode       int       `json:"status_code"`
+	DurationMs       int64     `json:"duration_ms"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TokensPerSec     float64   `json:"tokens_per_sec"`
+	// CooldownUntil is set on rate-limited rows: the gateway won't route to
+	// this provider+model again until this time (unless nothing else works).
+	CooldownUntil *time.Time `json:"cooldown_until"`
+	ErrorMessage  string     `json:"error_message" gorm:"type:text"`
+	CreatedAt        time.Time `json:"created_at" gorm:"index"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`
