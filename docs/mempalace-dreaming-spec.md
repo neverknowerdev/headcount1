@@ -76,6 +76,8 @@ type DreamRun struct {
     InsightsAdded   int
     InsightsSkipped int       // deduped against existing insights
     InsightsSuperseded int    // contradicted an existing insight
+    AuditConfirmed  int       // existing facts revalidated (freshness bump, no write)
+    AuditContradicted int     // existing Tier 2/3 facts invalidated by the audit pass (§4a)
     Error           string
     PromptTokens    int
     CompletionTokens int
@@ -131,6 +133,50 @@ Key properties:
 - **No agent involvement, no run-path latency.** Entirely off the hot path — agents don't know it's happening.
 - **Never rewrites Tier 1.** Only ever adds/invalidates Tier 3 (`pattern`/`preference`/`risk`) KG triples and `insights`-room drawers. Never touches operational drawers, decision records, or KG facts written by teardown capture/agents.
 
+## 4a. Audit pass — checking existing memory for staleness, not just proposing new insights
+
+§4 only ever contradicts a dreamed insight against *other* dreamed insights. It never revisits **Tier 2** — KG facts written by agents/engine hooks (`uses`, `blocks`, decision records, …) — so a fact like `(project:acme, uses, "Postgres")` from three sprints ago can sit there uncontested indefinitely, even once new drawers/decisions make it stale. Dreaming should audit, not just add.
+
+**Runs as a second stage of the same nightly cycle, after the propose-new-insights stage in §4, same wing, same `DreamRun`:**
+
+```
+staleCandidates := validFacts filtered to:
+    - facts older than STALE_AGE_THRESHOLD (e.g. 30 days) since valid_from, OR
+    - facts whose subject/object also appears in newDrawers (i.e. touched by recent activity)
+    // bounds the audit to facts plausibly affected by what's new — never a full-palace rescan
+
+if len(staleCandidates) == 0:
+    skip audit stage; continue to next wing   // no LLM call, no cost
+
+verdicts := call UtilityModel with a structured-output prompt:
+    input:  staleCandidates (the existing triples, each with its evidence/provenance),
+            newDrawers, validFacts (for cross-checking against sibling facts)
+    ask:    "For each existing fact, does the new evidence CONFIRM it (still true),
+             CONTRADICT it (evidence says otherwise), or is it UNCHANGED (no bearing
+             either way)? Only flag CONTRADICT with specific contradicting evidence —
+             absence of mention is not contradiction. Default to UNCHANGED when unsure."
+    output: [{fact_id, verdict: "confirm"|"contradict"|"unchanged", reasoning, evidence_ids}]
+
+for each verdict:
+    case "confirm":
+        bump fact's last_confirmed_at (metadata field) — no KG write; just freshness bookkeeping
+    case "contradict":
+        mempalace_kg_invalidate(fact, reason=verdict.reasoning, evidence=verdict.evidence_ids)
+        write a superseding decision drawer in the `decisions` room (same as the existing
+        human/CTO invalidation path in integration plan §3.2) so the audit trail reads the
+        same whether a human, an agent, or dreaming did the invalidating
+        AuditContradicted++
+    case "unchanged":
+        no-op
+```
+
+This is deliberately **conservative and self-limiting**:
+- Only audits facts that are either old *or* topically touched by new activity — never a blanket palace-wide re-verification, so cost stays bounded the same way §4 is.
+- Bias toward `unchanged` is explicit in the prompt — an audit pass that over-invalidates is worse than one that under-invalidates, because false invalidation silently erases working knowledge agents may be relying on, while under-invalidation just means the next cycle gets another chance.
+- **Never deletes.** Contradiction always goes through `kg_invalidate` (closes the validity window, keeps history) + a superseding decision drawer — identical mechanics to how a CTO/CEO agent invalidates a fact today. Dreaming doesn't get a new, more destructive invalidation path; it uses the existing one.
+- Applies to **Tier 2 facts as well as Tier 3 insights** — the audit stage is what lets a stale `(project:acme, uses, "Postgres")` fact eventually get superseded even though no human or agent happened to notice and invalidate it manually. This closes the gap called out in the pilot findings (`mempalace-tech-spec.md` §7.1: "`memory_invalidate` never used" by agents in practice) — dreaming becomes a backstop for invalidation hygiene, not just a source of new facts.
+- Contradiction verdicts on **Tier 2** facts are always `unconfirmed`-equivalent for review purposes: log them distinctly (`AuditContradicted` counter, separate from `InsightsSuperseded`) and surface them in the Dreams UI (§7) with higher visual weight than routine Tier 3 supersessions, since invalidating an agent-authored fact is a bigger claim than superseding a prior guess.
+
 ## 5. Scheduling
 
 Extends the nightly maintenance scheduler already planned in `mempalace-tech-spec.md` Phase 5 (alongside `compress`/`sync`) — one more job type, not a new subsystem.
@@ -160,7 +206,8 @@ Because insights are inferred, not stated, they need a lighter-weight but real r
 2. **Promotion.** A planner-tier agent (CEO/CTO) or a human via the Memory UI can promote an `unconfirmed` insight to `confirmed` — at which point it's treated like any other KG fact in ranking/prompting. No automatic promotion; confidence score from the LLM is a hint for the UI to sort by, not a threshold that self-promotes.
 3. **Rejection / pruning.** Humans can mark `rejected` (kept for audit, excluded from recall) or hard-delete via `mempalace_delete_by_source` on the `dreaming/<run-id>/...` prefix — cleans both the KG triple and its companion drawer in one action, reusing the source_file-scoped delete already designed for run cleanup.
 4. **Bounded growth.** Cap unconfirmed insights per wing (e.g. 50); when a new one would exceed the cap, the lowest-confidence unconfirmed insight older than N days is auto-pruned rather than accumulating forever. Confirmed insights are never auto-pruned.
-5. **Memory UI — new "Dreams" tab** (extends the Memory UI plan in integration-plan §4.4): list of insights per wing with confidence, evidence links (click through to the source drawers/facts that produced it), review-state filter, and promote/reject actions. `DreamRun` history (cost, counts, skipped/errored nights) as a small ops sub-view — reuses the `Activity & Stats` tab pattern already planned.
+5. **Audit contradictions get their own review queue.** Because §4a can invalidate a Tier 2 fact that an agent or human wrote deliberately, an `AuditContradicted` invalidation is surfaced separately from routine Tier 3 supersession — a "Contradictions" filter in the Dreams tab, sorted by fact age/importance rather than confidence. A **revert** action is available for exactly this case (distinct from Tier 3 reject/prune): it re-opens the invalidated fact's validity window and marks the superseding decision drawer `reverted` — cheap because `kg_invalidate` never deleted anything, it only closed a window.
+6. **Memory UI — new "Dreams" tab** (extends the Memory UI plan in integration-plan §4.4): list of insights per wing with confidence, evidence links (click through to the source drawers/facts that produced it), review-state filter, and promote/reject actions, plus the Contradictions sub-view from point 5. `DreamRun` history (cost, counts, skipped/errored nights, `AuditConfirmed`/`AuditContradicted`) as a small ops sub-view — reuses the `Activity & Stats` tab pattern already planned.
 
 ## 8. Cost and safety guardrails
 
@@ -173,21 +220,21 @@ Because insights are inferred, not stated, they need a lighter-weight but real r
 
 Slots in after `mempalace-tech-spec.md` Phase 2 (compaction) and reuses its plumbing (KG invalidation/supersede helpers, addressing, write lock, `MemoryActivity` logging) — no new foundational work needed beyond what Phases 0–2 already establish.
 
-**Phase D0 — Core job, project wings only, manual trigger (~2-3 days)**
-- `DreamRun` table + migration.
-- `pkg/mempalace/dreaming.go`: the algorithm in §4, scoped to `project:<name>` wings only.
-- `POST /api/memory/maintenance/dream` manual trigger. No scheduler yet — prove the algorithm and tune prompts/caps against real palace data first.
+**Phase D0 — Core job, project wings only, manual trigger (~3-4 days)**
+- `DreamRun` table + migration (including the `AuditConfirmed`/`AuditContradicted` counters).
+- `pkg/mempalace/dreaming.go`: propose-new-insights stage (§4) **and** the audit/invalidation stage (§4a), scoped to `project:<name>` wings only.
+- `POST /api/memory/maintenance/dream` manual trigger. No scheduler yet — prove both stages and tune prompts/caps/thresholds against real palace data first. Shipping the audit pass alongside the propose pass in the same phase, rather than deferring it, is deliberate: they share the same read/write plumbing and the "bias toward `unchanged`" prompt tuning in §4a needs the same real-data pass as §4's dedup tuning.
 
 **Phase D1 — Scheduling + remaining wing scopes (~1-2 days)**
 - Nightly scheduler integration (§5), `Company.DreamingEnabled` toggle.
 - Extend scope to `agent:*` and `company` wings with their cadences (§6).
 
 **Phase D2 — Review UI + recall integration (~2-3 days)**
-- "Dreams" tab in Memory UI (§7.5).
+- "Dreams" tab in Memory UI (§7.6), including the Contradictions sub-view + revert action (§7.5).
 - `recall_memory`/`memory_facts` response tagging + epistemic-ordering prompt update.
-- Promote/reject/prune actions wired to KG invalidate + `delete_by_source`.
+- Promote/reject/prune actions wired to KG invalidate + `delete_by_source`; revert action wired to KG re-open-validity-window.
 
 **Phase D3 — Tuning pass (~ongoing)**
-- Once real `DreamRun` cost/yield data exists: adjust `MAX_DRAWERS`, `MIN_ACTIVITY_THRESHOLD`, per-wing-type cadence, and confidence-threshold defaults for auto-pruning. This is expected to need at least one real tuning iteration — ship conservative defaults (fewer, higher-confidence insights) first.
+- Once real `DreamRun` cost/yield data exists: adjust `MAX_DRAWERS`, `MIN_ACTIVITY_THRESHOLD`, `STALE_AGE_THRESHOLD`, per-wing-type cadence, and confidence-threshold defaults for auto-pruning. This is expected to need at least one real tuning iteration — ship conservative defaults (fewer, higher-confidence insights; audit biased toward `unchanged`) first.
 
 **Total: roughly 1–1.5 weeks**, ahead of the pruning/tuning pass which is open-ended by nature.
