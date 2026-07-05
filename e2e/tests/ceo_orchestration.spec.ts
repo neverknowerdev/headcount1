@@ -110,8 +110,15 @@ test.describe.serial('CEO orchestration flow', () => {
         taskId = task.id;
 
         // ── Script the LLM: one global sequence across all sessions ─────────
+        // withFinishRetries: finish_task now nudges once per run when the
+        // agent hasn't called remember() yet (memory is available for this
+        // company by default in e2e) — see
+        // engine/aicli/tools/finish_task_execution.go. None of CTO/Coder/QA
+        // call remember() here, so every scripted finish_task gets an
+        // identical retry spliced in right after it; unused if the first
+        // call already finishes, consumed as the next scripted move if not.
         const scenario = {
-            entries: [
+            entries: withFinishRetries([
                 // CEO turn 1: report progress
                 { tool_call: { id: 'c1', name: 'report_status', arguments: { status: STATUS_LINE } } },
                 // CEO turn 2: question to the human
@@ -181,7 +188,7 @@ test.describe.serial('CEO orchestration flow', () => {
                     task_status: 'in-review',
                     finish_status: 'Greeting feature delegated, implemented and verified.',
                 } } },
-            ],
+            ]),
         };
         const scRes = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST',
@@ -487,6 +494,27 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(builtin.getByText('Coder — implements features from tech specs with high-quality, pattern-following code')).toBeVisible();
     });
 });
+
+/**
+ * finish_task nudges once per run when the agent hasn't called remember()
+ * yet ("store durable facts, then finish_task again" — see
+ * engine/aicli/tools/finish_task_execution.go). A real LLM adapts to that on
+ * the fly; a fixed mock script can't, so every scripted finish_task call
+ * gets an identical retry spliced in right after it. Unused (mock scenario
+ * entries are pulled lazily) when the first call already finishes; consumed
+ * as the agent's next scripted move when it doesn't.
+ */
+function withFinishRetries(entries: object[]): object[] {
+    const out: object[] = [];
+    for (const entry of entries) {
+        out.push(entry);
+        const tc = (entry as any).tool_call;
+        if (tc?.name === 'finish_task') {
+            out.push({ tool_call: { id: `${tc.id}-retry`, name: 'finish_task', arguments: tc.arguments } });
+        }
+    }
+    return out;
+}
 
 async function postJSON(request: APIRequestContext, url: string, data: unknown): Promise<any> {
     const res = await request.post(url, { data });

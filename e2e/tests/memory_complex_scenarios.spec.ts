@@ -582,10 +582,35 @@ async function waitForMemoryReady(request: APIRequestContext, companyId: number)
         .toBe('ready');
 }
 
+/**
+ * finish_task now nudges once per run when the agent hasn't called
+ * remember() yet ("store durable facts, then finish_task again") instead of
+ * finishing immediately — see engine/aicli/tools/finish_task_execution.go.
+ * A real LLM adapts to that on the fly; a fixed mock script can't, so every
+ * scripted finish_task call gets an identical retry spliced in right after
+ * it. If the first call actually finishes (remember() already happened,
+ * or a prior nudge in this same run already fired once), the retry is never
+ * consumed — mock scenario entries are pulled lazily, so an unused tail
+ * entry is harmless. If the nudge fires, the retry is the agent's next
+ * scripted move, which is exactly what a real agent would do.
+ */
+function withFinishRetries(entries: object[]): object[] {
+    const out: object[] = [];
+    for (const entry of entries) {
+        out.push(entry);
+        const tc = (entry as any).tool_call;
+        if (tc?.name === 'finish_task') {
+            out.push({ tool_call: { id: `${tc.id}-retry`, name: 'finish_task', arguments: tc.arguments } });
+        }
+    }
+    return out;
+}
+
 async function runTaskEntries(
     request: APIRequestContext, companyId: number, agentId: number, sprintId: number,
     projectId: number | undefined, title: string, entries: object[],
 ): Promise<number> {
+    entries = withFinishRetries(entries);
     await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries }),
     });
@@ -611,6 +636,7 @@ async function runTaskRaw(request: APIRequestContext, companyId: number, agentId
 
 /** Moves an EXISTING task back to 'to-do' and lets it run again (a new run, same task/closet). */
 async function rerunTaskEntries(request: APIRequestContext, taskId: number, entries: object[]): Promise<void> {
+    entries = withFinishRetries(entries);
     await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ entries }),
     });

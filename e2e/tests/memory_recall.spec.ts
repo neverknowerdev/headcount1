@@ -104,12 +104,34 @@ test.describe.serial('MemPalace memory integration', () => {
             .toBe('ready');
     });
 
+    /**
+     * finish_task now nudges once per run when the agent hasn't called
+     * remember() yet ("store durable facts, then finish_task again" — see
+     * engine/aicli/tools/finish_task_execution.go). A real LLM adapts to
+     * that on the fly; this fixed mock script can't, so every scripted
+     * finish_task call gets an identical retry spliced in right after it.
+     * Unused (mock entries are pulled lazily) when the first call already
+     * finishes; consumed as the agent's next scripted move when it doesn't.
+     */
+    function withFinishRetries(entries: object[]): object[] {
+        const out: object[] = [];
+        for (const entry of entries) {
+            out.push(entry);
+            const tc = (entry as any).tool_call;
+            if (tc?.name === 'finish_task') {
+                out.push({ tool_call: { id: `${tc.id}-retry`, name: 'finish_task', arguments: tc.arguments } });
+            }
+        }
+        return out;
+    }
+
     /** Runs one task whose scripted agent performs the given tool calls, then finishes. */
     async function runTask(
         request: APIRequestContext,
         title: string,
         entries: object[],
     ): Promise<number> {
+        entries = withFinishRetries(entries);
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
