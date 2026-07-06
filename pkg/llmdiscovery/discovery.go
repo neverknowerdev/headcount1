@@ -33,17 +33,18 @@ import (
 // offline fallback and the live-fetch ranking stay consistent. Worth
 // revisiting periodically as new models show up.
 var fallbackOpenRouterFreeModels = []string{
+	"openai/gpt-oss-120b:free",
 	"deepseek/deepseek-r1:free",
 	"deepseek/deepseek-chat-v3.1:free",
 	"qwen/qwen3-coder:free",
 	"meta-llama/llama-3.3-70b-instruct:free",
 	"google/gemma-3-27b-it:free",
-	"openai/gpt-oss-120b:free",
 }
 
 // fallbackOpenCodeZenFreeModels mirrors fallbackOpenRouterFreeModels for
 // OpenCode Zen — also doubles as its curated ranking reference.
 var fallbackOpenCodeZenFreeModels = []string{
+	"deepseek-v4-flash-free",
 	"big-pickle",
 	"minimax-m2.5-free",
 	"mimo-v2-pro-free",
