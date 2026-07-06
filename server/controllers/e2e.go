@@ -6,6 +6,7 @@ import (
 	"net/http"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/utils"
 )
 
@@ -48,10 +49,14 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
 
 	// Re-seed built-in LLM providers (OpenRouter, OpenCode Zen) so tests that
-	// list providers get a consistent baseline. Their model catalogs are
-	// fetched live only at real server startup, not here — a wipe should
-	// stay fast and offline.
-	_ = db.New(api.db).EnsureBuiltinLLMProviders(context.Background())
+	// list providers get a consistent baseline. Their model catalog is
+	// re-seeded from the curated no-network fallback list immediately
+	// (never live-fetched here — a wipe should stay fast and offline), so a
+	// wipe never leaves a provider with a blank DefaultModel: the real
+	// startup-time discovery only ever runs once, before the first wipe.
+	q := db.New(api.db)
+	_ = q.EnsureBuiltinLLMProviders(context.Background())
+	_ = llmdiscovery.SeedFallbackModels(context.Background(), q)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

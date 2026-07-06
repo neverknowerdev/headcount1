@@ -108,10 +108,15 @@ func main() {
 	}
 
 	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
-	// present. Their live model catalogs are fetched in the background below
-	// so a slow/unreachable host never delays server startup.
+	// present, and immediately give them a working (curated, no-network)
+	// model catalog so neither one is ever left with a blank DefaultModel —
+	// their live catalogs are then fetched in the background so a
+	// slow/unreachable host never delays server startup.
 	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
+	}
+	if err := llmdiscovery.SeedFallbackModels(context.Background(), db.New(database)); err != nil {
+		log.Printf("Warning: failed to seed fallback model catalog: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
 

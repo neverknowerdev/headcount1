@@ -328,6 +328,77 @@ func TestRefreshBuiltinProviderModels_FallsBackOnFetchFailure(t *testing.T) {
 	}
 }
 
+func TestSeedFallbackModels_PopulatesBuiltinProvidersWithNoNetwork(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+
+	// Sanity check: right after seeding, both providers are blank — this is
+	// exactly the window SeedFallbackModels exists to close.
+	before, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+	for _, p := range before {
+		assert.Empty(t, p.DefaultModel, "%s should start blank before SeedFallbackModels", p.Name)
+	}
+
+	require.NoError(t, SeedFallbackModels(ctx, q))
+
+	after, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+	names := map[string]bool{}
+	for _, p := range after {
+		names[p.Name] = true
+		assert.NotEmpty(t, p.DefaultModel, "%s should have a fallback default model", p.Name)
+		assert.NotEmpty(t, p.SupportedModels, "%s should have a fallback model list", p.Name)
+	}
+	assert.True(t, names[db.ProviderNameOpenRouter])
+	assert.True(t, names[db.ProviderNameOpenCodeZen])
+}
+
+// TestWipeThenSeedFallback_NeverLeavesABlankDefaultModel is a regression test
+// for a real bug: the e2e WipeDB handler re-seeds builtin providers (blank
+// catalog by design — no network at wipe time) *after* the one-time,
+// process-lifetime RefreshBuiltinProviderModels goroutine has already run.
+// Without a synchronous fallback seed, a provider wiped after that point
+// would have a permanently blank DefaultModel for the rest of the process's
+// life, breaking anything that assumes a builtin provider has one (e.g. the
+// "existing provider" onboarding step's required Model Name field silently
+// blocking form submission).
+func TestWipeThenSeedFallback_NeverLeavesABlankDefaultModel(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	// Simulate real startup: seed + a (here, always-failing) live refresh
+	// that still leaves a usable catalog via its own fallback path.
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
+	require.NoError(t, RefreshBuiltinProviderModels(ctx, q, client))
+
+	// Simulate a wipe: providers table cleared and re-seeded blank, exactly
+	// like server/controllers/e2e.go's WipeDB does. The one-time discovery
+	// goroutine has already run and will never run again for this process.
+	require.NoError(t, database.Exec("DELETE FROM llm_providers").Error)
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+
+	afterWipeOnly, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+	for _, p := range afterWipeOnly {
+		assert.Empty(t, p.DefaultModel, "sanity check: a bare re-seed after wipe must be blank")
+	}
+
+	// The fix: WipeDB also calls SeedFallbackModels synchronously.
+	require.NoError(t, SeedFallbackModels(ctx, q))
+
+	afterFallbackSeed, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+	for _, p := range afterFallbackSeed {
+		assert.NotEmpty(t, p.DefaultModel, "%s must never be left with a blank DefaultModel after a wipe", p.Name)
+		assert.NotEmpty(t, p.SupportedModels, "%s must never be left with a blank SupportedModels after a wipe", p.Name)
+	}
+}
+
 // alwaysFailTransport simulates total network unreachability (as this
 // sandboxed test environment has for openrouter.ai/opencode.ai) so
 // RefreshBuiltinProviderModels's fallback path can be exercised without

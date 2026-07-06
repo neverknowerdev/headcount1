@@ -122,6 +122,51 @@ func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]str
 	return free, nil
 }
 
+// fallbackModelsFor returns the curated fallback model list for a builtin
+// provider name, or nil if the name isn't one of the builtin providers.
+func fallbackModelsFor(providerName string) []string {
+	switch providerName {
+	case db.ProviderNameOpenRouter:
+		return fallbackOpenRouterFreeModels
+	case db.ProviderNameOpenCodeZen:
+		return fallbackOpenCodeZenFreeModels
+	default:
+		return nil
+	}
+}
+
+// SeedFallbackModels immediately populates every builtin provider's model
+// catalog from the static fallback list — no network call, so it's safe to
+// run synchronously right after EnsureBuiltinLLMProviders. This closes the
+// window where a builtin provider row exists but has a blank DefaultModel
+// (which breaks anything that assumes a provider has a usable default,
+// e.g. the "existing provider" onboarding step): without it, a provider
+// stays blank until the async RefreshBuiltinProviderModels fetch completes,
+// and if something re-seeds the providers afterward (e.g. the e2e WipeDB
+// helper, which intentionally skips the network fetch to stay fast), that
+// window never closes for the rest of the process's life. The later live
+// discovery fetch simply overwrites this seed with fresher data once it
+// completes.
+func SeedFallbackModels(ctx context.Context, q *db.Queries) error {
+	providers, err := q.ListLLMProviders(ctx)
+	if err != nil {
+		return fmt.Errorf("list providers: %w", err)
+	}
+	for _, p := range providers {
+		if !p.Builtin {
+			continue
+		}
+		models := fallbackModelsFor(p.Name)
+		if len(models) == 0 {
+			continue
+		}
+		if err := q.UpdateLLMProviderModelCatalog(ctx, p.ID, models); err != nil {
+			return fmt.Errorf("%s: %w", p.Name, err)
+		}
+	}
+	return nil
+}
+
 // RefreshBuiltinProviderModels fetches the current free-model catalog for
 // each builtin provider row and stores it via UpdateLLMProviderModelCatalog.
 // Safe to call repeatedly (startup, or a periodic ticker): a failed fetch
@@ -146,18 +191,14 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 		switch p.Name {
 		case db.ProviderNameOpenRouter:
 			models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
-			if fetchErr != nil {
-				log.Printf("llmdiscovery: %v — falling back to the built-in free-model list", fetchErr)
-				models = fallbackOpenRouterFreeModels
-			}
 		case db.ProviderNameOpenCodeZen:
 			models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
-			if fetchErr != nil {
-				log.Printf("llmdiscovery: %v — falling back to the built-in free-model list", fetchErr)
-				models = fallbackOpenCodeZenFreeModels
-			}
 		default:
 			continue
+		}
+		if fetchErr != nil {
+			log.Printf("llmdiscovery: %v — falling back to the built-in free-model list", fetchErr)
+			models = fallbackModelsFor(p.Name)
 		}
 
 		if len(models) == 0 {
