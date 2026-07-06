@@ -315,7 +315,19 @@ export const ProvidersManager: React.FC = () => {
                         </div>
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
-                        {p.supported_models && <p className="text-xs text-gray-500 mt-2 break-words"><span className="font-semibold">Models:</span> {p.supported_models.split(',').join(', ')}</p>}
+                        {p.supported_models && (() => {
+                            const models = p.supported_models.split(',').filter(Boolean);
+                            return (
+                                <div className="mt-2">
+                                    <p className="text-xs text-gray-500 truncate" title={models.join(', ')}>
+                                        <span className="font-semibold">Models:</span> {models.join(', ')}
+                                    </p>
+                                    <span className="inline-block mt-1 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                                        {models.length} model{models.length === 1 ? '' : 's'}
+                                    </span>
+                                </div>
+                            );
+                        })()}
                         {p.builtin && (
                             <div className="mt-3">
                                 {!p.api_key && (
