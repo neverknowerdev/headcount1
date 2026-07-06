@@ -1,6 +1,43 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
+
+// Renders a provider's model list truncated to one line, with an expand
+// toggle that only appears once the list actually overflows that line —
+// a short list (e.g. one custom model) never needs it.
+const ProviderModelsList: React.FC<{ supportedModels: string; expanded: boolean; onToggle: () => void }> = ({ supportedModels, expanded, onToggle }) => {
+    const textRef = useRef<HTMLParagraphElement>(null);
+    const [isOverflowing, setIsOverflowing] = useState(false);
+    const models = supportedModels.split(',').filter(Boolean);
+
+    useEffect(() => {
+        const el = textRef.current;
+        if (el) {
+            setIsOverflowing(el.scrollWidth > el.clientWidth);
+        }
+    }, [supportedModels]);
+
+    return (
+        <div className="mt-2">
+            <p
+                ref={textRef}
+                className={`text-xs text-gray-500 ${expanded ? 'break-words' : 'truncate'}`}
+                title={!expanded && isOverflowing ? models.join(', ') : undefined}
+            >
+                <span className="font-semibold">Models:</span> {models.join(', ')}
+            </p>
+            {isOverflowing && (
+                <button
+                    onClick={onToggle}
+                    className="inline-flex items-center gap-1 mt-1 text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 px-2 py-0.5 rounded-full"
+                >
+                    {models.length} model{models.length === 1 ? '' : 's'}
+                    {expanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                </button>
+            )}
+        </div>
+    );
+};
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
@@ -330,24 +367,13 @@ export const ProvidersManager: React.FC = () => {
                         </div>
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
-                        {p.supported_models && (() => {
-                            const models = p.supported_models.split(',').filter(Boolean);
-                            const isExpanded = expandedModelsIds.has(p.id);
-                            return (
-                                <div className="mt-2">
-                                    <p className={`text-xs text-gray-500 ${isExpanded ? 'break-words' : 'truncate'}`} title={isExpanded ? undefined : models.join(', ')}>
-                                        <span className="font-semibold">Models:</span> {models.join(', ')}
-                                    </p>
-                                    <button
-                                        onClick={() => toggleModelsExpanded(p.id)}
-                                        className="inline-flex items-center gap-1 mt-1 text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 px-2 py-0.5 rounded-full"
-                                    >
-                                        {models.length} model{models.length === 1 ? '' : 's'}
-                                        {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
-                                    </button>
-                                </div>
-                            );
-                        })()}
+                        {p.supported_models && (
+                            <ProviderModelsList
+                                supportedModels={p.supported_models}
+                                expanded={expandedModelsIds.has(p.id)}
+                                onToggle={() => toggleModelsExpanded(p.id)}
+                            />
+                        )}
                         {p.builtin && (
                             <div className="mt-3">
                                 {!p.api_key && (
