@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Edit2, Play, Minus } from 'lucide-react';
+import { Plus, Trash2, Edit2, Play, Minus, RefreshCw, KeyRound } from 'lucide-react';
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
@@ -12,6 +12,16 @@ export const ProvidersManager: React.FC = () => {
     const [testResult, setTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [testingProgress, setTestingProgress] = useState<string>('');
+
+    // Built-in providers (OpenRouter/OpenCode free models) get a simplified
+    // "Activate" flow instead of the generic edit modal — their model list
+    // is discovered automatically, not hand-typed.
+    const [rediscoveringId, setRediscoveringId] = useState<number | null>(null);
+    const [activateProvider, setActivateProvider] = useState<any | null>(null);
+    const [activateApiKey, setActivateApiKey] = useState('');
+    const [activateTestResult, setActivateTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
+    const [isActivateTesting, setIsActivateTesting] = useState(false);
+    const [isActivateSaving, setIsActivateSaving] = useState(false);
 
     const fetchProviders = async () => {
         try {
@@ -146,6 +156,71 @@ export const ProvidersManager: React.FC = () => {
         }
     };
 
+    const handleRediscover = async (provider: any) => {
+        setRediscoveringId(provider.id);
+        try {
+            const res = await axios.post(`/api/providers/${provider.id}/rediscover`);
+            setProviders(prev => prev.map(p => p.id === provider.id ? res.data : p));
+            setActivateProvider((prev: any) => (prev && prev.id === provider.id) ? res.data : prev);
+        } catch (e: any) {
+            alert(e.response?.data?.error || 'Failed to re-discover models');
+        } finally {
+            setRediscoveringId(null);
+        }
+    };
+
+    const openActivateModal = (provider: any) => {
+        setActivateProvider(provider);
+        setActivateApiKey('');
+        setActivateTestResult(null);
+    };
+
+    const closeActivateModal = () => {
+        setActivateProvider(null);
+        setActivateApiKey('');
+        setActivateTestResult(null);
+    };
+
+    const handleTestActivate = async () => {
+        if (!activateProvider) return;
+        setIsActivateTesting(true);
+        setActivateTestResult(null);
+        try {
+            const res = await testSingleModel(activateProvider.default_model, activateProvider.base_url, activateApiKey, activateProvider.provider_type, activateProvider.id);
+            setActivateTestResult(res);
+        } catch (e: any) {
+            setActivateTestResult({ error: e.message || 'Connection failed. Check your API key and try again.' });
+        } finally {
+            setIsActivateTesting(false);
+        }
+    };
+
+    const handleSaveActivate = async () => {
+        if (!activateProvider) return;
+        setIsActivateSaving(true);
+        try {
+            // Preserve the provider's own base_url/provider_type — these are
+            // known-good for a built-in gateway; the test probe's
+            // auto-detected shape isn't a reliable substitute (it races an
+            // OpenAI- and an Anthropic-shaped request and could otherwise
+            // clobber the URL with the wrong one).
+            await axios.put(`/api/providers/${activateProvider.id}`, {
+                name: activateProvider.name,
+                base_url: activateProvider.base_url,
+                api_key: activateApiKey,
+                provider_type: activateProvider.provider_type,
+                default_model: activateProvider.default_model,
+                supported_models: activateProvider.supported_models,
+            });
+            closeActivateModal();
+            fetchProviders();
+        } catch (e: any) {
+            setActivateTestResult({ error: e.response?.data?.error || 'Save failed' });
+        } finally {
+            setIsActivateSaving(false);
+        }
+    };
+
     const updateSupportedModel = (index: number, value: string) => {
         const newModels = [...supportedModels];
         newModels[index] = value;
@@ -189,10 +264,21 @@ export const ProvidersManager: React.FC = () => {
                                 <button onClick={() => handleTest(p)} className="text-blue-500 hover:text-blue-700" title="Test Connection">
                                     <Play size={18} />
                                 </button>
-                                <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700">
-                                    <Edit2 size={18} />
-                                </button>
-                                <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700">
+                                {p.builtin ? (
+                                    <button
+                                        onClick={() => handleRediscover(p)}
+                                        disabled={rediscoveringId === p.id}
+                                        className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                                        title="Re-discover models"
+                                    >
+                                        <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
+                                    </button>
+                                ) : (
+                                    <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700" title="Edit">
+                                        <Edit2 size={18} />
+                                    </button>
+                                )}
+                                <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700" title="Delete">
                                     <Trash2 size={18} />
                                 </button>
                             </div>
@@ -200,8 +286,25 @@ export const ProvidersManager: React.FC = () => {
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
                         {p.supported_models && <p className="text-xs text-gray-500 mt-2 break-words"><span className="font-semibold">Models:</span> {p.supported_models.split(',').join(', ')}</p>}
-                        {p.builtin && !p.api_key && (
-                            <p className="text-xs text-amber-600 mt-2">Free to use — add your API key to enable this provider.</p>
+                        {p.builtin && (
+                            <div className="mt-3">
+                                {!p.api_key && (
+                                    <p className="text-xs text-amber-600 mb-2">Free to use — activate with a free API key to enable this provider.</p>
+                                )}
+                                <button
+                                    onClick={() => openActivateModal(p)}
+                                    className={`w-full py-2 px-4 rounded-md font-semibold text-sm transition-colors ${
+                                        p.api_key
+                                            ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
+                                            : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
+                                    }`}
+                                >
+                                    <span className="flex items-center justify-center gap-2">
+                                        <KeyRound size={16} />
+                                        {p.api_key ? 'Update API Key' : 'Activate'}
+                                    </span>
+                                </button>
+                            </div>
                         )}
                     </div>
                 ))}
@@ -289,6 +392,81 @@ export const ProvidersManager: React.FC = () => {
                             <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700 px-4 py-2">Cancel</button>
                             <button type="button" onClick={handleSubmit} disabled={isSaving} className={`bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center ${isSaving ? 'opacity-50 cursor-not-allowed' : ''}`}>
                                 {isSaving ? 'Saving...' : 'Save Provider'}
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            )}
+
+            {activateProvider && (
+                <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
+                        <h2 className="text-xl font-bold mb-1">
+                            {activateProvider.api_key ? 'Update' : 'Activate'} {activateProvider.name}
+                        </h2>
+                        <p className="text-sm text-gray-500 mb-4">{activateProvider.base_url}</p>
+
+                        <div className="space-y-4 overflow-y-auto flex-1 pr-2">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                                <input
+                                    type="password"
+                                    autoFocus
+                                    value={activateApiKey}
+                                    onChange={e => setActivateApiKey(e.target.value)}
+                                    placeholder="Paste your free API key"
+                                    className="w-full border rounded p-2"
+                                />
+                            </div>
+
+                            <button
+                                type="button"
+                                onClick={handleTestActivate}
+                                disabled={isActivateTesting || !activateApiKey}
+                                className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200 disabled:opacity-50"
+                            >
+                                {isActivateTesting ? 'Testing...' : 'Test Connection'}
+                            </button>
+
+                            {activateTestResult?.status === 'ok' && (
+                                <p className="text-green-600 text-sm font-semibold">Connection successful! {activateProvider.name} is ready to use.</p>
+                            )}
+                            {activateTestResult && activateTestResult.status !== 'ok' && (
+                                <p className="text-red-600 text-sm font-semibold whitespace-pre-wrap">{activateTestResult.error}</p>
+                            )}
+
+                            <div className="border-t pt-4">
+                                <div className="flex justify-between items-center mb-2">
+                                    <label className="block text-sm font-medium text-gray-700">Models</label>
+                                    <button
+                                        type="button"
+                                        onClick={() => handleRediscover(activateProvider)}
+                                        disabled={rediscoveringId === activateProvider.id}
+                                        className="text-indigo-600 hover:text-indigo-800 text-xs font-medium flex items-center gap-1 disabled:opacity-50"
+                                    >
+                                        <RefreshCw size={14} className={rediscoveringId === activateProvider.id ? 'animate-spin' : ''} />
+                                        Re-discover Models
+                                    </button>
+                                </div>
+                                <p className="text-xs text-gray-500">Model lists are discovered automatically and can't be edited by hand.</p>
+                                {activateProvider.default_model && (
+                                    <p className="text-xs text-gray-600 mt-2"><span className="font-semibold">Default:</span> {activateProvider.default_model}</p>
+                                )}
+                                {activateProvider.supported_models && (
+                                    <p className="text-xs text-gray-500 mt-1 break-words">{activateProvider.supported_models.split(',').join(', ')}</p>
+                                )}
+                            </div>
+                        </div>
+
+                        <div className="flex justify-end space-x-3 pt-4 border-t mt-4">
+                            <button type="button" onClick={closeActivateModal} className="text-gray-500 hover:text-gray-700 px-4 py-2">Cancel</button>
+                            <button
+                                type="button"
+                                onClick={handleSaveActivate}
+                                disabled={isActivateSaving || activateTestResult?.status !== 'ok'}
+                                className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 flex items-center disabled:opacity-50 disabled:cursor-not-allowed"
+                            >
+                                {isActivateSaving ? 'Saving...' : 'Save'}
                             </button>
                         </div>
                     </div>

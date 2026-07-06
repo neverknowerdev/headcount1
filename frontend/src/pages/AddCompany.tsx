@@ -11,12 +11,12 @@ const presetColors = ['#4f46e5', '#f44336', '#e91e63', '#9c27b0', '#673ab7', '#3
 // by the provider's DB name so this stays in sync automatically if the list
 // of builtin providers ever grows.
 const FREE_PROVIDER_INFO: Record<string, { blurb: string; keyUrl: string; keyUrlLabel: string }> = {
-    'OpenRouter': {
+    'OpenRouter Free Models': {
         blurb: 'A gateway to dozens of free community models — no credit card required.',
         keyUrl: 'https://openrouter.ai/keys',
         keyUrlLabel: 'openrouter.ai/keys',
     },
-    'OpenCode Zen': {
+    'OpenCode Free Models': {
         blurb: 'Free models curated for coding agents — no credit card required.',
         keyUrl: 'https://opencode.ai/auth',
         keyUrlLabel: 'opencode.ai/auth',
@@ -55,7 +55,7 @@ export const AddCompany: React.FC = () => {
     // Free builtin providers (OpenRouter / OpenCode Zen), fetched on mount.
     const [builtinProviders, setBuiltinProviders] = useState<any[]>([]);
     const [builtinProvidersLoaded, setBuiltinProvidersLoaded] = useState(false);
-    const [freeProviderName, setFreeProviderName] = useState<string>('OpenRouter');
+    const [freeProviderName, setFreeProviderName] = useState<string>('OpenRouter Free Models');
     const [freeApiKey, setFreeApiKey] = useState('');
 
     // Existing Providers (for step 2 if !isInitialOnboarding)

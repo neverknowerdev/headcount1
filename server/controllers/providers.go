@@ -11,6 +11,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 )
@@ -87,6 +88,64 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	filesystem.NewManager(settings.BasePath).SaveLLMProvider(provider)
 	api.respondJSON(w, http.StatusOK, provider)
+}
+
+// RediscoverProviderModels re-fetches a builtin provider's free-model
+// catalog on demand. Unlike the automatic background/daily refresh (which
+// never overwrites an already-set DefaultModel), this always sets the
+// default to the top of the freshly ranked list — the whole point of a user
+// explicitly asking to re-discover models is to get the current best pick.
+func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := strconv.Atoi(idStr)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+
+	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "provider not found")
+		return
+	}
+	if !provider.Builtin {
+		api.respondError(w, http.StatusBadRequest, "only built-in providers support model re-discovery")
+		return
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	var models []string
+	switch provider.Name {
+	case db.ProviderNameOpenRouter:
+		models, err = llmdiscovery.FetchOpenRouterFreeModels(r.Context(), client)
+	case db.ProviderNameOpenCodeZen:
+		models, err = llmdiscovery.FetchOpenCodeZenFreeModels(r.Context(), client)
+	default:
+		api.respondError(w, http.StatusBadRequest, "unrecognized built-in provider")
+		return
+	}
+	if err != nil {
+		api.respondError(w, http.StatusBadGateway, "failed to fetch models: "+err.Error())
+		return
+	}
+	if len(models) == 0 {
+		api.respondError(w, http.StatusBadGateway, "provider returned no free models")
+		return
+	}
+
+	if err := api.q.ForceUpdateLLMProviderModelCatalog(r.Context(), provider.ID, models); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	updated, err := api.q.GetLLMProvider(r.Context(), provider.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	settings := LoadSettings()
+	filesystem.NewManager(settings.BasePath).SaveLLMProvider(updated)
+	api.respondJSON(w, http.StatusOK, updated)
 }
 
 func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {

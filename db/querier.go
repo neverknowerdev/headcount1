@@ -67,6 +67,7 @@ type LLMProviderQuerier interface {
 	UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error)
 	EnsureBuiltinLLMProviders(ctx context.Context) error
 	UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
+	ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
 }
 
 type SkillQuerier interface {

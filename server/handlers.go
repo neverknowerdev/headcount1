@@ -175,6 +175,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{id}", api.UpdateProvider)
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
+		r.Post("/{id}/rediscover", api.RediscoverProviderModels)
 	})
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {

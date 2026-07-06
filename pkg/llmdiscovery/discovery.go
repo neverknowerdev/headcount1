@@ -24,17 +24,25 @@ import (
 // fetched (offline first boot, transient outage), so the provider still has
 // a usable model list instead of an empty one. It self-heals: the next
 // successful RefreshBuiltinProviderModels call replaces it with live data.
+//
+// This list doubles as the curated ranking reference in sortByPriority: it's
+// ordered best-known-capability first. Neither OpenRouter nor OpenCode Zen
+// expose a public "intelligence" or popularity score via their /models
+// endpoint, so there's no live signal to sort live-fetched results by —
+// this ordering is an editorial judgment call, kept in one place so both the
+// offline fallback and the live-fetch ranking stay consistent. Worth
+// revisiting periodically as new models show up.
 var fallbackOpenRouterFreeModels = []string{
 	"deepseek/deepseek-r1:free",
 	"deepseek/deepseek-chat-v3.1:free",
+	"qwen/qwen3-coder:free",
 	"meta-llama/llama-3.3-70b-instruct:free",
 	"google/gemma-3-27b-it:free",
-	"qwen/qwen3-coder:free",
 	"openai/gpt-oss-120b:free",
 }
 
 // fallbackOpenCodeZenFreeModels mirrors fallbackOpenRouterFreeModels for
-// OpenCode Zen.
+// OpenCode Zen — also doubles as its curated ranking reference.
 var fallbackOpenCodeZenFreeModels = []string{
 	"big-pickle",
 	"minimax-m2.5-free",
@@ -92,8 +100,7 @@ func FetchOpenRouterFreeModels(ctx context.Context, client *http.Client) ([]stri
 			free = append(free, m.ID)
 		}
 	}
-	sort.Strings(free)
-	return free, nil
+	return sortByPriority(free, fallbackOpenRouterFreeModels), nil
 }
 
 // isOpenCodeZenFree reports whether a model ID looks free. OpenCode Zen's
@@ -118,8 +125,35 @@ func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]str
 			free = append(free, m.ID)
 		}
 	}
-	sort.Strings(free)
-	return free, nil
+	return sortByPriority(free, fallbackOpenCodeZenFreeModels), nil
+}
+
+// sortByPriority orders ids so that models appearing in priority come first,
+// in priority's own order (best first); any id not in priority is appended
+// afterward, sorted alphabetically for determinism. This is how "best model
+// first" is approximated in the absence of a live ranking signal from either
+// provider's API — see the fallback list comments above.
+func sortByPriority(ids []string, priority []string) []string {
+	rank := make(map[string]int, len(priority))
+	for i, id := range priority {
+		rank[id] = i
+	}
+	sorted := append([]string(nil), ids...)
+	sort.SliceStable(sorted, func(i, j int) bool {
+		ri, iRanked := rank[sorted[i]]
+		rj, jRanked := rank[sorted[j]]
+		switch {
+		case iRanked && jRanked:
+			return ri < rj
+		case iRanked && !jRanked:
+			return true
+		case !iRanked && jRanked:
+			return false
+		default:
+			return sorted[i] < sorted[j]
+		}
+	})
+	return sorted
 }
 
 // fallbackModelsFor returns the curated fallback model list for a builtin
@@ -213,6 +247,26 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 		return fmt.Errorf("llmdiscovery: %s", strings.Join(errs, "; "))
 	}
 	return nil
+}
+
+// StartDailyModelRefreshScheduler re-runs RefreshBuiltinProviderModels every
+// 24 hours so the free-model catalog (and its ranking) stays current without
+// requiring a server restart. Run in a goroutine — blocks until ctx is
+// cancelled.
+func StartDailyModelRefreshScheduler(ctx context.Context, q *db.Queries, client *http.Client) {
+	ticker := time.NewTicker(24 * time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			log.Println("llmdiscovery: running scheduled model catalog refresh...")
+			if err := RefreshBuiltinProviderModels(ctx, q, client); err != nil {
+				log.Printf("llmdiscovery: scheduled refresh failed: %v", err)
+			}
+		case <-ctx.Done():
+			return
+		}
+	}
 }
 
 // retryableStatusError signals an HTTP-level failure worth retrying (429,

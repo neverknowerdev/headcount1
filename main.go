@@ -119,6 +119,7 @@ func main() {
 		log.Printf("Warning: failed to seed fallback model catalog: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
+	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
 
 	// Repair codegraph servers whose project_id was not set on creation.
 	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {

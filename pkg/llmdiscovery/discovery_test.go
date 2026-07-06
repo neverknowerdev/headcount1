@@ -259,6 +259,65 @@ func TestUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
 	assert.Equal(t, "existing", updated.DefaultModel)
 }
 
+func TestForceUpdateLLMProviderModelCatalog_AlwaysOverwritesDefault(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true, SupportedModels: "old-a,old-b", DefaultModel: "old-a"})
+	require.NoError(t, err)
+
+	require.NoError(t, q.ForceUpdateLLMProviderModelCatalog(ctx, p.ID, []string{"new-a", "new-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "new-a,new-b", updated.SupportedModels)
+	assert.Equal(t, "new-a", updated.DefaultModel, "unlike UpdateLLMProviderModelCatalog, this must always overwrite the default")
+}
+
+func TestForceUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true, SupportedModels: "existing", DefaultModel: "existing"})
+	require.NoError(t, err)
+
+	require.NoError(t, q.ForceUpdateLLMProviderModelCatalog(ctx, p.ID, nil))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "existing", updated.SupportedModels)
+	assert.Equal(t, "existing", updated.DefaultModel)
+}
+
+func TestSortByPriority(t *testing.T) {
+	priority := []string{"best", "second-best", "third-best"}
+
+	t.Run("all ranked, sorted by priority order", func(t *testing.T) {
+		got := sortByPriority([]string{"third-best", "best", "second-best"}, priority)
+		assert.Equal(t, []string{"best", "second-best", "third-best"}, got)
+	})
+
+	t.Run("unranked models appended alphabetically after ranked ones", func(t *testing.T) {
+		got := sortByPriority([]string{"zzz-unranked", "third-best", "aaa-unranked", "best"}, priority)
+		assert.Equal(t, []string{"best", "third-best", "aaa-unranked", "zzz-unranked"}, got)
+	})
+
+	t.Run("no ranked matches falls back to alphabetical", func(t *testing.T) {
+		got := sortByPriority([]string{"c", "a", "b"}, priority)
+		assert.Equal(t, []string{"a", "b", "c"}, got)
+	})
+
+	t.Run("empty input", func(t *testing.T) {
+		assert.Empty(t, sortByPriority(nil, priority))
+	})
+
+	t.Run("does not mutate the input slice", func(t *testing.T) {
+		input := []string{"third-best", "best"}
+		_ = sortByPriority(input, priority)
+		assert.Equal(t, []string{"third-best", "best"}, input, "sortByPriority must operate on a copy")
+	})
+}
+
 func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)

@@ -9,8 +9,8 @@ import (
 // startup. Exported so pkg/llmdiscovery (which performs the live model
 // catalog fetch) can target the same rows without hardcoding them twice.
 const (
-	ProviderNameOpenRouter  = "OpenRouter"
-	ProviderNameOpenCodeZen = "OpenCode Zen"
+	ProviderNameOpenRouter  = "OpenRouter Free Models"
+	ProviderNameOpenCodeZen = "OpenCode Free Models"
 
 	OpenRouterBaseURL  = "https://openrouter.ai/api/v1"
 	OpenCodeZenBaseURL = "https://opencode.ai/zen/v1"
@@ -97,4 +97,19 @@ func (q *Queries) UpdateLLMProviderModelCatalog(ctx context.Context, providerID 
 		updates["default_model"] = models[0]
 	}
 	return q.db.WithContext(ctx).Model(&existing).Updates(updates).Error
+}
+
+// ForceUpdateLLMProviderModelCatalog replaces a provider's model catalog and
+// always sets DefaultModel to the top of the freshly ranked list, unlike
+// UpdateLLMProviderModelCatalog which never overwrites an existing
+// DefaultModel. Used for explicit, user-triggered re-discovery — getting the
+// current best-ranked pick is exactly the point of that action.
+func (q *Queries) ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error {
+	if len(models) == 0 {
+		return nil
+	}
+	return q.db.WithContext(ctx).Model(&LLMProvider{}).Where("id = ?", providerID).Updates(map[string]any{
+		"supported_models": strings.Join(models, ","),
+		"default_model":    models[0],
+	}).Error
 }
