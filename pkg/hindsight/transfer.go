@@ -8,13 +8,10 @@ import (
 	"strings"
 )
 
-// ourBank reports whether a bank id follows this app's naming conventions.
-// The legacy "proj-"/"runs-" prefixes are still recognized so an old backup
-// archive restores its banks (a startup migration then folds them into the
-// current per-company bank — see MigrateLegacyBanks).
+// ourBank reports whether a bank id follows this app's naming convention
+// (one bank per company).
 func ourBank(bankID string) bool {
-	return strings.HasPrefix(bankID, "company-") ||
-		strings.HasPrefix(bankID, "proj-") || strings.HasPrefix(bankID, "runs-")
+	return strings.HasPrefix(bankID, "company-")
 }
 
 // ExportAllToDir dumps every app-owned memory bank as a document-transfer ZIP

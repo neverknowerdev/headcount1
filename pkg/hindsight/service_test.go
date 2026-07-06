@@ -10,7 +10,22 @@ import (
 	"testing"
 
 	"agent-orchestrator/db"
+
+	"github.com/glebarez/sqlite"
+	"gorm.io/gorm"
 )
+
+func testDB(t *testing.T) *db.Queries {
+	t.Helper()
+	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	if err != nil {
+		t.Fatalf("open sqlite: %v", err)
+	}
+	if err := gdb.AutoMigrate(&db.Company{}, &db.Project{}, &db.HindsightDocument{}); err != nil {
+		t.Fatalf("automigrate: %v", err)
+	}
+	return db.New(gdb)
+}
 
 // recordingStub captures every request body so tests can assert on exactly
 // what the Service sent to Hindsight, without needing a full mock engine.

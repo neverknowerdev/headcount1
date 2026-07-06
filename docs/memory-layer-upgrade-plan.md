@@ -58,9 +58,7 @@ Tag schema is untouched — it was already designed for a shared bank.
 - `SyncProjectMemory` / `StartProjectMemoryInit` / `SyncAllProjectMemory`: pass company
   through to the new `SyncProjectDocs` signature.
 
-**`pkg/hindsight/transfer.go`** — `ourBank` accepts the `company-` prefix; keep accepting
-`proj-`/`runs-` on **import** so old backups restore (imported into their legacy bank ids;
-see migration).
+**`pkg/hindsight/transfer.go`** — `ourBank` matches the `company-` prefix only.
 
 **Frontend `Memory.tsx`** — no structural change; optionally add a filter chip on the
 memory list by tag (`project:<id>`, `agent:<role>`) since one bank now mixes sources.
@@ -68,37 +66,18 @@ memory list by tag (`project:<id>`, `agent:<role>`) since one bank now mixes sou
 
 ### Migration
 
-Startup, one-shot, guarded by a marker (e.g. a `hindsight_meta` row or
-`data/hindsight/.bank-v2` file):
-
-1. If legacy banks exist (`ListBanks` shows `proj-*`/`runs-*` for our companies):
-   export each via document-transfer, import into `company-<cid>` with
-   `on_conflict=new-id`… **however** document-transfer import preserves document ids, and
-   legacy doc ids (`doc:<relpath>`) don't carry the project prefix. Simpler and fully
-   deterministic alternative (preferred):
-   - **Docs**: wipe `hindsight_documents` rows for migrated projects and re-run
-     `SyncProjectDocs` — docs are re-derivable from the repos at zero data-loss risk
-     (LLM re-extraction cost only, one-time).
-   - **Runs**: export `runs-<cid>` transfer archive → import into `company-<cid>`
-     (`on_conflict=skip`); run document ids (`run-<id>`) are already unique.
-   - Delete legacy banks after successful import.
-2. If Hindsight is unreachable at startup, retry the migration next time the manager
-   reports healthy (hook it after `Manager.Start` succeeds in `main.go`, before
-   `SyncAllProjectMemory`).
+None needed — the app has no production deployments yet, so there is no pre-existing
+`proj-*`/`runs-*` bank data to carry forward. `company-<id>` is simply the naming
+convention from day one.
 
 ### E2E / mock
 
 - `mock-hindsight-server.ts`: no new endpoints needed (banks are auto-created); keep
   `__admin/dump` shape.
 - `memory.spec.ts`: assert docs and run memories land in `company-<cid>`; assert the
-  CMO recall test still surfaces CTO memories (now single-request); add a migration test:
-  pre-seed mock with legacy `proj-*`/`runs-*` banks via retain, restart-free variant —
-  call the migration through a new `POST /api/e2e/...`? Not worth an endpoint: instead
-  seed legacy banks, wipe-db, restart is impossible in-suite → **test migration at the
-  service level with a Go unit test** (`pkg/hindsight/migrate_test.go` against a stub
-  HTTP server), and keep e2e focused on the new layout.
+  CMO recall test still surfaces CTO memories (now single-request).
 - `backup_restore.spec.ts`: assert `company-<cid>.zip` appears in the archive and
-  round-trips; add one legacy-archive fixture case if cheap.
+  round-trips.
 
 **Exit criteria.** All e2e green; a manual run shows one bank in the Memory UI with both
 doc and run memories; entity graph shows doc- and run-derived nodes together.
