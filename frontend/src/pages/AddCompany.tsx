@@ -60,6 +60,7 @@ export const AddCompany: React.FC = () => {
 
     // Existing Providers (for step 2 if !isInitialOnboarding)
     const [existingProviders, setExistingProviders] = useState<any[]>([]);
+    const [existingProvidersLoaded, setExistingProvidersLoaded] = useState(false);
     const [selectedExistingProviderId, setSelectedExistingProviderId] = useState<string>('');
 
     // Step 3: CEO
@@ -101,7 +102,7 @@ export const AddCompany: React.FC = () => {
                     setSelectedExistingProviderId(res.data[0].id.toString());
                     setProviderModel(res.data[0].default_model);
                 }
-            }).catch(console.error);
+            }).catch(console.error).finally(() => setExistingProvidersLoaded(true));
         } else {
             // Fetch the builtin free-model providers (OpenRouter, OpenCode Zen)
             // seeded automatically on server startup, so the default onboarding
@@ -479,35 +480,41 @@ export const AddCompany: React.FC = () => {
                             <p className="text-sm text-gray-600 mb-2">
                                 Please select an existing LLM Provider to use for this workspace. You can add new providers later in Settings.
                             </p>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">Select Provider</label>
-                                <select
-                                    className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
-                                    value={selectedExistingProviderId}
-                                    onChange={(e) => {
-                                        setSelectedExistingProviderId(e.target.value);
-                                        const p = existingProviders.find(prov => prov.id.toString() === e.target.value);
-                                        if (p) setProviderModel(p.default_model);
-                                    }}
-                                    required
-                                >
-                                    {existingProviders.map(p => (
-                                        <option key={p.id} value={p.id}>{p.name} ({p.base_url})</option>
-                                    ))}
-                                </select>
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">Model Name</label>
-                                <input
-                                    required
-                                    type="text"
-                                    value={providerModel}
-                                    onChange={e => setProviderModel(e.target.value)}
-                                    className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
-                                />
-                            </div>
+                            {!existingProvidersLoaded ? (
+                                <p className="text-sm text-gray-400">Loading providers…</p>
+                            ) : (
+                                <>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Select Provider</label>
+                                        <select
+                                            className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                            value={selectedExistingProviderId}
+                                            onChange={(e) => {
+                                                setSelectedExistingProviderId(e.target.value);
+                                                const p = existingProviders.find(prov => prov.id.toString() === e.target.value);
+                                                if (p) setProviderModel(p.default_model);
+                                            }}
+                                            required
+                                        >
+                                            {existingProviders.map(p => (
+                                                <option key={p.id} value={p.id}>{p.name} ({p.base_url})</option>
+                                            ))}
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-sm font-medium text-gray-700">Model Name</label>
+                                        <input
+                                            required
+                                            type="text"
+                                            value={providerModel}
+                                            onChange={e => setProviderModel(e.target.value)}
+                                            className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300"
+                                        />
+                                    </div>
+                                </>
+                            )}
                         </div>
-                        <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700">
+                        <button type="submit" disabled={!existingProvidersLoaded || existingProviders.length === 0} className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 disabled:bg-indigo-300">
                             Next Step
                         </button>
                     </form>

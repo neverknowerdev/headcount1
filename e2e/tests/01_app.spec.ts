@@ -190,9 +190,14 @@ test.describe.serial('Paperclip2 App', () => {
         await page.fill('input[placeholder="acme"]', 'second-co');
         await page.click('button:has-text("Next Step")');
 
-        // Step 2: Use existing Provider
+        // Step 2: Use existing Provider. Wait for the provider list fetch to
+        // finish (button enabled) before clicking — the button starts out
+        // disabled until GET /api/providers resolves, so clicking immediately
+        // on a slow connection would otherwise silently do nothing.
         await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
-        await page.click('button:has-text("Next Step")');
+        const nextStepButton = page.getByRole('button', { name: 'Next Step' });
+        await expect(nextStepButton).toBeEnabled({ timeout: 10000 });
+        await nextStepButton.click();
 
         // Step 3: Hire new CEO
         await expect(page.getByText('Hire your CEO')).toBeVisible();
@@ -206,6 +211,41 @@ test.describe.serial('Paperclip2 App', () => {
         // Verify we are on the second company
         const companyButtons = page.locator('button[title="Playwright Inc"], button[title="Second Company"]');
         await expect(companyButtons).toHaveCount(2);
+    });
+
+    test('existing-provider step does not let you proceed before providers finish loading', async ({ page }) => {
+        // Regression test: on a slow connection, clicking "Next Step" before
+        // GET /api/providers resolves used to hit native <select required>
+        // validation with no options yet, silently blocking the form forever
+        // (Hire your CEO never appeared). The button must stay disabled
+        // until the fetch completes.
+        await page.route('**/api/providers', async route => {
+            if (route.request().method() === 'GET') {
+                await new Promise(r => setTimeout(r, 1500));
+            }
+            await route.continue();
+        });
+
+        await page.goto('/companies/nw');
+        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
+        await page.click('button[title="Add Workspace"]');
+
+        await expect(page.getByText('Add Workspace')).toBeVisible();
+        await page.fill('input[placeholder="Acme Corp"]', 'Third Company');
+        await page.fill('input[placeholder="acme"]', 'third-co');
+        await page.click('button:has-text("Next Step")');
+
+        await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
+        const nextStepButton = page.getByRole('button', { name: 'Next Step' });
+
+        // While the (delayed) fetch is still in flight, the button must be
+        // disabled rather than silently no-op on click.
+        await expect(nextStepButton).toBeDisabled();
+
+        // Once it resolves, the button becomes usable and the flow proceeds.
+        await expect(nextStepButton).toBeEnabled({ timeout: 10000 });
+        await nextStepButton.click();
+        await expect(page.getByText('Hire your CEO')).toBeVisible({ timeout: 10000 });
     });
 });
 
