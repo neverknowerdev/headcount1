@@ -55,12 +55,14 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 			BaseUrl:      OpenRouterBaseURL,
 			ProviderType: "openai",
 			Builtin:      true,
+			Enabled:      true,
 		},
 		{
 			Name:         ProviderNameOpenCodeZen,
 			BaseUrl:      OpenCodeZenBaseURL,
 			ProviderType: "openai",
 			Builtin:      true,
+			Enabled:      true,
 		},
 	}
 

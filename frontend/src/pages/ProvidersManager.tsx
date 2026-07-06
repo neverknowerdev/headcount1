@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Edit2, Play, Minus, RefreshCw, KeyRound } from 'lucide-react';
+import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap } from 'lucide-react';
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
@@ -22,6 +22,7 @@ export const ProvidersManager: React.FC = () => {
     const [activateTestResult, setActivateTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
     const [isActivateTesting, setIsActivateTesting] = useState(false);
     const [isActivateSaving, setIsActivateSaving] = useState(false);
+    const [togglingId, setTogglingId] = useState<number | null>(null);
 
     const fetchProviders = async () => {
         try {
@@ -169,6 +170,18 @@ export const ProvidersManager: React.FC = () => {
         }
     };
 
+    const handleToggleEnabled = async (provider: any) => {
+        setTogglingId(provider.id);
+        try {
+            await axios.put(`/api/providers/${provider.id}`, { enabled: !provider.enabled });
+            setProviders(prev => prev.map(p => p.id === provider.id ? { ...p, enabled: !p.enabled } : p));
+        } catch (e: any) {
+            alert(e.response?.data?.error || 'Failed to update provider');
+        } finally {
+            setTogglingId(null);
+        }
+    };
+
     const openActivateModal = (provider: any) => {
         setActivateProvider(provider);
         setActivateApiKey('');
@@ -252,35 +265,52 @@ export const ProvidersManager: React.FC = () => {
 
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {providers.map(p => (
-                    <div key={p.id} className="bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden">
+                    <div key={p.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden ${p.builtin && !p.enabled ? 'opacity-60' : ''}`}>
                         <div className="flex justify-between items-start mb-4">
-                            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
+                            <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2 flex-wrap">
                                 {p.name}
                                 {p.builtin && (
                                     <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Built-in</span>
                                 )}
+                                {p.builtin && (
+                                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${p.enabled ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-500'}`}>
+                                        {p.enabled ? 'Enabled' : 'Disabled'}
+                                    </span>
+                                )}
                             </h3>
-                            <div className="flex space-x-2">
+                            <div className="flex space-x-2 flex-shrink-0">
                                 <button onClick={() => handleTest(p)} className="text-blue-500 hover:text-blue-700" title="Test Connection">
-                                    <Play size={18} />
+                                    <Zap size={18} />
                                 </button>
                                 {p.builtin ? (
-                                    <button
-                                        onClick={() => handleRediscover(p)}
-                                        disabled={rediscoveringId === p.id}
-                                        className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
-                                        title="Re-discover models"
-                                    >
-                                        <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
-                                    </button>
+                                    <>
+                                        <button
+                                            onClick={() => handleRediscover(p)}
+                                            disabled={rediscoveringId === p.id}
+                                            className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                                            title="Re-discover models"
+                                        >
+                                            <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
+                                        </button>
+                                        <button
+                                            onClick={() => handleToggleEnabled(p)}
+                                            disabled={togglingId === p.id}
+                                            className={`disabled:opacity-50 ${p.enabled ? 'text-green-600 hover:text-green-800' : 'text-gray-400 hover:text-gray-600'}`}
+                                            title={p.enabled ? 'Deactivate (pause)' : 'Activate (resume)'}
+                                        >
+                                            {p.enabled ? <Pause size={18} /> : <Play size={18} />}
+                                        </button>
+                                    </>
                                 ) : (
-                                    <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700" title="Edit">
-                                        <Edit2 size={18} />
-                                    </button>
+                                    <>
+                                        <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700" title="Edit">
+                                            <Edit2 size={18} />
+                                        </button>
+                                        <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700" title="Delete">
+                                            <Trash2 size={18} />
+                                        </button>
+                                    </>
                                 )}
-                                <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700" title="Delete">
-                                    <Trash2 size={18} />
-                                </button>
                             </div>
                         </div>
                         <p className="text-sm text-gray-600 mb-1 truncate"><span className="font-semibold">URL:</span> {p.base_url}</p>

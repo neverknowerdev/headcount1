@@ -49,7 +49,12 @@ type LLMProvider struct {
 	// Builtin marks providers seeded automatically on startup (e.g. OpenRouter,
 	// OpenCode Zen) rather than added by hand. Used to know which providers'
 	// model catalogs are safe to refresh from a live discovery fetch.
-	Builtin   bool      `json:"builtin" gorm:"not null;default:false"`
+	Builtin bool `json:"builtin" gorm:"not null;default:false"`
+	// Enabled lets a builtin provider be turned off without deleting it —
+	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProviders
+	// just recreates it (blank) on the next startup. Defaults to true so
+	// existing/freshly-seeded providers stay usable.
+	Enabled   bool      `json:"enabled" gorm:"not null;default:true"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }

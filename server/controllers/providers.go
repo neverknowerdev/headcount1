@@ -33,6 +33,18 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "provider not found")
+		return
+	}
+	if provider.Builtin {
+		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProviders
+		// just recreates it (blank) on the next startup. Disable it instead.
+		api.respondError(w, http.StatusForbidden, "built-in providers cannot be deleted — disable it instead")
+		return
+	}
+
 	err = api.q.DeleteLLMProvider(r.Context(), int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -58,6 +70,10 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		// Enabled is a pointer so a caller that omits it (an older client, or
+		// a request that only means to touch other fields) leaves the
+		// current value untouched instead of silently disabling the provider.
+		Enabled *bool `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -77,6 +93,9 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
 		provider.ApiKey = req.ApiKey
+	}
+	if req.Enabled != nil {
+		provider.Enabled = *req.Enabled
 	}
 
 	provider, err = api.q.UpdateLLMProvider(r.Context(), provider)
@@ -168,6 +187,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
+		Enabled:         true,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

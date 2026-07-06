@@ -108,13 +108,17 @@ export const AddCompany: React.FC = () => {
             // seeded automatically on server startup, so the default onboarding
             // path can offer them instead of a from-scratch provider form.
             axios.get('/api/providers').then(res => {
-                const builtins = (res.data || []).filter((p: any) => p.builtin);
+                // Only offer builtin providers the user hasn't deactivated —
+                // a provider paused from the LLM Providers page shouldn't be
+                // handed to a brand-new company during onboarding.
+                const builtins = (res.data || []).filter((p: any) => p.builtin && p.enabled);
                 setBuiltinProviders(builtins);
                 if (builtins.length > 0) {
                     setFreeProviderName(prev => builtins.some((p: any) => p.name === prev) ? prev : builtins[0].name);
                 } else {
-                    // No builtin providers available (e.g. an older server) —
-                    // go straight to the custom provider form.
+                    // No builtin providers available (e.g. an older server, or
+                    // all of them deactivated) — go straight to the custom
+                    // provider form.
                     setProviderMode('custom');
                 }
             }).catch(() => setProviderMode('custom')).finally(() => setBuiltinProvidersLoaded(true));
