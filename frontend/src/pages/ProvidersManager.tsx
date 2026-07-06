@@ -65,10 +65,10 @@ export const ProvidersManager: React.FC = () => {
     const [expandedModelsIds, setExpandedModelsIds] = useState<Set<number>>(new Set());
 
     // Known provider presets (OpenCode Go, MiniMax, ...) a user can pick
-    // from a dropdown instead of filling in the full custom-provider form —
-    // just an API key, and the model catalog is discovered automatically.
+    // from a dropdown in the "Add Provider" modal instead of filling in the
+    // full custom-provider form — just an API key, and the model catalog is
+    // discovered automatically. 'custom' keeps the original plain form.
     const [providerPresets, setProviderPresets] = useState<any[]>([]);
-    const [isPresetPickerOpen, setIsPresetPickerOpen] = useState(false);
     const [selectedPresetKey, setSelectedPresetKey] = useState('custom');
     const [presetApiKey, setPresetApiKey] = useState('');
     const [presetError, setPresetError] = useState('');
@@ -106,6 +106,8 @@ export const ProvidersManager: React.FC = () => {
     const handleOpenModal = (p?: any) => {
         setTestResult(null);
         setTestingProgress('');
+        setPresetError('');
+        setPresetApiKey('');
         if (p) {
             setEditingId(p.id);
             setFormData({ name: p.name, base_url: p.base_url, api_key: '', default_model: p.default_model || '', provider_type: p.provider_type || '' });
@@ -117,6 +119,11 @@ export const ProvidersManager: React.FC = () => {
             setFormData({ name: '', base_url: '', api_key: '', default_model: '', provider_type: '' });
             setSupportedModels(['']);
             setOriginalModels([]);
+            // Default to the plain custom-provider form — the same
+            // experience as before presets existed. Picking a preset from
+            // the dropdown at the top of the modal switches to the
+            // API-key-only view.
+            setSelectedPresetKey('custom');
         }
         setIsModalOpen(true);
     };
@@ -245,26 +252,6 @@ export const ProvidersManager: React.FC = () => {
         });
     };
 
-    const openAddProviderPicker = () => {
-        setSelectedPresetKey(providerPresets[0]?.key || 'custom');
-        setPresetApiKey('');
-        setPresetError('');
-        setIsPresetPickerOpen(true);
-    };
-
-    const closeAddProviderPicker = () => {
-        setIsPresetPickerOpen(false);
-        setPresetApiKey('');
-        setPresetError('');
-    };
-
-    const handleContinueFromPicker = () => {
-        if (selectedPresetKey === 'custom') {
-            setIsPresetPickerOpen(false);
-            handleOpenModal();
-        }
-    };
-
     const handleCreateFromPreset = async () => {
         setIsPresetSaving(true);
         setPresetError('');
@@ -274,7 +261,8 @@ export const ProvidersManager: React.FC = () => {
                 api_key: presetApiKey,
             });
             setProviders(prev => [...prev, res.data]);
-            closeAddProviderPicker();
+            setIsModalOpen(false);
+            setPresetApiKey('');
         } catch (e: any) {
             setPresetError(e.response?.data?.error || 'Failed to add provider');
         } finally {
@@ -356,7 +344,7 @@ export const ProvidersManager: React.FC = () => {
             <div className="flex justify-between items-center">
                 <h1 className="text-2xl font-bold">LLM Providers</h1>
                 <button
-                    onClick={openAddProviderPicker}
+                    onClick={() => handleOpenModal()}
                     className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 shadow-sm"
                 >
                     <Plus size={16} className="mr-2" /> Add Provider
@@ -446,68 +434,6 @@ export const ProvidersManager: React.FC = () => {
                 ))}
             </div>
 
-            {isPresetPickerOpen && (
-                <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
-                        <h2 className="text-xl font-bold mb-4">Add Provider</h2>
-                        <label className="block text-sm font-medium mb-1">Provider</label>
-                        <select
-                            value={selectedPresetKey}
-                            onChange={e => { setSelectedPresetKey(e.target.value); setPresetError(''); }}
-                            className="w-full border rounded p-2 mb-4"
-                        >
-                            {providerPresets.map(preset => (
-                                <option key={preset.key} value={preset.key}>{preset.name}</option>
-                            ))}
-                            <option value="custom">Custom Provider (enter manually)</option>
-                        </select>
-
-                        {selectedPresetKey === 'custom' ? (
-                            <p className="text-sm text-gray-600 mb-4">
-                                Enter the base URL, API key, and model(s) by hand.
-                            </p>
-                        ) : (
-                            <>
-                                <label className="block text-sm font-medium mb-1">API Key</label>
-                                <input
-                                    type="password"
-                                    value={presetApiKey}
-                                    onChange={e => setPresetApiKey(e.target.value)}
-                                    className="w-full border rounded p-2 mb-2"
-                                    placeholder="sk-..."
-                                />
-                                <p className="text-xs text-gray-500 mb-4">
-                                    The base URL and available models are discovered automatically once the key is saved.
-                                </p>
-                            </>
-                        )}
-
-                        {presetError && (
-                            <p className="text-sm text-red-600 mb-4">{presetError}</p>
-                        )}
-
-                        <div className="flex justify-end gap-2">
-                            <button onClick={closeAddProviderPicker} className="px-4 py-2 rounded border text-gray-700 hover:bg-gray-50">
-                                Cancel
-                            </button>
-                            {selectedPresetKey === 'custom' ? (
-                                <button onClick={handleContinueFromPicker} className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
-                                    Continue
-                                </button>
-                            ) : (
-                                <button
-                                    onClick={handleCreateFromPreset}
-                                    disabled={!presetApiKey || isPresetSaving}
-                                    className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
-                                >
-                                    {isPresetSaving ? 'Adding...' : 'Add Provider'}
-                                </button>
-                            )}
-                        </div>
-                    </div>
-                </div>
-            )}
-
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
                     <p className="text-sm font-semibold">{testingProgress}</p>
@@ -528,6 +454,56 @@ export const ProvidersManager: React.FC = () => {
                 <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
                     <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
                         <h2 className="text-xl font-bold mb-4">{editingId ? 'Edit Provider' : 'Add Provider'}</h2>
+
+                        {!editingId && (
+                            <div className="mb-4">
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Provider</label>
+                                <select
+                                    value={selectedPresetKey}
+                                    onChange={e => { setSelectedPresetKey(e.target.value); setPresetError(''); }}
+                                    className="w-full border rounded p-2"
+                                >
+                                    <option value="custom">Custom Provider (enter manually)</option>
+                                    {providerPresets.map(preset => (
+                                        <option key={preset.key} value={preset.key}>{preset.name}</option>
+                                    ))}
+                                </select>
+                            </div>
+                        )}
+
+                        {!editingId && selectedPresetKey !== 'custom' ? (
+                            <>
+                                <div className="flex-1 overflow-y-auto pr-2">
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                                    <input
+                                        type="password"
+                                        autoFocus
+                                        value={presetApiKey}
+                                        onChange={e => setPresetApiKey(e.target.value)}
+                                        className="w-full border rounded p-2"
+                                        placeholder="sk-..."
+                                    />
+                                    <p className="text-xs text-gray-500 mt-2">
+                                        The base URL and available models are discovered automatically once the key is saved.
+                                    </p>
+                                    {presetError && (
+                                        <p className="text-sm text-red-600 mt-3">{presetError}</p>
+                                    )}
+                                </div>
+                                <div className="flex justify-end space-x-3 pt-4 border-t mt-4">
+                                    <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700 px-4 py-2">Cancel</button>
+                                    <button
+                                        type="button"
+                                        onClick={handleCreateFromPreset}
+                                        disabled={!presetApiKey || isPresetSaving}
+                                        className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 disabled:opacity-50"
+                                    >
+                                        {isPresetSaving ? 'Adding...' : 'Add Provider'}
+                                    </button>
+                                </div>
+                            </>
+                        ) : (
+                        <>
                         <form onSubmit={handleSubmit} className="space-y-4 overflow-y-auto flex-1 pr-2">
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
@@ -592,6 +568,8 @@ export const ProvidersManager: React.FC = () => {
                                 {isSaving ? 'Saving...' : 'Save Provider'}
                             </button>
                         </div>
+                        </>
+                        )}
                     </div>
                 </div>
             )}

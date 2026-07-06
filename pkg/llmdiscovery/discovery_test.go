@@ -133,6 +133,24 @@ func TestFetchModelsForPreset_SendsBearerAuthAndReturnsFullUnfilteredCatalog(t *
 	assert.Equal(t, []string{"MiniMax-M3", "MiniMax-Text-01"}, models)
 }
 
+func TestFetchModelsForPreset_MiniMaxPrefersM3AsDefaultRegardlessOfAlphabeticalOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "MiniMax-Abab-01"}, // sorts before MiniMax-M3 alphabetically
+				{"id": "MiniMax-Text-01"},
+				{"id": "MiniMax-M3"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	require.NotEmpty(t, models)
+	assert.Equal(t, "MiniMax-M3", models[0], "MiniMax-M3 should win the default-model slot even though it doesn't sort first alphabetically")
+}
+
 func TestFetchModelsForPreset_UnknownKeyFallsBackToGenericDiscoverer(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "some-model"}}})

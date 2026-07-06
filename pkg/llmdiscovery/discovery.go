@@ -168,16 +168,34 @@ var presetDiscoverers = map[string]PresetDiscoverer{
 	db.ProviderPresetMiniMax:    genericPresetDiscoverer{},
 }
 
+// presetDefaultPriority optionally names a preset's preferred default
+// model(s) — e.g. MiniMax-M3 is MiniMax's current flagship model, so it
+// should win over whatever happens to sort first alphabetically. Reuses
+// sortByPriority (see below): a model not in the discovered catalog is
+// simply ignored, and a preset with no entry here just keeps the
+// alphabetical order from FetchModels.
+var presetDefaultPriority = map[string][]string{
+	db.ProviderPresetMiniMax: {"MiniMax-M3"},
+}
+
 // FetchModelsForPreset fetches the model catalog for a provider created from
 // a preset, dispatching to whichever PresetDiscoverer is registered for
 // presetKey (falling back to the generic OpenAI-compatible fetch for
-// presets that don't need special handling).
+// presets that don't need special handling), then applies that preset's
+// preferred default model ordering, if any.
 func FetchModelsForPreset(ctx context.Context, client *http.Client, presetKey, baseURL, apiKey string) ([]string, error) {
 	d, ok := presetDiscoverers[presetKey]
 	if !ok {
 		d = genericPresetDiscoverer{}
 	}
-	return d.FetchModels(ctx, client, baseURL, apiKey)
+	models, err := d.FetchModels(ctx, client, baseURL, apiKey)
+	if err != nil {
+		return nil, err
+	}
+	if priority, ok := presetDefaultPriority[presetKey]; ok {
+		models = sortByPriority(models, priority)
+	}
+	return models, nil
 }
 
 // sortByPriority orders ids so that models appearing in priority come first,
