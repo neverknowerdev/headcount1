@@ -21,6 +21,12 @@ type Settings struct {
 	// back to the session's own provider and model.
 	UtilityProviderID int32  `json:"utility_provider_id" yaml:"utility_provider_id"`
 	UtilityModel      string `json:"utility_model" yaml:"utility_model"`
+	// MemoryRecallMaxTokens / MemoryBriefingMaxTokens override the memory
+	// layer's default recall token budgets (0 = use the built-in defaults:
+	// 6144 for the memory_recall tool, 4096 for the automatic pre-task
+	// briefing — see pkg/hindsight defaultRecallMaxTokens/defaultBriefingMaxTokens).
+	MemoryRecallMaxTokens   int `json:"memory_recall_max_tokens" yaml:"memory_recall_max_tokens"`
+	MemoryBriefingMaxTokens int `json:"memory_briefing_max_tokens" yaml:"memory_briefing_max_tokens"`
 }
 
 type SSHKeyPayload struct {

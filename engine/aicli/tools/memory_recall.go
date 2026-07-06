@@ -28,7 +28,9 @@ func (t *MemoryRecall) Def() aicli.ToolDef {
 			Description: "Search the company's long-term memory for relevant facts and past experience: project " +
 				"documentation, previous task outcomes, errors other agents hit, decisions made. Use it before " +
 				"starting work, when a task references earlier work, or when you need to know whether something " +
-				"was already attempted. Storing happens automatically — there is no memory_store.",
+				"was already attempted. Your system prompt already includes a synthesized memory briefing " +
+				"(project state, your own playbook) computed in the background — use this tool to dig deeper on " +
+				"something specific, not to re-fetch what's already there. Storing happens automatically — there is no memory_store.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
 				"properties":{
@@ -58,7 +60,8 @@ func (t *MemoryRecall) Execute(ctx context.Context, args json.RawMessage) (strin
 	if p.Query == "" {
 		return "", fmt.Errorf("query is required")
 	}
-	out, err := t.fn(ctx, p.Query, p.Agent, 2048)
+	// 0 lets the memory service apply its own default recall token budget.
+	out, err := t.fn(ctx, p.Query, p.Agent, 0)
 	if err != nil {
 		return "", fmt.Errorf("memory_recall: %w", err)
 	}

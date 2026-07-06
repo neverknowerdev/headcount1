@@ -180,10 +180,15 @@ func main() {
 		srv.CacheMCPTools(context.Background())
 
 		// Bring the memory backend up (after setup so hindsight-api is
-		// installed), then feed every project's docs into it.
+		// installed), fold any pre-consolidation per-project/per-company
+		// banks into the current single bank-per-company layout, then feed
+		// every project's docs into it.
 		if err := memManager.Start(context.Background()); err != nil {
 			log.Printf("WARNING: memory layer unavailable: %v", err)
 			return
+		}
+		if err := memService.MigrateLegacyBanks(context.Background(), endpoints.LoadSettings().BasePath); err != nil {
+			log.Printf("WARNING: memory bank migration failed (will retry next startup): %v", err)
 		}
 		srv.SyncAllProjectMemory(context.Background())
 	}()

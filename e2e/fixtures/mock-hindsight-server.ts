@@ -35,22 +35,83 @@ interface RetainItem {
     document_id?: string;
     tags?: string[];
     update_mode?: string;
+    observation_scopes?: string[][];
+}
+
+interface Directive {
+    name: string;
+    content: string;
+}
+
+interface MentalModel {
+    id: string;
+    name: string;
+    source_query: string;
+    tags: string[];
+    max_tokens?: number;
+    trigger?: { refresh_after_consolidation?: boolean };
+    content: string;
+    last_refreshed_at: string;
+}
+
+interface BankConfig {
+    updates: Record<string, unknown>;
 }
 
 type Banks = Map<string, Memory[]>;
+type BankConfigs = Map<string, Record<string, unknown>>;
+type BankDirectives = Map<string, Directive[]>;
+type BankMentalModels = Map<string, Map<string, MentalModel>>;
+type LastRecalls = Map<string, Record<string, unknown>>;
+
+/** Recomputes a mental model's content by concatenating the most recent
+ * memories whose tags overlap the model's tags (empty tags = whole bank),
+ * simulating Hindsight's refresh_after_consolidation trigger. */
+function synthesize(mems: Memory[], tags: string[]): string {
+    const matching = mems
+        .filter((m) => m.state === 'active')
+        .filter((m) => tags.length === 0 || m.tags.some((t) => tags.includes(t)))
+        .slice()
+        .sort((a, b) => (a.mentioned_at < b.mentioned_at ? 1 : -1))
+        .slice(0, 5);
+    return 'SYNTHESIS: ' + matching.map((m) => m.text).join(' | ');
+}
 
 export async function startMockHindsightServer(): Promise<{ baseUrl: string; port: number; stop: () => Promise<void> }> {
     const banks: Banks = new Map();
+    const bankConfigs: BankConfigs = new Map();
+    const bankDirectives: BankDirectives = new Map();
+    const bankModels: BankMentalModels = new Map();
+    const lastRecalls: LastRecalls = new Map();
 
     const getBank = (bank: string): Memory[] => {
         if (!banks.has(bank)) banks.set(bank, []);
         return banks.get(bank)!;
     };
+    const getDirectives = (bank: string): Directive[] => {
+        if (!bankDirectives.has(bank)) bankDirectives.set(bank, []);
+        return bankDirectives.get(bank)!;
+    };
+    const getModels = (bank: string): Map<string, MentalModel> => {
+        if (!bankModels.has(bank)) bankModels.set(bank, new Map());
+        return bankModels.get(bank)!;
+    };
+    // Refreshes every mental model in `bank` whose tags overlap `retainedTags`
+    // (or has no tags — bank-wide models always refresh).
+    const refreshModelsAfterRetain = (bank: string, retainedTags: string[]) => {
+        const mems = getBank(bank);
+        for (const model of getModels(bank).values()) {
+            if (model.tags.length === 0 || model.tags.some((t) => retainedTags.includes(t))) {
+                model.content = synthesize(mems, model.tags);
+                model.last_refreshed_at = new Date().toISOString();
+            }
+        }
+    };
 
     const server = http.createServer(async (req, res) => {
         try {
             const rawBody = await readBody(req);
-            handle(req, res, rawBody, banks, getBank);
+            handle(req, res, rawBody, banks, getBank, bankConfigs, bankDirectives, getDirectives, bankModels, getModels, refreshModelsAfterRetain, lastRecalls);
         } catch (err: any) {
             json(res, 500, { error: err?.message || 'internal error' });
         }
@@ -73,6 +134,13 @@ function handle(
     rawBody: Buffer,
     banks: Banks,
     getBank: (b: string) => Memory[],
+    bankConfigs: BankConfigs,
+    bankDirectives: BankDirectives,
+    getDirectives: (b: string) => Directive[],
+    bankModels: BankMentalModels,
+    getModels: (b: string) => Map<string, MentalModel>,
+    refreshModelsAfterRetain: (bank: string, tags: string[]) => void,
+    lastRecalls: LastRecalls,
 ): void {
     const method = req.method || 'GET';
     const u = new URL(req.url || '/', 'http://mock');
@@ -83,10 +151,22 @@ function handle(
     if (method === 'GET' && p === '/__admin/dump') {
         const dump: Record<string, Memory[]> = {};
         for (const [k, v] of banks.entries()) dump[k] = v;
-        return json(res, 200, { banks: dump });
+        const configs: Record<string, Record<string, unknown>> = {};
+        for (const [k, v] of bankConfigs.entries()) configs[k] = v;
+        const directives: Record<string, Directive[]> = {};
+        for (const k of banks.keys()) directives[k] = getDirectives(k);
+        const mentalModels: Record<string, MentalModel[]> = {};
+        for (const k of banks.keys()) mentalModels[k] = [...getModels(k).values()];
+        const lastRecall: Record<string, Record<string, unknown>> = {};
+        for (const [k, v] of lastRecalls.entries()) lastRecall[k] = v;
+        return json(res, 200, { banks: dump, configs, directives, mental_models: mentalModels, last_recall: lastRecall });
     }
     if (method === 'POST' && p === '/__admin/reset') {
         banks.clear();
+        bankConfigs.clear();
+        bankDirectives.clear();
+        bankModels.clear();
+        lastRecalls.clear();
         return json(res, 200, { status: 'ok' });
     }
 
@@ -105,6 +185,7 @@ function handle(
     if (method === 'POST' && rest === '/memories') {
         const mems = getBank(bank);
         const items: RetainItem[] = (body?.items as RetainItem[]) || [];
+        const allTags = new Set<string>();
         for (const item of items) {
             if (item.document_id) {
                 // upsert: drop previous memories of the same document
@@ -113,6 +194,7 @@ function handle(
                 mems.push(...remaining);
             }
             const tags = item.tags || [];
+            tags.forEach((t) => allTags.add(t));
             const isExperience = tags.some((t) => t.startsWith('agent:'));
             const ts = item.timestamp && item.timestamp !== 'unset' ? item.timestamp : new Date().toISOString();
             mems.push({
@@ -127,12 +209,118 @@ function handle(
                 occurred_start: ts,
                 state: 'active',
             });
+            // observation_scopes is accepted and otherwise ignored — the
+            // mock doesn't model Hindsight's observation consolidation.
         }
+        refreshModelsAfterRetain(bank, [...allTags]);
         return json(res, 200, { success: true });
+    }
+
+    // ── bank config ─────────────────────────────────────────────────────
+    if (rest === '/config') {
+        if (method === 'GET') {
+            const config = bankConfigs.get(bank) || {};
+            return json(res, 200, { bank_id: bank, config, overrides: config });
+        }
+        if (method === 'PATCH') {
+            const existing = bankConfigs.get(bank) || {};
+            const updates = (body as BankConfig)?.updates || {};
+            bankConfigs.set(bank, { ...existing, ...updates });
+            return json(res, 200, { status: 'ok' });
+        }
+    }
+
+    // ── directives ──────────────────────────────────────────────────────
+    if (method === 'GET' && rest === '/directives') {
+        return json(res, 200, { items: getDirectives(bank) });
+    }
+    if (method === 'POST' && rest === '/directives') {
+        const directives = getDirectives(bank);
+        const name = body?.name as string;
+        const content = body?.content as string;
+        const existing = directives.find((d) => d.name === name);
+        if (existing) existing.content = content;
+        else directives.push({ name, content });
+        return json(res, 200, { name, content });
+    }
+
+    // ── mental models ───────────────────────────────────────────────────
+    if (method === 'POST' && rest === '/mental-models') {
+        const models = getModels(bank);
+        const id = (body?.id as string) || crypto.randomUUID();
+        const model: MentalModel = {
+            id,
+            name: body?.name || id,
+            source_query: body?.source_query || '',
+            tags: body?.tags || [],
+            max_tokens: body?.max_tokens,
+            trigger: body?.trigger,
+            content: 'Generating content...',
+            last_refreshed_at: new Date().toISOString(),
+        };
+        models.set(id, model);
+        // Seed content immediately from whatever memories already match —
+        // real Hindsight generates async, but the mock has no async delay,
+        // so there's no reason to leave it as a placeholder if data exists.
+        model.content = synthesize(getBank(bank), model.tags);
+        return json(res, 200, { mental_model_id: id, operation_id: 'op-1' });
+    }
+    if (method === 'GET' && rest === '/mental-models') {
+        return json(res, 200, { items: [...getModels(bank).values()] });
+    }
+    const modelMatch = rest.match(/^\/mental-models\/([^/]+)$/);
+    if (modelMatch) {
+        const id = decodeURIComponent(modelMatch[1]);
+        const model = getModels(bank).get(id);
+        if (method === 'GET') {
+            if (!model) return json(res, 404, { error: 'mental model not found' });
+            return json(res, 200, model);
+        }
+        if (method === 'DELETE') {
+            getModels(bank).delete(id);
+            return json(res, 200, { status: 'ok' });
+        }
+    }
+    const modelRefreshMatch = rest.match(/^\/mental-models\/([^/]+)\/refresh$/);
+    if (method === 'POST' && modelRefreshMatch) {
+        const id = decodeURIComponent(modelRefreshMatch[1]);
+        const model = getModels(bank).get(id);
+        if (!model) return json(res, 404, { error: 'mental model not found' });
+        model.content = synthesize(getBank(bank), model.tags);
+        model.last_refreshed_at = new Date().toISOString();
+        return json(res, 200, { operation_id: 'op-1' });
+    }
+
+    // ── bank template export / import (config + mental models + directives) ──
+    if (method === 'GET' && rest === '/export') {
+        return json(res, 200, {
+            version: '1',
+            bank: bankConfigs.get(bank) || {},
+            mental_models: [...getModels(bank).values()],
+            directives: getDirectives(bank),
+        });
+    }
+    if (method === 'POST' && rest === '/import') {
+        const manifest = body || {};
+        if (manifest.bank) bankConfigs.set(bank, { ...(bankConfigs.get(bank) || {}), ...manifest.bank });
+        const models = getModels(bank);
+        for (const m of (manifest.mental_models as MentalModel[]) || []) models.set(m.id, m);
+        const directives = getDirectives(bank);
+        for (const d of (manifest.directives as Directive[]) || []) {
+            const existing = directives.find((x) => x.name === d.name);
+            if (existing) existing.content = d.content;
+            else directives.push(d);
+        }
+        return json(res, 200, {
+            bank_id: bank, config_applied: !!manifest.bank,
+            mental_models_created: [], mental_models_updated: [], directives_created: [], directives_updated: [],
+            operation_ids: [], dry_run: false,
+        });
     }
 
     // ── recall ──────────────────────────────────────────────────────────
     if (method === 'POST' && rest === '/memories/recall') {
+        lastRecalls.set(bank, body || {});
         const results = recall(getBank(bank), body || {});
         return json(res, 200, { results });
     }

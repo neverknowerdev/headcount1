@@ -40,6 +40,10 @@ type MemoryItem struct {
 	DocumentID string            `json:"document_id,omitempty"`
 	Tags       []string          `json:"tags,omitempty"`
 	UpdateMode string            `json:"update_mode,omitempty"` // "replace" (default) or "append"
+	// ObservationScopes controls at which tag granularity Hindsight builds
+	// consolidated observations from this item, e.g. [["project:12"]] scopes
+	// consolidation to that project instead of only the whole-bank default.
+	ObservationScopes [][]string `json:"observation_scopes,omitempty"`
 }
 
 type retainRequest struct {
@@ -54,6 +58,11 @@ type RecallRequest struct {
 	MaxTokens int      `json:"max_tokens,omitempty"`
 	Tags      []string `json:"tags,omitempty"`
 	TagsMatch string   `json:"tags_match,omitempty"` // any | all | any_strict | all_strict | exact
+	// PreferObservations drops raw world/experience facts that a returned
+	// observation already consolidates, backfilling the freed slots — so the
+	// higher-quality, deduplicated observation is what callers see instead
+	// of both the observation and the raw facts it was built from.
+	PreferObservations bool `json:"prefer_observations,omitempty"`
 }
 
 type RecallResult struct {
@@ -184,6 +193,28 @@ func (c *Client) DeleteBank(ctx context.Context, bankID string) error {
 	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, ""), nil, nil)
 }
 
+// UpdateBankConfig applies per-bank configuration overrides (mission,
+// disposition, etc). Keys use Hindsight's Python field names, e.g.
+// "reflect_mission", "disposition_skepticism".
+func (c *Client) UpdateBankConfig(ctx context.Context, bankID string, updates map[string]interface{}) error {
+	return c.doJSON(ctx, http.MethodPatch, bankPath(bankID, "/config"), map[string]interface{}{"updates": updates}, nil)
+}
+
+func (c *Client) GetBankConfigRaw(ctx context.Context, bankID string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/config"), nil)
+}
+
+// CreateDirective adds a hard rule enforced during reflect (as opposed to
+// disposition, which only softly influences it).
+func (c *Client) CreateDirective(ctx context.Context, bankID, name, content string) error {
+	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/directives"),
+		map[string]string{"name": name, "content": content}, nil)
+}
+
+func (c *Client) ListDirectivesRaw(ctx context.Context, bankID string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/directives"), nil)
+}
+
 // ListMemoriesRaw proxies GET /memories/list (params: q, type, document_id, limit, offset).
 func (c *Client) ListMemoriesRaw(ctx context.Context, bankID string, params url.Values) ([]byte, error) {
 	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/memories/list")+"?"+params.Encode(), nil)
@@ -253,4 +284,84 @@ func (c *Client) ImportDocuments(ctx context.Context, bankID string, archive []b
 	}
 	resp.Body.Close()
 	return nil
+}
+
+// CreateMentalModelRequest mirrors Hindsight's mental-model creation body.
+// A custom lowercase-hyphenated ID lets callers fetch a model deterministically
+// without maintaining an ID-lookup table.
+type CreateMentalModelRequest struct {
+	ID                        string   `json:"id,omitempty"`
+	Name                      string   `json:"name"`
+	SourceQuery               string   `json:"source_query"`
+	Tags                      []string `json:"tags,omitempty"`
+	MaxTokens                 int      `json:"max_tokens,omitempty"`
+	RefreshAfterConsolidation bool     `json:"-"` // translated into the trigger object below
+}
+
+type mentalModelTrigger struct {
+	RefreshAfterConsolidation bool `json:"refresh_after_consolidation"`
+}
+
+type createMentalModelBody struct {
+	ID          string             `json:"id,omitempty"`
+	Name        string             `json:"name"`
+	SourceQuery string             `json:"source_query"`
+	Tags        []string           `json:"tags,omitempty"`
+	MaxTokens   int                `json:"max_tokens,omitempty"`
+	Trigger     mentalModelTrigger `json:"trigger"`
+}
+
+// CreateMentalModel creates a mental model (async — content generates in the
+// background via reflect). Returns the mental_model_id (echoes req.ID when
+// set) and an operation_id for progress tracking; callers typically ignore
+// the operation and just poll GetMentalModelRaw later.
+func (c *Client) CreateMentalModel(ctx context.Context, bankID string, req CreateMentalModelRequest) (string, error) {
+	body := createMentalModelBody{
+		ID: req.ID, Name: req.Name, SourceQuery: req.SourceQuery,
+		Tags: req.Tags, MaxTokens: req.MaxTokens,
+		Trigger: mentalModelTrigger{RefreshAfterConsolidation: req.RefreshAfterConsolidation},
+	}
+	var out struct {
+		MentalModelID string `json:"mental_model_id"`
+	}
+	if err := c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/mental-models"), body, &out); err != nil {
+		return "", err
+	}
+	return out.MentalModelID, nil
+}
+
+func (c *Client) GetMentalModelRaw(ctx context.Context, bankID, id string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil)
+}
+
+func (c *Client) ListMentalModelsRaw(ctx context.Context, bankID string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models"), nil)
+}
+
+func (c *Client) RefreshMentalModel(ctx context.Context, bankID, id string) error {
+	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/refresh"), nil, nil)
+}
+
+func (c *Client) DeleteMentalModel(ctx context.Context, bankID, id string) error {
+	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil, nil)
+}
+
+// ExportBankTemplate exports a bank's config, mental models and directives
+// as an opaque JSON manifest. Unlike ExportDocuments (document-transfer),
+// this does NOT carry memories — the two exports are complementary and both
+// needed for a lossless bank backup once EnsureBank/mental models are in use.
+func (c *Client) ExportBankTemplate(ctx context.Context, bankID string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/export"), nil)
+}
+
+// ImportBankTemplate applies a previously exported manifest to a bank,
+// creating it if missing. Mental models are matched by id, directives by
+// name — existing ones are updated in place, so this is safe to call
+// repeatedly (e.g. on every restore).
+func (c *Client) ImportBankTemplate(ctx context.Context, bankID string, manifest []byte) error {
+	var body interface{}
+	if err := json.Unmarshal(manifest, &body); err != nil {
+		return fmt.Errorf("invalid bank template manifest: %w", err)
+	}
+	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/import"), body, nil)
 }

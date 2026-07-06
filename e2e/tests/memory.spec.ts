@@ -9,12 +9,17 @@ const env = loadE2EEnv();
 /**
  * Hindsight memory layer, end-to-end against the mock Hindsight server:
  *
- *   a. project doc ingestion (.md files of the git repo → bank proj-<id>)
+ *   a. project doc ingestion (.md files of the git repo → the single
+ *      per-company bank company-<companyID>)
  *   b. doc change tracking via POST /api/settings/sync (document upsert)
  *   c. agent experience: CTO fails a task, its error memory surfaces in a
  *      later CMO run via memory_recall; reruns then surface the history and
- *      add success memories (bank runs-<companyID>, tags agent:*)
+ *      add success memories (same bank company-<companyID>, tags agent:*)
  *   d. the /api/memory proxy surface (list, patch, delete, recall, ask)
+ *
+ * Since Phase 1 of the memory-layer upgrade, all memories for a company
+ * (project docs and agent run outcomes alike) live in a single bank named
+ * company-<companyID>; there is no longer a separate per-project doc bank.
  */
 test.describe.serial('Memory (Hindsight) layer', () => {
     const shortName = 'memco';
@@ -28,8 +33,7 @@ test.describe.serial('Memory (Hindsight) layer', () => {
     let sprintId: number;
     let task1Id: number; // CTO task
     let task2Id: number; // CMO task
-    let projBank: string;
-    let runsBank: string;
+    let bank: string;
 
     const cleanFilesystem = () => {
         for (const subDir of [`data/${shortName}`, `companies/${shortName}`, `workspace/${shortName}`, `data/runs/${shortName}`, `data/artifacts/${shortName}`]) {
@@ -42,10 +46,14 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         }
     };
 
-    const dumpBanks = async (): Promise<Record<string, any[]>> => {
+    const dumpAll = async (): Promise<any> => {
         const res = await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/dump`);
         expect(res.ok).toBeTruthy();
-        return (await res.json()).banks as Record<string, any[]>;
+        return res.json();
+    };
+
+    const dumpBanks = async (): Promise<Record<string, any[]>> => {
+        return (await dumpAll()).banks as Record<string, any[]>;
     };
 
     const setScenario = async (entries: any[]) => {
@@ -78,6 +86,25 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         await request.post('/api/e2e/wipe-db');
         await resetProviderMock();
         await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });
+
+        // hindsight.Service.EnsureBank guards its config-PATCH/directive-create
+        // work with an in-process "already ensured" flag keyed by numeric
+        // company ID — it does NOT re-check after that, only on first sight of
+        // an ID. wipe-db resets the DB's autoincrement to 1 for every spec
+        // file, but the Go server process (and its ensuredBanks set) is
+        // shared across the whole suite; other spec files that also exercise
+        // memory (e.g. backup_restore, git_project) may have already burned
+        // low company IDs, whose bank config would then never actually PATCH
+        // for the current process lifetime. Burn a generous batch of company
+        // IDs up front so this file's real company gets an ID no earlier
+        // spec file's memory-touching company could have used.
+        for (let i = 0; i < 20; i++) {
+            await request.post('/api/companies', { data: { name: `id-bump-${i}`, short_name: `idb${i}` } });
+        }
+        // NOTE: deliberately not wiping again here — DELETE FROM sqlite_sequence
+        // would reset the autoincrement counter back to 1 and undo the bump.
+        // The bump companies are harmless clutter: every assertion below scopes
+        // by this test's own company_id/bank, and afterAll wipes the DB anyway.
     });
 
     test.afterAll(async ({ request }) => {
@@ -95,12 +122,12 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         }, { timeout: 60_000, message: 'memory backend should become available' }).toBeTruthy();
     });
 
-    test('project docs are ingested into the project memory bank', async ({ request }) => {
+    test('project docs are ingested into the company memory bank', async ({ request }) => {
         const company = await postJSON(request, '/api/companies', {
             name: 'Memory Co', short_name: shortName, color: '#0ea5e9',
         });
         companyId = company.id;
-        runsBank = `runs-${companyId}`;
+        bank = `company-${companyId}`;
 
         const provider = await postJSON(request, '/api/providers', {
             name: 'memco-mock',
@@ -131,40 +158,57 @@ test.describe.serial('Memory (Hindsight) layer', () => {
             repository_url: env.E2E_TEST_REPO_URL,
         });
         projectId = project.id;
-        projBank = `proj-${projectId}`;
 
-        // The fixture repo carries README.md + docs/gm-coin.md + docs/icp-backend.md
+        // The fixture repo carries README.md + docs/gm-coin.md + docs/icp-backend.md,
+        // now retained with a project-id prefix so multiple projects' docs can
+        // coexist in the single company bank.
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            const mems = banks[projBank] || [];
+            const mems = banks[bank] || [];
             return mems.map((m: any) => m.document_id).sort();
         }, { timeout: 120_000, intervals: [2000], message: 'project docs should be ingested into the mock' })
-            .toEqual(['doc:README.md', 'doc:docs/gm-coin.md', 'doc:docs/icp-backend.md']);
+            .toEqual([
+                `doc:${projectId}/README.md`,
+                `doc:${projectId}/docs/gm-coin.md`,
+                `doc:${projectId}/docs/icp-backend.md`,
+            ]);
 
         const banks = await dumpBanks();
-        const mems = banks[projBank];
-        const gmCoin = mems.find((m: any) => m.document_id === 'doc:docs/gm-coin.md');
+        const mems = banks[bank];
+        const gmCoin = mems.find((m: any) => m.document_id === `doc:${projectId}/docs/gm-coin.md`);
         expect(gmCoin.text).toContain('GM Coin is a community token');
         expect(gmCoin.tags).toContain(`project:${projectId}`);
         expect(gmCoin.tags).toContain('source:docs');
         expect(gmCoin.type).toBe('world');
 
-        // Served back through the server's /api/memory proxy.
+        // Served back through the server's /api/memory proxy: exactly one
+        // bank per company now (Phase 1 bank consolidation).
         const banksRes = await request.get(`/api/memory/banks?company_id=${companyId}`);
         expect(banksRes.ok()).toBeTruthy();
         const bankList = await banksRes.json();
-        expect((bankList as any[]).map((b: any) => b.bank_id)).toEqual(
-            expect.arrayContaining([projBank, runsBank]));
+        expect(bankList).toEqual([
+            { bank_id: bank, kind: 'company', label: 'Memory — Memory Co' },
+        ]);
 
-        const listRes = await request.get(`/api/memory/banks/${projBank}/memories?limit=50`);
+        const listRes = await request.get(`/api/memory/banks/${bank}/memories?limit=50`);
         expect(listRes.ok()).toBeTruthy();
         const listBody = await listRes.json();
         expect(listBody.total).toBe(3);
         expect((listBody.items as any[]).some((i: any) => i.text.includes('Internet Computer'))).toBeTruthy();
 
-        const statsRes = await request.get(`/api/memory/banks/${projBank}/stats`);
+        const statsRes = await request.get(`/api/memory/banks/${bank}/stats`);
         expect(statsRes.ok()).toBeTruthy();
         expect((await statsRes.json()).memory_units).toBe(3);
+
+        // EnsureBank ran (once per company per process, guarded server-side)
+        // as part of doc sync: the bank config was PATCHed with a mission
+        // naming the company and a skepticism disposition, and both standing
+        // directives exist exactly once.
+        const dump1 = await dumpAll();
+        expect(dump1.configs[bank].reflect_mission).toContain('Memory Co');
+        expect(dump1.configs[bank].disposition_skepticism).toBe(4);
+        const directiveNames1 = (dump1.directives[bank] as any[]).map((d) => d.name).sort();
+        expect(directiveNames1).toEqual(['cite-source', 'no-false-completion']);
     });
 
     test('doc changes are tracked: settings sync upserts the changed document', async ({ request }) => {
@@ -183,14 +227,21 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         // Upsert: exactly one memory for the document, carrying the new text.
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            const docMems = (banks[projBank] || []).filter((m: any) => m.document_id === 'doc:docs/icp-backend.md');
+            const docMems = (banks[bank] || []).filter((m: any) => m.document_id === `doc:${projectId}/docs/icp-backend.md`);
             if (docMems.length !== 1) return `count=${docMems.length}`;
             return docMems[0].text.includes('Rust canisters') ? 'updated' : 'stale';
         }, { timeout: 120_000, intervals: [2000], message: 'changed doc should be re-retained (upserted)' })
             .toBe('updated');
 
         const banks = await dumpBanks();
-        expect((banks[projBank] || []).length).toBe(3); // no duplicates
+        expect((banks[bank] || []).length).toBe(3); // no duplicates
+
+        // EnsureBank is guarded to run once per company per process: a
+        // second retain (this doc re-sync) must not create duplicate
+        // directives or re-apply the config in a way that duplicates state.
+        const dump2 = await dumpAll();
+        const directiveNames2 = (dump2.directives[bank] as any[]).map((d: any) => d.name).sort();
+        expect(directiveNames2).toEqual(['cite-source', 'no-false-completion']);
     });
 
     test('CTO run failure is retained as experience memory', async ({ request }) => {
@@ -233,12 +284,31 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         // Run-outcome retention is async — poll the mock.
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            return (banks[runsBank] || []).filter((m: any) =>
+            return (banks[bank] || []).filter((m: any) =>
                 m.tags.includes('agent:cto') && m.text.includes('no shell access during task execution')).length;
-        }, { timeout: 60_000, message: 'CTO blocked-run memory should land in the runs bank' }).toBeGreaterThan(0);
+        }, { timeout: 60_000, message: 'CTO blocked-run memory should land in the company bank' }).toBeGreaterThan(0);
+
+        // Every recall (memory_recall tool + pre-task briefing) requests
+        // observation-aware recall: consolidated observations preferred
+        // alongside raw world/experience facts.
+        const dump3 = await dumpAll();
+        const lastRecall = dump3.last_recall[bank];
+        expect(lastRecall).toBeTruthy();
+        expect(lastRecall.types).toEqual(expect.arrayContaining(['world', 'experience', 'observation']));
+        expect(lastRecall.prefer_observations).toBe(true);
+
+        // The engine lazily ensures a project-state mental model on the next
+        // task run and refreshes it via the retain that just happened
+        // (project tag overlap) — poll for it surfacing the blocker.
+        await expect.poll(async () => {
+            const res = await request.get(`/api/memory/banks/${bank}/mental-models/project-state-${projectId}`);
+            if (!res.ok()) return null;
+            return (await res.json()).content as string;
+        }, { timeout: 60_000, message: 'project-state mental model should synthesize the CTO blocker' })
+            .toEqual(expect.stringContaining('no shell access during task execution'));
 
         const banks = await dumpBanks();
-        const ctoMem = (banks[runsBank] || []).find((m: any) => m.tags.includes('agent:cto'));
+        const ctoMem = (banks[bank] || []).find((m: any) => m.tags.includes('agent:cto'));
         expect(ctoMem.type).toBe('experience');
         expect(ctoMem.document_id).toMatch(/^run-\d+$/);
         expect(ctoMem.metadata.agent).toBe('CTO');
@@ -281,7 +351,7 @@ test.describe.serial('Memory (Hindsight) layer', () => {
 
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            return (banks[runsBank] || []).filter((m: any) =>
+            return (banks[bank] || []).filter((m: any) =>
                 m.tags.includes('agent:cmo') && m.text.includes('no implementation yet')).length;
         }, { timeout: 60_000, message: 'CMO blocked-run memory should be retained' }).toBeGreaterThan(0);
     });
@@ -307,13 +377,22 @@ test.describe.serial('Memory (Hindsight) layer', () => {
 
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            return (banks[runsBank] || []).filter((m: any) =>
+            return (banks[bank] || []).filter((m: any) =>
                 m.tags.includes('agent:cto') && m.text.includes('ICP backend implemented')).length;
         }, { timeout: 60_000, message: 'CTO success memory should be retained' }).toBeGreaterThan(0);
 
         // The old failure memory is a separate run document and must still exist.
         const banks = await dumpBanks();
-        expect((banks[runsBank] || []).some((m: any) => m.text.includes('no shell access during task execution'))).toBeTruthy();
+        expect((banks[bank] || []).some((m: any) => m.text.includes('no shell access during task execution'))).toBeTruthy();
+
+        // The project-state mental model refreshes again on this retain
+        // (same project tag) and now synthesizes the success instead.
+        await expect.poll(async () => {
+            const res = await request.get(`/api/memory/banks/${bank}/mental-models/project-state-${projectId}`);
+            if (!res.ok()) return null;
+            return (await res.json()).content as string;
+        }, { timeout: 60_000, message: 'project-state mental model should refresh to mention the CTO success' })
+            .toEqual(expect.stringContaining('ICP backend implemented'));
     });
 
     test('rerun: CMO now sees the CTO success and writes the post', async ({ request }) => {
@@ -337,74 +416,122 @@ test.describe.serial('Memory (Hindsight) layer', () => {
 
         await expect.poll(async () => {
             const banks = await dumpBanks();
-            return (banks[runsBank] || []).filter((m: any) =>
+            return (banks[bank] || []).filter((m: any) =>
                 m.tags.includes('agent:cmo') && m.text.includes('X post published')).length;
         }, { timeout: 60_000, message: 'CMO success memory should be retained' }).toBeGreaterThan(0);
     });
 
     test('memory UI API surface: list, patch, delete, recall, ask, graph', async ({ request }) => {
-        // Banks list
+        // Banks list: still exactly one bank per company.
         const bankList = await (await request.get(`/api/memory/banks?company_id=${companyId}`)).json();
-        expect((bankList as any[]).length).toBeGreaterThanOrEqual(2);
+        expect((bankList as any[]).length).toBe(1);
+        expect((bankList as any[])[0].bank_id).toBe(bank);
 
-        // List memories of the runs bank
-        const listBody = await (await request.get(`/api/memory/banks/${runsBank}/memories?limit=50`)).json();
-        expect(listBody.total).toBeGreaterThanOrEqual(4); // 2 CTO + 2 CMO runs
+        // List memories of the (single, shared) company bank: 3 docs + at
+        // least 4 run-outcome memories (2 CTO + 2 CMO runs).
+        const listBody = await (await request.get(`/api/memory/banks/${bank}/memories?limit=50`)).json();
+        expect(listBody.total).toBeGreaterThanOrEqual(7);
         const target = (listBody.items as any[]).find((i: any) => i.text.includes('no implementation yet'));
         expect(target).toBeTruthy();
 
         // Single memory GET
-        const single = await (await request.get(`/api/memory/banks/${runsBank}/memories/${target.id}`)).json();
+        const single = await (await request.get(`/api/memory/banks/${bank}/memories/${target.id}`)).json();
         expect(single.id).toBe(target.id);
 
         // PATCH text
-        const patched = await (await request.patch(`/api/memory/banks/${runsBank}/memories/${target.id}`, {
+        const patched = await (await request.patch(`/api/memory/banks/${bank}/memories/${target.id}`, {
             data: { text: 'CURATED: outdated CMO note about missing implementation' },
         })).json();
         expect(patched.text).toContain('CURATED');
-        const afterPatch = await (await request.get(`/api/memory/banks/${runsBank}/memories/${target.id}`)).json();
+        const afterPatch = await (await request.get(`/api/memory/banks/${bank}/memories/${target.id}`)).json();
         expect(afterPatch.text).toContain('CURATED');
 
         // Recall finds the curated memory
-        const recall1 = await (await request.post(`/api/memory/banks/${runsBank}/recall`, {
+        const recall1 = await (await request.post(`/api/memory/banks/${bank}/recall`, {
             data: { query: 'CURATED outdated note' },
         })).json();
         expect((recall1.results as any[]).some((r: any) => r.id === target.id)).toBeTruthy();
 
         // DELETE soft-invalidates: state flips and recall excludes it
-        const del = await request.delete(`/api/memory/banks/${runsBank}/memories/${target.id}`);
+        const del = await request.delete(`/api/memory/banks/${bank}/memories/${target.id}`);
         expect(del.ok()).toBeTruthy();
         expect((await del.json()).state).toBe('invalidated');
-        const afterDel = await (await request.get(`/api/memory/banks/${runsBank}/memories/${target.id}`)).json();
+        const afterDel = await (await request.get(`/api/memory/banks/${bank}/memories/${target.id}`)).json();
         expect(afterDel.state).toBe('invalidated');
-        const recall2 = await (await request.post(`/api/memory/banks/${runsBank}/recall`, {
+        const recall2 = await (await request.post(`/api/memory/banks/${bank}/recall`, {
             data: { query: 'CURATED outdated note' },
         })).json();
         expect((recall2.results as any[]).some((r: any) => r.id === target.id)).toBeFalsy();
 
         // Recall over run experience
-        const recall3 = await (await request.post(`/api/memory/banks/${runsBank}/recall`, {
+        const recall3 = await (await request.post(`/api/memory/banks/${bank}/recall`, {
             data: { query: 'ICP backend GM Coin' },
         })).json();
         expect((recall3.results as any[]).length).toBeGreaterThan(0);
 
         // Ask (reflect)
-        const ask = await (await request.post(`/api/memory/banks/${projBank}/ask`, {
+        const ask = await (await request.post(`/api/memory/banks/${bank}/ask`, {
             data: { query: 'What backend does GM Coin use?' },
         })).json();
         expect(ask.text).toContain('Based on stored memories:');
         expect(ask.text).toContain('Internet Computer');
 
-        // Graph + entities graph
-        const graph = await (await request.get(`/api/memory/banks/${projBank}/graph?limit=100`)).json();
-        expect(graph.total_units).toBe(3);
-        expect((graph.nodes as any[]).length).toBe(3);
-        const eg = await (await request.get(`/api/memory/banks/${projBank}/entities-graph`)).json();
+        // Graph + entities graph: reflects everything currently in the shared bank.
+        const banksNow = await dumpBanks();
+        const expectedUnits = (banksNow[bank] || []).length;
+        const graph = await (await request.get(`/api/memory/banks/${bank}/graph?limit=100`)).json();
+        expect(graph.total_units).toBe(expectedUnits);
+        expect((graph.nodes as any[]).length).toBe(expectedUnits);
+        const eg = await (await request.get(`/api/memory/banks/${bank}/entities-graph`)).json();
         expect(eg.nodes).toEqual([]);
 
         // Project memory sync endpoint (no-op here, but must respond OK)
         const syncRes = await request.post(`/api/memory/projects/${projectId}/sync`);
         expect(syncRes.ok()).toBeTruthy();
+    });
+
+    test('memory UI API surface: config, directives, mental models (Phase 2/3 proxies)', async ({ request }) => {
+        const modelId = `project-state-${projectId}`;
+
+        // GET bank config: reflects EnsureBank's mission + disposition.
+        const configRes = await request.get(`/api/memory/banks/${bank}/config`);
+        expect(configRes.ok()).toBeTruthy();
+        const configBody = await configRes.json();
+        expect(configBody.config.reflect_mission).toContain('Memory Co');
+        expect(configBody.config.disposition_skepticism).toBe(4);
+
+        // GET directives: both standing directives, exactly once each.
+        const directivesRes = await request.get(`/api/memory/banks/${bank}/directives`);
+        expect(directivesRes.ok()).toBeTruthy();
+        const directivesBody = await directivesRes.json();
+        expect((directivesBody.items as any[]).map((d) => d.name).sort())
+            .toEqual(['cite-source', 'no-false-completion']);
+
+        // GET mental-models list: the project-state model exists by now
+        // (created lazily by the CTO's task runs above).
+        const listRes = await request.get(`/api/memory/banks/${bank}/mental-models`);
+        expect(listRes.ok()).toBeTruthy();
+        const listBody = await listRes.json();
+        expect((listBody.items as any[]).some((m: any) => m.id === modelId)).toBeTruthy();
+
+        // GET single mental model.
+        const modelRes = await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`);
+        expect(modelRes.ok()).toBeTruthy();
+        const modelBody = await modelRes.json();
+        expect(modelBody.id).toBe(modelId);
+        expect(typeof modelBody.content).toBe('string');
+
+        // POST refresh: accepted, and the model's last_refreshed_at is sane.
+        const refreshRes = await request.post(`/api/memory/banks/${bank}/mental-models/${modelId}/refresh`);
+        expect(refreshRes.ok()).toBeTruthy();
+        const afterRefresh = await (await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`)).json();
+        expect(afterRefresh.last_refreshed_at).toBeTruthy();
+
+        // DELETE removes it; subsequent GET 404s.
+        const deleteRes = await request.delete(`/api/memory/banks/${bank}/mental-models/${modelId}`);
+        expect(deleteRes.ok()).toBeTruthy();
+        const afterDeleteRes = await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`);
+        expect(afterDeleteRes.ok()).toBeFalsy();
     });
 });
 

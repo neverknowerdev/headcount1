@@ -33,6 +33,10 @@ type Settings struct {
 	// app settings page; empty model = fall back to the session's LLM.
 	UtilityProviderID int32  `yaml:"utility_provider_id"`
 	UtilityModel      string `yaml:"utility_model"`
+	// Memory recall token budget overrides — see server/controllers.Settings
+	// for the full doc comment; 0 means use the pkg/hindsight defaults.
+	MemoryRecallMaxTokens   int `yaml:"memory_recall_max_tokens"`
+	MemoryBriefingMaxTokens int `yaml:"memory_briefing_max_tokens"`
 }
 
 // loadSettings reads the app settings. The canonical file is the one the

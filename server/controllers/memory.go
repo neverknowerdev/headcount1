@@ -59,16 +59,16 @@ func (api *API) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, status)
 }
 
-// memoryBank describes one bank with a human-friendly label resolved from
-// the project/company it belongs to.
+// memoryBank describes one bank with a human-friendly label.
 type memoryBank struct {
 	BankID string `json:"bank_id"`
-	Kind   string `json:"kind"` // "project" | "company"
+	Kind   string `json:"kind"` // "company"
 	Label  string `json:"label"`
 }
 
-// ListMemoryBanks lists app-owned banks for a company: the company's shared
-// agent-experience bank plus one docs bank per project.
+// ListMemoryBanks lists app-owned banks for a company. Project docs and
+// agent run experience share one bank per company (see pkg/hindsight
+// Service doc comment for why), so this always returns exactly one entry.
 func (api *API) ListMemoryBanks(w http.ResponseWriter, r *http.Request) {
 	if api.memoryClientOr503(w) == nil {
 		return
@@ -84,19 +84,10 @@ func (api *API) ListMemoryBanks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	banks := []memoryBank{{
-		BankID: hindsight.CompanyBankID(comp.ID),
+		BankID: hindsight.BankID(comp.ID),
 		Kind:   "company",
-		Label:  fmt.Sprintf("Agent experience — %s", comp.Name),
+		Label:  fmt.Sprintf("Memory — %s", comp.Name),
 	}}
-	if projects, perr := api.q.ListProjectsByCompany(r.Context(), comp.ID); perr == nil {
-		for _, p := range projects {
-			banks = append(banks, memoryBank{
-				BankID: hindsight.ProjectBankID(p.ID),
-				Kind:   "project",
-				Label:  fmt.Sprintf("Docs — %s", p.Name),
-			})
-		}
-	}
 	api.respondJSON(w, http.StatusOK, banks)
 }
 
@@ -238,6 +229,72 @@ func (api *API) GetMemoryStats(w http.ResponseWriter, r *http.Request) {
 	api.respondRawJSON(w, data, err)
 }
 
+// GetMemoryBankConfig exposes the bank's resolved config (mission,
+// disposition, directives applied by Service.EnsureBank) for display/debug
+// in the Memory UI.
+func (api *API) GetMemoryBankConfig(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.GetBankConfigRaw(r.Context(), chi.URLParam(r, "bankID"))
+	api.respondRawJSON(w, data, err)
+}
+
+// ListMemoryDirectives exposes the bank's active directives for display/debug.
+func (api *API) ListMemoryDirectives(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.ListDirectivesRaw(r.Context(), chi.URLParam(r, "bankID"))
+	api.respondRawJSON(w, data, err)
+}
+
+// ListMentalModels lists the bank's mental models (name, source query,
+// last-refreshed time) for the Memory UI's Insights tab.
+func (api *API) ListMentalModels(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.ListMentalModelsRaw(r.Context(), chi.URLParam(r, "bankID"))
+	api.respondRawJSON(w, data, err)
+}
+
+func (api *API) GetMentalModel(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.GetMentalModelRaw(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"))
+	api.respondRawJSON(w, data, err)
+}
+
+func (api *API) RefreshMentalModel(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	if err := c.RefreshMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
+		api.respondError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusAccepted)
+}
+
+func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	if err := c.DeleteMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
+		api.respondError(w, http.StatusBadGateway, err.Error())
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
 func (api *API) projectRepoPath(basePath string, comp db.Company, proj db.Project) string {
 	return filesystem.NewManager(basePath).GetProjectRepoPath(comp, proj)
 }
@@ -271,7 +328,7 @@ func (api *API) StartProjectMemoryInit(projectID int32) {
 		if _, statErr := os.Stat(repoPath); statErr != nil {
 			return // no repo on disk — nothing to feed
 		}
-		added, updated, removed, serr := memoryService.SyncProjectDocs(ctx, project, repoPath)
+		added, updated, removed, serr := memoryService.SyncProjectDocs(ctx, comp, project, repoPath)
 		if serr != nil {
 			log.Printf("memory: doc sync failed for project %d: %v", projectID, serr)
 			return
@@ -318,7 +375,7 @@ func (api *API) SyncProjectMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	settings := LoadSettings()
 	repoPath := api.projectRepoPath(settings.BasePath, comp, project)
-	added, updated, removed, serr := memoryService.SyncProjectDocs(r.Context(), project, repoPath)
+	added, updated, removed, serr := memoryService.SyncProjectDocs(r.Context(), comp, project, repoPath)
 	if serr != nil {
 		api.respondError(w, http.StatusInternalServerError, serr.Error())
 		return

@@ -1,14 +1,27 @@
 import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
+import { execFileSync } from 'child_process';
 import { loadE2EEnv } from '../helpers/env';
 
 const env = loadE2EEnv();
 
-async function dumpHindsightBanks(): Promise<Record<string, any[]>> {
+async function dumpHindsight(): Promise<any> {
     const res = await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/dump`);
     expect(res.ok).toBeTruthy();
-    return (await res.json()).banks as Record<string, any[]>;
+    return res.json();
+}
+
+async function dumpHindsightBanks(): Promise<Record<string, any[]>> {
+    return (await dumpHindsight()).banks as Record<string, any[]>;
+}
+
+/** Extracts a backup_*.tar.gz archive into a fresh temp dir and returns its path. */
+function extractArchive(archivePath: string): string {
+    const dest = fs.mkdtempSync(path.join(os.tmpdir(), 'paperclip-backup-'));
+    execFileSync('tar', ['-xzf', archivePath, '-C', dest]);
+    return dest;
 }
 
 test.describe.serial('Backup & Restore', () => {
@@ -71,17 +84,27 @@ test.describe.serial('Backup & Restore', () => {
             },
         });
         expect(memProjectRes.ok()).toBeTruthy();
-        const memProject = await memProjectRes.json();
-        const projBank = `proj-${memProject.id}`;
+        await memProjectRes.json();
+        const bank = `company-${company.id}`;
 
-        // Wait for the background doc ingestion to populate the project bank.
+        // Wait for the background doc ingestion to populate the company bank.
         await expect.poll(async () => {
             const banks = await dumpHindsightBanks();
-            return (banks[projBank] || []).length;
+            return (banks[bank] || []).length;
         }, { timeout: 120_000, intervals: [2000], message: 'project docs should be ingested before backup' })
             .toBe(3);
-        const memTextsBefore = (await dumpHindsightBanks())[projBank]
+        const memTextsBefore = (await dumpHindsightBanks())[bank]
             .map((m: any) => m.text).sort();
+
+        // EnsureBank ran during doc sync above: capture config/directives/
+        // mental-models pre-backup so we can assert lossless round-trip
+        // after restore (bank template export/import, separate from the
+        // document-transfer archive).
+        const dumpBefore = await dumpHindsight();
+        const configBefore = dumpBefore.configs[bank];
+        const directivesBefore = (dumpBefore.directives[bank] as any[]).map((d: any) => d.name).sort();
+        const modelsBefore = ((dumpBefore.mental_models[bank] as any[]) || []).map((m: any) => m.id).sort();
+        expect(configBefore.reflect_mission).toContain('Backup Test Company');
 
         // Create a sprint
         const sprintRes = await request.post('/api/sprints', {
@@ -128,6 +151,16 @@ test.describe.serial('Backup & Restore', () => {
 
         // Verify backup file exists
         expect(fs.existsSync(archivePath)).toBeTruthy();
+
+        // The bank's config/mental-models/directives manifest ("<bank>.template.json")
+        // must ride along inside the archive next to the document-transfer
+        // "<bank>.zip" — the two exports are complementary (see
+        // pkg/hindsight/transfer.go ExportAllToDir).
+        const extractedDir = extractArchive(archivePath);
+        const hindsightDir = path.join(extractedDir, 'data', 'hindsight');
+        expect(fs.existsSync(path.join(hindsightDir, `${bank}.zip`)), `expected ${bank}.zip in backup`).toBeTruthy();
+        expect(fs.existsSync(path.join(hindsightDir, `${bank}.template.json`)), `expected ${bank}.template.json in backup`).toBeTruthy();
+        fs.rmSync(extractedDir, { recursive: true, force: true });
 
         // Wipe the database
         const wipeRes = await request.post('/api/e2e/wipe-db');
@@ -191,18 +224,36 @@ test.describe.serial('Backup & Restore', () => {
         // ── Memory: the bank was repopulated from the archive without loss ──
         await expect.poll(async () => {
             const banks = await dumpHindsightBanks();
-            return (banks[projBank] || []).length;
+            return (banks[bank] || []).length;
         }, { timeout: 60_000, message: 'memory bank should be re-imported on restore' }).toBe(3);
-        const memTextsAfter = (await dumpHindsightBanks())[projBank]
+        const memTextsAfter = (await dumpHindsightBanks())[bank]
             .map((m: any) => m.text).sort();
         expect(memTextsAfter).toEqual(memTextsBefore);
 
         // And it is served through the /api/memory proxy again.
-        const memList = await request.get(`/api/memory/banks/${projBank}/memories?limit=50`);
+        const memList = await request.get(`/api/memory/banks/${bank}/memories?limit=50`);
         expect(memList.ok()).toBeTruthy();
         const memBody = await memList.json();
         expect(memBody.total).toBe(3);
         expect((memBody.items as any[]).some((i: any) => i.text.includes('GM Coin'))).toBeTruthy();
+
+        // ── Bank config + mental models survive export/import losslessly ──
+        // (the "<bank>.template.json" manifest applied by ImportAllFromDir,
+        // separate from the document-transfer archive checked above).
+        const configRes = await request.get(`/api/memory/banks/${bank}/config`);
+        expect(configRes.ok()).toBeTruthy();
+        const configAfter = (await configRes.json()).config;
+        expect(configAfter).toEqual(configBefore);
+
+        const directivesRes = await request.get(`/api/memory/banks/${bank}/directives`);
+        expect(directivesRes.ok()).toBeTruthy();
+        const directivesAfter = ((await directivesRes.json()).items as any[]).map((d: any) => d.name).sort();
+        expect(directivesAfter).toEqual(directivesBefore);
+
+        const modelsRes = await request.get(`/api/memory/banks/${bank}/mental-models`);
+        expect(modelsRes.ok()).toBeTruthy();
+        const modelsAfter = ((await modelsRes.json()).items as any[]).map((m: any) => m.id).sort();
+        expect(modelsAfter).toEqual(modelsBefore);
     });
 
     test('backup via Settings UI button', async ({ page }) => {

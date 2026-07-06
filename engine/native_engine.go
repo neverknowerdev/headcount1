@@ -497,12 +497,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
-	// Pre-task memory refinement: before execution starts, recall related
-	// facts and past experience from long-term memory (project docs, prior
-	// runs of any agent) and put them in front of the agent.
+	// Pre-task memory refinement: before execution starts, assemble the
+	// briefing from long-term memory using Hindsight's recommended pattern —
+	// cheap mental-model fetches for synthesized understanding, plus a
+	// recall pass for task-specific facts. Reflect (expensive agentic
+	// reasoning) is deliberately not used here; it's reserved for the
+	// explicit "Ask memory" UI action.
 	if e.memory.Available() {
-		if briefing := e.memory.TaskBriefing(ctx, task.CompanyID, task.ProjectID, task); briefing != "" {
-			systemPrompt += "\n\n## Memory briefing\nRecalled from the company's long-term memory (may be outdated — verify anything critical, use memory_recall to dig deeper):\n" + briefing
+		var role string
+		if agentCfg != nil {
+			role = agentCfg.Name
+		}
+		if briefing := e.buildMemoryBriefing(ctx, company, task, role); briefing != "" {
+			systemPrompt += "\n\n## Memory briefing\n" + briefing
 			e.logInfo(proxyLogger, "Memory briefing injected from long-term memory")
 		}
 	}
@@ -769,6 +776,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// automatic (docs on sync, run outcomes on session end).
 	if e.memory.Available() {
 		registry.Register(tools.NewMemoryRecall(func(mrCtx context.Context, query, agentFilter string, maxTokens int) (string, error) {
+			if maxTokens <= 0 {
+				maxTokens = loadSettings().MemoryRecallMaxTokens // 0 falls through to the Service default
+			}
 			results, rerr := e.memory.Recall(mrCtx, task.CompanyID, task.ProjectID, agentFilter, query, maxTokens)
 			if rerr != nil {
 				return "", rerr
@@ -966,6 +976,60 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
 
 	return status
+}
+
+// briefingMaxChars bounds the total injected memory briefing so it can never
+// dominate the system prompt — mental model sections (cheap, high-signal)
+// are kept whole; the recall section is truncated first if the budget is
+// tight.
+const briefingMaxChars = 24000 // ~6k tokens
+
+// buildMemoryBriefing assembles the pre-task memory section using
+// Hindsight's recommended pre-response pattern: mental-model fetch (cheap,
+// pre-computed synthesis) for standing understanding, plus recall for
+// task-specific facts — never reflect, which is too expensive for a routine
+// per-session step. Ensures each relevant model exists (idempotent,
+// best-effort) before fetching it. Returns "" when nothing is available.
+func (e *NativeEngine) buildMemoryBriefing(ctx context.Context, company db.Company, task db.Task, role string) string {
+	var sections []string
+
+	if task.ProjectID != nil {
+		if project, perr := e.q.GetProject(ctx, *task.ProjectID); perr == nil {
+			e.memory.EnsureProjectStateModel(ctx, company, project)
+			if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.ProjectStateModelID(project.ID)); ok {
+				sections = append(sections, "### Project state (synthesized)\n"+content)
+			}
+		}
+	}
+
+	if role != "" {
+		e.memory.EnsureAgentPlaybookModel(ctx, company, role)
+		if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.AgentPlaybookModelID(role)); ok {
+			sections = append(sections, "### Your playbook (synthesized)\n"+content)
+		}
+	}
+
+	if strings.EqualFold(role, defaultOrchestratorConfig) {
+		e.memory.EnsureOpenBlockersModel(ctx, company)
+		if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.OpenBlockersModelID()); ok {
+			sections = append(sections, "### Open blockers (synthesized)\n"+content)
+		}
+	}
+
+	budget := loadSettings().MemoryBriefingMaxTokens
+	if recalled := e.memory.TaskBriefing(ctx, company.ID, task.ProjectID, task, budget); recalled != "" {
+		sections = append(sections, "### Related memories (recall)\n"+recalled)
+	}
+
+	if len(sections) == 0 {
+		return ""
+	}
+	briefing := "Recalled from the company's long-term memory (may be outdated — verify anything critical, use memory_recall to dig deeper):\n\n" +
+		strings.Join(sections, "\n\n")
+	if len(briefing) > briefingMaxChars {
+		briefing = briefing[:briefingMaxChars] + "\n… (briefing truncated; use memory_recall for more)"
+	}
+	return briefing
 }
 
 // buildInitialMessages assembles a session's conversation seed: the task

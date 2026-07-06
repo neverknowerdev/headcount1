@@ -13,6 +13,11 @@ interface MemoryBank {
     label: string;
 }
 
+interface Project {
+    id: number;
+    name: string;
+}
+
 interface GraphNode {
     id: string;
     label: string;
@@ -376,7 +381,16 @@ const MemoryDetailPanel: React.FC<{
 
 // ---------- Main page ----------
 
-type Tab = 'graph' | 'memories' | 'query';
+type Tab = 'graph' | 'memories' | 'query' | 'insights';
+
+interface MentalModel {
+    id: string;
+    name: string;
+    source_query?: string;
+    content?: string | null;
+    last_refreshed_at?: string | null;
+    is_stale?: boolean;
+}
 
 export const Memory: React.FC = () => {
     const { selectedCompanyId } = useStore();
@@ -409,12 +423,20 @@ export const Memory: React.FC = () => {
     const [recallResults, setRecallResults] = useState<MemoryItem[]>([]);
     const [askAnswer, setAskAnswer] = useState<string | null>(null);
 
-    // Sync state
+    // Insights (mental models) state
+    const [models, setModels] = useState<MentalModel[]>([]);
+    const [modelsLoading, setModelsLoading] = useState(false);
+    const [modelsError, setModelsError] = useState<string | null>(null);
+    const [modelActionId, setModelActionId] = useState<string | null>(null);
+
+    // Sync state — with one shared bank per company, doc re-sync targets a
+    // specific project rather than the (now singular) bank.
+    const [projects, setProjects] = useState<Project[]>([]);
+    const [syncProjectId, setSyncProjectId] = useState<string>('');
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState<{ added: number; updated: number; removed: number } | null>(null);
 
     const available = status?.available === true;
-    const selectedBank = banks.find((b) => b.bank_id === selectedBankId);
 
     // Poll status
     useEffect(() => {
@@ -446,6 +468,23 @@ export const Memory: React.FC = () => {
             .catch(() => { if (!cancelled) setBanks([]); });
         return () => { cancelled = true; };
     }, [selectedCompanyId, available]);
+
+    // Load the company's projects — used only to pick which project's docs
+    // to re-sync (project docs and agent run experience now share one bank
+    // per company, so there is no per-project bank to infer this from).
+    useEffect(() => {
+        if (!selectedCompanyId) return;
+        let cancelled = false;
+        axios.get(`/api/projects?company_id=${selectedCompanyId}`)
+            .then((res) => {
+                if (cancelled) return;
+                const list: Project[] = res.data || [];
+                setProjects(list);
+                setSyncProjectId((prev) => (prev && list.some((p) => String(p.id) === prev) ? prev : String(list[0]?.id || '')));
+            })
+            .catch(() => { if (!cancelled) setProjects([]); });
+        return () => { cancelled = true; };
+    }, [selectedCompanyId]);
 
     // Load graph
     useEffect(() => {
@@ -486,6 +525,53 @@ export const Memory: React.FC = () => {
         return () => { cancelled = true; clearTimeout(t); };
     }, [selectedBankId, available, tab, memSearch, memType, memRefreshKey]);
 
+    // Load mental models (Insights tab) — synthesized, auto-refreshing
+    // knowledge (project state, agent playbooks, open blockers) rather than
+    // individual memories.
+    const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
+    useEffect(() => {
+        if (!selectedBankId || !available || tab !== 'insights') return;
+        let cancelled = false;
+        setModelsLoading(true);
+        setModelsError(null);
+        axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models`)
+            .then((res) => {
+                if (cancelled) return;
+                const data = res.data;
+                const items = Array.isArray(data) ? data : (data?.items || data?.mental_models || []);
+                setModels(Array.isArray(items) ? items : []);
+            })
+            .catch((e) => { if (!cancelled) { setModels([]); setModelsError(e?.response?.data?.error || 'Failed to load insights'); } })
+            .finally(() => { if (!cancelled) setModelsLoading(false); });
+        return () => { cancelled = true; };
+    }, [selectedBankId, available, tab, modelsRefreshKey]);
+
+    const refreshModel = useCallback(async (id: string) => {
+        if (!selectedBankId) return;
+        setModelActionId(id);
+        try {
+            await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}/refresh`);
+            setModelsRefreshKey((k) => k + 1);
+        } catch (e: any) {
+            alert(e?.response?.data?.error || 'Refresh failed');
+        } finally {
+            setModelActionId(null);
+        }
+    }, [selectedBankId]);
+
+    const deleteModel = useCallback(async (id: string) => {
+        if (!selectedBankId || !confirm(`Delete insight "${id}"? It will be re-created automatically the next time it is needed.`)) return;
+        setModelActionId(id);
+        try {
+            await axios.delete(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}`);
+            setModelsRefreshKey((k) => k + 1);
+        } catch (e: any) {
+            alert(e?.response?.data?.error || 'Delete failed');
+        } finally {
+            setModelActionId(null);
+        }
+    }, [selectedBankId]);
+
     const memoryTypes = useMemo(() => Array.from(new Set(memories.map((m) => m.type).filter(Boolean))) as string[], [memories]);
 
     const runQuery = useCallback(async () => {
@@ -510,19 +596,18 @@ export const Memory: React.FC = () => {
     }, [selectedBankId, query, queryMode]);
 
     const resyncDocs = useCallback(async () => {
-        if (!selectedBank || !selectedBank.bank_id.startsWith('proj-')) return;
-        const projectId = selectedBank.bank_id.slice('proj-'.length);
+        if (!syncProjectId) return;
         setSyncing(true);
         setSyncResult(null);
         try {
-            const res = await axios.post(`/api/memory/projects/${projectId}/sync`);
+            const res = await axios.post(`/api/memory/projects/${syncProjectId}/sync`);
             setSyncResult(res.data);
         } catch (e: any) {
             alert(e?.response?.data?.error || 'Sync failed');
         } finally {
             setSyncing(false);
         }
-    }, [selectedBank]);
+    }, [syncProjectId]);
 
     const onMemoryChanged = useCallback(() => setMemRefreshKey((k) => k + 1), []);
 
@@ -543,12 +628,21 @@ export const Memory: React.FC = () => {
                                 Synced: +{syncResult.added} added, {syncResult.updated} updated, −{syncResult.removed} removed
                             </span>
                         )}
-                        {selectedBank?.bank_id.startsWith('proj-') && (
-                            <button onClick={resyncDocs} disabled={syncing}
-                                className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md bg-white hover:bg-gray-50 text-gray-700 disabled:opacity-50">
-                                <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
-                                {syncing ? 'Syncing…' : 'Re-sync docs'}
-                            </button>
+                        {projects.length > 0 && (
+                            <>
+                                <select value={syncProjectId} onChange={(e) => { setSyncProjectId(e.target.value); setSyncResult(null); }}
+                                    className="border rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                    data-testid="memory-sync-project-select">
+                                    {projects.map((p) => (
+                                        <option key={p.id} value={p.id}>{p.name}</option>
+                                    ))}
+                                </select>
+                                <button onClick={resyncDocs} disabled={syncing || !syncProjectId}
+                                    className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md bg-white hover:bg-gray-50 text-gray-700 disabled:opacity-50">
+                                    <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
+                                    {syncing ? 'Syncing…' : 'Re-sync docs'}
+                                </button>
+                            </>
                         )}
                         <select value={selectedBankId} onChange={(e) => { setSelectedBankId(e.target.value); setSelectedMemoryId(null); setSyncResult(null); }}
                             className="border rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
@@ -583,6 +677,7 @@ export const Memory: React.FC = () => {
                                 ['graph', 'Graph'],
                                 ['memories', 'Memories'],
                                 ['query', 'Query'],
+                                ['insights', 'Insights'],
                             ] as [Tab, string][]).map(([t, label]) => (
                                 <button key={t} onClick={() => setTab(t)}
                                     className={`px-3 py-1.5 text-sm font-medium rounded-md ${
@@ -726,6 +821,59 @@ export const Memory: React.FC = () => {
                                         ) : (
                                             !queryLoading && <div className="text-gray-500 italic text-sm">Ask a question and the memory layer will reason over the bank to answer.</div>
                                         )
+                                    )}
+                                </div>
+                            )}
+
+                            {tab === 'insights' && (
+                                <div>
+                                    <p className="text-xs text-gray-500 mb-3">
+                                        Synthesized understanding the memory layer keeps up to date in the background —
+                                        project state, agent playbooks, open blockers — fetched instantly rather than
+                                        recomputed per request.
+                                    </p>
+                                    {modelsError && <div className="text-red-600 text-sm mb-3">{modelsError}</div>}
+                                    {modelsLoading && models.length === 0 ? (
+                                        <div className="text-gray-500 italic text-sm">Loading…</div>
+                                    ) : models.length === 0 ? (
+                                        <div className="text-gray-500 italic text-sm">
+                                            No insights yet — they appear once a project or agent has enough memory to synthesize from.
+                                        </div>
+                                    ) : (
+                                        <div className="space-y-3">
+                                            {models.map((m) => (
+                                                <div key={m.id} className="border rounded-lg p-3 bg-white">
+                                                    <div className="flex items-start justify-between gap-2 mb-1.5">
+                                                        <div>
+                                                            <div className="font-medium text-sm text-gray-900">{m.name || m.id}</div>
+                                                            {m.source_query && <div className="text-xs text-gray-500 mt-0.5">{m.source_query}</div>}
+                                                        </div>
+                                                        <div className="flex items-center gap-1.5 shrink-0">
+                                                            <button onClick={() => refreshModel(m.id)} disabled={modelActionId === m.id}
+                                                                title="Refresh now"
+                                                                className="p-1.5 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-50">
+                                                                <RefreshCw className={`w-3.5 h-3.5 ${modelActionId === m.id ? 'animate-spin' : ''}`} />
+                                                            </button>
+                                                            <button onClick={() => deleteModel(m.id)} disabled={modelActionId === m.id}
+                                                                title="Delete"
+                                                                className="p-1.5 rounded hover:bg-red-50 text-gray-500 hover:text-red-600 disabled:opacity-50">
+                                                                <Trash2 className="w-3.5 h-3.5" />
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    <div className="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
+                                                        {m.content && !/^generating content/i.test(m.content)
+                                                            ? m.content
+                                                            : <span className="italic text-gray-500">Still generating…</span>}
+                                                    </div>
+                                                    {m.last_refreshed_at && (
+                                                        <div className="text-[11px] text-gray-400 mt-1.5">
+                                                            Last refreshed: {new Date(m.last_refreshed_at).toLocaleString()}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
                                     )}
                                 </div>
                             )}
