@@ -1,6 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap } from 'lucide-react';
+import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 
 export const ProvidersManager: React.FC = () => {
     const [providers, setProviders] = useState<any[]>([]);
@@ -23,6 +23,9 @@ export const ProvidersManager: React.FC = () => {
     const [isActivateTesting, setIsActivateTesting] = useState(false);
     const [isActivateSaving, setIsActivateSaving] = useState(false);
     const [togglingId, setTogglingId] = useState<number | null>(null);
+    // Provider cards truncate a long model list to one line by default;
+    // this tracks which cards the user has expanded to see the full list.
+    const [expandedModelsIds, setExpandedModelsIds] = useState<Set<number>>(new Set());
 
     const fetchProviders = async () => {
         try {
@@ -182,6 +185,18 @@ export const ProvidersManager: React.FC = () => {
         }
     };
 
+    const toggleModelsExpanded = (providerId: number) => {
+        setExpandedModelsIds(prev => {
+            const next = new Set(prev);
+            if (next.has(providerId)) {
+                next.delete(providerId);
+            } else {
+                next.add(providerId);
+            }
+            return next;
+        });
+    };
+
     const openActivateModal = (provider: any) => {
         setActivateProvider(provider);
         setActivateApiKey('');
@@ -317,14 +332,19 @@ export const ProvidersManager: React.FC = () => {
                         {p.default_model && <p className="text-sm text-gray-600 mb-1"><span className="font-semibold">Default Model:</span> {p.default_model}</p>}
                         {p.supported_models && (() => {
                             const models = p.supported_models.split(',').filter(Boolean);
+                            const isExpanded = expandedModelsIds.has(p.id);
                             return (
                                 <div className="mt-2">
-                                    <p className="text-xs text-gray-500 truncate" title={models.join(', ')}>
+                                    <p className={`text-xs text-gray-500 ${isExpanded ? 'break-words' : 'truncate'}`} title={isExpanded ? undefined : models.join(', ')}>
                                         <span className="font-semibold">Models:</span> {models.join(', ')}
                                     </p>
-                                    <span className="inline-block mt-1 text-xs font-medium bg-gray-100 text-gray-600 px-2 py-0.5 rounded-full">
+                                    <button
+                                        onClick={() => toggleModelsExpanded(p.id)}
+                                        className="inline-flex items-center gap-1 mt-1 text-xs font-medium bg-gray-100 text-gray-600 hover:bg-gray-200 px-2 py-0.5 rounded-full"
+                                    >
                                         {models.length} model{models.length === 1 ? '' : 's'}
-                                    </span>
+                                        {isExpanded ? <ChevronUp size={12} /> : <ChevronDown size={12} />}
+                                    </button>
                                 </div>
                             );
                         })()}
