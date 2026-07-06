@@ -338,12 +338,38 @@ func (c *Client) ListMentalModelsRaw(ctx context.Context, bankID string) ([]byte
 	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models"), nil)
 }
 
+// CreateMentalModelRaw creates a mental model from an arbitrary user-supplied
+// payload (the Memory UI's "new mental model" form) and returns Hindsight's
+// raw JSON response ({mental_model_id, operation_id}).
+func (c *Client) CreateMentalModelRaw(ctx context.Context, bankID string, body map[string]interface{}) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodPost, bankPath(bankID, "/mental-models"), body)
+}
+
+// UpdateMentalModel edits a mental model's name/source_query/tags/max_tokens/
+// trigger. Only fields present in patch are changed.
+func (c *Client) UpdateMentalModel(ctx context.Context, bankID, id string, patch map[string]interface{}) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodPatch, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), patch)
+}
+
 func (c *Client) RefreshMentalModel(ctx context.Context, bankID, id string) error {
 	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/refresh"), nil, nil)
 }
 
 func (c *Client) DeleteMentalModel(ctx context.Context, bankID, id string) error {
 	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil, nil)
+}
+
+// GetMentalModelHistoryRaw returns the model's refresh history — content
+// snapshots over time, the closest thing to "past LLM runs" for a model
+// that the Memory UI can show without a full LLM-trace viewer.
+func (c *Client) GetMentalModelHistoryRaw(ctx context.Context, bankID, id string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/history"), nil)
+}
+
+// ListTagsRaw lists a bank's known tags with usage counts, used by the
+// Memory UI to suggest tags when creating/editing a mental model.
+func (c *Client) ListTagsRaw(ctx context.Context, bankID string) ([]byte, error) {
+	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/tags"), nil)
 }
 
 // ExportBankTemplate exports a bank's config, mental models and directives

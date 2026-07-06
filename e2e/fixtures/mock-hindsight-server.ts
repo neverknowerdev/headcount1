@@ -52,6 +52,7 @@ interface MentalModel {
     trigger?: { refresh_after_consolidation?: boolean };
     content: string;
     last_refreshed_at: string;
+    history?: Array<{ content: string; refreshed_at: string }>;
 }
 
 interface BankConfig {
@@ -75,6 +76,14 @@ function synthesize(mems: Memory[], tags: string[]): string {
         .sort((a, b) => (a.mentioned_at < b.mentioned_at ? 1 : -1))
         .slice(0, 5);
     return 'SYNTHESIS: ' + matching.map((m) => m.text).join(' | ');
+}
+
+/** Appends the model's current content to its refresh history (most recent
+ * first), mirroring Hindsight's history endpoint used by the Memory UI to
+ * show past runs of a mental model. */
+function pushHistory(model: MentalModel): void {
+    if (!model.history) model.history = [];
+    model.history.unshift({ content: model.content, refreshed_at: model.last_refreshed_at });
 }
 
 export async function startMockHindsightServer(): Promise<{ baseUrl: string; port: number; stop: () => Promise<void> }> {
@@ -104,6 +113,7 @@ export async function startMockHindsightServer(): Promise<{ baseUrl: string; por
             if (model.tags.length === 0 || model.tags.some((t) => retainedTags.includes(t))) {
                 model.content = synthesize(mems, model.tags);
                 model.last_refreshed_at = new Date().toISOString();
+                pushHistory(model);
             }
         }
     };
@@ -257,16 +267,35 @@ function handle(
             trigger: body?.trigger,
             content: 'Generating content...',
             last_refreshed_at: new Date().toISOString(),
+            history: [],
         };
         models.set(id, model);
         // Seed content immediately from whatever memories already match —
         // real Hindsight generates async, but the mock has no async delay,
         // so there's no reason to leave it as a placeholder if data exists.
         model.content = synthesize(getBank(bank), model.tags);
+        pushHistory(model);
         return json(res, 200, { mental_model_id: id, operation_id: 'op-1' });
     }
     if (method === 'GET' && rest === '/mental-models') {
         return json(res, 200, { items: [...getModels(bank).values()] });
+    }
+    const modelHistoryMatch = rest.match(/^\/mental-models\/([^/]+)\/history$/);
+    if (method === 'GET' && modelHistoryMatch) {
+        const id = decodeURIComponent(modelHistoryMatch[1]);
+        const model = getModels(bank).get(id);
+        if (!model) return json(res, 404, { error: 'mental model not found' });
+        return json(res, 200, { items: model.history || [] });
+    }
+    const modelRefreshMatch = rest.match(/^\/mental-models\/([^/]+)\/refresh$/);
+    if (method === 'POST' && modelRefreshMatch) {
+        const id = decodeURIComponent(modelRefreshMatch[1]);
+        const model = getModels(bank).get(id);
+        if (!model) return json(res, 404, { error: 'mental model not found' });
+        model.content = synthesize(getBank(bank), model.tags);
+        model.last_refreshed_at = new Date().toISOString();
+        pushHistory(model);
+        return json(res, 200, { operation_id: 'op-1' });
     }
     const modelMatch = rest.match(/^\/mental-models\/([^/]+)$/);
     if (modelMatch) {
@@ -276,19 +305,30 @@ function handle(
             if (!model) return json(res, 404, { error: 'mental model not found' });
             return json(res, 200, model);
         }
+        if (method === 'PATCH') {
+            if (!model) return json(res, 404, { error: 'mental model not found' });
+            if (typeof body?.name === 'string') model.name = body.name;
+            if (typeof body?.source_query === 'string') model.source_query = body.source_query;
+            if (Array.isArray(body?.tags)) model.tags = body.tags;
+            if (typeof body?.max_tokens === 'number') model.max_tokens = body.max_tokens;
+            if (body?.trigger) model.trigger = body.trigger;
+            return json(res, 200, model);
+        }
         if (method === 'DELETE') {
             getModels(bank).delete(id);
             return json(res, 200, { status: 'ok' });
         }
     }
-    const modelRefreshMatch = rest.match(/^\/mental-models\/([^/]+)\/refresh$/);
-    if (method === 'POST' && modelRefreshMatch) {
-        const id = decodeURIComponent(modelRefreshMatch[1]);
-        const model = getModels(bank).get(id);
-        if (!model) return json(res, 404, { error: 'mental model not found' });
-        model.content = synthesize(getBank(bank), model.tags);
-        model.last_refreshed_at = new Date().toISOString();
-        return json(res, 200, { operation_id: 'op-1' });
+
+    // ── tags ────────────────────────────────────────────────────────────
+    if (method === 'GET' && rest === '/tags') {
+        const counts = new Map<string, number>();
+        for (const m of getBank(bank)) {
+            if (m.state !== 'active') continue;
+            for (const t of m.tags) counts.set(t, (counts.get(t) || 0) + 1);
+        }
+        const items = [...counts.entries()].map(([tag, count]) => ({ tag, count }));
+        return json(res, 200, { items, total: items.length, limit: 100, offset: 0 });
     }
 
     // ── bank template export / import (config + mental models + directives) ──

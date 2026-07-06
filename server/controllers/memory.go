@@ -295,6 +295,72 @@ func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusOK)
 }
 
+// CreateMentalModel lets a user define a custom mental model from the Memory
+// UI: {id?, name, source_query, tags, max_tokens?, trigger?}. id must be
+// lowercase alphanumeric with hyphens if provided (Hindsight's constraint);
+// omitting it lets Hindsight assign one.
+func (api *API) CreateMentalModel(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	var body map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if _, ok := body["name"]; !ok {
+		api.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	if _, ok := body["source_query"]; !ok {
+		api.respondError(w, http.StatusBadRequest, "source_query is required")
+		return
+	}
+	data, err := c.CreateMentalModelRaw(r.Context(), chi.URLParam(r, "bankID"), body)
+	api.respondRawJSON(w, data, err)
+}
+
+// UpdateMentalModel edits an existing mental model's name/source_query/tags/
+// max_tokens/trigger. Only fields present in the request body are changed.
+func (api *API) UpdateMentalModel(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	var patch map[string]interface{}
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	data, err := c.UpdateMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"), patch)
+	api.respondRawJSON(w, data, err)
+}
+
+// GetMentalModelHistory exposes a model's refresh history — content
+// snapshots over time — the closest available proxy for "past LLM runs"
+// without a dedicated LLM-trace viewer.
+func (api *API) GetMentalModelHistory(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.GetMentalModelHistoryRaw(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"))
+	api.respondRawJSON(w, data, err)
+}
+
+// ListMemoryTags lists the bank's known tags with usage counts, so the
+// Memory UI can suggest existing tags (plus the dynamic agent:/project:
+// suggestions it computes client-side) when creating or editing a model.
+func (api *API) ListMemoryTags(w http.ResponseWriter, r *http.Request) {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return
+	}
+	data, err := c.ListTagsRaw(r.Context(), chi.URLParam(r, "bankID"))
+	api.respondRawJSON(w, data, err)
+}
+
 func (api *API) projectRepoPath(basePath string, comp db.Company, proj db.Project) string {
 	return filesystem.NewManager(basePath).GetProjectRepoPath(comp, proj)
 }

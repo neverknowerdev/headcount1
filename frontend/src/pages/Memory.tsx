@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
 import {
-    Brain, RefreshCw, Search, Trash2, Pencil, X, Sparkles, AlertTriangle,
+    Brain, RefreshCw, Search, Trash2, Pencil, X, Sparkles, AlertTriangle, Plus, History, ChevronDown, ChevronUp,
 } from 'lucide-react';
 import { useStore } from '../store';
 
@@ -390,7 +390,194 @@ interface MentalModel {
     content?: string | null;
     last_refreshed_at?: string | null;
     is_stale?: boolean;
+    tags?: string[];
+    max_tokens?: number;
+    trigger?: { refresh_after_consolidation?: boolean };
 }
+
+interface HistoryEntry {
+    content: string;
+    refreshed_at: string;
+}
+
+interface AgentConfig {
+    name: string;
+    [key: string]: any;
+}
+
+const MODEL_ID_RE = /^[a-z0-9-]+$/;
+
+const agentTagFor = (name: string) => `agent:${name.trim().toLowerCase().replace(/\s+/g, '-')}`;
+
+// ---------- Mental model create/edit form ----------
+
+const MentalModelForm: React.FC<{
+    bankId: string;
+    model: MentalModel | null; // null = create
+    agentConfigs: AgentConfig[];
+    projects: Project[];
+    bankTags: string[];
+    onClose: () => void;
+    onSaved: () => void;
+}> = ({ bankId, model, agentConfigs, projects, bankTags, onClose, onSaved }) => {
+    const isEdit = !!model;
+    const [id, setId] = useState(model?.id || '');
+    const [name, setName] = useState(model?.name || '');
+    const [sourceQuery, setSourceQuery] = useState(model?.source_query || '');
+    const [maxTokens, setMaxTokens] = useState(model?.max_tokens || 2048);
+    const [autoRefresh, setAutoRefresh] = useState(model?.trigger?.refresh_after_consolidation !== false);
+    const [tags, setTags] = useState<string[]>(model?.tags || []);
+    const [tagInput, setTagInput] = useState('');
+    const [showSuggestions, setShowSuggestions] = useState(false);
+    const [saving, setSaving] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+
+    const idError = id.trim() && !MODEL_ID_RE.test(id.trim())
+        ? 'ID must contain only lowercase letters, numbers, and hyphens.'
+        : null;
+
+    const suggestions = useMemo(() => {
+        const set = new Set<string>();
+        const list: { tag: string; label: string }[] = [];
+        const add = (tag: string, label: string) => {
+            if (set.has(tag) || tags.includes(tag)) return;
+            set.add(tag);
+            list.push({ tag, label });
+        };
+        bankTags.forEach((t) => add(t, t));
+        agentConfigs.forEach((a) => { const t = agentTagFor(a.name); add(t, `${t} (${a.name})`); });
+        projects.forEach((p) => { const t = `project:${p.id}`; add(t, `${t} (${p.name})`); });
+        const q = tagInput.trim().toLowerCase();
+        return (q ? list.filter((s) => s.tag.toLowerCase().includes(q) || s.label.toLowerCase().includes(q)) : list).slice(0, 30);
+    }, [bankTags, agentConfigs, projects, tagInput, tags]);
+
+    const addTag = (tag: string) => {
+        const t = tag.trim();
+        if (!t || tags.includes(t)) return;
+        setTags((prev) => [...prev, t]);
+        setTagInput('');
+        setShowSuggestions(false);
+    };
+
+    const removeTag = (tag: string) => setTags((prev) => prev.filter((t) => t !== tag));
+
+    const submit = async () => {
+        if (!name.trim() || !sourceQuery.trim() || idError) return;
+        setSaving(true);
+        setError(null);
+        try {
+            const body: any = {
+                name: name.trim(),
+                source_query: sourceQuery.trim(),
+                tags,
+                max_tokens: maxTokens,
+                trigger: { refresh_after_consolidation: autoRefresh },
+            };
+            if (isEdit && model) {
+                await axios.patch(`/api/memory/banks/${encodeURIComponent(bankId)}/mental-models/${encodeURIComponent(model.id)}`, body);
+            } else {
+                if (id.trim()) body.id = id.trim();
+                await axios.post(`/api/memory/banks/${encodeURIComponent(bankId)}/mental-models`, body);
+            }
+            onSaved();
+        } catch (e: any) {
+            setError(e?.response?.data?.error || 'Failed to save mental model');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    return (
+        <div className="fixed inset-0 bg-black/30 flex items-center justify-center z-50" onClick={onClose}>
+            <div className="w-full max-w-lg bg-white rounded-lg shadow border max-h-[90vh] overflow-y-auto"
+                onClick={(e) => e.stopPropagation()} data-testid="mental-model-form">
+                <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
+                    <h3 className="font-semibold text-sm text-gray-800">{isEdit ? 'Edit mental model' : 'New mental model'}</h3>
+                    <button onClick={onClose} title="Close" className="p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
+                        <X className="w-4 h-4" />
+                    </button>
+                </div>
+                <div className="p-4 space-y-3 text-sm">
+                    {error && <div className="text-red-600 text-sm">{error}</div>}
+                    <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Name</label>
+                        <input value={name} onChange={(e) => setName(e.target.value)} required
+                            className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">ID</label>
+                        <input value={id} onChange={(e) => setId(e.target.value)} disabled={isEdit}
+                            placeholder="auto-generated if left blank"
+                            className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 disabled:bg-gray-100 disabled:text-gray-500" />
+                        {idError && <div className="text-xs text-red-600 mt-1">{idError}</div>}
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Source query</label>
+                        <textarea value={sourceQuery} onChange={(e) => setSourceQuery(e.target.value)} rows={3} required
+                            placeholder="e.g. What is the current implementation state of this project?"
+                            className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                    </div>
+                    <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Max tokens</label>
+                        <input type="number" min={256} max={8192} value={maxTokens}
+                            onChange={(e) => setMaxTokens(Math.max(256, Math.min(8192, Number(e.target.value) || 2048)))}
+                            className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                    </div>
+                    <label className="flex items-center gap-2 text-sm text-gray-700">
+                        <input type="checkbox" checked={autoRefresh} onChange={(e) => setAutoRefresh(e.target.checked)} />
+                        Auto-refresh after new memories
+                    </label>
+                    <div>
+                        <label className="block text-xs font-medium text-gray-500 mb-1">Tags</label>
+                        <div className="flex flex-wrap gap-1.5 mb-1.5">
+                            {tags.map((t) => (
+                                <span key={t} className="flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">
+                                    {t}
+                                    <button onClick={() => removeTag(t)} className="hover:text-indigo-900">
+                                        <X className="w-3 h-3" />
+                                    </button>
+                                </span>
+                            ))}
+                        </div>
+                        <div className="relative">
+                            <input value={tagInput}
+                                onChange={(e) => { setTagInput(e.target.value); setShowSuggestions(true); }}
+                                onFocus={() => setShowSuggestions(true)}
+                                onKeyDown={(e) => {
+                                    if (e.key === 'Enter') { e.preventDefault(); addTag(tagInput); }
+                                }}
+                                placeholder="Type to search or add a tag…"
+                                className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
+                            {showSuggestions && (suggestions.length > 0 || tagInput.trim()) && (
+                                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border rounded-md shadow">
+                                    {suggestions.map((s) => (
+                                        <button key={s.tag} type="button" onClick={() => addTag(s.tag)}
+                                            className="block w-full text-left px-2 py-1.5 text-xs hover:bg-indigo-50 text-gray-700">
+                                            {s.label}
+                                        </button>
+                                    ))}
+                                    {tagInput.trim() && !suggestions.some((s) => s.tag === tagInput.trim()) && (
+                                        <button type="button" onClick={() => addTag(tagInput)}
+                                            className="block w-full text-left px-2 py-1.5 text-xs hover:bg-indigo-50 text-indigo-700 border-t">
+                                            Add "{tagInput.trim()}"
+                                        </button>
+                                    )}
+                                </div>
+                            )}
+                        </div>
+                    </div>
+                    <div className="flex gap-2 pt-1">
+                        <button onClick={submit} disabled={saving || !name.trim() || !sourceQuery.trim() || !!idError}
+                            className="px-3 py-1.5 bg-indigo-600 text-white rounded-md text-sm hover:bg-indigo-700 disabled:opacity-50">
+                            {saving ? 'Saving…' : (isEdit ? 'Save changes' : 'Create')}
+                        </button>
+                        <button onClick={onClose} className="px-3 py-1.5 border rounded-md text-sm hover:bg-gray-50">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
 
 export const Memory: React.FC = () => {
     const { selectedCompanyId } = useStore();
@@ -428,6 +615,16 @@ export const Memory: React.FC = () => {
     const [modelsLoading, setModelsLoading] = useState(false);
     const [modelsError, setModelsError] = useState<string | null>(null);
     const [modelActionId, setModelActionId] = useState<string | null>(null);
+    const [bankTags, setBankTags] = useState<string[]>([]);
+    const [agentConfigs, setAgentConfigs] = useState<AgentConfig[]>([]);
+    const [showModelForm, setShowModelForm] = useState(false);
+    const [editingModel, setEditingModel] = useState<MentalModel | null>(null);
+    const [editingModelLoading, setEditingModelLoading] = useState(false);
+    const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+    const [historyByModel, setHistoryByModel] = useState<Record<string, HistoryEntry[]>>({});
+    const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
+    const [historyError, setHistoryError] = useState<Record<string, string>>({});
+    const [expandedHistoryEntries, setExpandedHistoryEntries] = useState<Record<string, boolean>>({});
 
     // Sync state — with one shared bank per company, doc re-sync targets a
     // specific project rather than the (now singular) bank.
@@ -546,6 +743,29 @@ export const Memory: React.FC = () => {
         return () => { cancelled = true; };
     }, [selectedBankId, available, tab, modelsRefreshKey]);
 
+    // Load agent configs (once) — used to suggest agent:<role> tags.
+    useEffect(() => {
+        let cancelled = false;
+        axios.get('/api/agent-configs')
+            .then((res) => { if (!cancelled) setAgentConfigs(Array.isArray(res.data) ? res.data : []); })
+            .catch(() => { if (!cancelled) setAgentConfigs([]); });
+        return () => { cancelled = true; };
+    }, []);
+
+    // Load the bank's already-observed tags — used to suggest tags in the form.
+    useEffect(() => {
+        if (!selectedBankId || !available || tab !== 'insights') return;
+        let cancelled = false;
+        axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/tags`)
+            .then((res) => {
+                if (cancelled) return;
+                const items = res.data?.items || [];
+                setBankTags(Array.isArray(items) ? items.map((i: any) => i.tag).filter(Boolean) : []);
+            })
+            .catch(() => { if (!cancelled) setBankTags([]); });
+        return () => { cancelled = true; };
+    }, [selectedBankId, available, tab, modelsRefreshKey]);
+
     const refreshModel = useCallback(async (id: string) => {
         if (!selectedBankId) return;
         setModelActionId(id);
@@ -571,6 +791,48 @@ export const Memory: React.FC = () => {
             setModelActionId(null);
         }
     }, [selectedBankId]);
+
+    const openCreateModel = useCallback(() => {
+        setEditingModel(null);
+        setShowModelForm(true);
+    }, []);
+
+    const openEditModel = useCallback(async (m: MentalModel) => {
+        if (!selectedBankId) return;
+        setEditingModelLoading(true);
+        try {
+            const res = await axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(m.id)}`);
+            setEditingModel(res.data || m);
+            setShowModelForm(true);
+        } catch (e: any) {
+            alert(e?.response?.data?.error || 'Failed to load mental model');
+        } finally {
+            setEditingModelLoading(false);
+        }
+    }, [selectedBankId]);
+
+    const onModelFormSaved = useCallback(() => {
+        setShowModelForm(false);
+        setEditingModel(null);
+        setModelsRefreshKey((k) => k + 1);
+    }, []);
+
+    const toggleHistory = useCallback((id: string) => {
+        setExpandedHistoryId((prev) => (prev === id ? null : id));
+        if (expandedHistoryId !== id && !historyByModel[id] && selectedBankId) {
+            setHistoryLoadingId(id);
+            setHistoryError((prev) => ({ ...prev, [id]: '' }));
+            axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}/history`)
+                .then((res) => {
+                    const items = res.data?.items || [];
+                    setHistoryByModel((prev) => ({ ...prev, [id]: Array.isArray(items) ? items : [] }));
+                })
+                .catch((e: any) => {
+                    setHistoryError((prev) => ({ ...prev, [id]: e?.response?.data?.error || 'Failed to load history' }));
+                })
+                .finally(() => setHistoryLoadingId((prev) => (prev === id ? null : prev)));
+        }
+    }, [expandedHistoryId, historyByModel, selectedBankId]);
 
     const memoryTypes = useMemo(() => Array.from(new Set(memories.map((m) => m.type).filter(Boolean))) as string[], [memories]);
 
@@ -827,11 +1089,17 @@ export const Memory: React.FC = () => {
 
                             {tab === 'insights' && (
                                 <div>
-                                    <p className="text-xs text-gray-500 mb-3">
-                                        Synthesized understanding the memory layer keeps up to date in the background —
-                                        project state, agent playbooks, open blockers — fetched instantly rather than
-                                        recomputed per request.
-                                    </p>
+                                    <div className="flex items-start justify-between gap-3 mb-3">
+                                        <p className="text-xs text-gray-500">
+                                            Synthesized understanding the memory layer keeps up to date in the background —
+                                            project state, agent playbooks, open blockers — fetched instantly rather than
+                                            recomputed per request.
+                                        </p>
+                                        <button onClick={openCreateModel}
+                                            className="flex items-center gap-1.5 px-3 py-1.5 text-sm bg-indigo-600 text-white rounded-md hover:bg-indigo-700 shrink-0">
+                                            <Plus className="w-4 h-4" /> New mental model
+                                        </button>
+                                    </div>
                                     {modelsError && <div className="text-red-600 text-sm mb-3">{modelsError}</div>}
                                     {modelsLoading && models.length === 0 ? (
                                         <div className="text-gray-500 italic text-sm">Loading…</div>
@@ -849,6 +1117,16 @@ export const Memory: React.FC = () => {
                                                             {m.source_query && <div className="text-xs text-gray-500 mt-0.5">{m.source_query}</div>}
                                                         </div>
                                                         <div className="flex items-center gap-1.5 shrink-0">
+                                                            <button onClick={() => toggleHistory(m.id)}
+                                                                title="View history"
+                                                                className="p-1.5 rounded hover:bg-gray-100 text-gray-500">
+                                                                <History className="w-3.5 h-3.5" />
+                                                            </button>
+                                                            <button onClick={() => openEditModel(m)} disabled={editingModelLoading}
+                                                                title="Edit"
+                                                                className="p-1.5 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-50">
+                                                                <Pencil className="w-3.5 h-3.5" />
+                                                            </button>
                                                             <button onClick={() => refreshModel(m.id)} disabled={modelActionId === m.id}
                                                                 title="Refresh now"
                                                                 className="p-1.5 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-50">
@@ -866,9 +1144,52 @@ export const Memory: React.FC = () => {
                                                             ? m.content
                                                             : <span className="italic text-gray-500">Still generating…</span>}
                                                     </div>
+                                                    {Array.isArray(m.tags) && m.tags.length > 0 && (
+                                                        <div className="flex flex-wrap gap-1 mt-1.5">
+                                                            {m.tags.map((t) => (
+                                                                <span key={t} className="text-[10px] bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full">{t}</span>
+                                                            ))}
+                                                        </div>
+                                                    )}
                                                     {m.last_refreshed_at && (
                                                         <div className="text-[11px] text-gray-400 mt-1.5">
                                                             Last refreshed: {new Date(m.last_refreshed_at).toLocaleString()}
+                                                        </div>
+                                                    )}
+                                                    {expandedHistoryId === m.id && (
+                                                        <div className="mt-2 border-t pt-2">
+                                                            {historyLoadingId === m.id ? (
+                                                                <div className="text-xs text-gray-500 italic">Loading history…</div>
+                                                            ) : historyError[m.id] ? (
+                                                                <div className="text-xs text-red-600">{historyError[m.id]}</div>
+                                                            ) : (historyByModel[m.id] || []).length === 0 ? (
+                                                                <div className="text-xs text-gray-500 italic">No history yet.</div>
+                                                            ) : (
+                                                                <div className="space-y-2 max-h-64 overflow-y-auto">
+                                                                    {(historyByModel[m.id] || []).map((h, i) => {
+                                                                        const key = `${m.id}:${i}`;
+                                                                        const isLong = h.content && h.content.length > 300;
+                                                                        const expanded = !!expandedHistoryEntries[key];
+                                                                        return (
+                                                                            <div key={key} className="bg-gray-50 border rounded-md p-2">
+                                                                                <div className="text-[11px] text-gray-400 mb-1">
+                                                                                    {new Date(h.refreshed_at).toLocaleString()}
+                                                                                </div>
+                                                                                <div className="text-xs text-gray-700 whitespace-pre-wrap">
+                                                                                    {isLong && !expanded ? truncate(h.content, 300) : h.content}
+                                                                                </div>
+                                                                                {isLong && (
+                                                                                    <button
+                                                                                        onClick={() => setExpandedHistoryEntries((prev) => ({ ...prev, [key]: !expanded }))}
+                                                                                        className="flex items-center gap-1 text-[11px] text-indigo-600 hover:text-indigo-800 mt-1">
+                                                                                        {expanded ? <><ChevronUp className="w-3 h-3" /> Show less</> : <><ChevronDown className="w-3 h-3" /> Show more</>}
+                                                                                    </button>
+                                                                                )}
+                                                                            </div>
+                                                                        );
+                                                                    })}
+                                                                </div>
+                                                            )}
                                                         </div>
                                                     )}
                                                 </div>
@@ -889,6 +1210,18 @@ export const Memory: React.FC = () => {
                         />
                     )}
                 </div>
+            )}
+
+            {showModelForm && selectedBankId && (
+                <MentalModelForm
+                    bankId={selectedBankId}
+                    model={editingModel}
+                    agentConfigs={agentConfigs}
+                    projects={projects}
+                    bankTags={bankTags}
+                    onClose={() => { setShowModelForm(false); setEditingModel(null); }}
+                    onSaved={onModelFormSaved}
+                />
             )}
         </div>
     );
