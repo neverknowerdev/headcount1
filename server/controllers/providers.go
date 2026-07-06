@@ -25,6 +25,73 @@ func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, providers)
 }
 
+// ListProviderPresets returns the known provider presets (OpenCode Go,
+// MiniMax, ...) so the frontend can offer them in an "Add Provider" dropdown
+// — the user only needs to pick one and paste in an API key.
+func (api *API) ListProviderPresets(w http.ResponseWriter, r *http.Request) {
+	presets, err := api.q.ListProviderPresets(r.Context())
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, presets)
+}
+
+// CreateProviderFromPreset creates a provider from a known preset and the
+// user's own API key. Unlike the manual "Add Provider" form, this runs no
+// separate test-connection probe: a successful model-catalog fetch (using
+// the supplied key) is itself sufficient validation, so the provider is
+// only created if that fetch succeeds.
+func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		PresetKey string `json:"preset_key"`
+		ApiKey    string `json:"api_key"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if req.ApiKey == "" {
+		api.respondError(w, http.StatusBadRequest, "API key is required")
+		return
+	}
+
+	preset, err := api.q.GetProviderPresetByKey(r.Context(), req.PresetKey)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "unknown provider preset")
+		return
+	}
+
+	client := &http.Client{Timeout: 20 * time.Second}
+	models, err := llmdiscovery.FetchModelsForPreset(r.Context(), client, preset.Key, preset.BaseUrl, req.ApiKey)
+	if err != nil {
+		api.respondError(w, http.StatusBadGateway, "failed to fetch models — check your API key: "+err.Error())
+		return
+	}
+	if len(models) == 0 {
+		api.respondError(w, http.StatusBadGateway, "provider returned no models")
+		return
+	}
+
+	p := db.LLMProvider{
+		Name:            preset.Name,
+		BaseUrl:         preset.BaseUrl,
+		ApiKey:          req.ApiKey,
+		ProviderType:    preset.ProviderType,
+		DefaultModel:    models[0],
+		SupportedModels: strings.Join(models, ","),
+		PresetKey:       preset.Key,
+		Enabled:         true,
+	}
+	if err := api.db.Create(&p).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	settings := LoadSettings()
+	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
+	api.respondJSON(w, http.StatusCreated, p)
+}
+
 func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.Atoi(idStr)
@@ -109,11 +176,13 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, provider)
 }
 
-// RediscoverProviderModels re-fetches a builtin provider's free-model
-// catalog on demand. Unlike the automatic background/daily refresh (which
-// never overwrites an already-set DefaultModel), this always sets the
-// default to the top of the freshly ranked list — the whole point of a user
-// explicitly asking to re-discover models is to get the current best pick.
+// RediscoverProviderModels re-fetches a provider's model catalog on demand —
+// either a builtin free provider's public catalog, or a preset-derived
+// provider's authenticated catalog (using its saved API key). Unlike the
+// automatic background/daily refresh (which never overwrites an
+// already-set DefaultModel), this always sets the default to the top of
+// the freshly fetched list — the whole point of a user explicitly asking
+// to re-discover models is to get the current best/full pick.
 func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request) {
 	idStr := chi.URLParam(r, "id")
 	id, err := strconv.Atoi(idStr)
@@ -127,20 +196,28 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
-	if !provider.Builtin {
-		api.respondError(w, http.StatusBadRequest, "only built-in providers support model re-discovery")
-		return
-	}
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	var models []string
-	switch provider.Name {
-	case db.ProviderNameOpenRouter:
-		models, err = llmdiscovery.FetchOpenRouterFreeModels(r.Context(), client)
-	case db.ProviderNameOpenCodeZen:
-		models, err = llmdiscovery.FetchOpenCodeZenFreeModels(r.Context(), client)
+	switch {
+	case provider.Builtin:
+		switch provider.Name {
+		case db.ProviderNameOpenRouter:
+			models, err = llmdiscovery.FetchOpenRouterFreeModels(r.Context(), client)
+		case db.ProviderNameOpenCodeZen:
+			models, err = llmdiscovery.FetchOpenCodeZenFreeModels(r.Context(), client)
+		default:
+			api.respondError(w, http.StatusBadRequest, "unrecognized built-in provider")
+			return
+		}
+	case provider.PresetKey != "":
+		if provider.ApiKey == "" {
+			api.respondError(w, http.StatusBadRequest, "add an API key before re-discovering models")
+			return
+		}
+		models, err = llmdiscovery.FetchModelsForPreset(r.Context(), client, provider.PresetKey, provider.BaseUrl, provider.ApiKey)
 	default:
-		api.respondError(w, http.StatusBadRequest, "unrecognized built-in provider")
+		api.respondError(w, http.StatusBadRequest, "only built-in or preset-based providers support model re-discovery")
 		return
 	}
 	if err != nil {
@@ -148,7 +225,7 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	if len(models) == 0 {
-		api.respondError(w, http.StatusBadGateway, "provider returned no free models")
+		api.respondError(w, http.StatusBadGateway, "provider returned no models")
 		return
 	}
 

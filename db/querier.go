@@ -70,6 +70,12 @@ type LLMProviderQuerier interface {
 	ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
 }
 
+type ProviderPresetQuerier interface {
+	ListProviderPresets(ctx context.Context) ([]ProviderPreset, error)
+	GetProviderPresetByKey(ctx context.Context, key string) (ProviderPreset, error)
+	EnsureProviderPresets(ctx context.Context) error
+}
+
 type SkillQuerier interface {
 	CreateSkill(ctx context.Context, s Skill) (Skill, error)
 }
@@ -93,6 +99,7 @@ type Querier interface {
 	AttachmentQuerier
 	RunQuerier
 	LLMProviderQuerier
+	ProviderPresetQuerier
 	SkillQuerier
 	SprintQuerier
 	ProxyRequestLogQuerier

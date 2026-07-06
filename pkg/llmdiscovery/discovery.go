@@ -92,7 +92,7 @@ func isOpenRouterFree(m openRouterModel) bool {
 // returns the IDs of models that cost nothing to use.
 func FetchOpenRouterFreeModels(ctx context.Context, client *http.Client) ([]string, error) {
 	var resp openRouterModelsResponse
-	if err := fetchJSONWithRetry(ctx, client, db.OpenRouterBaseURL+"/models", &resp); err != nil {
+	if err := fetchJSONWithRetry(ctx, client, db.OpenRouterBaseURL+"/models", "", &resp); err != nil {
 		return nil, fmt.Errorf("fetch OpenRouter models: %w", err)
 	}
 	var free []string
@@ -117,7 +117,7 @@ func isOpenCodeZenFree(id string) bool {
 // returns the IDs of models that are free to use.
 func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]string, error) {
 	var resp openAIModelsResponse
-	if err := fetchJSONWithRetry(ctx, client, db.OpenCodeZenBaseURL+"/models", &resp); err != nil {
+	if err := fetchJSONWithRetry(ctx, client, db.OpenCodeZenBaseURL+"/models", "", &resp); err != nil {
 		return nil, fmt.Errorf("fetch OpenCode Zen models: %w", err)
 	}
 	var free []string
@@ -127,6 +127,57 @@ func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]str
 		}
 	}
 	return sortByPriority(free, fallbackOpenCodeZenFreeModels), nil
+}
+
+// PresetDiscoverer knows how to fetch the live model catalog for a provider
+// created from a db.ProviderPreset (OpenCode Go, MiniMax, ...), given the
+// user's own API key. Unlike the free builtin fetchers above, these presets
+// are ordinary paid providers: there's no "free" subset to filter down to,
+// and the endpoint requires auth. Most presets share the standard
+// OpenAI-compatible /models shape (genericPresetDiscoverer); a preset whose
+// endpoint deviates from that can register its own implementation in
+// presetDiscoverers instead of special-casing FetchModelsForPreset.
+type PresetDiscoverer interface {
+	FetchModels(ctx context.Context, client *http.Client, baseURL, apiKey string) ([]string, error)
+}
+
+type genericPresetDiscoverer struct{}
+
+func (genericPresetDiscoverer) FetchModels(ctx context.Context, client *http.Client, baseURL, apiKey string) ([]string, error) {
+	if apiKey == "" {
+		return nil, errors.New("an API key is required to discover this provider's models")
+	}
+	var resp openAIModelsResponse
+	if err := fetchJSONWithRetry(ctx, client, baseURL+"/models", apiKey, &resp); err != nil {
+		return nil, fmt.Errorf("fetch models: %w", err)
+	}
+	ids := make([]string, 0, len(resp.Data))
+	for _, m := range resp.Data {
+		ids = append(ids, m.ID)
+	}
+	sort.Strings(ids)
+	return ids, nil
+}
+
+// presetDiscoverers maps a ProviderPreset's Key to the discoverer that knows
+// how to fetch its catalog. New presets default to genericPresetDiscoverer —
+// only add an entry here if a preset's /models endpoint needs bespoke
+// handling.
+var presetDiscoverers = map[string]PresetDiscoverer{
+	db.ProviderPresetOpenCodeGo: genericPresetDiscoverer{},
+	db.ProviderPresetMiniMax:    genericPresetDiscoverer{},
+}
+
+// FetchModelsForPreset fetches the model catalog for a provider created from
+// a preset, dispatching to whichever PresetDiscoverer is registered for
+// presetKey (falling back to the generic OpenAI-compatible fetch for
+// presets that don't need special handling).
+func FetchModelsForPreset(ctx context.Context, client *http.Client, presetKey, baseURL, apiKey string) ([]string, error) {
+	d, ok := presetDiscoverers[presetKey]
+	if !ok {
+		d = genericPresetDiscoverer{}
+	}
+	return d.FetchModels(ctx, client, baseURL, apiKey)
 }
 
 // sortByPriority orders ids so that models appearing in priority come first,
@@ -290,7 +341,10 @@ const fetchMaxAttempts = 3
 // fetchJSONWithRetry GETs url and decodes the JSON body into out, retrying
 // transient failures (network errors, 429, 5xx) with exponential backoff.
 // Non-transient failures (4xx other than 429, malformed JSON) fail fast.
-func fetchJSONWithRetry(ctx context.Context, client *http.Client, url string, out interface{}) error {
+// apiKey is sent as a Bearer token when non-empty; the free-catalog fetchers
+// (OpenRouter, OpenCode Zen) call this with an empty key since their public
+// /models endpoints need no auth.
+func fetchJSONWithRetry(ctx context.Context, client *http.Client, url string, apiKey string, out interface{}) error {
 	var lastErr error
 	for attempt := 0; attempt < fetchMaxAttempts; attempt++ {
 		if attempt > 0 {
@@ -302,7 +356,7 @@ func fetchJSONWithRetry(ctx context.Context, client *http.Client, url string, ou
 			}
 		}
 
-		err := doFetchJSON(ctx, client, url, out)
+		err := doFetchJSON(ctx, client, url, apiKey, out)
 		if err == nil {
 			return nil
 		}
@@ -323,12 +377,15 @@ func isRetryable(err error) bool {
 	return errors.As(err, &ue)
 }
 
-func doFetchJSON(ctx context.Context, client *http.Client, reqURL string, out interface{}) error {
+func doFetchJSON(ctx context.Context, client *http.Client, reqURL string, apiKey string, out interface{}) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, reqURL, nil)
 	if err != nil {
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+	}
 
 	resp, err := client.Do(req)
 	if err != nil {

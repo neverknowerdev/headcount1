@@ -80,6 +80,7 @@ func main() {
 		&db.Project{},
 		&db.Sprint{},
 		&db.LLMProvider{},
+		&db.ProviderPreset{},
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
@@ -117,6 +118,14 @@ func main() {
 	}
 	if err := llmdiscovery.SeedFallbackModels(context.Background(), db.New(database)); err != nil {
 		log.Printf("Warning: failed to seed fallback model catalog: %v", err)
+	}
+
+	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
+	// pick from a dropdown when adding a provider. Unlike the builtin free
+	// providers above, these don't become actual LLMProvider rows until a
+	// user picks one and supplies an API key.
+	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed provider presets: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})

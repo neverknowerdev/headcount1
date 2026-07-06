@@ -58,7 +58,7 @@ func TestFetchOpenRouterFreeModels_FiltersFreePricing(t *testing.T) {
 func fetchOpenRouterFreeModelsFromURL(t *testing.T, url string) ([]string, error) {
 	t.Helper()
 	var resp openRouterModelsResponse
-	if err := fetchJSONWithRetry(context.Background(), http.DefaultClient, url, &resp); err != nil {
+	if err := fetchJSONWithRetry(context.Background(), http.DefaultClient, url, "", &resp); err != nil {
 		return nil, err
 	}
 	var free []string
@@ -95,7 +95,7 @@ func TestFetchOpenCodeZenFreeModels_FiltersByNameHeuristic(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	require.NoError(t, fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL+"/models", &resp))
+	require.NoError(t, fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL+"/models", "", &resp))
 	var free []string
 	for _, m := range resp.Data {
 		if isOpenCodeZenFree(m.ID) {
@@ -103,6 +103,45 @@ func TestFetchOpenCodeZenFreeModels_FiltersByNameHeuristic(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{"big-pickle", "minimax-m2.5-free"}, free)
+}
+
+func TestFetchModelsForPreset_RequiresApiKey(t *testing.T) {
+	_, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, "https://example.com", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "API key is required")
+}
+
+func TestFetchModelsForPreset_SendsBearerAuthAndReturnsFullUnfilteredCatalog(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/models", r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "MiniMax-M3"},
+				{"id": "MiniMax-Text-01"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer sk-test-key", gotAuth)
+	// No free/paid filtering for presets — everything the endpoint returns
+	// comes back, alphabetized.
+	assert.Equal(t, []string{"MiniMax-M3", "MiniMax-Text-01"}, models)
+}
+
+func TestFetchModelsForPreset_UnknownKeyFallsBackToGenericDiscoverer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "some-model"}}})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, "some-future-preset", srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"some-model"}, models)
 }
 
 func TestFetchJSONWithRetry_RetriesOn5xxThenSucceeds(t *testing.T) {
@@ -118,7 +157,7 @@ func TestFetchJSONWithRetry_RetriesOn5xxThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
 	assert.Equal(t, "ok", resp.Data[0].ID)
@@ -136,7 +175,7 @@ func TestFetchJSONWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
@@ -150,7 +189,7 @@ func TestFetchJSONWithRetry_DoesNotRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.Error(t, err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
 	assert.Contains(t, err.Error(), "404")
@@ -165,7 +204,7 @@ func TestFetchJSONWithRetry_ExhaustsRetriesAndReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.Error(t, err)
 	assert.Equal(t, int32(fetchMaxAttempts), atomic.LoadInt32(&calls))
 	assert.Contains(t, err.Error(), "all retries exhausted")
@@ -191,7 +230,7 @@ func TestFetchJSONWithRetry_RetriesOnNetworkError(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
@@ -213,7 +252,7 @@ func TestFetchJSONWithRetry_RespectsContextCancellation(t *testing.T) {
 
 	var resp openAIModelsResponse
 	start := time.Now()
-	err := fetchJSONWithRetry(ctx, http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(ctx, http.DefaultClient, srv.URL, "", &resp)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)

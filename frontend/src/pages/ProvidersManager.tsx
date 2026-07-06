@@ -64,6 +64,16 @@ export const ProvidersManager: React.FC = () => {
     // this tracks which cards the user has expanded to see the full list.
     const [expandedModelsIds, setExpandedModelsIds] = useState<Set<number>>(new Set());
 
+    // Known provider presets (OpenCode Go, MiniMax, ...) a user can pick
+    // from a dropdown instead of filling in the full custom-provider form —
+    // just an API key, and the model catalog is discovered automatically.
+    const [providerPresets, setProviderPresets] = useState<any[]>([]);
+    const [isPresetPickerOpen, setIsPresetPickerOpen] = useState(false);
+    const [selectedPresetKey, setSelectedPresetKey] = useState('custom');
+    const [presetApiKey, setPresetApiKey] = useState('');
+    const [presetError, setPresetError] = useState('');
+    const [isPresetSaving, setIsPresetSaving] = useState(false);
+
     const fetchProviders = async () => {
         try {
             const res = await axios.get('/api/providers');
@@ -75,6 +85,7 @@ export const ProvidersManager: React.FC = () => {
 
     useEffect(() => {
         fetchProviders();
+        axios.get('/api/providers/presets').then(res => setProviderPresets(res.data || [])).catch(() => {});
     }, []);
 
     const testSingleModel = async (model: string, base_url: string, api_key: string, provider_type: string, provider_id?: number | null) => {
@@ -234,6 +245,43 @@ export const ProvidersManager: React.FC = () => {
         });
     };
 
+    const openAddProviderPicker = () => {
+        setSelectedPresetKey(providerPresets[0]?.key || 'custom');
+        setPresetApiKey('');
+        setPresetError('');
+        setIsPresetPickerOpen(true);
+    };
+
+    const closeAddProviderPicker = () => {
+        setIsPresetPickerOpen(false);
+        setPresetApiKey('');
+        setPresetError('');
+    };
+
+    const handleContinueFromPicker = () => {
+        if (selectedPresetKey === 'custom') {
+            setIsPresetPickerOpen(false);
+            handleOpenModal();
+        }
+    };
+
+    const handleCreateFromPreset = async () => {
+        setIsPresetSaving(true);
+        setPresetError('');
+        try {
+            const res = await axios.post('/api/providers/from-preset', {
+                preset_key: selectedPresetKey,
+                api_key: presetApiKey,
+            });
+            setProviders(prev => [...prev, res.data]);
+            closeAddProviderPicker();
+        } catch (e: any) {
+            setPresetError(e.response?.data?.error || 'Failed to add provider');
+        } finally {
+            setIsPresetSaving(false);
+        }
+    };
+
     const openActivateModal = (provider: any) => {
         setActivateProvider(provider);
         setActivateApiKey('');
@@ -308,7 +356,7 @@ export const ProvidersManager: React.FC = () => {
             <div className="flex justify-between items-center">
                 <h1 className="text-2xl font-bold">LLM Providers</h1>
                 <button
-                    onClick={() => handleOpenModal()}
+                    onClick={openAddProviderPicker}
                     className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 shadow-sm"
                 >
                     <Plus size={16} className="mr-2" /> Add Provider
@@ -334,25 +382,25 @@ export const ProvidersManager: React.FC = () => {
                                 <button onClick={() => handleTest(p)} className="text-blue-500 hover:text-blue-700" title="Test Connection">
                                     <Zap size={18} />
                                 </button>
+                                {(p.builtin || p.preset_key) && (
+                                    <button
+                                        onClick={() => handleRediscover(p)}
+                                        disabled={rediscoveringId === p.id}
+                                        className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
+                                        title="Re-discover models"
+                                    >
+                                        <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
+                                    </button>
+                                )}
                                 {p.builtin ? (
-                                    <>
-                                        <button
-                                            onClick={() => handleRediscover(p)}
-                                            disabled={rediscoveringId === p.id}
-                                            className="text-gray-500 hover:text-gray-700 disabled:opacity-50"
-                                            title="Re-discover models"
-                                        >
-                                            <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
-                                        </button>
-                                        <button
-                                            onClick={() => handleToggleEnabled(p)}
-                                            disabled={togglingId === p.id}
-                                            className={`disabled:opacity-50 ${p.enabled ? 'text-green-600 hover:text-green-800' : 'text-gray-400 hover:text-gray-600'}`}
-                                            title={p.enabled ? 'Deactivate (pause)' : 'Activate (resume)'}
-                                        >
-                                            {p.enabled ? <Pause size={18} /> : <Play size={18} />}
-                                        </button>
-                                    </>
+                                    <button
+                                        onClick={() => handleToggleEnabled(p)}
+                                        disabled={togglingId === p.id}
+                                        className={`disabled:opacity-50 ${p.enabled ? 'text-green-600 hover:text-green-800' : 'text-gray-400 hover:text-gray-600'}`}
+                                        title={p.enabled ? 'Deactivate (pause)' : 'Activate (resume)'}
+                                    >
+                                        {p.enabled ? <Pause size={18} /> : <Play size={18} />}
+                                    </button>
                                 ) : (
                                     <>
                                         <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700" title="Edit">
@@ -397,6 +445,68 @@ export const ProvidersManager: React.FC = () => {
                     </div>
                 ))}
             </div>
+
+            {isPresetPickerOpen && (
+                <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
+                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-md">
+                        <h2 className="text-xl font-bold mb-4">Add Provider</h2>
+                        <label className="block text-sm font-medium mb-1">Provider</label>
+                        <select
+                            value={selectedPresetKey}
+                            onChange={e => { setSelectedPresetKey(e.target.value); setPresetError(''); }}
+                            className="w-full border rounded p-2 mb-4"
+                        >
+                            {providerPresets.map(preset => (
+                                <option key={preset.key} value={preset.key}>{preset.name}</option>
+                            ))}
+                            <option value="custom">Custom Provider (enter manually)</option>
+                        </select>
+
+                        {selectedPresetKey === 'custom' ? (
+                            <p className="text-sm text-gray-600 mb-4">
+                                Enter the base URL, API key, and model(s) by hand.
+                            </p>
+                        ) : (
+                            <>
+                                <label className="block text-sm font-medium mb-1">API Key</label>
+                                <input
+                                    type="password"
+                                    value={presetApiKey}
+                                    onChange={e => setPresetApiKey(e.target.value)}
+                                    className="w-full border rounded p-2 mb-2"
+                                    placeholder="sk-..."
+                                />
+                                <p className="text-xs text-gray-500 mb-4">
+                                    The base URL and available models are discovered automatically once the key is saved.
+                                </p>
+                            </>
+                        )}
+
+                        {presetError && (
+                            <p className="text-sm text-red-600 mb-4">{presetError}</p>
+                        )}
+
+                        <div className="flex justify-end gap-2">
+                            <button onClick={closeAddProviderPicker} className="px-4 py-2 rounded border text-gray-700 hover:bg-gray-50">
+                                Cancel
+                            </button>
+                            {selectedPresetKey === 'custom' ? (
+                                <button onClick={handleContinueFromPicker} className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700">
+                                    Continue
+                                </button>
+                            ) : (
+                                <button
+                                    onClick={handleCreateFromPreset}
+                                    disabled={!presetApiKey || isPresetSaving}
+                                    className="px-4 py-2 rounded bg-indigo-600 text-white hover:bg-indigo-700 disabled:opacity-50"
+                                >
+                                    {isPresetSaving ? 'Adding...' : 'Add Provider'}
+                                </button>
+                            )}
+                        </div>
+                    </div>
+                </div>
+            )}
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
