@@ -1,5 +1,13 @@
 # Memory Layer Design Review
 
+> **Status update:** Findings #1 (bank consolidation), #4 (bank config), #5 (observations in
+> recall), #6 (token budgets), #3 (mental models) and #7 (export of config/mental models) are
+> implemented — see [`memory-layer-upgrade-plan.md`](./memory-layer-upgrade-plan.md) for the
+> design and `pkg/hindsight/service.go`, `mentalmodels.go`, `migrate.go` for the code. Finding
+> #2 (retain full session conversations, not just outcomes) remains open. The tables/sections
+> below are kept as originally written for historical context; treat "our implementation"
+> descriptions as pre-upgrade unless the status note above says otherwise.
+
 A review of our Hindsight integration (`pkg/hindsight`, engine + server wiring) against the
 official **hindsight-architect** skill
 (<https://github.com/vectorize-io/hindsight/blob/main/skills/hindsight-architect/SKILL.md>),
