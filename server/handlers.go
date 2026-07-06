@@ -51,6 +51,14 @@ func (s *Server) InitPendingCodegraphServers(ctx context.Context) {
 	api.InitPendingCodegraphServers(ctx)
 }
 
+// InitPendingMempalaceProjects runs `mempalace init` for any project that
+// doesn't have it done yet and whose workspace is on disk. Must run after
+// EnsureCompanyPalaces so mempalace availability/servers are known.
+func (s *Server) InitPendingMempalaceProjects(ctx context.Context) {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api.InitPendingMempalaceProjects(ctx)
+}
+
 // EnsureCompanyPalaces provisions memory palaces for all companies. Runs
 // after the setup script so mempalace availability is known.
 func (s *Server) EnsureCompanyPalaces(ctx context.Context) {

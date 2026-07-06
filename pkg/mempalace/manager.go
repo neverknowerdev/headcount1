@@ -257,6 +257,42 @@ func CloseAll() {
 	}
 }
 
+// InitProjectAsync runs `mempalace init` for a project workspace in a
+// background goroutine, then chains into MineProjectAsync on success. Init
+// only writes mempalace.yaml (+ entity registry) into workspaceDir — it never
+// touches the chroma palace itself, so unlike `mine` it is safe to run as a
+// plain CLI subprocess alongside the long-lived mempalace-mcp process without
+// fighting over the palace writer lease (see MineProjectAsync's comment).
+// --yes/--no-llm/--auto-mine=false keep it non-interactive and local-only;
+// mining is deliberately left to the existing MCP-backed MineProjectAsync
+// path so both go through their respective safe channels.
+func InitProjectAsync(q *db.Queries, server db.MCPServer, company db.Company, project db.Project, workspaceDir string) {
+	if !Available() || workspaceDir == "" {
+		return
+	}
+	go func() {
+		if _, err := os.Stat(workspaceDir); err != nil {
+			log.Printf("mempalace: init skipped for project %q, workspace not on disk yet: %v", project.Name, err)
+			return
+		}
+		log.Printf("mempalace: running init for project %q...", project.Name)
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+		defer cancel()
+		cmd := exec.CommandContext(ctx, setup.MempalaceCLIPath(),
+			"--palace", PalacePath(company), "init", workspaceDir, "--yes", "--no-llm")
+		out, err := cmd.CombinedOutput()
+		if err != nil {
+			log.Printf("mempalace: init failed for project %q: %v — %s", project.Name, err, tail(string(out), 500))
+			return
+		}
+		if err := q.SetMempalaceInitDone(context.Background(), project.ID, true); err != nil {
+			log.Printf("mempalace: init succeeded for project %q but failed to persist flag: %v", project.Name, err)
+		}
+		log.Printf("mempalace: init completed for project %q", project.Name)
+		MineProjectAsync(server, company, project, workspaceDir)
+	}()
+}
+
 // MineProjectAsync indexes a project workspace into the company palace in a
 // background goroutine (codegraph-init pattern). Failures are logged only —
 // mining is an enrichment, not a dependency of memory availability.

@@ -144,11 +144,12 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		api.startCodegraphInit(proj.ID, newCGServer.ID, repoPath)
 	}
 
-	// Mine the project workspace into the company's memory palace in the
-	// background (best-effort; requires mempalace + an on-disk repo).
+	// Init (room detection) then mine the project workspace into the
+	// company's memory palace in the background (best-effort; requires
+	// mempalace + an on-disk repo).
 	if mempalace.Available() {
 		if memServer, memErr := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); memErr == nil {
-			mempalace.MineProjectAsync(memServer, comp, proj, repoPath)
+			mempalace.InitProjectAsync(api.q, memServer, comp, proj, repoPath)
 		}
 	}
 
@@ -254,6 +255,16 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		if cgErr == nil {
 			api.startCodegraphInit(project.ID, cgSrv.ID, repoPath)
 		}
+
+		// Repo content changed (new clone or re-pointed URL) — re-run
+		// mempalace init so room detection reflects the current folder
+		// structure, then re-mine.
+		project.MempalaceInitDone = false
+		if mempalace.Available() {
+			if memServer, memErr := mempalace.EnsureCompanyServer(r.Context(), api.q, comp); memErr == nil {
+				mempalace.InitProjectAsync(api.q, memServer, comp, project, repoPath)
+			}
+		}
 	}
 
 	project, err = api.q.UpdateProject(r.Context(), project)
@@ -352,6 +363,40 @@ func (api *API) InitPendingCodegraphServers(ctx context.Context) {
 			continue
 		}
 		api.startCodegraphInit(pair.Project.ID, pair.Server.ID, pair.Server.WorkDir)
+	}
+}
+
+// InitPendingMempalaceProjects finds every project without a completed
+// `mempalace init` (new projects created before this flag existed, or ones
+// whose init previously failed) and kicks off InitProjectAsync for each.
+// Intended to run once at startup, mirroring InitPendingCodegraphServers.
+func (api *API) InitPendingMempalaceProjects(ctx context.Context) {
+	if !mempalace.Available() {
+		return
+	}
+	projects, err := api.q.ListProjectsPendingMempalaceInit(ctx)
+	if err != nil {
+		log.Printf("mempalace startup sweep: failed to list pending: %v", err)
+		return
+	}
+	if len(projects) == 0 {
+		return
+	}
+	log.Printf("mempalace startup sweep: %d project(s) pending init", len(projects))
+	settings := LoadSettings()
+	fsManager := filesystem.NewManager(settings.BasePath)
+	for _, proj := range projects {
+		repoPath := fsManager.GetProjectRepoPath(proj.Company, proj)
+		if _, statErr := os.Stat(repoPath); os.IsNotExist(statErr) {
+			log.Printf("mempalace startup: workspace not on disk yet for project %d, skipping", proj.ID)
+			continue
+		}
+		memServer, memErr := mempalace.EnsureCompanyServer(ctx, api.q, proj.Company)
+		if memErr != nil {
+			log.Printf("mempalace startup: failed to get palace server for project %d: %v", proj.ID, memErr)
+			continue
+		}
+		mempalace.InitProjectAsync(api.q, memServer, proj.Company, proj, repoPath)
 	}
 }
 

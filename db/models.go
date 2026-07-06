@@ -22,8 +22,13 @@ type Project struct {
 	WorkspaceFolder string    `json:"workspace_folder"`
 	RepositoryUrl   string    `json:"repository_url"`
 	IsExternal      bool      `json:"is_external" gorm:"not null;default:false"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// MempalaceInitDone tracks whether `mempalace init` has been run for this
+	// project's workspace (writes mempalace.yaml so mining routes content into
+	// project-shaped rooms instead of generic keyword-bucket rooms). Reset to
+	// false to force re-init on next startup sweep.
+	MempalaceInitDone bool      `json:"mempalace_init_done" gorm:"not null;default:false"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
 }
 
 type Sprint struct {

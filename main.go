@@ -145,6 +145,9 @@ func main() {
 		// Memory palaces can only be provisioned once setup has decided
 		// whether mempalace is available.
 		srv.EnsureCompanyPalaces(context.Background())
+		// Sweep for projects missing `mempalace init` (new projects, or ones
+		// whose init previously failed) so their rooms get set up before mining.
+		srv.InitPendingMempalaceProjects(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 	go srv.StartMemoryActivityPurge(context.Background())
