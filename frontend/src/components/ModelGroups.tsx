@@ -115,7 +115,7 @@ const WindowCell: React.FC<{ w: MemberWindow }> = ({ w }) => {
     );
 };
 
-export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
+export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> = ({ providers, onChange }) => {
     const [groups, setGroups] = useState<any[]>([]);
     const [stats, setStats] = useState<Record<number, GroupStats>>({});
     const [isModalOpen, setIsModalOpen] = useState(false);
@@ -197,6 +197,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
             }
             setIsModalOpen(false);
             fetchGroups();
+            onChange?.();
         } catch (e: any) {
             setSaveError(e.response?.data?.error || 'Save failed');
         } finally {
@@ -209,6 +210,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
         try {
             await axios.delete(`/api/model-groups/${g.id}`);
             fetchGroups();
+            onChange?.();
         } catch (e) {
             console.error(e);
         }

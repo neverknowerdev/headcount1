@@ -23,7 +23,7 @@ const toFormValue = (s: any): ProviderOrGroupValue => ({
     model: s?.model || '',
 });
 
-export const DefaultModelSettings: React.FC<{ providers: any[] }> = ({ providers }) => {
+export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: number }> = ({ providers, refreshSignal }) => {
     const [settings, setSettings] = useState<any[]>([]);
     const [modelGroups, setModelGroups] = useState<any[]>([]);
     const [forms, setForms] = useState<Record<string, ProviderOrGroupValue>>({});
@@ -46,9 +46,13 @@ export const DefaultModelSettings: React.FC<{ providers: any[] }> = ({ providers
         }
     }, []);
 
+    // refreshSignal changes whenever a model group is created/edited/deleted
+    // elsewhere on the page, so a purpose pointed at a deleted group shows
+    // "Session's own model" immediately (the backend already reset it via an
+    // ON DELETE SET NULL foreign key) instead of only after a page reload.
     useEffect(() => {
         fetchAll();
-    }, [fetchAll]);
+    }, [fetchAll, refreshSignal]);
 
     const handleSave = async (purpose: string) => {
         setSavingPurpose(purpose);

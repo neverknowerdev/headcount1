@@ -51,6 +51,12 @@ export const ProvidersManager: React.FC = () => {
     const [testResult, setTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
     const [isSaving, setIsSaving] = useState(false);
     const [testingProgress, setTestingProgress] = useState<string>('');
+    // Bumped whenever ModelGroups creates/edits/deletes a group, so
+    // DefaultModelSettings (a sibling section) refetches without a page
+    // reload — e.g. deleting a group that a purpose pointed at resets that
+    // purpose to "Session's own model" server-side, and this makes the UI
+    // reflect it immediately.
+    const [modelGroupsVersion, setModelGroupsVersion] = useState(0);
 
     // Built-in providers (OpenRouter/OpenCode free models) get a simplified
     // "Activate" flow instead of the generic edit modal — their model list
@@ -454,9 +460,9 @@ export const ProvidersManager: React.FC = () => {
                 ))}
             </div>
 
-            <ModelGroups providers={providers} />
+            <ModelGroups providers={providers} onChange={() => setModelGroupsVersion(v => v + 1)} />
 
-            <DefaultModelSettings providers={providers} />
+            <DefaultModelSettings providers={providers} refreshSignal={modelGroupsVersion} />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
