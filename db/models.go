@@ -46,8 +46,48 @@ type LLMProvider struct {
 	ProviderType    string    `json:"provider_type"`
 	DefaultModel    string    `json:"default_model"`
 	SupportedModels string    `json:"supported_models"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	// Builtin marks providers seeded automatically on startup (e.g. OpenRouter,
+	// OpenCode Zen) rather than added by hand. Used to know which providers'
+	// model catalogs are safe to refresh from a live discovery fetch.
+	Builtin bool `json:"builtin" gorm:"not null;default:false"`
+	// Enabled lets a builtin provider be turned off without deleting it —
+	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProviders
+	// just recreates it (blank) on the next startup. Defaults to true so
+	// existing/freshly-seeded providers stay usable.
+	Enabled bool `json:"enabled" gorm:"not null;default:true"`
+	// PresetKey records which ProviderPreset (if any) this provider was
+	// created from — e.g. "opencode-go", "minimax". Empty for the builtin
+	// free providers and for fully custom ones. Lets RediscoverProviderModels
+	// route to the right (authenticated) discovery logic without having to
+	// match on Name/BaseUrl.
+	PresetKey string `json:"preset_key" gorm:"default:''"`
+	// ProviderName is a stable, non-editable identifier for a builtin free
+	// provider ("OpenRouter", "OpenCode") — used to route to the right
+	// discovery logic instead of matching the user-facing Name field, which
+	// UpdateProvider allows changing. Empty for presets and fully custom
+	// providers, which use PresetKey/BaseUrl matching instead.
+	ProviderName string    `json:"provider_name" gorm:"default:''"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// ProviderPreset is a known third-party LLM gateway a user can pick from a
+// dropdown when adding a provider, instead of typing in a base URL and
+// provider type from scratch — they only need to paste in their own API
+// key. Unlike the builtin free providers (OpenRouter, OpenCode Zen), a
+// preset isn't auto-created at startup; it only becomes an actual
+// LLMProvider row once the user picks it and supplies a key. Add a new
+// provider by adding a row here (see EnsureProviderPresets), not by writing
+// bespoke fetch code — unless its /models endpoint needs special handling,
+// see pkg/llmdiscovery.PresetDiscoverer.
+type ProviderPreset struct {
+	ID           int32     `json:"id" gorm:"primaryKey"`
+	Key          string    `json:"key" gorm:"uniqueIndex;not null"`
+	Name         string    `json:"name" gorm:"not null"`
+	BaseUrl      string    `json:"base_url" gorm:"not null"`
+	ProviderType string    `json:"provider_type" gorm:"not null"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 type Agent struct {

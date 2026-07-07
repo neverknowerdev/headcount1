@@ -171,10 +171,13 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Route("/providers", func(r chi.Router) {
 		r.Get("/", api.ListProviders)
+		r.Get("/presets", api.ListProviderPresets)
 		r.Post("/", api.CreateProvider)
+		r.Post("/from-preset", api.CreateProviderFromPreset)
 		r.Put("/{id}", api.UpdateProvider)
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
+		r.Post("/{id}/rediscover", api.RediscoverProviderModels)
 	})
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {

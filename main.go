@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -79,6 +80,7 @@ func main() {
 		&db.Project{},
 		&db.Sprint{},
 		&db.LLMProvider{},
+		&db.ProviderPreset{},
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
@@ -105,6 +107,24 @@ func main() {
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
+
+	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
+	// present. Their model catalog (and DefaultModel) is populated purely
+	// from a live fetch in the background — no hardcoded model list — so a
+	// slow/unreachable host never delays server startup, and a provider is
+	// simply left blank until the first successful fetch completes.
+	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
+	}
+	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
+	// pick from a dropdown when adding a provider. Unlike the builtin free
+	// providers above, these don't become actual LLMProvider rows until a
+	// user picks one and supplies an API key.
+	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed provider presets: %v", err)
+	}
+	go refreshBuiltinLLMProviderModels(database)
+	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
 
 	// Repair codegraph servers whose project_id was not set on creation.
 	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {
@@ -246,5 +266,54 @@ func recoverStaleRuns(database *gorm.DB) {
 		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
 		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
+	}
+}
+
+// refreshBuiltinLLMProviderModels fetches the current free-model catalog for
+// the built-in OpenRouter/OpenCode Zen providers and, once at least one has a
+// usable default model, points the app's cheap "utility model" setting at it
+// if the user hasn't already chosen one. Runs in a goroutine so a slow or
+// unreachable host never delays server startup; RefreshBuiltinProviderModels
+// itself retries transient failures and falls back to a curated model list,
+// so this always leaves the providers usable.
+func refreshBuiltinLLMProviderModels(database *gorm.DB) {
+	ctx := context.Background()
+	q := db.New(database)
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	if err := llmdiscovery.RefreshBuiltinProviderModels(ctx, q, client); err != nil {
+		log.Printf("Warning: %v", err)
+	}
+	ensureDefaultUtilityModel(q)
+}
+
+// ensureDefaultUtilityModel points the app-level cheap/utility LLM at a
+// built-in free model on first boot, so a fresh install has a working
+// utility model (used for artifact Q&A, commit messages, ...) without any
+// manual setup. Never overwrites a utility model the user already picked.
+func ensureDefaultUtilityModel(q *db.Queries) {
+	settings := endpoints.LoadSettings()
+	if settings.UtilityModel != "" {
+		return
+	}
+
+	providers, err := q.ListLLMProviders(context.Background())
+	if err != nil {
+		log.Printf("Warning: could not load providers to set a default utility model: %v", err)
+		return
+	}
+
+	for _, p := range providers {
+		if !p.Builtin || p.DefaultModel == "" {
+			continue
+		}
+		settings.UtilityProviderID = p.ID
+		settings.UtilityModel = p.DefaultModel
+		if err := endpoints.SaveSettings(settings); err != nil {
+			log.Printf("Warning: failed to save default utility model: %v", err)
+			return
+		}
+		log.Printf("Set default utility model to %s (provider %q)", p.DefaultModel, p.Name)
+		return
 	}
 }

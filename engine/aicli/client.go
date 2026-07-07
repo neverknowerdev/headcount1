@@ -95,22 +95,70 @@ type Usage struct {
 
 // APIErr is the error structure returned by some providers inside a 200 body.
 type APIErr struct {
-	Message string `json:"message"`
-	Type    string `json:"type"`
-	Code    string `json:"code"`
+	Message string       `json:"message"`
+	Type    string       `json:"type"`
+	Code    flexibleCode `json:"code"`
 }
 
 func (e *APIErr) Error() string {
 	return fmt.Sprintf("LLM error [%s]: %s", e.Type, e.Message)
 }
 
-// retryableError signals a transient failure that warrants a retry.
+// retryable reports whether an embedded-200-body error describes a
+// transient condition (rate limiting, provider overload/5xx) rather than a
+// hard failure (bad API key, invalid request, unknown model). Some
+// OpenAI-compatible gateways — including free-tier providers like OpenRouter,
+// which enforce a request-per-minute cap on free models — report rate limits
+// this way instead of (or in addition to) an HTTP 429 status.
+func (e *APIErr) retryable() bool {
+	t := strings.ToLower(e.Type)
+	c := strings.ToLower(string(e.Code))
+	return strings.Contains(t, "rate_limit") ||
+		strings.Contains(t, "overloaded") ||
+		strings.Contains(t, "server_error") ||
+		strings.Contains(t, "internal_error") ||
+		c == "429" ||
+		strings.Contains(c, "rate_limit") ||
+		strings.Contains(c, "overloaded")
+}
+
+// flexibleCode unmarshals an error "code" field regardless of whether the
+// provider sent it as a JSON string (e.g. "rate_limit_exceeded") or a JSON
+// number (e.g. 429) — providers are inconsistent here, and a strict string
+// field would fail to decode the entire response when a number shows up.
+type flexibleCode string
+
+func (c *flexibleCode) UnmarshalJSON(data []byte) error {
+	var s string
+	if err := json.Unmarshal(data, &s); err == nil {
+		*c = flexibleCode(s)
+		return nil
+	}
+	var n json.Number
+	if err := json.Unmarshal(data, &n); err == nil {
+		*c = flexibleCode(n.String())
+		return nil
+	}
+	// null or some other unexpected shape: leave it empty rather than
+	// failing the whole response over a cosmetic error field.
+	*c = ""
+	return nil
+}
+
+// retryableError signals a transient failure that warrants a retry: either
+// an HTTP-level failure (429, 5xx) or a network-level one (timeout,
+// connection reset, DNS failure — status left at 0).
 type retryableError struct {
 	status int
 	body   string
 }
 
-func (e *retryableError) Error() string { return fmt.Sprintf("HTTP %d: %s", e.status, e.body) }
+func (e *retryableError) Error() string {
+	if e.status == 0 {
+		return fmt.Sprintf("network error: %s", e.body)
+	}
+	return fmt.Sprintf("HTTP %d: %s", e.status, e.body)
+}
 
 // Client makes non-streaming OpenAI-compatible chat-completion requests.
 type Client struct {
@@ -119,16 +167,22 @@ type Client struct {
 	Model      string
 	HTTPClient *http.Client
 	MaxRetries int
+	// RetryBaseDelay is the base of the exponential backoff between retries:
+	// attempt N waits RetryBaseDelay*2^(N-1). Defaults to 1s (see NewClient);
+	// a zero value falls back to that default in Complete so a Client built
+	// via a bare struct literal (as some tests do) still behaves sanely.
+	RetryBaseDelay time.Duration
 }
 
 // NewClient creates a Client with sensible defaults.
 func NewClient(baseURL, apiKey, model string) *Client {
 	return &Client{
-		BaseURL:    strings.TrimRight(baseURL, "/"),
-		APIKey:     apiKey,
-		Model:      model,
-		HTTPClient: &http.Client{Timeout: 120 * time.Second},
-		MaxRetries: 3,
+		BaseURL:        strings.TrimRight(baseURL, "/"),
+		APIKey:         apiKey,
+		Model:          model,
+		HTTPClient:     &http.Client{Timeout: 120 * time.Second},
+		MaxRetries:     3,
+		RetryBaseDelay: time.Second,
 	}
 }
 
@@ -144,10 +198,18 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (*ChatResponse, 
 		return nil, nil, fmt.Errorf("marshal request: %w", err)
 	}
 
+	retryBase := c.RetryBaseDelay
+	if retryBase <= 0 {
+		retryBase = time.Second
+	}
+
 	var lastErr error
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 0 {
-			wait := time.Duration(1<<uint(attempt-1)) * time.Second
+			// Exponential backoff: 1x, 2x, 4x, 8x... retryBase on successive
+			// retries (attempt 1, 2, 3, 4...).
+			backoffMultiplier := time.Duration(1) << uint(attempt-1)
+			wait := retryBase * backoffMultiplier
 			select {
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()
@@ -193,7 +255,14 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 
 	httpResp, err := c.HTTPClient.Do(httpReq)
 	if err != nil {
-		return nil, nil, err
+		// A context we were handed was cancelled/timed out deliberately —
+		// surface that as-is rather than retrying. Anything else (connection
+		// reset, DNS failure, the HTTPClient's own request timeout, ...) is
+		// treated as a transient network error worth retrying.
+		if ctx.Err() != nil {
+			return nil, nil, ctx.Err()
+		}
+		return nil, nil, &retryableError{body: err.Error()}
 	}
 	defer httpResp.Body.Close()
 	rawBody, _ := io.ReadAll(httpResp.Body)
@@ -208,8 +277,12 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 		return nil, rawBody, fmt.Errorf("unmarshal response (status=%d): %w", httpResp.StatusCode, err)
 	}
 
-	// Detect errors embedded in a 200 body (some providers do this).
+	// Detect errors embedded in a 200 body (some providers do this, including
+	// free-tier rate limits that don't always surface as an HTTP 429).
 	if chatResp.Error != nil {
+		if chatResp.Error.retryable() {
+			return nil, rawBody, &retryableError{status: httpResp.StatusCode, body: chatResp.Error.Error()}
+		}
 		return nil, rawBody, chatResp.Error
 	}
 
