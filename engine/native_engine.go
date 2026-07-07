@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"sync"
 	"time"
@@ -656,7 +657,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// ask_artifact: verify artifact content through a separate one-shot LLM
 	// call — the artifact never enters this session's context, only the short
-	// answer does. Uses the provider's cheap utility model when configured.
+	// answer does. Uses the built-in Utility model group when configured.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
 		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question, proxyLogger)
 	}))
@@ -1419,30 +1420,35 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 }
 
 // utilityLLM resolves the provider/model pair for lightweight internal calls
-// (artifact Q&A, commit message generation) from the app settings, which may
-// point at any provider/model combination. When no utility model is
-// configured — or its provider can't be loaded — it falls back to the
-// session's own provider and model.
+// (artifact Q&A, commit message generation) from the built-in "Utility"
+// model group: its free members first, tie-broken by priority — the same
+// ordering the group gateway uses, minus live health tracking, which isn't
+// worth the bookkeeping for an infrequent one-shot call. Falls back to the
+// session's own provider and model when the group doesn't exist yet or has
+// no members configured.
 func (e *NativeEngine) utilityLLM(ctx context.Context, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
-	settings := loadSettings()
-	if settings.UtilityModel == "" {
+	group, err := e.q.GetModelGroupByKey(ctx, db.DefaultUtilityGroupSlug)
+	if err != nil {
 		return sessionProvider, sessionModel
 	}
-	if settings.UtilityProviderID != 0 && settings.UtilityProviderID != sessionProvider.ID {
-		p, err := e.q.GetLLMProvider(ctx, settings.UtilityProviderID)
-		if err != nil {
-			fmt.Printf("Warning: utility provider %d not found (%v), falling back to the session LLM\n", settings.UtilityProviderID, err)
-			return sessionProvider, sessionModel
-		}
-		return p, settings.UtilityModel
+	members := db.ExpandModelGroupMembers(group.Members)
+	if len(members) == 0 {
+		return sessionProvider, sessionModel
 	}
-	return sessionProvider, settings.UtilityModel
+	sort.SliceStable(members, func(i, j int) bool {
+		if members[i].IsFree != members[j].IsFree {
+			return members[i].IsFree
+		}
+		return members[i].Priority < members[j].Priority
+	})
+	best := members[0]
+	return best.Provider, best.Model
 }
 
 // askArtifact answers a question about one artifact via a separate one-shot
 // LLM call, so the artifact's content never enters the asking agent's
 // context — only the short answer is returned as the tool result. It uses the
-// provider's cheap UtilityModel when configured, falling back to the asking
+// built-in Utility model group when configured, falling back to the asking
 // session's model, and bills the reader call's tokens to the asking run.
 // Each reader call is logged to its own file in the run's log folder.
 func (e *NativeEngine) askArtifact(

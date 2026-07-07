@@ -126,6 +126,13 @@ func main() {
 	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed provider presets: %v", err)
 	}
+	// Seed the built-in "Memory Management" and "Utility" model groups. Each
+	// defaults to "any model" from the free OpenRouter provider, which needs
+	// no live model-catalog fetch to work, so this doesn't wait on the
+	// background refresh below.
+	if err := db.New(database).EnsureDefaultModelGroups(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed default model groups: %v", err)
+	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
 
@@ -273,10 +280,8 @@ func recoverStaleRuns(database *gorm.DB) {
 }
 
 // refreshBuiltinLLMProviderModels fetches the current free-model catalog for
-// the built-in OpenRouter/OpenCode Zen providers and, once at least one has a
-// usable default model, points the app's cheap "utility model" setting at it
-// if the user hasn't already chosen one. Runs in a goroutine so a slow or
-// unreachable host never delays server startup; RefreshBuiltinProviderModels
+// the built-in OpenRouter/OpenCode Zen providers. Runs in a goroutine so a
+// slow or unreachable host never delays server startup; RefreshBuiltinProviderModels
 // itself retries transient failures and falls back to a curated model list,
 // so this always leaves the providers usable.
 func refreshBuiltinLLMProviderModels(database *gorm.DB) {
@@ -286,43 +291,5 @@ func refreshBuiltinLLMProviderModels(database *gorm.DB) {
 
 	if err := llmdiscovery.RefreshBuiltinProviderModels(ctx, q, client); err != nil {
 		log.Printf("Warning: %v", err)
-	}
-	ensureDefaultUtilityModel(q)
-
-	// Seed the default "Memory Management" model group once the free-model
-	// catalogs are populated, so its gpt-oss* members can be resolved.
-	if err := q.EnsureDefaultModelGroups(ctx); err != nil {
-		log.Printf("Warning: failed to seed default model groups: %v", err)
-	}
-}
-
-// ensureDefaultUtilityModel points the app-level cheap/utility LLM at a
-// built-in free model on first boot, so a fresh install has a working
-// utility model (used for artifact Q&A, commit messages, ...) without any
-// manual setup. Never overwrites a utility model the user already picked.
-func ensureDefaultUtilityModel(q *db.Queries) {
-	settings := endpoints.LoadSettings()
-	if settings.UtilityModel != "" {
-		return
-	}
-
-	providers, err := q.ListLLMProviders(context.Background())
-	if err != nil {
-		log.Printf("Warning: could not load providers to set a default utility model: %v", err)
-		return
-	}
-
-	for _, p := range providers {
-		if !p.Builtin || p.DefaultModel == "" {
-			continue
-		}
-		settings.UtilityProviderID = p.ID
-		settings.UtilityModel = p.DefaultModel
-		if err := endpoints.SaveSettings(settings); err != nil {
-			log.Printf("Warning: failed to save default utility model: %v", err)
-			return
-		}
-		log.Printf("Set default utility model to %s (provider %q)", p.DefaultModel, p.Name)
-		return
 	}
 }

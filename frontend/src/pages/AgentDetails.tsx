@@ -3,6 +3,12 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
+
+// Describes one model group's members as a short label list, showing "Any
+// model" for wildcard (all_models) members instead of a blank model name.
+const describeGroupModels = (group: any): string =>
+    (group?.members || []).map((m: any) => (m.all_models ? 'Any model' : m.model)).join(', ') || 'no models configured';
+
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -216,7 +222,7 @@ export const AgentDetails: React.FC = () => {
                                     <p className="text-sm text-gray-500 mb-1">{agent.model_group_id ? 'Models' : 'Active Model'}</p>
                                     <p className="font-medium">
                                         {agent.model_group_id
-                                            ? ((modelGroups.find(g => g.id === agent.model_group_id)?.members || []).map((m: any) => m.model).join(', ') || 'None')
+                                            ? describeGroupModels(modelGroups.find(g => g.id === agent.model_group_id))
                                             : (agent.model || 'None')}
                                     </p>
                                 </div>
@@ -547,7 +553,7 @@ export const AgentDetails: React.FC = () => {
                             <div className="text-xs text-gray-600 bg-indigo-50 border border-indigo-100 rounded p-3">
                                 Requests are routed automatically across this group's models (free first), with retries and failover on errors or rate limits:
                                 <span className="block mt-1 font-mono break-words">
-                                    {(modelGroups.find(g => g.id.toString() === formData.model_group_id)?.members || []).map((m: any) => m.model).join(', ') || 'no models configured'}
+                                    {describeGroupModels(modelGroups.find(g => g.id.toString() === formData.model_group_id))}
                                 </span>
                             </div>
                         ) : (

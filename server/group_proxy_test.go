@@ -335,3 +335,49 @@ func TestGroupProxySwitchesOnlyLogging(t *testing.T) {
 		t.Errorf("switches-only mode must not log request/response entries, got %d", other)
 	}
 }
+
+// TestGroupProxyAllModelsMember: a member with AllModels=true expands to one
+// candidate per model in its provider's SupportedModels at request time, so
+// routing works without enumerating every model by hand.
+func TestGroupProxyAllModelsMember(t *testing.T) {
+	database := setupGroupTestDB(t)
+
+	var gotModel string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+		gotModel, _ = payload["model"].(string)
+		w.Write([]byte(`{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}`))
+	}))
+	defer srv.Close()
+
+	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKey: "k", SupportedModels: "model-a,model-b"}
+	database.Create(&p)
+	group := db.ModelGroup{Name: "Any Group", Slug: "any-group"}
+	database.Create(&group)
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: p.ID, AllModels: true, IsFree: true})
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+
+	w := groupRequest(t, r, "any-group", `{"model": "x"}`)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotModel != "model-a" && gotModel != "model-b" {
+		t.Fatalf("expected the request to use one of the provider's models, got %q", gotModel)
+	}
+
+	// /v1/models lists the expanded concrete models, not the wildcard.
+	modelsReq := httptest.NewRequest("GET", "/proxy/group/any-group/v1/models", nil)
+	rctx := chi.NewRouteContext()
+	rctx.URLParams.Add("group_key", "any-group")
+	modelsReq = modelsReq.WithContext(context.WithValue(modelsReq.Context(), chi.RouteCtxKey, rctx))
+	mw := httptest.NewRecorder()
+	r.ServeHTTP(mw, modelsReq)
+	if !strings.Contains(mw.Body.String(), "model-a") || !strings.Contains(mw.Body.String(), "model-b") {
+		t.Fatalf("expected /v1/models to list expanded models, got %s", mw.Body.String())
+	}
+}

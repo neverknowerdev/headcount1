@@ -14,6 +14,7 @@ interface MemberStat {
     provider_id: number;
     provider_name: string;
     model: string;
+    all_models: boolean;
     is_free: boolean;
     window_5h: MemberWindow;
     window_3d: MemberWindow;
@@ -36,8 +37,12 @@ interface GroupStats {
 interface MemberForm {
     provider_id: number | '';
     model: string;
+    all_models: boolean;
     is_free: boolean;
 }
+
+// Sentinel <select> value for "any model from this provider".
+const ANY_MODEL = '__any__';
 
 // Status colors (state encoding): success / failure / rate-limited.
 const STATUS = {
@@ -159,12 +164,14 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
             setEditingId(g.id);
             setFormName(g.name);
             setFormDescription(g.description || '');
-            setFormMembers((g.members || []).map((m: any) => ({ provider_id: m.provider_id, model: m.model, is_free: m.is_free })));
+            setFormMembers((g.members || []).map((m: any) => ({
+                provider_id: m.provider_id, model: m.model, all_models: !!m.all_models, is_free: m.is_free,
+            })));
         } else {
             setEditingId(null);
             setFormName('');
             setFormDescription('');
-            setFormMembers([{ provider_id: '', model: '', is_free: false }]);
+            setFormMembers([{ provider_id: '', model: '', all_models: false, is_free: false }]);
         }
         setIsModalOpen(true);
     };
@@ -174,8 +181,13 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
         setSaveError('');
         try {
             const members = formMembers
-                .filter(m => m.provider_id && m.model.trim())
-                .map(m => ({ provider_id: m.provider_id, model: m.model.trim(), is_free: m.is_free }));
+                .filter(m => m.provider_id && (m.all_models || m.model.trim()))
+                .map(m => ({
+                    provider_id: m.provider_id,
+                    model: m.all_models ? '' : m.model.trim(),
+                    all_models: m.all_models,
+                    is_free: m.is_free,
+                }));
             const payload = { name: formName, description: formDescription, members };
             if (editingId) {
                 await axios.put(`/api/model-groups/${editingId}`, payload);
@@ -191,10 +203,11 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
         }
     };
 
-    const handleDelete = async (id: number) => {
+    const handleDelete = async (g: any) => {
+        if (g.builtin) return;
         if (!window.confirm('Delete this model group?')) return;
         try {
-            await axios.delete(`/api/model-groups/${id}`);
+            await axios.delete(`/api/model-groups/${g.id}`);
             fetchGroups();
         } catch (e) {
             console.error(e);
@@ -222,7 +235,8 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
     };
 
     const memberStatFor = (groupId: number, m: any): MemberStat | undefined =>
-        stats[groupId]?.members?.find(s => s.provider_id === m.provider_id && s.model === m.model);
+        stats[groupId]?.members?.find(s => s.provider_id === m.provider_id &&
+            (m.all_models ? s.all_models : s.model === m.model));
 
     return (
         <div className="space-y-4">
@@ -252,7 +266,9 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                             </h3>
                             <div className="flex space-x-2">
                                 <button onClick={() => openModal(g)} className="text-gray-500 hover:text-gray-700"><Edit2 size={18} /></button>
-                                <button onClick={() => handleDelete(g.id)} className="text-red-500 hover:text-red-700"><Trash2 size={18} /></button>
+                                {!g.builtin && (
+                                    <button onClick={() => handleDelete(g)} className="text-red-500 hover:text-red-700"><Trash2 size={18} /></button>
+                                )}
                             </div>
                         </div>
                         {g.description && <p className="text-sm text-gray-600 mb-2">{g.description}</p>}
@@ -280,7 +296,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                                         <tr key={m.id} className="border-t">
                                             <td className="py-1.5 pr-2">
                                                 <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <span className="text-gray-800 break-all">{m.model}</span>
+                                                    <span className="text-gray-800 break-all">{m.all_models ? 'Any model' : m.model}</span>
                                                     <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${m.is_free ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
                                                         {m.is_free ? 'free' : 'paid'}
                                                     </span>
@@ -331,23 +347,29 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                                     <div key={idx} className="flex items-center gap-2 mb-2">
                                         <select
                                             value={m.provider_id}
-                                            onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '' })}
+                                            onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '', all_models: false })}
                                             className="border rounded p-2 text-sm w-40"
                                         >
                                             <option value="">Provider…</option>
                                             {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                         </select>
-                                        <input
-                                            type="text"
-                                            list={`models-${idx}`}
-                                            value={m.model}
-                                            onChange={e => updateMember(idx, { model: e.target.value, is_free: looksFree(e.target.value) })}
-                                            placeholder="Model name"
-                                            className="flex-1 border rounded p-2 text-sm"
-                                        />
-                                        <datalist id={`models-${idx}`}>
-                                            {providerModels(m.provider_id).map(pm => <option key={pm} value={pm} />)}
-                                        </datalist>
+                                        <select
+                                            value={m.all_models ? ANY_MODEL : m.model}
+                                            disabled={!m.provider_id}
+                                            onChange={e => {
+                                                const v = e.target.value;
+                                                if (v === ANY_MODEL) {
+                                                    updateMember(idx, { model: '', all_models: true });
+                                                } else {
+                                                    updateMember(idx, { model: v, all_models: false, is_free: looksFree(v) });
+                                                }
+                                            }}
+                                            className="flex-1 border rounded p-2 text-sm disabled:bg-gray-50 disabled:text-gray-400"
+                                        >
+                                            <option value="">Model…</option>
+                                            <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
+                                            {providerModels(m.provider_id).map(pm => <option key={pm} value={pm}>{pm}</option>)}
+                                        </select>
                                         <label className="flex items-center gap-1 text-xs text-gray-600 shrink-0">
                                             <input type="checkbox" checked={m.is_free} onChange={e => updateMember(idx, { is_free: e.target.checked })} />
                                             free
@@ -357,7 +379,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                                         <button type="button" onClick={() => setFormMembers(ms => ms.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700"><Minus size={16} /></button>
                                     </div>
                                 ))}
-                                <button type="button" onClick={() => setFormMembers(ms => [...ms, { provider_id: '', model: '', is_free: false }])} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center mt-2">
+                                <button type="button" onClick={() => setFormMembers(ms => [...ms, { provider_id: '', model: '', all_models: false, is_free: false }])} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center mt-2">
                                     <Plus size={14} className="mr-1" /> Add Model
                                 </button>
                             </div>

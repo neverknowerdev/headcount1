@@ -28,11 +28,6 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 type Settings struct {
 	BasePath         string   `yaml:"base_path"`
 	WorkspaceFolders []string `yaml:"workspace_folders"`
-	// UtilityProviderID / UtilityModel select a cheap LLM for lightweight
-	// internal calls (artifact Q&A, commit message generation). Set on the
-	// app settings page; empty model = fall back to the session's LLM.
-	UtilityProviderID int32  `yaml:"utility_provider_id"`
-	UtilityModel      string `yaml:"utility_model"`
 }
 
 // loadSettings reads the app settings. The canonical file is the one the

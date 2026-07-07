@@ -209,6 +209,7 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 }
 
 func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Request, group db.ModelGroup) {
+	group.Members = db.ExpandModelGroupMembers(group.Members)
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
@@ -628,6 +629,7 @@ func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *LLMGateway) serveGroupModels(w http.ResponseWriter, group db.ModelGroup) {
+	group.Members = db.ExpandModelGroupMembers(group.Members)
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`

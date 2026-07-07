@@ -15,6 +15,7 @@ import (
 type modelGroupMemberReq struct {
 	ProviderID int32  `json:"provider_id"`
 	Model      string `json:"model"`
+	AllModels  bool   `json:"all_models"`
 	IsFree     bool   `json:"is_free"`
 }
 
@@ -112,6 +113,15 @@ func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
+	group, err := api.q.GetModelGroup(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "model group not found")
+		return
+	}
+	if group.Builtin {
+		api.respondError(w, http.StatusBadRequest, "built-in model groups cannot be deleted")
+		return
+	}
 	if err := api.q.DeleteModelGroup(r.Context(), int32(id)); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -122,7 +132,14 @@ func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers []modelGroupMemberReq) error {
 	members := make([]db.ModelGroupMember, 0, len(reqMembers))
 	for _, m := range reqMembers {
-		if m.ProviderID == 0 || strings.TrimSpace(m.Model) == "" {
+		if m.ProviderID == 0 {
+			continue
+		}
+		if m.AllModels {
+			members = append(members, db.ModelGroupMember{ProviderID: m.ProviderID, AllModels: true, IsFree: m.IsFree})
+			continue
+		}
+		if strings.TrimSpace(m.Model) == "" {
 			continue
 		}
 		members = append(members, db.ModelGroupMember{
@@ -147,6 +164,7 @@ type memberStats struct {
 	ProviderID     int32            `json:"provider_id"`
 	ProviderName   string           `json:"provider_name"`
 	Model          string           `json:"model"`
+	AllModels      bool             `json:"all_models"`
 	IsFree         bool             `json:"is_free"`
 	Window5h       memberStatWindow `json:"window_5h"`
 	Window3d       memberStatWindow `json:"window_3d"`
@@ -224,25 +242,30 @@ func (api *API) GetModelGroupStats(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
+	// An "any model" member has no fixed model string, so it's also
+	// aggregated under a provider-level key (model == "") spanning every
+	// concrete model actually invoked for that provider within this group.
 	for _, s := range stats {
-		k := key{s.ProviderID, s.Model}
-		addTo(agg3d, k, s)
-		if s.Success && s.TokensPerSec > 0 {
-			tps3dSum[k] += s.TokensPerSec
-			tps3dN[k]++
-		}
-		if !s.CreatedAt.Before(since5h) {
-			addTo(agg5h, k, s)
+		keys := []key{{s.ProviderID, s.Model}, {s.ProviderID, ""}}
+		for _, k := range keys {
+			addTo(agg3d, k, s)
 			if s.Success && s.TokensPerSec > 0 {
-				tps5hSum[k] += s.TokensPerSec
-				tps5hN[k]++
+				tps3dSum[k] += s.TokensPerSec
+				tps3dN[k]++
 			}
-		}
-		if s.RateLimited && s.CooldownUntil != nil {
-			lastRateLimit[k] = rateLimitMark{at: s.CreatedAt, until: *s.CooldownUntil}
-		}
-		if s.Success {
-			lastSuccess[k] = s.CreatedAt
+			if !s.CreatedAt.Before(since5h) {
+				addTo(agg5h, k, s)
+				if s.Success && s.TokensPerSec > 0 {
+					tps5hSum[k] += s.TokensPerSec
+					tps5hN[k]++
+				}
+			}
+			if s.RateLimited && s.CooldownUntil != nil {
+				lastRateLimit[k] = rateLimitMark{at: s.CreatedAt, until: *s.CooldownUntil}
+			}
+			if s.Success {
+				lastSuccess[k] = s.CreatedAt
+			}
 		}
 
 		idx := int(s.CreatedAt.Sub(bucketStart) / time.Hour)
@@ -274,10 +297,14 @@ func (api *API) GetModelGroupStats(w http.ResponseWriter, r *http.Request) {
 	members := make([]memberStats, 0, len(group.Members))
 	for _, m := range group.Members {
 		k := key{m.ProviderID, m.Model}
+		if m.AllModels {
+			k = key{m.ProviderID, ""}
+		}
 		ms := memberStats{
 			ProviderID:   m.ProviderID,
 			ProviderName: m.Provider.Name,
 			Model:        m.Model,
+			AllModels:    m.AllModels,
 			IsFree:       m.IsFree,
 			Window5h:     finalize(agg5h[k], tps5hSum[k], tps5hN[k]),
 			Window3d:     finalize(agg3d[k], tps3dSum[k], tps3dN[k]),

@@ -39,13 +39,13 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	Name            string    `json:"name" gorm:"not null"`
-	BaseUrl         string    `json:"base_url" gorm:"not null"`
-	ApiKey          string    `json:"api_key" gorm:"not null"`
-	ProviderType    string    `json:"provider_type"`
-	DefaultModel    string    `json:"default_model"`
-	SupportedModels string    `json:"supported_models"`
+	ID              int32  `json:"id" gorm:"primaryKey"`
+	Name            string `json:"name" gorm:"not null"`
+	BaseUrl         string `json:"base_url" gorm:"not null"`
+	ApiKey          string `json:"api_key" gorm:"not null"`
+	ProviderType    string `json:"provider_type"`
+	DefaultModel    string `json:"default_model"`
+	SupportedModels string `json:"supported_models"`
 	// Builtin marks providers seeded automatically on startup (e.g. OpenRouter,
 	// OpenCode Zen) rather than added by hand. Used to know which providers'
 	// model catalogs are safe to refresh from a live discovery fetch.
@@ -102,14 +102,14 @@ type Agent struct {
 	// ModelGroupID, when set, takes precedence over ProviderID/Model: the
 	// agent's LLM calls go through the model-group router (free-first,
 	// auto-failover) instead of a fixed provider+model.
-	ModelGroupID *int32       `json:"model_group_id"`
-	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
-	Model        string       `json:"model"`
-	Mode         string       `json:"mode" gorm:"not null;default:'primary'"`
-	Permissions  string       `json:"permissions"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Skills       []Skill      `json:"skills" gorm:"many2many:agent_skills;"`
+	ModelGroupID *int32      `json:"model_group_id"`
+	ModelGroup   *ModelGroup `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
+	Model        string      `json:"model"`
+	Mode         string      `json:"mode" gorm:"not null;default:'primary'"`
+	Permissions  string      `json:"permissions"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+	Skills       []Skill     `json:"skills" gorm:"many2many:agent_skills;"`
 }
 
 type Skill struct {
@@ -375,10 +375,15 @@ type ModelGroupMember struct {
 	GroupID    int32       `json:"group_id" gorm:"not null;index"`
 	ProviderID int32       `json:"provider_id" gorm:"not null"`
 	Provider   LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:CASCADE;"`
-	Model      string      `json:"model" gorm:"not null"`
-	IsFree     bool        `json:"is_free" gorm:"not null;default:false"`
-	Priority   int         `json:"priority" gorm:"not null;default:0"`
-	CreatedAt  time.Time   `json:"created_at"`
+	// Model is the concrete model id to route to. Empty when AllModels is
+	// set — the member then stands for every model currently listed in the
+	// provider's SupportedModels, resolved at request time (so it tracks a
+	// provider's catalog automatically as it changes).
+	Model     string    `json:"model"`
+	AllModels bool      `json:"all_models" gorm:"not null;default:false"`
+	IsFree    bool      `json:"is_free" gorm:"not null;default:false"`
+	Priority  int       `json:"priority" gorm:"not null;default:0"`
+	CreatedAt time.Time `json:"created_at"`
 }
 
 // ModelRequestStat records the outcome of a single LLM request routed by the
@@ -386,22 +391,22 @@ type ModelGroupMember struct {
 // separately from failures so they don't count against a model's failure %.
 // TokensPerSec is completion tokens divided by wall-clock duration.
 type ModelRequestStat struct {
-	ID               int32     `json:"id" gorm:"primaryKey"`
-	GroupID          *int32    `json:"group_id" gorm:"index"`
-	ProviderID       int32     `json:"provider_id" gorm:"not null;index"`
-	Model            string    `json:"model" gorm:"not null;index"`
-	Success          bool      `json:"success" gorm:"not null;default:false"`
-	RateLimited      bool      `json:"rate_limited" gorm:"not null;default:false"`
-	StatusCode       int       `json:"status_code"`
-	DurationMs       int64     `json:"duration_ms"`
-	PromptTokens     int       `json:"prompt_tokens"`
-	CompletionTokens int       `json:"completion_tokens"`
-	TokensPerSec     float64   `json:"tokens_per_sec"`
+	ID               int32   `json:"id" gorm:"primaryKey"`
+	GroupID          *int32  `json:"group_id" gorm:"index"`
+	ProviderID       int32   `json:"provider_id" gorm:"not null;index"`
+	Model            string  `json:"model" gorm:"not null;index"`
+	Success          bool    `json:"success" gorm:"not null;default:false"`
+	RateLimited      bool    `json:"rate_limited" gorm:"not null;default:false"`
+	StatusCode       int     `json:"status_code"`
+	DurationMs       int64   `json:"duration_ms"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TokensPerSec     float64 `json:"tokens_per_sec"`
 	// CooldownUntil is set on rate-limited rows: the gateway won't route to
 	// this provider+model again until this time (unless nothing else works).
 	CooldownUntil *time.Time `json:"cooldown_until"`
 	ErrorMessage  string     `json:"error_message" gorm:"type:text"`
-	CreatedAt        time.Time `json:"created_at" gorm:"index"`
+	CreatedAt     time.Time  `json:"created_at" gorm:"index"`
 }
 
 type ProxyRequestLog struct {

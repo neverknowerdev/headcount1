@@ -20,6 +20,9 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	tables := []string{
 		"activity_logs",
 		"proxy_request_logs",
+		"model_request_stats",
+		"model_group_members",
+		"model_groups",
 		"runs",
 		"comments",
 		"attachments",
@@ -59,6 +62,10 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	q := db.New(api.db)
 	_ = q.EnsureBuiltinLLMProviders(context.Background())
 	seedPlaceholderModelCatalog(context.Background(), q)
+
+	// Re-seed the built-in "Memory Management"/"Utility" model groups too,
+	// so tests get the same consistent baseline as a fresh install.
+	_ = q.EnsureDefaultModelGroups(context.Background())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

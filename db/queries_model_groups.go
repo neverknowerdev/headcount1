@@ -8,8 +8,12 @@ import (
 	"gorm.io/gorm"
 )
 
-// Slug of the model group seeded automatically on startup.
-const DefaultMemoryGroupSlug = "memory-management"
+// Slugs of the model groups seeded automatically on startup. Both are
+// built-in: they can be edited (renamed, members changed) but never deleted.
+const (
+	DefaultMemoryGroupSlug  = "memory-management"
+	DefaultUtilityGroupSlug = "utility"
+)
 
 func (q *Queries) CreateModelGroup(ctx context.Context, g ModelGroup) (ModelGroup, error) {
 	err := q.db.WithContext(ctx).Create(&g).Error
@@ -98,29 +102,64 @@ func (q *Queries) ListModelRequestStatsSince(ctx context.Context, groupID *int32
 	return stats, err
 }
 
-// EnsureDefaultModelGroups seeds the built-in "Memory Management" group with
-// the free gpt-oss* models currently listed on the builtin OpenRouter /
-// OpenCode Zen providers. Idempotent: creates the group if missing, and
-// (re)populates its members only while it has none, so user edits are never
-// overwritten. Called after the free-model catalog refresh on startup.
+// defaultModelGroupSpecs describes the built-in model groups seeded on
+// startup: slug, display name, and description. Both default to "any model"
+// from the free OpenRouter provider (see ensureDefaultGroupMember) so they
+// work immediately without a live model-catalog fetch.
+var defaultModelGroupSpecs = []struct {
+	slug, name, description string
+}{
+	{
+		DefaultMemoryGroupSlug, "Memory Management",
+		"Free models for lightweight memory-management calls, with automatic failover.",
+	},
+	{
+		DefaultUtilityGroupSlug, "Utility",
+		"Cheap model used for internal one-shot calls (artifact Q&A, commit messages), with automatic failover.",
+	},
+}
+
+// EnsureDefaultModelGroups seeds the built-in "Memory Management" and
+// "Utility" model groups. Idempotent and safe to call on every startup:
+// creates each group if missing (never deleted — Builtin groups are
+// undeletable, see DeleteModelGroup), and adds a default "any model from
+// OpenRouter" member only while the group has none, so user edits are never
+// overwritten.
 func (q *Queries) EnsureDefaultModelGroups(ctx context.Context) error {
-	var group ModelGroup
-	err := q.db.WithContext(ctx).Where("slug = ?", DefaultMemoryGroupSlug).First(&group).Error
-	if err != nil {
-		if err != gorm.ErrRecordNotFound {
+	for _, spec := range defaultModelGroupSpecs {
+		group, err := q.ensureModelGroup(ctx, spec.slug, spec.name, spec.description)
+		if err != nil {
 			return err
 		}
-		group = ModelGroup{
-			Name:        "Memory Management",
-			Slug:        DefaultMemoryGroupSlug,
-			Description: "Free gpt-oss models for lightweight memory-management calls, with automatic failover.",
-			Builtin:     true,
-		}
-		if err := q.db.WithContext(ctx).Create(&group).Error; err != nil {
+		if err := q.ensureDefaultGroupMember(ctx, group); err != nil {
 			return err
 		}
 	}
+	return nil
+}
 
+func (q *Queries) ensureModelGroup(ctx context.Context, slug, name, description string) (ModelGroup, error) {
+	var group ModelGroup
+	err := q.db.WithContext(ctx).Where("slug = ?", slug).First(&group).Error
+	if err == nil {
+		return group, nil
+	}
+	if err != gorm.ErrRecordNotFound {
+		return ModelGroup{}, err
+	}
+	group = ModelGroup{Name: name, Slug: slug, Description: description, Builtin: true}
+	if err := q.db.WithContext(ctx).Create(&group).Error; err != nil {
+		return ModelGroup{}, err
+	}
+	return group, nil
+}
+
+// ensureDefaultGroupMember adds a single "any model from OpenRouter" member
+// to group when it has none. Matched by the stable ProviderName field (not
+// the user-editable display Name), so it still finds the provider even if
+// it's been renamed. A no-op if the OpenRouter provider row doesn't exist
+// yet or the group already has members.
+func (q *Queries) ensureDefaultGroupMember(ctx context.Context, group ModelGroup) error {
 	var memberCount int64
 	if err := q.db.WithContext(ctx).Model(&ModelGroupMember{}).Where("group_id = ?", group.ID).Count(&memberCount).Error; err != nil {
 		return err
@@ -129,31 +168,41 @@ func (q *Queries) EnsureDefaultModelGroups(ctx context.Context) error {
 		return nil
 	}
 
-	providers, err := q.ListLLMProviders(ctx)
-	if err != nil {
+	var provider LLMProvider
+	if err := q.db.WithContext(ctx).Where("provider_name = ?", ProviderVendorOpenRouter).First(&provider).Error; err != nil {
+		if err == gorm.ErrRecordNotFound {
+			return nil
+		}
 		return err
 	}
 
-	var members []ModelGroupMember
-	for _, p := range providers {
-		if !p.Builtin || p.SupportedModels == "" {
+	return q.ReplaceModelGroupMembers(ctx, group.ID, []ModelGroupMember{
+		{ProviderID: provider.ID, AllModels: true, IsFree: true},
+	})
+}
+
+// ExpandModelGroupMembers turns each AllModels member into one concrete
+// member per model in its provider's SupportedModels, so routing always
+// operates on concrete (provider, model) pairs that track the provider's
+// live catalog. Regular (non-wildcard) members pass through unchanged.
+// Callers must have preloaded Members.Provider.
+func ExpandModelGroupMembers(members []ModelGroupMember) []ModelGroupMember {
+	out := make([]ModelGroupMember, 0, len(members))
+	for _, m := range members {
+		if !m.AllModels {
+			out = append(out, m)
 			continue
 		}
-		for _, m := range strings.Split(p.SupportedModels, ",") {
-			m = strings.TrimSpace(m)
-			if m == "" || !strings.Contains(strings.ToLower(m), "gpt-oss") {
+		for _, model := range strings.Split(m.Provider.SupportedModels, ",") {
+			model = strings.TrimSpace(model)
+			if model == "" {
 				continue
 			}
-			members = append(members, ModelGroupMember{
-				GroupID:    group.ID,
-				ProviderID: p.ID,
-				Model:      m,
-				IsFree:     true,
-			})
+			expanded := m
+			expanded.Model = model
+			expanded.AllModels = false
+			out = append(out, expanded)
 		}
 	}
-	if len(members) == 0 {
-		return nil
-	}
-	return q.ReplaceModelGroupMembers(ctx, group.ID, members)
+	return out
 }
