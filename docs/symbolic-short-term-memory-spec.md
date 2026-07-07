@@ -73,7 +73,9 @@ Deterministic capture of every sizable tool result, done synchronously inside `A
   ```
 - **Capture rule:** offload when `len(result) >= OffloadMinChars` (default **2000**). Below that, the result stays inline-only and never enters the pipeline. `finish_task`-family terminal tools and `ask_human` are never offloaded.
 - Updates to entries (summary, node_id, status) are done by rewriting the JSONL under a mutex — files are small (hundreds of lines max per run). `node_id` format: `N{seq}` (we don't need TencentDB's multi-file `001-` prefix; one canvas per run).
-- Interaction with the existing `maxToolOutputChars = 60000` cap (`agent.go:47`): capture the **full untruncated** result to the ref file *before* truncation, so `recall_tool_result` can recover what the model never saw. The inline truncation notice gains the node reference (§2.5).
+- **`maxToolOutputChars` (`agent.go:44-47`) is removed entirely, not worked around.** Today it truncates any tool result to 60000 chars *before* it's even appended to canonical `history` (`agent.go:352-355`), so the model — and later Hindsight — permanently lose anything past that cap; no offload/recall path can recover data that was never kept. With the offload store + Compactor (§2.4) now doing token-budget-aware management of what actually reaches the LLM, a blunt fixed-size cut at capture time is redundant and strictly lossy: it exists to protect the *live context*, and that job now belongs to the Compactor. Canonical `history` keeps every tool result at full size, unconditionally.
+
+  Practical consequence to handle explicitly, since the old cap was also incidentally guarding against a single oversized *fresh* result blowing the very next request (the Compactor's Mild tier, per §2.4, only touches tool results older than `freshAssistantTurns`): the freshness exemption becomes **size-aware, not just turn-count-aware.** If a just-produced tool result alone exceeds `shortterm_single_result_max_ratio` (default **0.15**) of the context window, it is immediately given the compacted/pointer treatment in that same `Compact` call regardless of recency — the Compactor, not a capture-time cap, is what prevents a single huge dump from starving the rest of the conversation.
 
 ### 2.2 L1 summarizer (`pkg/shortterm/summarizer.go`)
 
@@ -116,7 +118,7 @@ The core change in the agent loop. Today `runMessageHistory` sends `pruneHistory
   - `aggressive = AggressiveCompressRatio * window` (default **0.85**)
   - `emergency = EmergencyCompressRatio * window` (default **0.95**), target `EmergencyTargetRatio` (**0.6**)
 - **Fast path:** if the estimate is < 85% of `mild`, return history with only today's existing behavior applied (stale-MCP `[omitted]` replacement stays as-is) — zero new cost on small runs.
-- **Tier 1 — Mild** (`>= mild`): walk tool messages older than `freshAssistantTurns = 2` (keep the existing recency guarantee), oldest first, **highest score first**; replace each offloaded one's content with:
+- **Tier 1 — Mild** (`>= mild`): walk tool messages older than `freshAssistantTurns = 2` (keep the existing recency guarantee) **plus any fresh result that alone exceeds `shortterm_single_result_max_ratio` of the window** (the replacement for the removed `maxToolOutputChars` cap — see §2.1), oldest-and-largest first, **highest score first** among the rest; replace each offloaded one's content with:
   ```
   [offloaded → node {NodeID or ToolCallID}] {L1 summary}
   Full result: recall_tool_result("{ToolCallID}")
@@ -145,19 +147,17 @@ The core change in the agent loop. Today `runMessageHistory` sends `pruneHistory
   ```
   Position: immediately after the latest real user message; adjusted forward so it never lands between an assistant tool_call and its results. Identified by a `Meta` marker on the synthetic `Message` (add an unexported field or a sentinel prefix) so re-injection first strips the old copy. Fingerprint (len + first 64 chars of the canvas) short-circuits no-op re-injections. Budget: skip injection if canvas tokens > `MmdMaxTokenRatio` (**0.1**, tighter than TencentDB's 0.2 since our canvas is single-file) × window.
 - **Retrieval tool** — new `engine/aicli/tools/recall_tool_result.go`, standard one-file pattern (template: `tools/memory_recall.go`), registered in `native_engine.go` alongside the others and added to agent configs' `AllowedTools`:
-  - `recall_tool_result(id string, query string?)` — `id` is a `node_id` or `tool_call_id`. Resolves via the index, reads the ref file, returns content (subject to the same `maxToolOutputChars` cap; if `query` is given, return grep-style matching lines ±3 context instead of the head). Result of this tool is itself offload-eligible — the store handles that naturally.
+  - `recall_tool_result(id string, query string?)` — `id` is a `node_id` or `tool_call_id`. Resolves via the index, reads the ref file, returns content capped at `RecallResultMaxChars` (a package constant scoped to this tool's own reply, default **60000** — unrelated to history storage, which is now uncapped; if `query` is given, return grep-style matching lines ±3 context instead of the head). Result of this tool is itself offload-eligible — the store handles that naturally.
 
 ### 2.6 Feeding the full history to Hindsight
 
 **Requirement:** Hindsight must retain the complete run transcript — every user/assistant/tool message, full tool outputs — not the compacted view the LLM saw, and not just the outcome summary `RetainRunOutcome` builds today from `Task`/`Run` fields.
 
-This is why the Compactor's contract in §2.4 matters beyond the live loop: `Compact` is a **pure, non-mutating** view over `history` built fresh per LLM call. The canonical `history` slice inside `runMessageHistory` (`agent.go:194-310`) always keeps the full, uncompacted conversation — compaction never touches it. So the raw material Hindsight needs already exists in memory for the lifetime of the run; today it's simply discarded when the run ends, because `Agent.Run` (`agent.go:159`) only returns the final answer string.
+This is why the Compactor's contract in §2.4 matters beyond the live loop: `Compact` is a **pure, non-mutating** view over `history` built fresh per LLM call. The canonical `history` slice inside `runMessageHistory` (`agent.go:194-310`) always keeps the full, uncompacted conversation — compaction never touches it. And now that `maxToolOutputChars` is removed entirely (§2.1), canonical `history` is genuinely lossless: every tool result is kept at full size, not just "full up to 60000 chars." So the raw material Hindsight needs already exists in memory, complete, for the lifetime of the run — today it's simply discarded when the run ends, because `Agent.Run` (`agent.go:159`) only returns the final answer string. No ref-file recovery step is needed to reconstruct anything; `history` itself is already the whole conversation.
 
 **Gap to close — surfacing the canonical history:**
 - `Agent.Run` / `runMessageHistory` return only `(string, error)` today. Add a way to retrieve the full history the run produced: either change the return type to `(string, []Message, error)`, or add a callback/field (`Agent.OnComplete func([]Message)` or `Agent.LastHistory() []Message` read after `Run` returns). Prefer the return-value change — it's the smaller diff and matches Go convention; the two other `aicli.Client.Complete` call sites in `native_engine.go` (commit messages, `ask_artifact`) don't use `Agent` and are unaffected.
 - `native_engine.go`'s run-completion path (the block at `native_engine.go:950-971`, right where `RetainRunOutcome` is already called) captures this history alongside the existing outcome build.
-
-**Recovering what even the canonical history truncated:** the canonical history itself is not 100% lossless — `maxToolOutputChars = 60000` (`agent.go:47`) truncates any single tool result before it's appended to `history` at all (`agent.go:352-355`), independent of the Compactor. The offload store (§2.1) already captures the **full untruncated** result to `refs/{tool_call_id}.md` before that cap is applied. So building the Hindsight transcript means: walk canonical `history`; for any tool message whose content carries the "re-run with narrower query" truncation marker, substitute the full text read back from its ref file. This makes the transcript fed to Hindsight strictly more complete than anything that was ever in the LLM's context — genuinely "all message history," not "history minus one truncation cap."
 
 **Shape of what's sent — `pkg/hindsight/service.go`:**
 - Add `RetainRunConversation(ctx, company, task, run db.Run, history []aicli.Message) error` alongside the existing `RetainRunOutcome` (keep both — the outcome item stays as the cheap, high-signal headline your mental-model synthesis already reads; the conversation items are the raw backing material).
@@ -165,7 +165,7 @@ This is why the Compactor's contract in §2.4 matters beyond the live loop: `Com
   - `DocumentID: fmt.Sprintf("run-%d-turn-%03d", run.ID, n)` (stable, so a retry/replay updates via `UpdateMode: "replace"` instead of duplicating).
   - `Tags`/`ObservationScopes`: same `agentTag`, `session:<rootRunID>`, `task:<refKey>`, `project:<id>` scoping `RetainRunOutcome` already computes — factor that tag-building into a shared helper both methods call.
   - `Metadata: {"run_id", "turn": n, "kind": "conversation_turn", "role": ...}` so recall/consolidation can distinguish these from the outcome doc (`kind: "outcome"`) and from project docs.
-  - Size-bound each item (split further if a single turn's tool output — even ref-file-recovered — exceeds a configurable chunk size; see §3) so ingestion/embedding cost per item stays predictable.
+  - Size-bound each item (split further if a single turn's tool output exceeds a configurable chunk size; see §3) so ingestion/embedding cost per item stays predictable — now more important than before, since a full tool result can be arbitrarily large with no capture-time cap.
 - Call both `RetainRunOutcome` and `RetainRunConversation` from the same async goroutine in `native_engine.go:963-969`, in one `Retain` batch call where practical (the `Client.Retain` signature already takes `[]MemoryItem`) to avoid a second round trip.
 - Skip trivial turns to control volume: heartbeat tool calls, and tool results already fully captured by an earlier identical call in the same run (hash-dedupe by `tool_call` + first N chars of result), are not sent as separate conversation items — this mirrors TencentDB's "skip heartbeat" rule and keeps ingestion cost proportional to actual new information, not raw turn count.
 
@@ -184,6 +184,7 @@ Extend the settings YAML (add to **both** structs — `server/controllers/settin
 | `shortterm_aggressive_ratio` | `0.85` | Aggressive tier threshold |
 | `shortterm_emergency_ratio` / `_target` | `0.95` / `0.6` | Emergency trigger / target |
 | `shortterm_mmd_max_token_ratio` | `0.1` | Canvas injection budget |
+| `shortterm_single_result_max_ratio` | `0.15` | A single fresh tool result larger than this fraction of the window is compacted immediately, overriding the `freshAssistantTurns` exemption (replaces the deleted `maxToolOutputChars` cap) |
 | `hindsight_retain_full_history` | `true` | Feed the full run transcript to Hindsight, not just the outcome summary (§2.6) |
 | `hindsight_transcript_chunk_chars` | `8000` | Max size of a single conversation `MemoryItem` before it's split further |
 
@@ -200,7 +201,7 @@ The Summarizer/CanvasBuilder use the utility model; if none is configured, L1/L2
 
 ## 5. Implementation phases
 
-**Phase 1 — Deterministic core (no LLM).** `pkg/shortterm/store.go`, capture in `executeToolCalls`, `recall_tool_result` tool, `Compactor` with Mild-as-truncation (recall pointer, no summaries) + Emergency tier, settings plumbing, unit tests (extend `engine/aicli/prune_test.go` style: pair-integrity, threshold math, fresh-turn preservation). *Ship value: full results recoverable, pointer-based truncation.*
+**Phase 1 — Deterministic core (no LLM).** Delete `maxToolOutputChars` and its truncation call site (`agent.go:44-47, 352-355`) so canonical `history` is unconditionally lossless; `pkg/shortterm/store.go`; capture in `executeToolCalls`; `recall_tool_result` tool; `Compactor` with Mild-as-truncation (recall pointer, no summaries, including the size-aware freshness override) + Emergency tier; settings plumbing; unit tests (extend `engine/aicli/prune_test.go` style: pair-integrity, threshold math, fresh-turn preservation, oversized-fresh-result compaction). *Ship value: full results recoverable, pointer-based truncation, nothing silently dropped at capture time.*
 
 **Phase 1.5 — Full-history retention to Hindsight (§2.6).** Surface canonical `history` from `Agent.Run`, add `RetainRunConversation` to `pkg/hindsight/service.go`, wire ref-file recovery for truncated results, chunk-and-tag conversation `MemoryItem`s, call alongside `RetainRunOutcome` in `native_engine.go`. Depends only on the offload store (Phase 1), not on the Compactor tiers or L1/L2 — can ship and be verified independently (compare Hindsight bank contents before/after on a test run). *Ship value: Hindsight's synthesis is no longer starved to one paragraph per run.*
 
@@ -228,4 +229,4 @@ The Summarizer/CanvasBuilder use the utility model; if none is configured, L1/L2
 | Provider rejects malformed history | Pair-integrity invariant enforced in one place (`Compact`) and unit-tested exhaustively |
 | Estimator undercounts → context overflow anyway | Emergency tier at 0.95 with a hard target; ratios tunable per deployment |
 | Full-history retention (§2.6) multiplies Hindsight ingestion volume/cost | Chunk-size cap, heartbeat/dedupe filtering before send, `hindsight_retain_full_history` kill switch, batched into the existing async `Retain` call so it never blocks run completion |
-| Ref-file recovery reconstructs stale/wrong content (e.g. file rotated or missing) | Fall back to the in-history (possibly truncated) content with a `"[ref file unavailable]"` marker rather than failing the whole retention call |
+| Removing `maxToolOutputChars` lets a single pathological tool result (e.g. a multi-hundred-MB file dump) balloon in-memory `history` and per-run disk usage | Compactor's size-aware freshness override (`shortterm_single_result_max_ratio`) compacts it out of the *next* request immediately rather than waiting on turn-count staleness; tool implementations remain the first line of defense (paginate/cap at the source) — this spec only removes the redundant second cap, not the need for tools themselves to behave |
