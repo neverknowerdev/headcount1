@@ -1,7 +1,6 @@
 package db_test
 
 import (
-	"context"
 	"testing"
 
 	"agent-orchestrator/db"
@@ -20,65 +19,6 @@ func setupModelGroupTestDB(t *testing.T) *gorm.DB {
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}))
 	return database
-}
-
-// TestEnsureDefaultModelGroups_SeedsBothGroupsWithOpenRouterAny verifies that
-// both built-in groups (Memory Management, Utility) are created and each
-// gets a single "any model from OpenRouter" member once the OpenRouter
-// provider row exists — and that a second call is a no-op once members
-// exist, so user edits are never clobbered.
-func TestEnsureDefaultModelGroups_SeedsBothGroupsWithOpenRouterAny(t *testing.T) {
-	database := setupModelGroupTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-
-	openRouter := db.LLMProvider{Name: "OpenRouter Free Models", BaseUrl: "https://openrouter.ai/api/v1", Builtin: true, ProviderName: db.ProviderVendorOpenRouter}
-	require.NoError(t, database.Create(&openRouter).Error)
-
-	require.NoError(t, q.EnsureDefaultModelGroups(ctx))
-
-	for _, slug := range []string{db.DefaultMemoryGroupSlug, db.DefaultUtilityGroupSlug} {
-		group, err := q.GetModelGroupByKey(ctx, slug)
-		require.NoError(t, err, "group %q should exist", slug)
-		assert.True(t, group.Builtin)
-		require.Len(t, group.Members, 1, "group %q should have exactly one default member", slug)
-		m := group.Members[0]
-		assert.Equal(t, openRouter.ID, m.ProviderID)
-		assert.True(t, m.AllModels)
-		assert.True(t, m.IsFree)
-	}
-
-	// User edits the Memory Management group's members — a second call must
-	// not overwrite them.
-	memGroup, err := q.GetModelGroupByKey(ctx, db.DefaultMemoryGroupSlug)
-	require.NoError(t, err)
-	custom := db.LLMProvider{Name: "Custom", BaseUrl: "https://example.com/v1"}
-	require.NoError(t, database.Create(&custom).Error)
-	require.NoError(t, q.ReplaceModelGroupMembers(ctx, memGroup.ID, []db.ModelGroupMember{
-		{ProviderID: custom.ID, Model: "custom-model"},
-	}))
-
-	require.NoError(t, q.EnsureDefaultModelGroups(ctx))
-
-	memGroup, err = q.GetModelGroupByKey(ctx, db.DefaultMemoryGroupSlug)
-	require.NoError(t, err)
-	require.Len(t, memGroup.Members, 1)
-	assert.Equal(t, "custom-model", memGroup.Members[0].Model, "user-edited members must survive a re-seed call")
-}
-
-// TestEnsureDefaultModelGroups_NoOpenRouterProvider verifies groups are still
-// created (so they exist for the user to configure) even when the
-// OpenRouter provider row hasn't been seeded yet — they simply start empty.
-func TestEnsureDefaultModelGroups_NoOpenRouterProvider(t *testing.T) {
-	database := setupModelGroupTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-
-	require.NoError(t, q.EnsureDefaultModelGroups(ctx))
-
-	group, err := q.GetModelGroupByKey(ctx, db.DefaultUtilityGroupSlug)
-	require.NoError(t, err)
-	assert.Empty(t, group.Members)
 }
 
 // TestExpandModelGroupMembers verifies AllModels members expand to one

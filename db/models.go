@@ -361,7 +361,6 @@ type ModelGroup struct {
 	Name        string             `json:"name" gorm:"not null"`
 	Slug        string             `json:"slug" gorm:"not null;uniqueIndex"`
 	Description string             `json:"description"`
-	Builtin     bool               `json:"builtin" gorm:"not null;default:false"`
 	Members     []ModelGroupMember `json:"members" gorm:"foreignKey:GroupID"`
 	CreatedAt   time.Time          `json:"created_at"`
 	UpdatedAt   time.Time          `json:"updated_at"`

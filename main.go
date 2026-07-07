@@ -127,15 +127,9 @@ func main() {
 	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed provider presets: %v", err)
 	}
-	// Seed the built-in "Memory Management" and "Utility" model groups. Each
-	// defaults to "any model" from the free OpenRouter provider, which needs
-	// no live model-catalog fetch to work, so this doesn't wait on the
-	// background refresh below.
-	if err := db.New(database).EnsureDefaultModelGroups(context.Background()); err != nil {
-		log.Printf("Warning: failed to seed default model groups: %v", err)
-	}
-	// Seed the "Default Models" purposes (commit messages, ask_artifact),
-	// each initially pointing at the built-in Utility group.
+	// Seed the "Default Models" purposes (commit messages, ask_artifact) with
+	// no target configured, so they fall back to the calling session's own
+	// LLM until a user points them at a provider/model or a model group.
 	if err := db.New(database).EnsureDefaultModelSettings(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed default model settings: %v", err)
 	}

@@ -10,36 +10,29 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEnsureDefaultModelSettings_SeedsBothPurposesPointingAtUtility verifies
-// both known purposes get a row on first call, each pointing at the
-// built-in Utility group (matching the old hardcoded default), and that a
-// second call never overwrites a purpose a user has since reconfigured.
-func TestEnsureDefaultModelSettings_SeedsBothPurposesPointingAtUtility(t *testing.T) {
+// TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured verifies both
+// known purposes get an unconfigured row on first call (falling back to the
+// calling session's own LLM), and that a second call never overwrites a
+// purpose a user has since configured.
+func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) {
 	database := setupModelGroupTestDB(t)
 	require.NoError(t, database.AutoMigrate(&db.DefaultModelSetting{}))
 	q := db.New(database)
 	ctx := context.Background()
-
-	openRouter := db.LLMProvider{Name: "OpenRouter Free Models", ProviderName: db.ProviderVendorOpenRouter, Builtin: true}
-	require.NoError(t, database.Create(&openRouter).Error)
-	require.NoError(t, q.EnsureDefaultModelGroups(ctx))
-	utility, err := q.GetModelGroupByKey(ctx, db.DefaultUtilityGroupSlug)
-	require.NoError(t, err)
 
 	require.NoError(t, q.EnsureDefaultModelSettings(ctx))
 
 	for _, purpose := range []string{db.PurposeCommitMessages, db.PurposeAskArtifact} {
 		s, err := q.GetDefaultModelSetting(ctx, purpose)
 		require.NoError(t, err, "purpose %q should exist", purpose)
-		require.NotNil(t, s.ModelGroupID)
-		assert.Equal(t, utility.ID, *s.ModelGroupID)
 		assert.Nil(t, s.ProviderID)
+		assert.Nil(t, s.ModelGroupID)
 	}
 
 	// User points commit_messages at a fixed provider+model directly.
 	customProvider := db.LLMProvider{Name: "Custom", DefaultModel: "x"}
 	require.NoError(t, database.Create(&customProvider).Error)
-	_, err = q.UpdateDefaultModelSetting(ctx, db.PurposeCommitMessages, &customProvider.ID, "custom-model", nil)
+	_, err := q.UpdateDefaultModelSetting(ctx, db.PurposeCommitMessages, &customProvider.ID, "custom-model", nil)
 	require.NoError(t, err)
 
 	// Re-seeding must not clobber that override.
@@ -49,22 +42,5 @@ func TestEnsureDefaultModelSettings_SeedsBothPurposesPointingAtUtility(t *testin
 	require.NotNil(t, s.ProviderID)
 	assert.Equal(t, customProvider.ID, *s.ProviderID)
 	assert.Equal(t, "custom-model", s.Model)
-	assert.Nil(t, s.ModelGroupID)
-}
-
-// TestEnsureDefaultModelSettings_NoUtilityGroupYet verifies purposes are
-// still seeded (with a nil target, meaning "fall back to the session's own
-// LLM") even before the Utility group exists.
-func TestEnsureDefaultModelSettings_NoUtilityGroupYet(t *testing.T) {
-	database := setupModelGroupTestDB(t)
-	require.NoError(t, database.AutoMigrate(&db.DefaultModelSetting{}))
-	q := db.New(database)
-	ctx := context.Background()
-
-	require.NoError(t, q.EnsureDefaultModelSettings(ctx))
-
-	s, err := q.GetDefaultModelSetting(ctx, db.PurposeAskArtifact)
-	require.NoError(t, err)
-	assert.Nil(t, s.ProviderID)
 	assert.Nil(t, s.ModelGroupID)
 }

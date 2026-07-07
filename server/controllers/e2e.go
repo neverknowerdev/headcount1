@@ -64,10 +64,8 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	_ = q.EnsureBuiltinLLMProviders(context.Background())
 	seedPlaceholderModelCatalog(context.Background(), q)
 
-	// Re-seed the built-in "Memory Management"/"Utility" model groups, and
-	// the Default Models purposes that point at Utility by default, so
-	// tests get the same consistent baseline as a fresh install.
-	_ = q.EnsureDefaultModelGroups(context.Background())
+	// Re-seed the (initially unconfigured) Default Models purposes so tests
+	// get the same consistent baseline as a fresh install.
 	_ = q.EnsureDefaultModelSettings(context.Background())
 
 	w.Header().Set("Content-Type", "application/json")

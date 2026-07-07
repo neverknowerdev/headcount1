@@ -2,7 +2,6 @@ package server
 
 import (
 	"bytes"
-	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
@@ -38,28 +37,9 @@ func setupModelGroupsRouter(database *gorm.DB) chi.Router {
 	return r
 }
 
-func TestModelGroup_CannotDeleteBuiltin(t *testing.T) {
-	database := setupModelGroupsTestDB(t)
-	r := setupModelGroupsRouter(database)
-	q := db.New(database)
-
-	require.NoError(t, database.Create(&db.LLMProvider{Name: "OpenRouter Free Models", ProviderName: db.ProviderVendorOpenRouter, Builtin: true}).Error)
-	require.NoError(t, q.EnsureDefaultModelGroups(context.Background()))
-
-	group, err := q.GetModelGroupByKey(context.Background(), db.DefaultUtilityGroupSlug)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/model-groups/%d", group.ID), nil)
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusBadRequest, w.Code)
-
-	// Still there afterwards.
-	var stillThere db.ModelGroup
-	assert.NoError(t, database.First(&stillThere, group.ID).Error)
-}
-
-func TestModelGroup_CanDeleteCustom(t *testing.T) {
+// TestModelGroup_AnyGroupCanBeDeleted verifies every model group, with no
+// exceptions, can be deleted — there's no built-in/undeletable concept.
+func TestModelGroup_AnyGroupCanBeDeleted(t *testing.T) {
 	database := setupModelGroupsTestDB(t)
 	r := setupModelGroupsRouter(database)
 
@@ -71,12 +51,14 @@ func TestModelGroup_CanDeleteCustom(t *testing.T) {
 	require.Equal(t, http.StatusCreated, w.Code)
 	var created db.ModelGroup
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &created))
-	assert.False(t, created.Builtin)
 
 	req = httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/model-groups/%d", created.ID), nil)
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusOK, w.Code)
+
+	var gone db.ModelGroup
+	assert.Error(t, database.First(&gone, created.ID).Error)
 }
 
 // TestModelGroup_AllModelsMemberRoundTrip verifies a member saved with

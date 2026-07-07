@@ -52,21 +52,11 @@ func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, purpose string,
 	return s, nil
 }
 
-// EnsureDefaultModelSettings seeds a row per known purpose if missing,
-// defaulting to the built-in Utility model group so behavior matches the
-// original hardcoded default until a user points a purpose elsewhere.
-// Idempotent: never overwrites an existing row's configuration.
+// EnsureDefaultModelSettings seeds an unconfigured row per known purpose if
+// missing, so each purpose falls back to the calling session's own LLM
+// until a user points it at a provider/model or a model group. Idempotent:
+// never overwrites an existing row's configuration.
 func (q *Queries) EnsureDefaultModelSettings(ctx context.Context) error {
-	var utilityGroupID *int32
-	var group ModelGroup
-	err := q.db.WithContext(ctx).Where("slug = ?", DefaultUtilityGroupSlug).First(&group).Error
-	if err == nil {
-		id := group.ID
-		utilityGroupID = &id
-	} else if err != gorm.ErrRecordNotFound {
-		return err
-	}
-
 	for _, purpose := range defaultModelSettingPurposes {
 		var existing DefaultModelSetting
 		err := q.db.WithContext(ctx).Where("purpose = ?", purpose).First(&existing).Error
@@ -76,7 +66,7 @@ func (q *Queries) EnsureDefaultModelSettings(ctx context.Context) error {
 		if err != gorm.ErrRecordNotFound {
 			return err
 		}
-		if err := q.db.WithContext(ctx).Create(&DefaultModelSetting{Purpose: purpose, ModelGroupID: utilityGroupID}).Error; err != nil {
+		if err := q.db.WithContext(ctx).Create(&DefaultModelSetting{Purpose: purpose}).Error; err != nil {
 			return err
 		}
 	}

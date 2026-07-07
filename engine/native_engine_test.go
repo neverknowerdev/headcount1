@@ -686,7 +686,7 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	var provider db.LLMProvider
 	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
 	utilityGroup, err := q.CreateModelGroup(context.Background(), db.ModelGroup{
-		Name: "Utility", Slug: db.DefaultUtilityGroupSlug, Builtin: true,
+		Name: "Utility", Slug: "utility",
 	})
 	require.NoError(t, err)
 	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{

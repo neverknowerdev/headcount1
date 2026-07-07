@@ -205,7 +205,6 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
     };
 
     const handleDelete = async (g: any) => {
-        if (g.builtin) return;
         if (!window.confirm('Delete this model group?')) return;
         try {
             await axios.delete(`/api/model-groups/${g.id}`);
@@ -304,14 +303,11 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                         <div className="flex justify-between items-start mb-2">
                             <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                                 {g.name}
-                                {g.builtin && <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Built-in</span>}
                             </h3>
                             <div className="flex space-x-2">
                                 <button onClick={() => setStatsGroupId(g.id)} className="text-gray-500 hover:text-indigo-600" title="View stats"><BarChart3 size={18} /></button>
                                 <button onClick={() => openModal(g)} className="text-gray-500 hover:text-gray-700" title="Edit group"><Edit2 size={18} /></button>
-                                {!g.builtin && (
-                                    <button onClick={() => handleDelete(g)} className="text-red-500 hover:text-red-700" title="Delete group"><Trash2 size={18} /></button>
-                                )}
+                                <button onClick={() => handleDelete(g)} className="text-red-500 hover:text-red-700" title="Delete group"><Trash2 size={18} /></button>
                             </div>
                         </div>
                         {g.description && <p className="text-sm text-gray-600 mb-2">{g.description}</p>}

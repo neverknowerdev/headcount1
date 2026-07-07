@@ -113,15 +113,6 @@ func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
-	if group.Builtin {
-		api.respondError(w, http.StatusBadRequest, "built-in model groups cannot be deleted")
-		return
-	}
 	if err := api.q.DeleteModelGroup(r.Context(), int32(id)); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -77,19 +77,13 @@ test.describe.serial('CEO orchestration flow', () => {
         });
         providerId = provider.id;
 
-        // The utility LLM (used by ask_artifact's one-shot reader) is the
-        // built-in "Utility" model group — point its one member at the mock
-        // provider so the reader call is deterministic.
-        const groups = await (await request.get('/api/model-groups')).json();
-        const utilityGroup = groups.find((g: any) => g.slug === 'utility');
-        const utilityGroupUpd = await request.put(`/api/model-groups/${utilityGroup.id}`, {
-            data: {
-                name: utilityGroup.name,
-                members: [{ provider_id: provider.id, model: 'e2e-mock-model', is_free: false }],
-            },
+        // The Default Model for ask_artifact's one-shot reader call: point it
+        // directly at the mock provider so the reader call is deterministic.
+        const askArtifactUpd = await request.put('/api/default-model-settings/ask_artifact', {
+            data: { provider_id: provider.id, model: 'e2e-mock-model' },
         });
-        if (!utilityGroupUpd.ok()) {
-            throw new Error(`PUT /api/model-groups/${utilityGroup.id} failed (${utilityGroupUpd.status()}): ${await utilityGroupUpd.text()}`);
+        if (!askArtifactUpd.ok()) {
+            throw new Error(`PUT /api/default-model-settings/ask_artifact failed (${askArtifactUpd.status()}): ${await askArtifactUpd.text()}`);
         }
         const company = await postJSON(request, '/api/companies', {
             name: 'CEO Co', short_name: 'ceo-co', color: '#4f46e5',
