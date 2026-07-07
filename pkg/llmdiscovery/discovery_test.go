@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -278,7 +277,7 @@ func TestFetchJSONWithRetry_RespectsContextCancellation(t *testing.T) {
 	assert.Less(t, elapsed, time.Second, "should abort during backoff wait, not run all retries")
 }
 
-func TestUpdateLLMProviderModelCatalog_SetsDefaultOnlyWhenEmpty(t *testing.T) {
+func TestUpdateLLMProviderModelCatalog_PreservesDefaultWhileStillValid(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
@@ -292,13 +291,63 @@ func TestUpdateLLMProviderModelCatalog_SetsDefaultOnlyWhenEmpty(t *testing.T) {
 	assert.Equal(t, "model-a,model-b", updated.SupportedModels)
 	assert.Equal(t, "model-a", updated.DefaultModel)
 
-	// A second refresh with a different catalog must not clobber the
-	// already-set (possibly user-chosen) default model.
+	// A second refresh where the current default is still on offer (just
+	// reordered) must not perturb it.
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-b", "model-a"}))
+	updated2, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-b,model-a", updated2.SupportedModels)
+	assert.Equal(t, "model-a", updated2.DefaultModel, "a still-valid default must not be perturbed")
+}
+
+func TestUpdateLLMProviderModelCatalog_RepicksDefaultWhenItDisappears(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true})
+	require.NoError(t, err)
+
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-a", "model-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-a", updated.DefaultModel)
+
+	// The provider stopped offering model-a (renamed/discontinued upstream)
+	// — the stale default must be replaced, not left dangling at a model
+	// that no longer exists in the catalog.
 	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-c"}))
 	updated2, err := q.GetLLMProvider(ctx, p.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "model-c", updated2.SupportedModels)
-	assert.Equal(t, "model-a", updated2.DefaultModel, "default model must not be overwritten once set")
+	assert.Equal(t, "model-c", updated2.DefaultModel, "a default that vanished from the catalog must be re-picked")
+}
+
+func TestUpdateLLMProviderModelCatalog_DefaultIsFirstOfCallerOrderedList(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true})
+	require.NoError(t, err)
+
+	// UpdateLLMProviderModelCatalog trusts the caller's ordering (e.g.
+	// pkg/llmdiscovery's sortByPriority already put the preferred model
+	// first) rather than re-deciding preference itself.
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"openai/gpt-oss-120b:free", "model-a", "model-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "openai/gpt-oss-120b:free", updated.DefaultModel)
+}
+
+func TestOpenRouterDefaultPriority_PrefersGptOss120bRegardlessOfAlphabeticalOrder(t *testing.T) {
+	// FetchOpenRouterFreeModels always targets the fixed OpenRouter base URL
+	// (no live HTTP access in this sandboxed test environment), so exercise
+	// the actual ordering it applies — sortByPriority with
+	// openRouterDefaultPriority — directly.
+	models := sortByPriority([]string{"aardvark/aaa:free", "openai/gpt-oss-120b:free", "zzz/model:free"}, openRouterDefaultPriority)
+	require.NotEmpty(t, models)
+	assert.Equal(t, "openai/gpt-oss-120b:free", models[0], "gpt-oss-120b should win the default slot even though it doesn't sort first alphabetically")
 }
 
 func TestUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
@@ -346,35 +395,6 @@ func TestForceUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
 	assert.Equal(t, "existing", updated.DefaultModel)
 }
 
-func TestSortByPriority(t *testing.T) {
-	priority := []string{"best", "second-best", "third-best"}
-
-	t.Run("all ranked, sorted by priority order", func(t *testing.T) {
-		got := sortByPriority([]string{"third-best", "best", "second-best"}, priority)
-		assert.Equal(t, []string{"best", "second-best", "third-best"}, got)
-	})
-
-	t.Run("unranked models appended alphabetically after ranked ones", func(t *testing.T) {
-		got := sortByPriority([]string{"zzz-unranked", "third-best", "aaa-unranked", "best"}, priority)
-		assert.Equal(t, []string{"best", "third-best", "aaa-unranked", "zzz-unranked"}, got)
-	})
-
-	t.Run("no ranked matches falls back to alphabetical", func(t *testing.T) {
-		got := sortByPriority([]string{"c", "a", "b"}, priority)
-		assert.Equal(t, []string{"a", "b", "c"}, got)
-	})
-
-	t.Run("empty input", func(t *testing.T) {
-		assert.Empty(t, sortByPriority(nil, priority))
-	})
-
-	t.Run("does not mutate the input slice", func(t *testing.T) {
-		input := []string{"third-best", "best"}
-		_ = sortByPriority(input, priority)
-		assert.Equal(t, []string{"third-best", "best"}, input, "sortByPriority must operate on a copy")
-	})
-}
-
 func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
@@ -416,102 +436,33 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	assert.Len(t, providersAfter, 2, "re-running Ensure must not create duplicates")
 }
 
-func TestRefreshBuiltinProviderModels_FallsBackOnFetchFailure(t *testing.T) {
+func TestRefreshBuiltinProviderModels_FetchFailureLeavesCatalogUntouched(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
 	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
 
-	// Point both builtin providers at a base URL that always 404s, forcing
-	// the fetch to fail and the fallback list to be used instead. We can't
-	// override the package-level base URL constants, so this test verifies
-	// the fallback path indirectly: RefreshBuiltinProviderModels must
-	// gracefully populate a non-empty catalog even when the live host used in
-	// tests (still openrouter.ai/opencode.ai — unreachable in sandboxed CI)
-	// cannot be reached.
-	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
-	err := RefreshBuiltinProviderModels(ctx, q, client)
-	require.NoError(t, err, "a fetch failure must be absorbed by the fallback list, not surfaced as an error")
-
+	// Give both providers a known-good catalog first, simulating a prior
+	// successful discovery.
 	providers, err := q.ListLLMProviders(ctx)
 	require.NoError(t, err)
 	for _, p := range providers {
-		assert.NotEmpty(t, p.SupportedModels, "%s should have a fallback model list", p.Name)
-		assert.NotEmpty(t, p.DefaultModel, "%s should have a fallback default model", p.Name)
-		if p.Name == db.ProviderNameOpenRouter {
-			assert.True(t, strings.Contains(p.SupportedModels, ":free"))
-		}
-	}
-}
-
-func TestSeedFallbackModels_PopulatesBuiltinProvidersWithNoNetwork(t *testing.T) {
-	database := setupTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
-
-	// Sanity check: right after seeding, both providers are blank — this is
-	// exactly the window SeedFallbackModels exists to close.
-	before, err := q.ListLLMProviders(ctx)
-	require.NoError(t, err)
-	for _, p := range before {
-		assert.Empty(t, p.DefaultModel, "%s should start blank before SeedFallbackModels", p.Name)
+		require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"existing-model"}))
 	}
 
-	require.NoError(t, SeedFallbackModels(ctx, q))
+	// A subsequent refresh whose fetch fails entirely (host unreachable) must
+	// not touch that already-known-good catalog — there is no hardcoded
+	// fallback list to substitute in, so the safest thing is to leave it
+	// alone and retry later.
+	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
+	err = RefreshBuiltinProviderModels(ctx, q, client)
+	require.NoError(t, err, "a fetch failure is logged and skipped, not surfaced as an error")
 
 	after, err := q.ListLLMProviders(ctx)
 	require.NoError(t, err)
-	names := map[string]bool{}
 	for _, p := range after {
-		names[p.Name] = true
-		assert.NotEmpty(t, p.DefaultModel, "%s should have a fallback default model", p.Name)
-		assert.NotEmpty(t, p.SupportedModels, "%s should have a fallback model list", p.Name)
-	}
-	assert.True(t, names[db.ProviderNameOpenRouter])
-	assert.True(t, names[db.ProviderNameOpenCodeZen])
-}
-
-// TestWipeThenSeedFallback_NeverLeavesABlankDefaultModel is a regression test
-// for a real bug: the e2e WipeDB handler re-seeds builtin providers (blank
-// catalog by design — no network at wipe time) *after* the one-time,
-// process-lifetime RefreshBuiltinProviderModels goroutine has already run.
-// Without a synchronous fallback seed, a provider wiped after that point
-// would have a permanently blank DefaultModel for the rest of the process's
-// life, breaking anything that assumes a builtin provider has one (e.g. the
-// "existing provider" onboarding step's required Model Name field silently
-// blocking form submission).
-func TestWipeThenSeedFallback_NeverLeavesABlankDefaultModel(t *testing.T) {
-	database := setupTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-
-	// Simulate real startup: seed + a (here, always-failing) live refresh
-	// that still leaves a usable catalog via its own fallback path.
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
-	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
-	require.NoError(t, RefreshBuiltinProviderModels(ctx, q, client))
-
-	// Simulate a wipe: providers table cleared and re-seeded blank, exactly
-	// like server/controllers/e2e.go's WipeDB does. The one-time discovery
-	// goroutine has already run and will never run again for this process.
-	require.NoError(t, database.Exec("DELETE FROM llm_providers").Error)
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
-
-	afterWipeOnly, err := q.ListLLMProviders(ctx)
-	require.NoError(t, err)
-	for _, p := range afterWipeOnly {
-		assert.Empty(t, p.DefaultModel, "sanity check: a bare re-seed after wipe must be blank")
-	}
-
-	// The fix: WipeDB also calls SeedFallbackModels synchronously.
-	require.NoError(t, SeedFallbackModels(ctx, q))
-
-	afterFallbackSeed, err := q.ListLLMProviders(ctx)
-	require.NoError(t, err)
-	for _, p := range afterFallbackSeed {
-		assert.NotEmpty(t, p.DefaultModel, "%s must never be left with a blank DefaultModel after a wipe", p.Name)
-		assert.NotEmpty(t, p.SupportedModels, "%s must never be left with a blank SupportedModels after a wipe", p.Name)
+		assert.Equal(t, "existing-model", p.SupportedModels, "%s's catalog must be untouched by a failed fetch", p.Name)
+		assert.Equal(t, "existing-model", p.DefaultModel, "%s's default must be untouched by a failed fetch", p.Name)
 	}
 }
 

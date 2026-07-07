@@ -20,38 +20,6 @@ import (
 	"agent-orchestrator/db"
 )
 
-// fallbackOpenRouterFreeModels is used when the live catalog can't be
-// fetched (offline first boot, transient outage), so the provider still has
-// a usable model list instead of an empty one. It self-heals: the next
-// successful RefreshBuiltinProviderModels call replaces it with live data.
-//
-// This list doubles as the curated ranking reference in sortByPriority: it's
-// ordered best-known-capability first. Neither OpenRouter nor OpenCode Zen
-// expose a public "intelligence" or popularity score via their /models
-// endpoint, so there's no live signal to sort live-fetched results by —
-// this ordering is an editorial judgment call, kept in one place so both the
-// offline fallback and the live-fetch ranking stay consistent. Worth
-// revisiting periodically as new models show up.
-var fallbackOpenRouterFreeModels = []string{
-	"openai/gpt-oss-120b:free",
-	"deepseek/deepseek-r1:free",
-	"deepseek/deepseek-chat-v3.1:free",
-	"qwen/qwen3-coder:free",
-	"meta-llama/llama-3.3-70b-instruct:free",
-	"google/gemma-3-27b-it:free",
-}
-
-// fallbackOpenCodeZenFreeModels mirrors fallbackOpenRouterFreeModels for
-// OpenCode Zen — also doubles as its curated ranking reference.
-var fallbackOpenCodeZenFreeModels = []string{
-	"deepseek-v4-flash-free",
-	"big-pickle",
-	"minimax-m2.5-free",
-	"mimo-v2-pro-free",
-	"mimo-v2-omni-free",
-	"nemotron-3-super-free",
-}
-
 // openCodeZenKnownFree lists OpenCode Zen model IDs known to be free even
 // though they don't follow the "-free" naming convention.
 var openCodeZenKnownFree = map[string]bool{
@@ -88,6 +56,14 @@ func isOpenRouterFree(m openRouterModel) bool {
 	return m.Pricing.Prompt == "0" && m.Pricing.Completion == "0"
 }
 
+// openRouterDefaultPriority names OpenRouter's preferred default model —
+// a solid general-purpose free model — so it wins the default slot over
+// whatever happens to sort first alphabetically. Reuses sortByPriority (see
+// below): if this model isn't actually offered, it's simply ignored and the
+// catalog stays plain alphabetical. This is the only free-model ID this
+// package hardcodes; every other model comes straight from the live fetch.
+var openRouterDefaultPriority = []string{"openai/gpt-oss-120b:free"}
+
 // FetchOpenRouterFreeModels fetches OpenRouter's public model catalog and
 // returns the IDs of models that cost nothing to use.
 func FetchOpenRouterFreeModels(ctx context.Context, client *http.Client) ([]string, error) {
@@ -101,7 +77,7 @@ func FetchOpenRouterFreeModels(ctx context.Context, client *http.Client) ([]stri
 			free = append(free, m.ID)
 		}
 	}
-	return sortByPriority(free, fallbackOpenRouterFreeModels), nil
+	return sortByPriority(free, openRouterDefaultPriority), nil
 }
 
 // isOpenCodeZenFree reports whether a model ID looks free. OpenCode Zen's
@@ -126,7 +102,8 @@ func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]str
 			free = append(free, m.ID)
 		}
 	}
-	return sortByPriority(free, fallbackOpenCodeZenFreeModels), nil
+	sort.Strings(free)
+	return free, nil
 }
 
 // PresetDiscoverer knows how to fetch the live model catalog for a provider
@@ -226,58 +203,16 @@ func sortByPriority(ids []string, priority []string) []string {
 	return sorted
 }
 
-// fallbackModelsFor returns the curated fallback model list for a builtin
-// provider name, or nil if the name isn't one of the builtin providers.
-func fallbackModelsFor(providerName string) []string {
-	switch providerName {
-	case db.ProviderNameOpenRouter:
-		return fallbackOpenRouterFreeModels
-	case db.ProviderNameOpenCodeZen:
-		return fallbackOpenCodeZenFreeModels
-	default:
-		return nil
-	}
-}
-
-// SeedFallbackModels immediately populates every builtin provider's model
-// catalog from the static fallback list — no network call, so it's safe to
-// run synchronously right after EnsureBuiltinLLMProviders. This closes the
-// window where a builtin provider row exists but has a blank DefaultModel
-// (which breaks anything that assumes a provider has a usable default,
-// e.g. the "existing provider" onboarding step): without it, a provider
-// stays blank until the async RefreshBuiltinProviderModels fetch completes,
-// and if something re-seeds the providers afterward (e.g. the e2e WipeDB
-// helper, which intentionally skips the network fetch to stay fast), that
-// window never closes for the rest of the process's life. The later live
-// discovery fetch simply overwrites this seed with fresher data once it
-// completes.
-func SeedFallbackModels(ctx context.Context, q *db.Queries) error {
-	providers, err := q.ListLLMProviders(ctx)
-	if err != nil {
-		return fmt.Errorf("list providers: %w", err)
-	}
-	for _, p := range providers {
-		if !p.Builtin {
-			continue
-		}
-		models := fallbackModelsFor(p.Name)
-		if len(models) == 0 {
-			continue
-		}
-		if err := q.UpdateLLMProviderModelCatalog(ctx, p.ID, models); err != nil {
-			return fmt.Errorf("%s: %w", p.Name, err)
-		}
-	}
-	return nil
-}
-
 // RefreshBuiltinProviderModels fetches the current free-model catalog for
 // each builtin provider row and stores it via UpdateLLMProviderModelCatalog.
-// Safe to call repeatedly (startup, or a periodic ticker): a failed fetch
-// falls back to a small curated model list rather than leaving the provider
-// without any usable models, and never overwrites a DefaultModel the user
-// already picked. Returns an error only to log context; callers should treat
-// it as a warning, not a startup blocker.
+// Safe to call repeatedly (startup, or a periodic ticker). A failed fetch is
+// logged and skipped for that provider, leaving its last known-good catalog
+// untouched — there is no hardcoded fallback list to fall back to, since a
+// stale, hand-maintained list of "free models" can silently drift out of
+// sync with what a provider actually offers (a model can be renamed or
+// discontinued upstream) and end up worse than just trying again next time.
+// Returns an error only to log context; callers should treat it as a
+// warning, not a startup blocker.
 func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *http.Client) error {
 	providers, err := q.ListLLMProviders(ctx)
 	if err != nil {
@@ -301,8 +236,8 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 			continue
 		}
 		if fetchErr != nil {
-			log.Printf("llmdiscovery: %v — falling back to the built-in free-model list", fetchErr)
-			models = fallbackModelsFor(p.Name)
+			log.Printf("llmdiscovery: %v — leaving %s's model catalog untouched", fetchErr, p.Name)
+			continue
 		}
 
 		if len(models) == 0 {

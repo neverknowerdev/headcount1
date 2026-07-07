@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"slices"
 	"strings"
 )
 
@@ -82,10 +83,13 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 }
 
 // UpdateLLMProviderModelCatalog stores a freshly discovered list of model IDs
-// on a provider. DefaultModel is only set when currently empty, so a
-// background refresh never overrides a default the user picked deliberately.
-// A nil/empty models list is a no-op — a transient discovery failure should
-// never blank out a previously known-good catalog.
+// on a provider. DefaultModel is only re-picked when it's currently empty or
+// no longer present in the new catalog — e.g. the upstream provider removed
+// or renamed the model — so a stale default (like one pointing at a model
+// that no longer exists) can never survive a catalog refresh, while a
+// still-valid default stays stable across refreshes even if the fetched
+// order changes. A nil/empty models list is a no-op — a transient discovery
+// failure should never blank out a previously known-good catalog.
 func (q *Queries) UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error {
 	if len(models) == 0 {
 		return nil
@@ -95,17 +99,19 @@ func (q *Queries) UpdateLLMProviderModelCatalog(ctx context.Context, providerID 
 		return err
 	}
 	updates := map[string]any{"supported_models": strings.Join(models, ",")}
-	if existing.DefaultModel == "" {
+	if existing.DefaultModel == "" || !slices.Contains(models, existing.DefaultModel) {
+		// models is ordered by the caller (e.g. pkg/llmdiscovery's
+		// sortByPriority) with its preferred default first.
 		updates["default_model"] = models[0]
 	}
 	return q.db.WithContext(ctx).Model(&existing).Updates(updates).Error
 }
 
 // ForceUpdateLLMProviderModelCatalog replaces a provider's model catalog and
-// always sets DefaultModel to the top of the freshly ranked list, unlike
-// UpdateLLMProviderModelCatalog which never overwrites an existing
-// DefaultModel. Used for explicit, user-triggered re-discovery — getting the
-// current best-ranked pick is exactly the point of that action.
+// always re-picks DefaultModel from the fresh list, unlike
+// UpdateLLMProviderModelCatalog which leaves a still-valid DefaultModel
+// alone. Used for explicit, user-triggered re-discovery — getting the
+// current best pick is exactly the point of that action.
 func (q *Queries) ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error {
 	if len(models) == 0 {
 		return nil
