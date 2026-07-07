@@ -83,6 +83,7 @@ func main() {
 		&db.ModelGroup{},
 		&db.ModelGroupMember{},
 		&db.ModelRequestStat{},
+		&db.ProviderPreset{},
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
@@ -111,12 +112,22 @@ func main() {
 	}
 
 	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
-	// present. Their live model catalogs are fetched in the background below
-	// so a slow/unreachable host never delays server startup.
+	// present. Their model catalog (and DefaultModel) is populated purely
+	// from a live fetch in the background — no hardcoded model list — so a
+	// slow/unreachable host never delays server startup, and a provider is
+	// simply left blank until the first successful fetch completes.
 	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
 	}
+	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
+	// pick from a dropdown when adding a provider. Unlike the builtin free
+	// providers above, these don't become actual LLMProvider rows until a
+	// user picks one and supplies an API key.
+	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed provider presets: %v", err)
+	}
 	go refreshBuiltinLLMProviderModels(database)
+	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
 
 	// Repair codegraph servers whose project_id was not set on creation.
 	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {

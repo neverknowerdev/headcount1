@@ -209,7 +209,10 @@ func (c *Client) Complete(ctx context.Context, req ChatRequest) (*ChatResponse, 
 	var lastErr error
 	for attempt := 0; attempt <= c.MaxRetries; attempt++ {
 		if attempt > 0 {
-			wait := retryBase << uint(attempt-1)
+			// Exponential backoff: 1x, 2x, 4x, 8x... retryBase on successive
+			// retries (attempt 1, 2, 3, 4...).
+			backoffMultiplier := time.Duration(1) << uint(attempt-1)
+			wait := retryBase * backoffMultiplier
 			select {
 			case <-ctx.Done():
 				return nil, nil, ctx.Err()

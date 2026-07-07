@@ -18,7 +18,7 @@ interface TokenUsage {
   cached?: number;
 }
 
-interface RunTokenStats {
+export interface RunTokenStats {
   prompt_tokens?: number;
   completion_tokens?: number;
   reasoning_tokens?: number;
@@ -1088,7 +1088,7 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
 
 // ─── TokenStatsBar ────────────────────────────────────────────────────────────
 
-interface TokenStatsBarProps {
+export interface TokenStatsBarProps {
   stats: RunTokenStats | null;
   messages: LogMessage[];
   agentStats?: AgentTokenStats[];
@@ -1103,7 +1103,7 @@ interface TokenSegment {
   isSub?: boolean;
 }
 
-function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProps) {
+export function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProps) {
   const [expanded, setExpanded] = useState(false);
 
   const aggregate: RunTokenStats = useMemo(() => {

@@ -6,7 +6,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
-	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -58,7 +57,7 @@ func TestFetchOpenRouterFreeModels_FiltersFreePricing(t *testing.T) {
 func fetchOpenRouterFreeModelsFromURL(t *testing.T, url string) ([]string, error) {
 	t.Helper()
 	var resp openRouterModelsResponse
-	if err := fetchJSONWithRetry(context.Background(), http.DefaultClient, url, &resp); err != nil {
+	if err := fetchJSONWithRetry(context.Background(), http.DefaultClient, url, "", &resp); err != nil {
 		return nil, err
 	}
 	var free []string
@@ -95,7 +94,7 @@ func TestFetchOpenCodeZenFreeModels_FiltersByNameHeuristic(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	require.NoError(t, fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL+"/models", &resp))
+	require.NoError(t, fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL+"/models", "", &resp))
 	var free []string
 	for _, m := range resp.Data {
 		if isOpenCodeZenFree(m.ID) {
@@ -103,6 +102,63 @@ func TestFetchOpenCodeZenFreeModels_FiltersByNameHeuristic(t *testing.T) {
 		}
 	}
 	assert.ElementsMatch(t, []string{"big-pickle", "minimax-m2.5-free"}, free)
+}
+
+func TestFetchModelsForPreset_RequiresApiKey(t *testing.T) {
+	_, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, "https://example.com", "")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "API key is required")
+}
+
+func TestFetchModelsForPreset_SendsBearerAuthAndReturnsFullUnfilteredCatalog(t *testing.T) {
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		assert.Equal(t, "/models", r.URL.Path)
+		gotAuth = r.Header.Get("Authorization")
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "MiniMax-M3"},
+				{"id": "MiniMax-Text-01"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	assert.Equal(t, "Bearer sk-test-key", gotAuth)
+	// No free/paid filtering for presets — everything the endpoint returns
+	// comes back, alphabetized.
+	assert.Equal(t, []string{"MiniMax-M3", "MiniMax-Text-01"}, models)
+}
+
+func TestFetchModelsForPreset_MiniMaxPrefersM3AsDefaultRegardlessOfAlphabeticalOrder(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{
+			"data": []map[string]any{
+				{"id": "MiniMax-Abab-01"}, // sorts before MiniMax-M3 alphabetically
+				{"id": "MiniMax-Text-01"},
+				{"id": "MiniMax-M3"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, db.ProviderPresetMiniMax, srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	require.NotEmpty(t, models)
+	assert.Equal(t, "MiniMax-M3", models[0], "MiniMax-M3 should win the default-model slot even though it doesn't sort first alphabetically")
+}
+
+func TestFetchModelsForPreset_UnknownKeyFallsBackToGenericDiscoverer(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{{"id": "some-model"}}})
+	}))
+	defer srv.Close()
+
+	models, err := FetchModelsForPreset(context.Background(), http.DefaultClient, "some-future-preset", srv.URL, "sk-test-key")
+	require.NoError(t, err)
+	assert.Equal(t, []string{"some-model"}, models)
 }
 
 func TestFetchJSONWithRetry_RetriesOn5xxThenSucceeds(t *testing.T) {
@@ -118,7 +174,7 @@ func TestFetchJSONWithRetry_RetriesOn5xxThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(3), atomic.LoadInt32(&calls))
 	assert.Equal(t, "ok", resp.Data[0].ID)
@@ -136,7 +192,7 @@ func TestFetchJSONWithRetry_RetriesOn429ThenSucceeds(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
@@ -150,7 +206,7 @@ func TestFetchJSONWithRetry_DoesNotRetryOn4xx(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.Error(t, err)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls))
 	assert.Contains(t, err.Error(), "404")
@@ -165,7 +221,7 @@ func TestFetchJSONWithRetry_ExhaustsRetriesAndReturnsError(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.Error(t, err)
 	assert.Equal(t, int32(fetchMaxAttempts), atomic.LoadInt32(&calls))
 	assert.Contains(t, err.Error(), "all retries exhausted")
@@ -191,7 +247,7 @@ func TestFetchJSONWithRetry_RetriesOnNetworkError(t *testing.T) {
 	defer srv.Close()
 
 	var resp openAIModelsResponse
-	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL, "", &resp)
 	require.NoError(t, err)
 	assert.Equal(t, int32(2), atomic.LoadInt32(&calls))
 }
@@ -213,7 +269,7 @@ func TestFetchJSONWithRetry_RespectsContextCancellation(t *testing.T) {
 
 	var resp openAIModelsResponse
 	start := time.Now()
-	err := fetchJSONWithRetry(ctx, http.DefaultClient, srv.URL, &resp)
+	err := fetchJSONWithRetry(ctx, http.DefaultClient, srv.URL, "", &resp)
 	elapsed := time.Since(start)
 
 	require.Error(t, err)
@@ -221,7 +277,7 @@ func TestFetchJSONWithRetry_RespectsContextCancellation(t *testing.T) {
 	assert.Less(t, elapsed, time.Second, "should abort during backoff wait, not run all retries")
 }
 
-func TestUpdateLLMProviderModelCatalog_SetsDefaultOnlyWhenEmpty(t *testing.T) {
+func TestUpdateLLMProviderModelCatalog_PreservesDefaultWhileStillValid(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
@@ -235,13 +291,63 @@ func TestUpdateLLMProviderModelCatalog_SetsDefaultOnlyWhenEmpty(t *testing.T) {
 	assert.Equal(t, "model-a,model-b", updated.SupportedModels)
 	assert.Equal(t, "model-a", updated.DefaultModel)
 
-	// A second refresh with a different catalog must not clobber the
-	// already-set (possibly user-chosen) default model.
+	// A second refresh where the current default is still on offer (just
+	// reordered) must not perturb it.
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-b", "model-a"}))
+	updated2, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-b,model-a", updated2.SupportedModels)
+	assert.Equal(t, "model-a", updated2.DefaultModel, "a still-valid default must not be perturbed")
+}
+
+func TestUpdateLLMProviderModelCatalog_RepicksDefaultWhenItDisappears(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true})
+	require.NoError(t, err)
+
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-a", "model-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "model-a", updated.DefaultModel)
+
+	// The provider stopped offering model-a (renamed/discontinued upstream)
+	// — the stale default must be replaced, not left dangling at a model
+	// that no longer exists in the catalog.
 	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"model-c"}))
 	updated2, err := q.GetLLMProvider(ctx, p.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "model-c", updated2.SupportedModels)
-	assert.Equal(t, "model-a", updated2.DefaultModel, "default model must not be overwritten once set")
+	assert.Equal(t, "model-c", updated2.DefaultModel, "a default that vanished from the catalog must be re-picked")
+}
+
+func TestUpdateLLMProviderModelCatalog_DefaultIsFirstOfCallerOrderedList(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true})
+	require.NoError(t, err)
+
+	// UpdateLLMProviderModelCatalog trusts the caller's ordering (e.g.
+	// pkg/llmdiscovery's sortByPriority already put the preferred model
+	// first) rather than re-deciding preference itself.
+	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"openai/gpt-oss-120b:free", "model-a", "model-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "openai/gpt-oss-120b:free", updated.DefaultModel)
+}
+
+func TestOpenRouterDefaultPriority_PrefersGptOss120bRegardlessOfAlphabeticalOrder(t *testing.T) {
+	// FetchOpenRouterFreeModels always targets the fixed OpenRouter base URL
+	// (no live HTTP access in this sandboxed test environment), so exercise
+	// the actual ordering it applies — sortByPriority with
+	// openRouterDefaultPriority — directly.
+	models := sortByPriority([]string{"aardvark/aaa:free", "openai/gpt-oss-120b:free", "zzz/model:free"}, openRouterDefaultPriority)
+	require.NotEmpty(t, models)
+	assert.Equal(t, "openai/gpt-oss-120b:free", models[0], "gpt-oss-120b should win the default slot even though it doesn't sort first alphabetically")
 }
 
 func TestUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
@@ -253,6 +359,36 @@ func TestUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, nil))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "existing", updated.SupportedModels)
+	assert.Equal(t, "existing", updated.DefaultModel)
+}
+
+func TestForceUpdateLLMProviderModelCatalog_AlwaysOverwritesDefault(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true, SupportedModels: "old-a,old-b", DefaultModel: "old-a"})
+	require.NoError(t, err)
+
+	require.NoError(t, q.ForceUpdateLLMProviderModelCatalog(ctx, p.ID, []string{"new-a", "new-b"}))
+	updated, err := q.GetLLMProvider(ctx, p.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "new-a,new-b", updated.SupportedModels)
+	assert.Equal(t, "new-a", updated.DefaultModel, "unlike UpdateLLMProviderModelCatalog, this must always overwrite the default")
+}
+
+func TestForceUpdateLLMProviderModelCatalog_EmptyListIsNoop(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	p, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "OpenRouter", BaseUrl: db.OpenRouterBaseURL, Builtin: true, SupportedModels: "existing", DefaultModel: "existing"})
+	require.NoError(t, err)
+
+	require.NoError(t, q.ForceUpdateLLMProviderModelCatalog(ctx, p.ID, nil))
 	updated, err := q.GetLLMProvider(ctx, p.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "existing", updated.SupportedModels)
@@ -300,31 +436,91 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	assert.Len(t, providersAfter, 2, "re-running Ensure must not create duplicates")
 }
 
-func TestRefreshBuiltinProviderModels_FallsBackOnFetchFailure(t *testing.T) {
+func TestEnsureBuiltinLLMProviders_SetsStableProviderName(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	providers, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+
+	byVendor := map[string]bool{}
+	for _, p := range providers {
+		byVendor[p.ProviderName] = true
+	}
+	assert.True(t, byVendor[db.ProviderVendorOpenRouter])
+	assert.True(t, byVendor[db.ProviderVendorOpenCodeZen])
+}
+
+func TestEnsureBuiltinLLMProviders_BackfillsProviderNameOnLegacyRow(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	// Simulate a row created before ProviderName existed: builtin, matching
+	// Name, but no ProviderName set.
+	legacy, err := q.CreateLLMProvider(ctx, db.LLMProvider{
+		Name: db.ProviderNameOpenRouter, BaseUrl: db.OpenRouterBaseURL, Builtin: true, Enabled: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, legacy.ProviderName)
+
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	after, err := q.GetLLMProvider(ctx, legacy.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.ProviderVendorOpenRouter, after.ProviderName, "a pre-existing builtin row must be backfilled with its stable ProviderName")
+}
+
+func TestBuiltinProviderDispatch_SurvivesUserRenamingDisplayName(t *testing.T) {
+	// Regression test: RediscoverProviderModels/RefreshBuiltinProviderModels
+	// used to dispatch by matching the user-editable display Name — renaming
+	// a builtin provider (allowed by UpdateProvider) would silently break
+	// that dispatch. ProviderName is never touched by UpdateProvider, so it
+	// must still identify the provider correctly after a rename.
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
 	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
 
-	// Point both builtin providers at a base URL that always 404s, forcing
-	// the fetch to fail and the fallback list to be used instead. We can't
-	// override the package-level base URL constants, so this test verifies
-	// the fallback path indirectly: RefreshBuiltinProviderModels must
-	// gracefully populate a non-empty catalog even when the live host used in
-	// tests (still openrouter.ai/opencode.ai — unreachable in sandboxed CI)
-	// cannot be reached.
-	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
-	err := RefreshBuiltinProviderModels(ctx, q, client)
-	require.NoError(t, err, "a fetch failure must be absorbed by the fallback list, not surfaced as an error")
+	var openRouter db.LLMProvider
+	require.NoError(t, database.Where("name = ?", db.ProviderNameOpenRouter).First(&openRouter).Error)
 
+	// Simulate UpdateProvider's field-by-field mutation of an
+	// already-fetched row (it never touches ProviderName).
+	openRouter.Name = "My Renamed Provider"
+	updated, err := q.UpdateLLMProvider(ctx, openRouter)
+	require.NoError(t, err)
+	assert.Equal(t, db.ProviderVendorOpenRouter, updated.ProviderName, "ProviderName must survive a display-name rename")
+}
+
+func TestRefreshBuiltinProviderModels_FetchFailureLeavesCatalogUntouched(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+
+	// Give both providers a known-good catalog first, simulating a prior
+	// successful discovery.
 	providers, err := q.ListLLMProviders(ctx)
 	require.NoError(t, err)
 	for _, p := range providers {
-		assert.NotEmpty(t, p.SupportedModels, "%s should have a fallback model list", p.Name)
-		assert.NotEmpty(t, p.DefaultModel, "%s should have a fallback default model", p.Name)
-		if p.Name == db.ProviderNameOpenRouter {
-			assert.True(t, strings.Contains(p.SupportedModels, ":free"))
-		}
+		require.NoError(t, q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"existing-model"}))
+	}
+
+	// A subsequent refresh whose fetch fails entirely (host unreachable) must
+	// not touch that already-known-good catalog — there is no hardcoded
+	// fallback list to substitute in, so the safest thing is to leave it
+	// alone and retry later.
+	client := &http.Client{Timeout: 2 * time.Second, Transport: alwaysFailTransport{}}
+	err = RefreshBuiltinProviderModels(ctx, q, client)
+	require.NoError(t, err, "a fetch failure is logged and skipped, not surfaced as an error")
+
+	after, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+	for _, p := range after {
+		assert.Equal(t, "existing-model", p.SupportedModels, "%s's catalog must be untouched by a failed fetch", p.Name)
+		assert.Equal(t, "existing-model", p.DefaultModel, "%s's default must be untouched by a failed fetch", p.Name)
 	}
 }
 

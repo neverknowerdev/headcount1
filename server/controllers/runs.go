@@ -8,6 +8,7 @@ import (
 	"agent-orchestrator/db"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 // RunResponse is the wire shape returned to the frontend. It is identical to
@@ -77,10 +78,17 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The list view only needs overview info: log_content/log_entries are
+	// full transcripts (can be megabytes for long sessions) and are only
+	// ever rendered on the Run Log Details page, so they're omitted here to
+	// keep the list fast and responsive as run history grows. Task/Agent
+	// preloads are similarly trimmed to the handful of fields the list
+	// actually renders.
 	var runs []db.Run
 	err := api.db.
-		Preload("Task").
-		Preload("Agent").
+		Omit("log_content", "log_entries").
+		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
+		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error
