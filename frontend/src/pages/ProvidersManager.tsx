@@ -57,6 +57,10 @@ export const ProvidersManager: React.FC = () => {
     const [activateProvider, setActivateProvider] = useState<any | null>(null);
     const [activateApiKey, setActivateApiKey] = useState('');
     const [activateTestResult, setActivateTestResult] = useState<{status?: string, error?: string, log?: string} | null>(null);
+    // Which model Test Connection/Save use — defaults to the provider's
+    // current default_model, but the user can pick a different discovered
+    // model (e.g. if the default is rate-limited or erroring).
+    const [activateTestModel, setActivateTestModel] = useState('');
     const [isActivateTesting, setIsActivateTesting] = useState(false);
     const [isActivateSaving, setIsActivateSaving] = useState(false);
     const [togglingId, setTogglingId] = useState<number | null>(null);
@@ -221,6 +225,7 @@ export const ProvidersManager: React.FC = () => {
             const res = await axios.post(`/api/providers/${provider.id}/rediscover`);
             setProviders(prev => prev.map(p => p.id === provider.id ? res.data : p));
             setActivateProvider((prev: any) => (prev && prev.id === provider.id) ? res.data : prev);
+            setActivateTestModel(prev => (activateProvider && activateProvider.id === provider.id) ? res.data.default_model : prev);
         } catch (e: any) {
             alert(e.response?.data?.error || 'Failed to re-discover models');
         } finally {
@@ -274,20 +279,27 @@ export const ProvidersManager: React.FC = () => {
         setActivateProvider(provider);
         setActivateApiKey('');
         setActivateTestResult(null);
+        setActivateTestModel(provider.default_model || '');
     };
 
     const closeActivateModal = () => {
         setActivateProvider(null);
         setActivateApiKey('');
         setActivateTestResult(null);
+        setActivateTestModel('');
     };
 
     const handleTestActivate = async () => {
         if (!activateProvider) return;
+        const modelToTest = activateTestModel || activateProvider.default_model;
         setIsActivateTesting(true);
         setActivateTestResult(null);
         try {
-            const res = await testSingleModel(activateProvider.default_model, activateProvider.base_url, activateApiKey, activateProvider.provider_type, activateProvider.id);
+            // An empty api_key here is fine when the provider already has one
+            // saved (activateProvider.api_key) — the backend falls back to
+            // the stored key for a known provider_id, so this also works to
+            // re-test with the existing key without retyping it.
+            const res = await testSingleModel(modelToTest, activateProvider.base_url, activateApiKey, activateProvider.provider_type, activateProvider.id);
             setActivateTestResult(res);
         } catch (e: any) {
             setActivateTestResult({ error: e.message || 'Connection failed. Check your API key and try again.' });
@@ -304,13 +316,15 @@ export const ProvidersManager: React.FC = () => {
             // known-good for a built-in gateway; the test probe's
             // auto-detected shape isn't a reliable substitute (it races an
             // OpenAI- and an Anthropic-shaped request and could otherwise
-            // clobber the URL with the wrong one).
+            // clobber the URL with the wrong one). default_model is whatever
+            // was just successfully tested — lets the user save a fallback
+            // pick if the original default was rate-limited or erroring.
             await axios.put(`/api/providers/${activateProvider.id}`, {
                 name: activateProvider.name,
                 base_url: activateProvider.base_url,
                 api_key: activateApiKey,
                 provider_type: activateProvider.provider_type,
-                default_model: activateProvider.default_model,
+                default_model: activateTestModel || activateProvider.default_model,
                 supported_models: activateProvider.supported_models,
             });
             closeActivateModal();
@@ -590,15 +604,31 @@ export const ProvidersManager: React.FC = () => {
                                     autoFocus
                                     value={activateApiKey}
                                     onChange={e => setActivateApiKey(e.target.value)}
-                                    placeholder="Paste your free API key"
+                                    placeholder={activateProvider.api_key ? 'Leave blank to keep the existing key' : 'Paste your free API key'}
                                     className="w-full border rounded p-2"
                                 />
                             </div>
 
+                            {activateProvider.supported_models && (
+                                <div>
+                                    <label className="block text-sm font-medium text-gray-700 mb-1">Model to test &amp; use</label>
+                                    <select
+                                        value={activateTestModel}
+                                        onChange={e => { setActivateTestModel(e.target.value); setActivateTestResult(null); }}
+                                        className="w-full border rounded p-2"
+                                    >
+                                        {activateProvider.supported_models.split(',').map((m: string) => (
+                                            <option key={m} value={m}>{m}{m === activateProvider.default_model ? ' (default)' : ''}</option>
+                                        ))}
+                                    </select>
+                                    <p className="text-xs text-gray-500 mt-1">If the default model is rate-limited or errors, pick another here — Test Connection and Save both use this selection.</p>
+                                </div>
+                            )}
+
                             <button
                                 type="button"
                                 onClick={handleTestActivate}
-                                disabled={isActivateTesting || !activateApiKey}
+                                disabled={isActivateTesting || (!activateApiKey && !activateProvider.api_key)}
                                 className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200 disabled:opacity-50"
                             >
                                 {isActivateTesting ? 'Testing...' : 'Test Connection'}
