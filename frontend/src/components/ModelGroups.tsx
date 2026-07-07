@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Edit2, Minus, Copy, Check, ArrowUp, ArrowDown } from 'lucide-react';
+import { Plus, Trash2, Edit2, Minus, Copy, Check, ArrowUp, ArrowDown, BarChart3, X } from 'lucide-react';
 
 interface MemberWindow {
     requests: number;
@@ -126,6 +126,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
     const [saveError, setSaveError] = useState('');
     const [isSaving, setIsSaving] = useState(false);
     const [copiedId, setCopiedId] = useState<number | null>(null);
+    const [statsGroupId, setStatsGroupId] = useState<number | null>(null);
 
     const fetchGroups = useCallback(async () => {
         try {
@@ -248,6 +249,37 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
         stats[groupId]?.members?.find(s => s.provider_id === m.provider_id &&
             (m.all_models ? s.all_models : s.model === m.model));
 
+    // Compact card summary over the last 3 days: total requests, the share
+    // that needed a fallback (failed or rate-limited attempts — every one
+    // of those means the router moved on to another model), a
+    // request-weighted average tokens/sec across members, and — only when
+    // the group actually mixes free and paid members, where the split is
+    // meaningful — the share of requests served by a free model.
+    const summaryFor = (g: any) => {
+        const members = stats[g.id]?.members;
+        if (!members || members.length === 0) return null;
+        let requests = 0, fallbacks = 0, tpsSum = 0, tpsWeight = 0, freeRequests = 0;
+        for (const m of members) {
+            const w = m.window_3d;
+            requests += w.requests;
+            fallbacks += w.failures + w.rate_limited;
+            if (w.avg_tokens_per_sec > 0) {
+                tpsSum += w.avg_tokens_per_sec * w.requests;
+                tpsWeight += w.requests;
+            }
+            if (m.is_free) freeRequests += w.requests;
+        }
+        if (requests === 0) return { requests: 0 };
+        const hasFree = (g.members || []).some((m: any) => m.is_free);
+        const hasPaid = (g.members || []).some((m: any) => !m.is_free);
+        return {
+            requests,
+            fallbackRate: fallbacks / requests,
+            avgTokensPerSec: tpsWeight > 0 ? tpsSum / tpsWeight : 0,
+            freeSharePct: (hasFree && hasPaid) ? freeRequests / requests : null,
+        };
+    };
+
     return (
         <div className="space-y-4">
             <div className="flex justify-between items-center">
@@ -275,9 +307,10 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                                 {g.builtin && <span className="text-xs font-medium bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">Built-in</span>}
                             </h3>
                             <div className="flex space-x-2">
-                                <button onClick={() => openModal(g)} className="text-gray-500 hover:text-gray-700"><Edit2 size={18} /></button>
+                                <button onClick={() => setStatsGroupId(g.id)} className="text-gray-500 hover:text-indigo-600" title="View stats"><BarChart3 size={18} /></button>
+                                <button onClick={() => openModal(g)} className="text-gray-500 hover:text-gray-700" title="Edit group"><Edit2 size={18} /></button>
                                 {!g.builtin && (
-                                    <button onClick={() => handleDelete(g)} className="text-red-500 hover:text-red-700"><Trash2 size={18} /></button>
+                                    <button onClick={() => handleDelete(g)} className="text-red-500 hover:text-red-700" title="Delete group"><Trash2 size={18} /></button>
                                 )}
                             </div>
                         </div>
@@ -290,50 +323,21 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                             </button>
                         </div>
 
-                        <table className="w-full text-xs">
-                            <thead>
-                                <tr className="text-left text-gray-400">
-                                    <th className="font-medium py-1">Model</th>
-                                    <th className="font-medium py-1">Fail % (5h)</th>
-                                    <th className="font-medium py-1">Fail % (3d)</th>
-                                    <th className="font-medium py-1 text-right">tok/s</th>
-                                </tr>
-                            </thead>
-                            <tbody>
-                                {(g.members || []).map((m: any) => {
-                                    const s = memberStatFor(g.id, m);
-                                    return (
-                                        <tr key={m.id} className="border-t">
-                                            <td className="py-1.5 pr-2">
-                                                <div className="flex items-center gap-1.5 flex-wrap">
-                                                    <span className="text-gray-800 break-all">{m.all_models ? 'Any model' : m.model}</span>
-                                                    <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${m.is_free ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
-                                                        {m.is_free ? 'free' : 'paid'}
-                                                    </span>
-                                                    {s?.rate_limited_now && (
-                                                        <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700"
-                                                            title={s.cooldown_until ? `Cooling down until ${new Date(s.cooldown_until).toLocaleTimeString()}` : ''}>
-                                                            ⏳ rate limited
-                                                        </span>
-                                                    )}
-                                                </div>
-                                                <span className="text-gray-400">{m.provider?.name || s?.provider_name}</span>
-                                            </td>
-                                            <td className="py-1.5 pr-2">{s ? <WindowCell w={s.window_5h} /> : <span className="text-gray-300">—</span>}</td>
-                                            <td className="py-1.5 pr-2">{s ? <WindowCell w={s.window_3d} /> : <span className="text-gray-300">—</span>}</td>
-                                            <td className="py-1.5 text-right text-gray-700">
-                                                {s && s.window_3d.avg_tokens_per_sec > 0 ? s.window_3d.avg_tokens_per_sec.toFixed(1) : '—'}
-                                            </td>
-                                        </tr>
-                                    );
-                                })}
-                                {(g.members || []).length === 0 && (
-                                    <tr><td colSpan={4} className="py-2 text-gray-400">No members configured.</td></tr>
-                                )}
-                            </tbody>
-                        </table>
-
-                        <RequestsChart buckets={stats[g.id]?.buckets || []} />
+                        <p className="text-xs text-gray-500">
+                            {(g.members || []).length} model{(g.members || []).length === 1 ? '' : 's'} configured
+                            {(() => {
+                                const s = summaryFor(g);
+                                if (!s || !s.requests) return ' · no requests in the last 3 days';
+                                return (
+                                    <>
+                                        {' · '}{s.requests} request{s.requests === 1 ? '' : 's'} (3d)
+                                        {' · '}<span className={s.fallbackRate! >= 0.3 ? 'text-red-600 font-medium' : ''}>{pct(s.fallbackRate!)} fallback</span>
+                                        {s.avgTokensPerSec! > 0 && <>{' · '}{s.avgTokensPerSec!.toFixed(1)} tok/s avg</>}
+                                        {s.freeSharePct !== null && <>{' · '}{pct(s.freeSharePct!)} free</>}
+                                    </>
+                                );
+                            })()}
+                        </p>
                     </div>
                 ))}
             </div>
@@ -354,45 +358,39 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Models (tried top to bottom; free models always go first)</label>
                                 {formMembers.map((m, idx) => (
-                                    <div key={idx} className="border rounded-lg p-2.5 mb-2 space-y-2">
-                                        <div className="flex flex-col sm:flex-row gap-2">
-                                            <select
-                                                value={m.provider_id}
-                                                onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '', all_models: false })}
-                                                className="border rounded p-2 text-sm sm:w-1/2 min-w-0"
-                                            >
-                                                <option value="">Provider…</option>
-                                                {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                                            </select>
-                                            <select
-                                                value={m.all_models ? ANY_MODEL : m.model}
-                                                disabled={!m.provider_id}
-                                                onChange={e => {
-                                                    const v = e.target.value;
-                                                    if (v === ANY_MODEL) {
-                                                        updateMember(idx, { model: '', all_models: true });
-                                                    } else {
-                                                        updateMember(idx, { model: v, all_models: false, is_free: looksFree(v) });
-                                                    }
-                                                }}
-                                                className="border rounded p-2 text-sm sm:w-1/2 min-w-0 disabled:bg-gray-50 disabled:text-gray-400"
-                                            >
-                                                <option value="">Model…</option>
-                                                <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
-                                                {modelOptionsFor(m).map(pm => <option key={pm} value={pm}>{pm}</option>)}
-                                            </select>
-                                        </div>
-                                        <div className="flex items-center justify-between">
-                                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
-                                                <input type="checkbox" checked={m.is_free} onChange={e => updateMember(idx, { is_free: e.target.checked })} />
-                                                free
-                                            </label>
-                                            <div className="flex items-center gap-1">
-                                                <button type="button" onClick={() => moveMember(idx, -1)} disabled={idx === 0} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 p-1"><ArrowUp size={15} /></button>
-                                                <button type="button" onClick={() => moveMember(idx, 1)} disabled={idx === formMembers.length - 1} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 p-1"><ArrowDown size={15} /></button>
-                                                <button type="button" onClick={() => setFormMembers(ms => ms.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700 p-1"><Minus size={16} /></button>
-                                            </div>
-                                        </div>
+                                    <div key={idx} className="flex items-center gap-2 mb-2">
+                                        <select
+                                            value={m.provider_id}
+                                            onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '', all_models: false })}
+                                            className="border rounded p-2 text-sm w-56 shrink-0"
+                                        >
+                                            <option value="">Provider…</option>
+                                            {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                        </select>
+                                        <select
+                                            value={m.all_models ? ANY_MODEL : m.model}
+                                            disabled={!m.provider_id}
+                                            onChange={e => {
+                                                const v = e.target.value;
+                                                if (v === ANY_MODEL) {
+                                                    updateMember(idx, { model: '', all_models: true });
+                                                } else {
+                                                    updateMember(idx, { model: v, all_models: false, is_free: looksFree(v) });
+                                                }
+                                            }}
+                                            className="flex-1 min-w-0 border rounded p-2 text-sm disabled:bg-gray-50 disabled:text-gray-400"
+                                        >
+                                            <option value="">Model…</option>
+                                            <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
+                                            {modelOptionsFor(m).map(pm => <option key={pm} value={pm}>{pm}</option>)}
+                                        </select>
+                                        <label className="flex items-center gap-1 text-xs text-gray-600 shrink-0">
+                                            <input type="checkbox" checked={m.is_free} onChange={e => updateMember(idx, { is_free: e.target.checked })} />
+                                            free
+                                        </label>
+                                        <button type="button" onClick={() => moveMember(idx, -1)} disabled={idx === 0} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 shrink-0"><ArrowUp size={15} /></button>
+                                        <button type="button" onClick={() => moveMember(idx, 1)} disabled={idx === formMembers.length - 1} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 shrink-0"><ArrowDown size={15} /></button>
+                                        <button type="button" onClick={() => setFormMembers(ms => ms.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700 shrink-0"><Minus size={16} /></button>
                                     </div>
                                 ))}
                                 <button type="button" onClick={() => setFormMembers(ms => [...ms, { provider_id: '', model: '', all_models: false, is_free: false }])} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center mt-2">
@@ -412,6 +410,67 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                     </div>
                 </div>
             )}
+
+            {statsGroupId !== null && (() => {
+                const g = groups.find(gr => gr.id === statsGroupId);
+                if (!g) return null;
+                return (
+                    <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
+                        <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                            <div className="flex justify-between items-start mb-4">
+                                <h2 className="text-xl font-bold">{g.name} — Stats</h2>
+                                <button onClick={() => setStatsGroupId(null)} className="text-gray-400 hover:text-gray-700"><X size={20} /></button>
+                            </div>
+                            <div className="overflow-y-auto flex-1 pr-1">
+                                <table className="w-full text-xs">
+                                    <thead>
+                                        <tr className="text-left text-gray-400">
+                                            <th className="font-medium py-1">Model</th>
+                                            <th className="font-medium py-1">Fail % (5h)</th>
+                                            <th className="font-medium py-1">Fail % (3d)</th>
+                                            <th className="font-medium py-1 text-right">tok/s</th>
+                                        </tr>
+                                    </thead>
+                                    <tbody>
+                                        {(g.members || []).map((m: any) => {
+                                            const s = memberStatFor(g.id, m);
+                                            return (
+                                                <tr key={m.id} className="border-t">
+                                                    <td className="py-1.5 pr-2">
+                                                        <div className="flex items-center gap-1.5 flex-wrap">
+                                                            <span className="text-gray-800 break-all">{m.all_models ? 'Any model' : m.model}</span>
+                                                            <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-medium ${m.is_free ? 'bg-green-100 text-green-700' : 'bg-gray-100 text-gray-600'}`}>
+                                                                {m.is_free ? 'free' : 'paid'}
+                                                            </span>
+                                                            {s?.rate_limited_now && (
+                                                                <span className="px-1.5 py-0.5 rounded-full text-[10px] font-medium bg-amber-100 text-amber-700"
+                                                                    title={s.cooldown_until ? `Cooling down until ${new Date(s.cooldown_until).toLocaleTimeString()}` : ''}>
+                                                                    ⏳ rate limited
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                        <span className="text-gray-400">{m.provider?.name || s?.provider_name}</span>
+                                                    </td>
+                                                    <td className="py-1.5 pr-2">{s ? <WindowCell w={s.window_5h} /> : <span className="text-gray-300">—</span>}</td>
+                                                    <td className="py-1.5 pr-2">{s ? <WindowCell w={s.window_3d} /> : <span className="text-gray-300">—</span>}</td>
+                                                    <td className="py-1.5 text-right text-gray-700">
+                                                        {s && s.window_3d.avg_tokens_per_sec > 0 ? s.window_3d.avg_tokens_per_sec.toFixed(1) : '—'}
+                                                    </td>
+                                                </tr>
+                                            );
+                                        })}
+                                        {(g.members || []).length === 0 && (
+                                            <tr><td colSpan={4} className="py-2 text-gray-400">No members configured.</td></tr>
+                                        )}
+                                    </tbody>
+                                </table>
+
+                                <RequestsChart buckets={stats[g.id]?.buckets || []} />
+                            </div>
+                        </div>
+                    </div>
+                );
+            })()}
         </div>
     );
 };
