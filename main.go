@@ -83,6 +83,7 @@ func main() {
 		&db.ModelGroup{},
 		&db.ModelGroupMember{},
 		&db.ModelRequestStat{},
+		&db.DefaultModelSetting{},
 		&db.ProviderPreset{},
 		&db.Agent{},
 		&db.Skill{},
@@ -132,6 +133,11 @@ func main() {
 	// background refresh below.
 	if err := db.New(database).EnsureDefaultModelGroups(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed default model groups: %v", err)
+	}
+	// Seed the "Default Models" purposes (commit messages, ask_artifact),
+	// each initially pointing at the built-in Utility group.
+	if err := db.New(database).EnsureDefaultModelSettings(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed default model settings: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})

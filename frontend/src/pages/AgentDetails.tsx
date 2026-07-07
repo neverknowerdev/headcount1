@@ -3,11 +3,7 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
-
-// Describes one model group's members as a short label list, showing "Any
-// model" for wildcard (all_models) members instead of a blank model name.
-const describeGroupModels = (group: any): string =>
-    (group?.members || []).map((m: any) => (m.all_models ? 'Any model' : m.model)).join(', ') || 'no models configured';
+import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
 
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
@@ -521,52 +517,15 @@ export const AgentDetails: React.FC = () => {
                             <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                             <input type="text" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2" />
                         </div>
-                        <div>
-                            <div className="flex justify-between items-center mb-1">
-                                <label className="block text-sm font-medium text-gray-700">LLM Provider or Model Group</label>
-                                <Link to={`/companies/${shortName}/providers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
-                            </div>
-                            <select value={formData.model_group_id ? `group:${formData.model_group_id}` : (formData.provider_id ? `provider:${formData.provider_id}` : '')} onChange={e => {
-                                const v = e.target.value;
-                                if (v.startsWith('group:')) {
-                                    setFormData({...formData, model_group_id: v.slice(6), provider_id: '', model: ''});
-                                } else if (v.startsWith('provider:')) {
-                                    const selectedProviderId = v.slice(9);
-                                    const provider = providers.find(p => p.id.toString() === selectedProviderId);
-                                    setFormData({...formData, provider_id: selectedProviderId, model_group_id: '', model: provider?.default_model || ''});
-                                } else {
-                                    setFormData({...formData, provider_id: '', model_group_id: '', model: ''});
-                                }
-                            }} className="w-full border rounded p-2">
-                                <option value="">-- Select Provider or Group --</option>
-                                {modelGroups.length > 0 && (
-                                    <optgroup label="Model Groups (auto-routing & failover)">
-                                        {modelGroups.map(g => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
-                                    </optgroup>
-                                )}
-                                <optgroup label="Providers">
-                                    {providers.map(p => <option key={p.id} value={`provider:${p.id}`}>{p.name}</option>)}
-                                </optgroup>
-                            </select>
-                        </div>
-                        {formData.model_group_id ? (
-                            <div className="text-xs text-gray-600 bg-indigo-50 border border-indigo-100 rounded p-3">
-                                Requests are routed automatically across this group's models (free first), with retries and failover on errors or rate limits:
-                                <span className="block mt-1 font-mono break-words">
-                                    {describeGroupModels(modelGroups.find(g => g.id.toString() === formData.model_group_id))}
-                                </span>
-                            </div>
-                        ) : (
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
-                                <select required value={formData.model || ''} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2">
-                                    <option value="">-- Select Model --</option>
-                                    {providers.find(p => p.id.toString() === formData.provider_id)?.supported_models?.split(',').map((m: string) => m.trim()).filter((m: string) => m).map((m: string) => (
-                                        <option key={m} value={m}>{m}</option>
-                                    ))}
-                                </select>
-                            </div>
-                        )}
+                        <ProviderOrGroupSelect
+                            label="LLM Provider or Model Group"
+                            providers={providers}
+                            modelGroups={modelGroups}
+                            manageLinkTo={`/companies/${shortName}/providers`}
+                            modelRequired
+                            value={{ provider_id: formData.provider_id, model_group_id: formData.model_group_id, model: formData.model }}
+                            onChange={v => setFormData({ ...formData, provider_id: v.provider_id, model_group_id: v.model_group_id, model: v.model })}
+                        />
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
                             <textarea required rows={5} value={formData.system_prompt} onChange={e => setFormData({...formData, system_prompt: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" />

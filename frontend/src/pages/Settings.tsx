@@ -190,8 +190,8 @@ export const Settings: React.FC = () => {
                         />
                     </div>
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
-                        Cheap model used for lightweight internal calls (artifact Q&A, commit message generation) is now configured as the built-in <strong>Utility</strong> model group, alongside your other{' '}
-                        <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> — edit its models there.
+                        Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
+                        <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">

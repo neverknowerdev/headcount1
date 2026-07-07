@@ -409,6 +409,24 @@ type ModelRequestStat struct {
 	CreatedAt     time.Time  `json:"created_at" gorm:"index"`
 }
 
+// DefaultModelSetting configures which provider+model (or model group) to
+// use for one internal purpose (e.g. commit-message generation, the
+// ask_artifact one-shot reader) — independent of any Model Group's own
+// definition, so a purpose can point at a fixed provider+model, at any
+// model group (built-in or custom), or fall back to the calling session's
+// own LLM when left unconfigured (both fields nil).
+type DefaultModelSetting struct {
+	ID           int32        `json:"id" gorm:"primaryKey"`
+	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex"`
+	ProviderID   *int32       `json:"provider_id"`
+	Provider     *LLMProvider `json:"provider,omitempty" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
+	Model        string       `json:"model"`
+	ModelGroupID *int32       `json:"model_group_id"`
+	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`

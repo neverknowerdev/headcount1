@@ -657,7 +657,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// ask_artifact: verify artifact content through a separate one-shot LLM
 	// call — the artifact never enters this session's context, only the short
-	// answer does. Uses the built-in Utility model group when configured.
+	// answer does. Uses the configured "ask_artifact" Default Model when set.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
 		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question, proxyLogger)
 	}))
@@ -1419,36 +1419,59 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	return reply, nil
 }
 
-// utilityLLM resolves the provider/model pair for lightweight internal calls
-// (artifact Q&A, commit message generation) from the built-in "Utility"
-// model group: its free members first, tie-broken by priority — the same
-// ordering the group gateway uses, minus live health tracking, which isn't
-// worth the bookkeeping for an infrequent one-shot call. Falls back to the
-// session's own provider and model when the group doesn't exist yet or has
-// no members configured.
-func (e *NativeEngine) utilityLLM(ctx context.Context, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
-	group, err := e.q.GetModelGroupByKey(ctx, db.DefaultUtilityGroupSlug)
+// resolveDefaultModel resolves the provider/model pair configured for one
+// internal-use purpose (see db.PurposeCommitMessages, db.PurposeAskArtifact)
+// via the "Default Models" settings — independent of any Model Group's own
+// definition. A purpose can point at a fixed provider+model or at any model
+// group (in which case its free members are tried first, tie-broken by
+// priority — the same ordering the group gateway uses, minus live health
+// tracking, which isn't worth the bookkeeping for an infrequent one-shot
+// call). Falls back to the session's own provider and model when the
+// purpose has no override configured, or its target no longer resolves.
+func (e *NativeEngine) resolveDefaultModel(ctx context.Context, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
+	setting, err := e.q.GetDefaultModelSetting(ctx, purpose)
 	if err != nil {
 		return sessionProvider, sessionModel
 	}
-	members := db.ExpandModelGroupMembers(group.Members)
-	if len(members) == 0 {
-		return sessionProvider, sessionModel
-	}
-	sort.SliceStable(members, func(i, j int) bool {
-		if members[i].IsFree != members[j].IsFree {
-			return members[i].IsFree
+
+	if setting.ModelGroupID != nil {
+		group, gErr := e.q.GetModelGroup(ctx, *setting.ModelGroupID)
+		if gErr != nil {
+			return sessionProvider, sessionModel
 		}
-		return members[i].Priority < members[j].Priority
-	})
-	best := members[0]
-	return best.Provider, best.Model
+		members := db.ExpandModelGroupMembers(group.Members)
+		if len(members) == 0 {
+			return sessionProvider, sessionModel
+		}
+		sort.SliceStable(members, func(i, j int) bool {
+			if members[i].IsFree != members[j].IsFree {
+				return members[i].IsFree
+			}
+			return members[i].Priority < members[j].Priority
+		})
+		best := members[0]
+		return best.Provider, best.Model
+	}
+
+	if setting.ProviderID != nil {
+		provider, pErr := e.q.GetLLMProvider(ctx, *setting.ProviderID)
+		if pErr != nil {
+			return sessionProvider, sessionModel
+		}
+		model := setting.Model
+		if model == "" {
+			model = provider.DefaultModel
+		}
+		return provider, model
+	}
+
+	return sessionProvider, sessionModel
 }
 
 // askArtifact answers a question about one artifact via a separate one-shot
 // LLM call, so the artifact's content never enters the asking agent's
 // context — only the short answer is returned as the tool result. It uses the
-// built-in Utility model group when configured, falling back to the asking
+// configured "ask_artifact" Default Model when set, falling back to the asking
 // session's model, and bills the reader call's tokens to the asking run.
 // Each reader call is logged to its own file in the run's log folder.
 func (e *NativeEngine) askArtifact(
@@ -1482,7 +1505,7 @@ func (e *NativeEngine) askArtifact(
 		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
 	}
 
-	provider, model := e.utilityLLM(ctx, provider, sessionModel)
+	provider, model := e.resolveDefaultModel(ctx, db.PurposeAskArtifact, provider, sessionModel)
 
 	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
 
@@ -1698,13 +1721,13 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if err != nil {
 		return "", err
 	}
-	// Commit messages are a lightweight internal task: prefer the app-level
-	// utility LLM when one is configured.
+	// Commit messages are a lightweight internal task: prefer the configured
+	// "Default Models" target for it, when one is set.
 	sessionModel := agent.Model
 	if sessionModel == "" {
 		sessionModel = provider.DefaultModel
 	}
-	provider, model := e.utilityLLM(ctx, provider, sessionModel)
+	provider, model := e.resolveDefaultModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
 	if len(diff) > 8000 {
 		diff = diff[:8000] + "\n... (truncated)"
 	}

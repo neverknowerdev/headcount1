@@ -55,6 +55,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.ProxyRequestLog{},
 		&db.ModelGroup{},
 		&db.ModelGroupMember{},
+		&db.DefaultModelSetting{},
 	))
 	return database
 }
@@ -679,8 +680,9 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	paperclipDir := filepath.Join(tmpHome, ".paperclip2")
 	require.NoError(t, os.MkdirAll(paperclipDir, 0755))
 
-	// Configure the built-in "Utility" model group (any provider/model; here
-	// the same provider, cheaper model) — this is what utilityLLM resolves.
+	// Configure the "ask_artifact" Default Model to point at a model group
+	// (any provider/model; here the same provider, cheaper model) — this is
+	// what resolveDefaultModel resolves.
 	var provider db.LLMProvider
 	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
 	utilityGroup, err := q.CreateModelGroup(context.Background(), db.ModelGroup{
@@ -690,6 +692,9 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{
 		{ProviderID: provider.ID, Model: "cheap-model"},
 	}))
+	require.NoError(t, database.Create(&db.DefaultModelSetting{
+		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID,
+	}).Error)
 
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})
 	require.NoError(t, err)

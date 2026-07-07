@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { ModelGroups } from '../components/ModelGroups';
+import { DefaultModelSettings } from '../components/DefaultModelSettings';
 
 // Renders a provider's model list truncated to one line, with an expand
 // toggle that only appears once the list actually overflows that line —
@@ -454,6 +455,8 @@ export const ProvidersManager: React.FC = () => {
             </div>
 
             <ModelGroups providers={providers} />
+
+            <DefaultModelSettings providers={providers} />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">

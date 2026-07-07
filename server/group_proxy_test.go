@@ -429,16 +429,23 @@ func TestGroupProxyAllModelsMember_TriesEveryModelInOrder(t *testing.T) {
 
 	time.Sleep(50 * time.Millisecond)
 	var stats []db.ModelRequestStat
-	database.Order("id").Find(&stats)
+	database.Find(&stats)
 	if len(stats) != 3 {
 		t.Fatalf("expected 3 stat rows (one per attempted model), got %d", len(stats))
 	}
-	for i, model := range []string{"model-a", "model-b"} {
-		if stats[i].Model != model || stats[i].Success {
-			t.Errorf("stat %d: expected failed attempt on %s, got %+v", i, model, stats[i])
+	// Each attempt's stat row is persisted in its own goroutine, so rows can
+	// land in any order — match by model instead of assuming insertion order.
+	byModel := map[string]db.ModelRequestStat{}
+	for _, s := range stats {
+		byModel[s.Model] = s
+	}
+	for _, model := range []string{"model-a", "model-b"} {
+		s, ok := byModel[model]
+		if !ok || s.Success {
+			t.Errorf("expected a failed attempt on %s, got %+v (present=%v)", model, s, ok)
 		}
 	}
-	if stats[2].Model != "model-c" || !stats[2].Success {
-		t.Errorf("expected the final stat row to be a success on model-c, got %+v", stats[2])
+	if s, ok := byModel["model-c"]; !ok || !s.Success {
+		t.Errorf("expected a success stat row on model-c, got %+v (present=%v)", s, ok)
 	}
 }
