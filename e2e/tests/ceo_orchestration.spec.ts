@@ -395,29 +395,39 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(agentTokenStats).toContainText('Coder');
         await expect(agentTokenStats).toContainText('QA');
 
-        // Run Logs list: only the main session is a top-level card. Its
-        // sub-sessions are nested one level down and stay collapsed until the
-        // card itself, then the individual session block, is maximized.
+        // Run Logs list: only the main session is a top-level card, and the
+        // list is an overview only — no run's actual transcript is ever
+        // fetched or rendered here, so the page stays fast regardless of log
+        // history size. Full content lives on each run's own details page.
         await page.goto('/companies/ceo-co/runs');
         await expect(page.getByRole('heading', { name: 'Run Logs' })).toBeVisible();
         const rootCards = page.getByTestId('root-run-card');
         await expect(rootCards).toHaveCount(1);
         await expect(rootCards.first()).toContainText('1 session');
 
-        // Sub-session logs stay hidden until the root card itself is maximized
-        // (native <details> collapses its content).
-        await expect(rootCards.first().getByTestId('session-block').first()).not.toBeVisible();
+        // Expanding the root card reveals a stats/info panel (status, agent,
+        // timing, token breakdown, nested sessions) — never the raw log.
+        await expect(rootCards.first().getByText('Sessions (1)')).not.toBeVisible();
         await rootCards.first().locator('summary').click();
-        const listSessionBlocks = rootCards.first().getByTestId('session-block');
-        await expect(listSessionBlocks).toHaveCount(1);
-        await expect(listSessionBlocks.first()).toBeVisible();
-        await expect(listSessionBlocks.first()).toContainText('CTO');
+        await expect(rootCards.first().getByText('Sessions (1)')).toBeVisible();
+        await expect(rootCards.first().getByText('Execution Log')).toHaveCount(0);
 
-        // Each nested session itself stays collapsed (not even mounted) until
-        // it is individually maximized.
-        await expect(listSessionBlocks.first().getByText('Execution Log')).toHaveCount(0);
-        await listSessionBlocks.first().getByRole('button').first().click();
-        await expect(listSessionBlocks.first().getByText('Execution Log')).toBeVisible({ timeout: 15_000 });
+        const childLinks = rootCards.first().getByTestId('child-session-link');
+        await expect(childLinks).toHaveCount(1);
+        await expect(childLinks.first()).toContainText('CTO');
+
+        // Expanding the token bar reveals the whole-tree per-agent breakdown,
+        // computed client-side from the overview rows already on the page —
+        // no extra network round trip.
+        await rootCards.first().locator('button[title="Click for detailed breakdown"]').click();
+        const listAgentStats = rootCards.first().getByTestId('agent-token-stats');
+        await expect(listAgentStats).toBeVisible();
+        await expect(listAgentStats).toContainText('CTO');
+
+        // Following a nested session's link navigates to its own details
+        // page, where the full transcript is fetched and rendered.
+        await childLinks.first().click();
+        await expect(page.getByRole('heading', { name: /Details$/ })).toBeVisible({ timeout: 15_000 });
 
         // Task view shows the untouched user input.
         await page.goto(`/companies/ceo-co/tasks/${taskId}`);
