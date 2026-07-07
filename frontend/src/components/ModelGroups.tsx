@@ -234,6 +234,16 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
         return p.supported_models.split(',').map((m: string) => m.trim()).filter(Boolean);
     };
 
+    // Options for a member's model dropdown: the provider's live catalog,
+    // plus the member's already-saved model if the catalog doesn't (yet, or
+    // anymore) list it — otherwise a stale/pending catalog would make the
+    // dropdown show blank and silently wipe a valid saved model on save.
+    const modelOptionsFor = (m: MemberForm): string[] => {
+        const live = providerModels(m.provider_id);
+        if (m.model && !live.includes(m.model)) return [m.model, ...live];
+        return live;
+    };
+
     const memberStatFor = (groupId: number, m: any): MemberStat | undefined =>
         stats[groupId]?.members?.find(s => s.provider_id === m.provider_id &&
             (m.all_models ? s.all_models : s.model === m.model));
@@ -330,7 +340,7 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
 
             {isModalOpen && (
                 <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
-                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-2xl max-h-[90vh] flex flex-col">
+                    <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-3xl max-h-[90vh] flex flex-col">
                         <h2 className="text-xl font-bold mb-4">{editingId ? 'Edit Model Group' : 'Add Model Group'}</h2>
                         <div className="space-y-4 overflow-y-auto flex-1 pr-2">
                             <div>
@@ -344,39 +354,45 @@ export const ModelGroups: React.FC<{ providers: any[] }> = ({ providers }) => {
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Models (tried top to bottom; free models always go first)</label>
                                 {formMembers.map((m, idx) => (
-                                    <div key={idx} className="flex items-center gap-2 mb-2">
-                                        <select
-                                            value={m.provider_id}
-                                            onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '', all_models: false })}
-                                            className="border rounded p-2 text-sm w-40"
-                                        >
-                                            <option value="">Provider…</option>
-                                            {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                                        </select>
-                                        <select
-                                            value={m.all_models ? ANY_MODEL : m.model}
-                                            disabled={!m.provider_id}
-                                            onChange={e => {
-                                                const v = e.target.value;
-                                                if (v === ANY_MODEL) {
-                                                    updateMember(idx, { model: '', all_models: true });
-                                                } else {
-                                                    updateMember(idx, { model: v, all_models: false, is_free: looksFree(v) });
-                                                }
-                                            }}
-                                            className="flex-1 border rounded p-2 text-sm disabled:bg-gray-50 disabled:text-gray-400"
-                                        >
-                                            <option value="">Model…</option>
-                                            <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
-                                            {providerModels(m.provider_id).map(pm => <option key={pm} value={pm}>{pm}</option>)}
-                                        </select>
-                                        <label className="flex items-center gap-1 text-xs text-gray-600 shrink-0">
-                                            <input type="checkbox" checked={m.is_free} onChange={e => updateMember(idx, { is_free: e.target.checked })} />
-                                            free
-                                        </label>
-                                        <button type="button" onClick={() => moveMember(idx, -1)} disabled={idx === 0} className="text-gray-400 hover:text-gray-700 disabled:opacity-30"><ArrowUp size={15} /></button>
-                                        <button type="button" onClick={() => moveMember(idx, 1)} disabled={idx === formMembers.length - 1} className="text-gray-400 hover:text-gray-700 disabled:opacity-30"><ArrowDown size={15} /></button>
-                                        <button type="button" onClick={() => setFormMembers(ms => ms.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700"><Minus size={16} /></button>
+                                    <div key={idx} className="border rounded-lg p-2.5 mb-2 space-y-2">
+                                        <div className="flex flex-col sm:flex-row gap-2">
+                                            <select
+                                                value={m.provider_id}
+                                                onChange={e => updateMember(idx, { provider_id: e.target.value ? Number(e.target.value) : '', model: '', all_models: false })}
+                                                className="border rounded p-2 text-sm sm:w-1/2 min-w-0"
+                                            >
+                                                <option value="">Provider…</option>
+                                                {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                            </select>
+                                            <select
+                                                value={m.all_models ? ANY_MODEL : m.model}
+                                                disabled={!m.provider_id}
+                                                onChange={e => {
+                                                    const v = e.target.value;
+                                                    if (v === ANY_MODEL) {
+                                                        updateMember(idx, { model: '', all_models: true });
+                                                    } else {
+                                                        updateMember(idx, { model: v, all_models: false, is_free: looksFree(v) });
+                                                    }
+                                                }}
+                                                className="border rounded p-2 text-sm sm:w-1/2 min-w-0 disabled:bg-gray-50 disabled:text-gray-400"
+                                            >
+                                                <option value="">Model…</option>
+                                                <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
+                                                {modelOptionsFor(m).map(pm => <option key={pm} value={pm}>{pm}</option>)}
+                                            </select>
+                                        </div>
+                                        <div className="flex items-center justify-between">
+                                            <label className="flex items-center gap-1.5 text-xs text-gray-600">
+                                                <input type="checkbox" checked={m.is_free} onChange={e => updateMember(idx, { is_free: e.target.checked })} />
+                                                free
+                                            </label>
+                                            <div className="flex items-center gap-1">
+                                                <button type="button" onClick={() => moveMember(idx, -1)} disabled={idx === 0} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 p-1"><ArrowUp size={15} /></button>
+                                                <button type="button" onClick={() => moveMember(idx, 1)} disabled={idx === formMembers.length - 1} className="text-gray-400 hover:text-gray-700 disabled:opacity-30 p-1"><ArrowDown size={15} /></button>
+                                                <button type="button" onClick={() => setFormMembers(ms => ms.filter((_, i) => i !== idx))} className="text-red-500 hover:text-red-700 p-1"><Minus size={16} /></button>
+                                            </div>
+                                        </div>
                                     </div>
                                 ))}
                                 <button type="button" onClick={() => setFormMembers(ms => [...ms, { provider_id: '', model: '', all_models: false, is_free: false }])} className="text-indigo-600 hover:text-indigo-800 text-sm font-medium flex items-center mt-2">
