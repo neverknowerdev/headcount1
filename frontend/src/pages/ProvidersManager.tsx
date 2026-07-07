@@ -394,7 +394,7 @@ export const ProvidersManager: React.FC = () => {
                                         <RefreshCw size={18} className={rediscoveringId === p.id ? 'animate-spin' : ''} />
                                     </button>
                                 )}
-                                {p.builtin ? (
+                                {p.builtin && (
                                     <button
                                         onClick={() => handleToggleEnabled(p)}
                                         disabled={togglingId === p.id}
@@ -403,15 +403,25 @@ export const ProvidersManager: React.FC = () => {
                                     >
                                         {p.enabled ? <Pause size={18} /> : <Play size={18} />}
                                     </button>
-                                ) : (
-                                    <>
-                                        <button onClick={() => handleOpenModal(p)} className="text-gray-500 hover:text-gray-700" title="Edit">
-                                            <Edit2 size={18} />
-                                        </button>
-                                        <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700" title="Delete">
-                                            <Trash2 size={18} />
-                                        </button>
-                                    </>
+                                )}
+                                {/* Auto-discoverable providers (a builtin one once it has a key, or a
+                                    preset) edit via the restricted Activate-style modal — API key +
+                                    a default-model dropdown, never free-text model editing. A builtin
+                                    provider with no key yet uses the "Activate" banner below instead.
+                                    Fully custom providers keep the original unrestricted edit modal. */}
+                                {(!p.builtin || p.api_key) && (
+                                    <button
+                                        onClick={() => (p.builtin || p.preset_key) ? openActivateModal(p) : handleOpenModal(p)}
+                                        className="text-gray-500 hover:text-gray-700"
+                                        title="Edit"
+                                    >
+                                        <Edit2 size={18} />
+                                    </button>
+                                )}
+                                {!p.builtin && (
+                                    <button onClick={() => handleDelete(p.id)} className="text-red-500 hover:text-red-700" title="Delete">
+                                        <Trash2 size={18} />
+                                    </button>
                                 )}
                             </div>
                         </div>
@@ -424,22 +434,16 @@ export const ProvidersManager: React.FC = () => {
                                 onToggle={() => toggleModelsExpanded(p.id)}
                             />
                         )}
-                        {p.builtin && (
+                        {p.builtin && !p.api_key && (
                             <div className="mt-3">
-                                {!p.api_key && (
-                                    <p className="text-xs text-amber-600 mb-2">Free to use — activate with a free API key to enable this provider.</p>
-                                )}
+                                <p className="text-xs text-amber-600 mb-2">Free to use — activate with a free API key to enable this provider.</p>
                                 <button
                                     onClick={() => openActivateModal(p)}
-                                    className={`w-full py-2 px-4 rounded-md font-semibold text-sm transition-colors ${
-                                        p.api_key
-                                            ? 'bg-gray-100 text-gray-700 hover:bg-gray-200'
-                                            : 'bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm'
-                                    }`}
+                                    className="w-full py-2 px-4 rounded-md font-semibold text-sm transition-colors bg-indigo-600 text-white hover:bg-indigo-700 shadow-sm"
                                 >
                                     <span className="flex items-center justify-center gap-2">
                                         <KeyRound size={16} />
-                                        {p.api_key ? 'Update API Key' : 'Activate'}
+                                        Activate
                                     </span>
                                 </button>
                             </div>
