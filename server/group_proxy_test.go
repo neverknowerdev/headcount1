@@ -381,3 +381,64 @@ func TestGroupProxyAllModelsMember(t *testing.T) {
 		t.Fatalf("expected /v1/models to list expanded models, got %s", mw.Body.String())
 	}
 }
+
+// TestGroupProxyAllModelsMember_TriesEveryModelInOrder: with an AllModels
+// wildcard member, the router must walk the provider's ENTIRE model list —
+// not just one pick — trying each concrete model in turn (in the order
+// SupportedModels lists them) until one succeeds, exactly like a group with
+// that many explicit members.
+func TestGroupProxyAllModelsMember_TriesEveryModelInOrder(t *testing.T) {
+	database := setupGroupTestDB(t)
+
+	var triedModels []string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+		model, _ := payload["model"].(string)
+		triedModels = append(triedModels, model)
+		if model == "model-c" {
+			w.Write([]byte(`{"choices": [{"message": {"content": "ok"}}], "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2}}`))
+			return
+		}
+		w.WriteHeader(http.StatusInternalServerError)
+		w.Write([]byte(`{"error": {"message": "boom"}}`))
+	}))
+	defer srv.Close()
+
+	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKey: "k", SupportedModels: "model-a,model-b,model-c"}
+	database.Create(&p)
+	group := db.ModelGroup{Name: "Any Group", Slug: "any-group"}
+	database.Create(&group)
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: p.ID, AllModels: true, IsFree: true})
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+
+	w := groupRequest(t, r, "any-group", `{"model": "x"}`)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 once model-c succeeds, got %d: %s", w.Code, w.Body.String())
+	}
+	if len(triedModels) != 3 {
+		t.Fatalf("expected all 3 models to be tried in order before success, got %v", triedModels)
+	}
+	if triedModels[0] != "model-a" || triedModels[1] != "model-b" || triedModels[2] != "model-c" {
+		t.Fatalf("expected model-a, model-b, model-c in that order, got %v", triedModels)
+	}
+
+	time.Sleep(50 * time.Millisecond)
+	var stats []db.ModelRequestStat
+	database.Order("id").Find(&stats)
+	if len(stats) != 3 {
+		t.Fatalf("expected 3 stat rows (one per attempted model), got %d", len(stats))
+	}
+	for i, model := range []string{"model-a", "model-b"} {
+		if stats[i].Model != model || stats[i].Success {
+			t.Errorf("stat %d: expected failed attempt on %s, got %+v", i, model, stats[i])
+		}
+	}
+	if stats[2].Model != "model-c" || !stats[2].Success {
+		t.Errorf("expected the final stat row to be a success on model-c, got %+v", stats[2])
+	}
+}
