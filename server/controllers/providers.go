@@ -201,10 +201,10 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 	var models []string
 	switch {
 	case provider.Builtin:
-		switch provider.Name {
-		case db.ProviderNameOpenRouter:
+		switch provider.ProviderName {
+		case db.ProviderVendorOpenRouter:
 			models, err = llmdiscovery.FetchOpenRouterFreeModels(r.Context(), client)
-		case db.ProviderNameOpenCodeZen:
+		case db.ProviderVendorOpenCodeZen:
 			models, err = llmdiscovery.FetchOpenCodeZenFreeModels(r.Context(), client)
 		default:
 			api.respondError(w, http.StatusBadRequest, "unrecognized built-in provider")

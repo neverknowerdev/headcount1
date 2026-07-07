@@ -227,10 +227,10 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 
 		var models []string
 		var fetchErr error
-		switch p.Name {
-		case db.ProviderNameOpenRouter:
+		switch p.ProviderName {
+		case db.ProviderVendorOpenRouter:
 			models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
-		case db.ProviderNameOpenCodeZen:
+		case db.ProviderVendorOpenCodeZen:
 			models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
 		default:
 			continue
@@ -301,7 +301,10 @@ func fetchJSONWithRetry(ctx context.Context, client *http.Client, url string, ap
 	var lastErr error
 	for attempt := 0; attempt < fetchMaxAttempts; attempt++ {
 		if attempt > 0 {
-			wait := retryBaseDelay << uint(attempt-1)
+			// Exponential backoff: 1x, 2x, 4x, 8x... retryBaseDelay on
+			// successive retries (attempt 1, 2, 3, 4...).
+			backoffMultiplier := time.Duration(1) << uint(attempt-1)
+			wait := retryBaseDelay * backoffMultiplier
 			select {
 			case <-ctx.Done():
 				return ctx.Err()

@@ -60,9 +60,15 @@ type LLMProvider struct {
 	// free providers and for fully custom ones. Lets RediscoverProviderModels
 	// route to the right (authenticated) discovery logic without having to
 	// match on Name/BaseUrl.
-	PresetKey string    `json:"preset_key" gorm:"default:''"`
-	CreatedAt time.Time `json:"created_at"`
-	UpdatedAt time.Time `json:"updated_at"`
+	PresetKey string `json:"preset_key" gorm:"default:''"`
+	// ProviderName is a stable, non-editable identifier for a builtin free
+	// provider ("OpenRouter", "OpenCode") — used to route to the right
+	// discovery logic instead of matching the user-facing Name field, which
+	// UpdateProvider allows changing. Empty for presets and fully custom
+	// providers, which use PresetKey/BaseUrl matching instead.
+	ProviderName string    `json:"provider_name" gorm:"default:''"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // ProviderPreset is a known third-party LLM gateway a user can pick from a

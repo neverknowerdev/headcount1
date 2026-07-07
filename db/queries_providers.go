@@ -17,6 +17,14 @@ const (
 	OpenCodeZenBaseURL = "https://opencode.ai/zen/v1"
 )
 
+// Stable ProviderName values for the two builtin free providers — see
+// LLMProvider.ProviderName's doc comment for why these exist separately
+// from the (user-editable) display Name.
+const (
+	ProviderVendorOpenRouter  = "OpenRouter"
+	ProviderVendorOpenCodeZen = "OpenCode"
+)
+
 func (q *Queries) CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	err := q.db.WithContext(ctx).Create(&p).Error
 	return p, err
@@ -57,6 +65,7 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 			ProviderType: "openai",
 			Builtin:      true,
 			Enabled:      true,
+			ProviderName: ProviderVendorOpenRouter,
 		},
 		{
 			Name:         ProviderNameOpenCodeZen,
@@ -64,6 +73,7 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 			ProviderType: "openai",
 			Builtin:      true,
 			Enabled:      true,
+			ProviderName: ProviderVendorOpenCodeZen,
 		},
 	}
 
@@ -72,6 +82,9 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 		if q.db.WithContext(ctx).Where("name = ?", p.Name).First(&existing).Error == nil {
 			if !existing.Builtin {
 				q.db.WithContext(ctx).Model(&existing).Update("builtin", true)
+			}
+			if existing.ProviderName == "" {
+				q.db.WithContext(ctx).Model(&existing).Update("provider_name", p.ProviderName)
 			}
 			continue
 		}

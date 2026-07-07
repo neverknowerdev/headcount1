@@ -436,6 +436,64 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	assert.Len(t, providersAfter, 2, "re-running Ensure must not create duplicates")
 }
 
+func TestEnsureBuiltinLLMProviders_SetsStableProviderName(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	providers, err := q.ListLLMProviders(ctx)
+	require.NoError(t, err)
+
+	byVendor := map[string]bool{}
+	for _, p := range providers {
+		byVendor[p.ProviderName] = true
+	}
+	assert.True(t, byVendor[db.ProviderVendorOpenRouter])
+	assert.True(t, byVendor[db.ProviderVendorOpenCodeZen])
+}
+
+func TestEnsureBuiltinLLMProviders_BackfillsProviderNameOnLegacyRow(t *testing.T) {
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	// Simulate a row created before ProviderName existed: builtin, matching
+	// Name, but no ProviderName set.
+	legacy, err := q.CreateLLMProvider(ctx, db.LLMProvider{
+		Name: db.ProviderNameOpenRouter, BaseUrl: db.OpenRouterBaseURL, Builtin: true, Enabled: true,
+	})
+	require.NoError(t, err)
+	require.Empty(t, legacy.ProviderName)
+
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	after, err := q.GetLLMProvider(ctx, legacy.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.ProviderVendorOpenRouter, after.ProviderName, "a pre-existing builtin row must be backfilled with its stable ProviderName")
+}
+
+func TestBuiltinProviderDispatch_SurvivesUserRenamingDisplayName(t *testing.T) {
+	// Regression test: RediscoverProviderModels/RefreshBuiltinProviderModels
+	// used to dispatch by matching the user-editable display Name — renaming
+	// a builtin provider (allowed by UpdateProvider) would silently break
+	// that dispatch. ProviderName is never touched by UpdateProvider, so it
+	// must still identify the provider correctly after a rename.
+	database := setupTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+
+	var openRouter db.LLMProvider
+	require.NoError(t, database.Where("name = ?", db.ProviderNameOpenRouter).First(&openRouter).Error)
+
+	// Simulate UpdateProvider's field-by-field mutation of an
+	// already-fetched row (it never touches ProviderName).
+	openRouter.Name = "My Renamed Provider"
+	updated, err := q.UpdateLLMProvider(ctx, openRouter)
+	require.NoError(t, err)
+	assert.Equal(t, db.ProviderVendorOpenRouter, updated.ProviderName, "ProviderName must survive a display-name rename")
+}
+
 func TestRefreshBuiltinProviderModels_FetchFailureLeavesCatalogUntouched(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
