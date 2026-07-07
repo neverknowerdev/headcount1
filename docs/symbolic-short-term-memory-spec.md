@@ -1,7 +1,7 @@
 # Tech Spec: Symbolic Short-Term Memory (Tool-Result Offloading)
 
 **Status:** Proposed
-**Scope:** Intra-run context compaction only. Long-term memory stays with Hindsight (`pkg/hindsight/`) — this spec deliberately excludes the L3 persona/scenario layers, vector storage, and cross-session recall from TencentDB-Agent-Memory.
+**Scope:** Intra-run context compaction, *plus* wiring so Hindsight ingests the full, uncompacted run transcript rather than the outcome-only summary it gets today. Long-term memory (retention policy, mental models, recall, vector storage) stays owned by Hindsight (`pkg/hindsight/`) — this spec deliberately excludes the L3 persona/scenario layers and cross-session recall from TencentDB-Agent-Memory. It changes *what raw material* Hindsight receives, not how Hindsight decides what to keep.
 
 ## 1. Background
 
@@ -40,7 +40,7 @@ history ───────► Compactor (tiered, replaces pruneHistory)      
                  + canvas injection + `recall_tool_result` tool
 ```
 
-Everything is per-run: state lives under the existing per-run log directory and dies with the run. Nothing here touches Hindsight; on run end, Hindsight's `RetainRunOutcome` continues to own what survives the session.
+Everything is per-run: state lives under the existing per-run log directory and dies with the run. One thing *does* touch Hindsight: at run end, the canonical (uncompacted) history plus the offload store are used to feed Hindsight the full transcript, not just the outcome summary — see §2.6.
 
 ### 2.1 Offload store (`pkg/shortterm/store.go`)
 
@@ -147,6 +147,30 @@ The core change in the agent loop. Today `runMessageHistory` sends `pruneHistory
 - **Retrieval tool** — new `engine/aicli/tools/recall_tool_result.go`, standard one-file pattern (template: `tools/memory_recall.go`), registered in `native_engine.go` alongside the others and added to agent configs' `AllowedTools`:
   - `recall_tool_result(id string, query string?)` — `id` is a `node_id` or `tool_call_id`. Resolves via the index, reads the ref file, returns content (subject to the same `maxToolOutputChars` cap; if `query` is given, return grep-style matching lines ±3 context instead of the head). Result of this tool is itself offload-eligible — the store handles that naturally.
 
+### 2.6 Feeding the full history to Hindsight
+
+**Requirement:** Hindsight must retain the complete run transcript — every user/assistant/tool message, full tool outputs — not the compacted view the LLM saw, and not just the outcome summary `RetainRunOutcome` builds today from `Task`/`Run` fields.
+
+This is why the Compactor's contract in §2.4 matters beyond the live loop: `Compact` is a **pure, non-mutating** view over `history` built fresh per LLM call. The canonical `history` slice inside `runMessageHistory` (`agent.go:194-310`) always keeps the full, uncompacted conversation — compaction never touches it. So the raw material Hindsight needs already exists in memory for the lifetime of the run; today it's simply discarded when the run ends, because `Agent.Run` (`agent.go:159`) only returns the final answer string.
+
+**Gap to close — surfacing the canonical history:**
+- `Agent.Run` / `runMessageHistory` return only `(string, error)` today. Add a way to retrieve the full history the run produced: either change the return type to `(string, []Message, error)`, or add a callback/field (`Agent.OnComplete func([]Message)` or `Agent.LastHistory() []Message` read after `Run` returns). Prefer the return-value change — it's the smaller diff and matches Go convention; the two other `aicli.Client.Complete` call sites in `native_engine.go` (commit messages, `ask_artifact`) don't use `Agent` and are unaffected.
+- `native_engine.go`'s run-completion path (the block at `native_engine.go:950-971`, right where `RetainRunOutcome` is already called) captures this history alongside the existing outcome build.
+
+**Recovering what even the canonical history truncated:** the canonical history itself is not 100% lossless — `maxToolOutputChars = 60000` (`agent.go:47`) truncates any single tool result before it's appended to `history` at all (`agent.go:352-355`), independent of the Compactor. The offload store (§2.1) already captures the **full untruncated** result to `refs/{tool_call_id}.md` before that cap is applied. So building the Hindsight transcript means: walk canonical `history`; for any tool message whose content carries the "re-run with narrower query" truncation marker, substitute the full text read back from its ref file. This makes the transcript fed to Hindsight strictly more complete than anything that was ever in the LLM's context — genuinely "all message history," not "history minus one truncation cap."
+
+**Shape of what's sent — `pkg/hindsight/service.go`:**
+- Add `RetainRunConversation(ctx, company, task, run db.Run, history []aicli.Message) error` alongside the existing `RetainRunOutcome` (keep both — the outcome item stays as the cheap, high-signal headline your mental-model synthesis already reads; the conversation items are the raw backing material).
+- Chunk `history` into one `MemoryItem` per turn-group (a user or assistant message plus any tool messages it produced), not one giant blob — mirrors how `RetainRunOutcome` already scopes tags:
+  - `DocumentID: fmt.Sprintf("run-%d-turn-%03d", run.ID, n)` (stable, so a retry/replay updates via `UpdateMode: "replace"` instead of duplicating).
+  - `Tags`/`ObservationScopes`: same `agentTag`, `session:<rootRunID>`, `task:<refKey>`, `project:<id>` scoping `RetainRunOutcome` already computes — factor that tag-building into a shared helper both methods call.
+  - `Metadata: {"run_id", "turn": n, "kind": "conversation_turn", "role": ...}` so recall/consolidation can distinguish these from the outcome doc (`kind: "outcome"`) and from project docs.
+  - Size-bound each item (split further if a single turn's tool output — even ref-file-recovered — exceeds a configurable chunk size; see §3) so ingestion/embedding cost per item stays predictable.
+- Call both `RetainRunOutcome` and `RetainRunConversation` from the same async goroutine in `native_engine.go:963-969`, in one `Retain` batch call where practical (the `Client.Retain` signature already takes `[]MemoryItem`) to avoid a second round trip.
+- Skip trivial turns to control volume: heartbeat tool calls, and tool results already fully captured by an earlier identical call in the same run (hash-dedupe by `tool_call` + first N chars of result), are not sent as separate conversation items — this mirrors TencentDB's "skip heartbeat" rule and keeps ingestion cost proportional to actual new information, not raw turn count.
+
+**Why this doesn't reopen the long-term-memory boundary:** Hindsight still owns every decision about consolidation, mental-model synthesis, recall ranking, and retention policy (what to keep, how long, how to summarize further). This section only changes the *input*: instead of Hindsight synthesizing its playbooks and project state from a one-paragraph outcome, it synthesizes them from the actual conversation — a strictly richer signal for the same downstream logic. No new responsibility crosses into `pkg/shortterm/`.
+
 ## 3. Configuration
 
 Extend the settings YAML (add to **both** structs — `server/controllers/settings.go:13` and `engine/system_prompt.go:28`), all under a `shortterm` prefix, following the existing `MemoryRecallMaxTokens` precedent:
@@ -160,8 +184,10 @@ Extend the settings YAML (add to **both** structs — `server/controllers/settin
 | `shortterm_aggressive_ratio` | `0.85` | Aggressive tier threshold |
 | `shortterm_emergency_ratio` / `_target` | `0.95` / `0.6` | Emergency trigger / target |
 | `shortterm_mmd_max_token_ratio` | `0.1` | Canvas injection budget |
+| `hindsight_retain_full_history` | `true` | Feed the full run transcript to Hindsight, not just the outcome summary (§2.6) |
+| `hindsight_transcript_chunk_chars` | `8000` | Max size of a single conversation `MemoryItem` before it's split further |
 
-L1/L2 batch sizes and timeouts stay as package constants until proven to need tuning. When `shortterm_enabled=false`, `Compact` degrades to exactly today's `pruneHistory` behavior — the flag gates everything, enabling safe rollout.
+L1/L2 batch sizes and timeouts stay as package constants until proven to need tuning. When `shortterm_enabled=false`, `Compact` degrades to exactly today's `pruneHistory` behavior — the flag gates everything, enabling safe rollout. `hindsight_retain_full_history` is independent of `shortterm_enabled`: full-history retention only needs the canonical-history-surfacing change (§2.6) and, for full fidelity on truncated results, the offload store's ref files — so it can ship in Phase 1 (see §5) even before compaction tiers are enabled.
 
 The Summarizer/CanvasBuilder use the utility model; if none is configured, L1/L2 silently disable and only the deterministic parts run (offload capture, mild summary-less truncation with recall pointers, retrieval tool) — still a strict improvement over head-truncation.
 
@@ -170,21 +196,24 @@ The Summarizer/CanvasBuilder use the utility model; if none is configured, L1/L2
 - Each compaction pass appends a run log entry (`appendRunLog`, `agent.go:422` pattern) of type `"compaction"`: `{tier, tokens_before, tokens_after, replaced, deleted, canvas_tokens}`. Surfaces in the existing run-log UI for free.
 - `db.RunTokenStats` (`db/models.go:180`) gains `OffloadSavedTokens int64` (AutoMigrate handles it; no production data exists per `docs/memory-layer-design-review.md`).
 - The offload dir lives inside the run log dir, so existing log retention/cleanup covers GC — no reclaimer needed (TencentDB's `reclaimer.ts` exists because their store is global under `~/.openclaw`; ours is per-run).
-- Note: this also advances the design review's open Finding #2 ("retain full session conversations") — ref files preserve full tool outputs on disk per run, which Hindsight retention could later mine.
+- This closes the design review's open Finding #2 ("retain full session conversations, not just outcomes") — §2.6 wires ref files + canonical history directly into `RetainRunConversation`, so it's no longer a future follow-on.
 
 ## 5. Implementation phases
 
 **Phase 1 — Deterministic core (no LLM).** `pkg/shortterm/store.go`, capture in `executeToolCalls`, `recall_tool_result` tool, `Compactor` with Mild-as-truncation (recall pointer, no summaries) + Emergency tier, settings plumbing, unit tests (extend `engine/aicli/prune_test.go` style: pair-integrity, threshold math, fresh-turn preservation). *Ship value: full results recoverable, pointer-based truncation.*
 
+**Phase 1.5 — Full-history retention to Hindsight (§2.6).** Surface canonical `history` from `Agent.Run`, add `RetainRunConversation` to `pkg/hindsight/service.go`, wire ref-file recovery for truncated results, chunk-and-tag conversation `MemoryItem`s, call alongside `RetainRunOutcome` in `native_engine.go`. Depends only on the offload store (Phase 1), not on the Compactor tiers or L1/L2 — can ship and be verified independently (compare Hindsight bank contents before/after on a test run). *Ship value: Hindsight's synthesis is no longer starved to one paragraph per run.*
+
 **Phase 2 — L1 summaries + scores.** Summarizer, degraded mode, score-ordered Mild, Aggressive tier. Test with a stub `aicli.Client` (httptest server, as in existing client tests).
 
 **Phase 3 — L2 canvas + injection.** CanvasBuilder, backfill, fingerprinted injection, `<current_task_context>` prompt. Golden-file tests for Mermaid parsing/validation.
 
-**Phase 4 — Tuning + telemetry.** Compaction run-log entries, `OffloadSavedTokens`, frontend badge on runs (optional), threshold tuning against real runs, then consider flipping `shortterm_enabled` default.
+**Phase 4 — Tuning + telemetry.** Compaction run-log entries, `OffloadSavedTokens`, frontend badge on runs (optional), threshold tuning against real runs, then consider flipping `shortterm_enabled` default. Also tune `hindsight_transcript_chunk_chars` and dedupe aggressiveness against observed Hindsight ingestion cost/latency.
 
 ## 6. Explicitly out of scope
 
 - TencentDB's L0–L3 layered long-term memory, personas, scenarios, sqlite-vec, Hermes gateway, backend L1/L2 services — long-term memory remains Hindsight's job.
+- Hindsight's own consolidation/recall/retention-policy logic — §2.6 changes what Hindsight is fed, not how it decides what to keep or how mental models are synthesized from it.
 - Cross-run canvas reuse (their multi-`.mmd` session registry). One run = one canvas.
 - Exact tokenization (tiktoken). `tokens.Estimate` + conservative ratios is sufficient; thresholds are ratios precisely so estimator error is absorbed.
 - The LLM gateway path (`integration/llm_gateway.go`) — only the native engine loop is instrumented.
@@ -198,3 +227,5 @@ The Summarizer/CanvasBuilder use the utility model; if none is configured, L1/L2
 | Dropping a result the agent still needed | Score floor (≤2 never aggressively dropped), fresh-turn guarantee, and full recovery via the retrieval tool |
 | Provider rejects malformed history | Pair-integrity invariant enforced in one place (`Compact`) and unit-tested exhaustively |
 | Estimator undercounts → context overflow anyway | Emergency tier at 0.95 with a hard target; ratios tunable per deployment |
+| Full-history retention (§2.6) multiplies Hindsight ingestion volume/cost | Chunk-size cap, heartbeat/dedupe filtering before send, `hindsight_retain_full_history` kill switch, batched into the existing async `Retain` call so it never blocks run completion |
+| Ref-file recovery reconstructs stale/wrong content (e.g. file rotated or missing) | Fall back to the in-history (possibly truncated) content with a `"[ref file unavailable]"` marker rather than failing the whole retention call |
