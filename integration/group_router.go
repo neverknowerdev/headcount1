@@ -195,14 +195,18 @@ func (g *LLMGateway) recordStat(stat db.ModelRequestStat) {
 // router then only contributes model_switch and exhaustion entries.
 const proxyLogModeHeader = "X-Proxy-Log-Mode"
 
-// sendProviderRequest builds and sends a chat-completions request to a
-// provider, forwarding the incoming request's headers (except the ones in
-// skipHeaders, matched case-insensitively) and swapping in the provider's
-// own bearer token. This is the single place that talks to an LLM
-// provider's /chat/completions endpoint — direct proxying and the model
-// group router's per-attempt retries all go through it.
-func sendProviderRequest(ctx context.Context, method string, provider db.LLMProvider, bodyBytes []byte, srcHeader http.Header, skipHeaders map[string]bool) (*http.Response, error) {
-	req, err := http.NewRequestWithContext(ctx, method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewReader(bodyBytes))
+// sendProviderRequest builds and sends a request to a provider endpoint
+// (e.g. "/chat/completions" or "/models"), forwarding the incoming request's
+// headers (except the ones in skipHeaders, matched case-insensitively) and
+// swapping in the provider's own bearer token. This is the single place that
+// talks to an LLM provider — direct proxying and the model group router's
+// per-attempt retries all go through it.
+func sendProviderRequest(ctx context.Context, method string, provider db.LLMProvider, path string, bodyBytes []byte, srcHeader http.Header, skipHeaders map[string]bool) (*http.Response, error) {
+	var body io.Reader
+	if bodyBytes != nil {
+		body = bytes.NewReader(bodyBytes)
+	}
+	req, err := http.NewRequestWithContext(ctx, method, utils.BuildProviderURL(provider.BaseUrl, path), body)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +218,9 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 			req.Header.Add(k, v)
 		}
 	}
-	req.Header.Set("Content-Type", "application/json")
+	if bodyBytes != nil {
+		req.Header.Set("Content-Type", "application/json")
+	}
 	req.Header.Set("Authorization", "Bearer "+provider.ApiKey)
 	return providerHTTPClient.Do(req)
 }
@@ -304,7 +310,7 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		}
 
 		start := time.Now()
-		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, attemptBody, r.Header, skipHeaders)
+		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, "/chat/completions", attemptBody, r.Header, skipHeaders)
 		if err != nil {
 			lastErrMsg = err.Error()
 			lastStatus = http.StatusBadGateway

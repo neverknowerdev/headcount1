@@ -11,12 +11,12 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/tokens"
-	"agent-orchestrator/pkg/utils"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
@@ -29,11 +29,7 @@ type LLMGateway struct {
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
-	return &LLMGateway{
-		q:           db.New(database),
-		basePath:    db.PaperclipHome(),
-		groupHealth: newGroupHealthState(),
-	}
+	return NewLLMGatewayWithHub(database, nil)
 }
 
 func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(string, interface{}) }) *LLMGateway {
@@ -132,20 +128,29 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 	})
 }
 
-// proxyChatCompletionsForAgent proxies on behalf of a specific agent. Agents
-// bound to a model group hand off to the group router; otherwise the agent's
-// own provider is used and stats are attributed directly to the agent.
-func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http.Request) {
+// agentProxyTarget is where an agent's LLM traffic should go: a model group
+// (routed with failover by the group router) or the agent's fixed provider.
+// Exactly one of group/provider is set.
+type agentProxyTarget struct {
+	agent    db.Agent
+	group    *db.ModelGroup
+	provider db.LLMProvider
+}
+
+// resolveAgentProxyTarget loads the agent addressed by the request's
+// {agent_id} URL param and resolves its model group or provider. On failure
+// it writes the HTTP error itself and returns ok=false.
+func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Request) (agentProxyTarget, bool) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "agent_id"))
 	if err != nil {
 		http.Error(w, "Invalid agent ID", http.StatusBadRequest)
-		return
+		return agentProxyTarget{}, false
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
 	if err != nil {
 		http.Error(w, "Agent not found", http.StatusNotFound)
-		return
+		return agentProxyTarget{}, false
 	}
 
 	// Agents bound to a model group route through the group router
@@ -154,21 +159,36 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
 		if gErr != nil {
 			http.Error(w, "Model group not found", http.StatusNotFound)
-			return
+			return agentProxyTarget{}, false
 		}
-		g.serveGroupChatCompletions(w, r, group)
-		return
+		return agentProxyTarget{agent: agent, group: &group}, true
 	}
 
 	if agent.ProviderID == nil {
 		http.Error(w, "Agent has no provider or model group configured", http.StatusNotFound)
-		return
+		return agentProxyTarget{}, false
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), *agent.ProviderID)
 	if err != nil {
 		http.Error(w, "Provider not found", http.StatusNotFound)
+		return agentProxyTarget{}, false
+	}
+	return agentProxyTarget{agent: agent, provider: provider}, true
+}
+
+// proxyChatCompletionsForAgent proxies on behalf of a specific agent. Agents
+// bound to a model group hand off to the group router; otherwise the agent's
+// own provider is used and stats are attributed directly to the agent.
+func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http.Request) {
+	target, ok := g.resolveAgentProxyTarget(w, r)
+	if !ok {
 		return
 	}
+	if target.group != nil {
+		g.serveGroupChatCompletions(w, r, *target.group)
+		return
+	}
+	agent, provider := target.agent, target.provider
 
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
@@ -191,7 +211,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		bodyBytes:   bodyBytes,
 		logger:      logger,
 		runID:       runID,
-		agentID:     int32(agentID),
+		agentID:     agent.ID,
 		skipHeaders: map[string]bool{"authorization": true},
 	})
 }
@@ -203,7 +223,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 // generic and per-agent entrypoints; only provider resolution and stat
 // attribution differ between them, and those arrive on p.
 func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Request, p directProxyRequest) {
-	resp, err := sendProviderRequest(r.Context(), r.Method, p.provider, p.bodyBytes, r.Header, p.skipHeaders)
+	resp, err := sendProviderRequest(r.Context(), r.Method, p.provider, "/chat/completions", p.bodyBytes, r.Header, p.skipHeaders)
 	if err != nil {
 		if p.logger != nil {
 			p.logger.LogError(p.model, p.sourceName, p.provider.Name, err)
@@ -219,13 +239,7 @@ func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Reques
 		go g.q.TouchRunLastMessageTime(context.Background(), int32(p.runID))
 	}
 
-	// Forward all upstream response headers verbatim (the body is relayed
-	// unchanged, so the upstream content-length still applies).
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
+	copyResponseHeaders(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 
 	if !p.stream {
@@ -302,70 +316,26 @@ func (g *LLMGateway) runAgentID(ctx context.Context, runID int) int32 {
 	return *run.Task.AgentID
 }
 
+// getModelsForAgent answers /v1/models on behalf of an agent: the group's
+// pseudo-model list for group-bound agents, the provider's own list otherwise.
 func (g *LLMGateway) getModelsForAgent(w http.ResponseWriter, r *http.Request) {
-	agentIDStr := chi.URLParam(r, "agent_id")
-	agentID, err := strconv.Atoi(agentIDStr)
-	if err != nil {
-		http.Error(w, "Invalid agent ID", http.StatusBadRequest)
+	target, ok := g.resolveAgentProxyTarget(w, r)
+	if !ok {
+		return
+	}
+	if target.group != nil {
+		g.serveGroupModels(w, *target.group)
 		return
 	}
 
-	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil {
-		http.Error(w, "Agent not found", http.StatusNotFound)
-		return
-	}
-
-	if agent.ModelGroupID != nil {
-		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
-		if gErr != nil {
-			http.Error(w, "Model group not found", http.StatusNotFound)
-			return
-		}
-		g.serveGroupModels(w, group)
-		return
-	}
-
-	if agent.ProviderID == nil {
-		http.Error(w, "Agent has no provider or model group configured", http.StatusNotFound)
-		return
-	}
-
-	provider, err := g.q.GetLLMProvider(r.Context(), *agent.ProviderID)
-	if err != nil {
-		http.Error(w, "Provider not found", http.StatusNotFound)
-		return
-	}
-
-	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/models"), nil)
-	if err != nil {
-		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
-		return
-	}
-
-	for k, vv := range r.Header {
-		if strings.ToLower(k) == "authorization" {
-			continue
-		}
-		for _, v := range vv {
-			proxyReq.Header.Add(k, v)
-		}
-	}
-	proxyReq.Header.Set("Authorization", "Bearer "+provider.ApiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
+	resp, err := sendProviderRequest(r.Context(), r.Method, target.provider, "/models", nil, r.Header, map[string]bool{"authorization": true})
 	if err != nil {
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
+	copyResponseHeaders(w, resp.Header)
 	w.WriteHeader(resp.StatusCode)
 	io.Copy(w, resp.Body)
 }
@@ -406,7 +376,10 @@ func proxySSEStream(
 	// do for non-streaming LogResponse).
 	rawBuf := &bytes.Buffer{}
 	body = io.TeeReader(body, rawBuf)
-	lastByteAt := time.Now()
+	// lastByteAt is written by the scanner loop and read by the watchdog
+	// goroutine, so it must be atomic (stored as unix nanos).
+	var lastByteAt atomic.Int64
+	lastByteAt.Store(time.Now().UnixNano())
 	stallCh := make(chan struct{})
 	stallErr := make(chan error, 1)
 	stallDuration := make(chan time.Duration, 1)
@@ -418,7 +391,7 @@ func proxySSEStream(
 			case <-stallCh:
 				return
 			case <-ticker.C:
-				d := time.Since(lastByteAt)
+				d := time.Since(time.Unix(0, lastByteAt.Load()))
 				if d > streamStallTimeout {
 					stallErr <- fmt.Errorf("LLM stream stalled: no data for %v", d)
 					stallDuration <- d
@@ -427,6 +400,24 @@ func proxySSEStream(
 			}
 		}
 	}()
+
+	// checkStall reports (and logs) a pending stall detected by the watchdog.
+	checkStall := func() (error, bool) {
+		select {
+		case stalled := <-stallErr:
+			var d time.Duration
+			select {
+			case d = <-stallDuration:
+			default:
+			}
+			if proxyLogger != nil {
+				proxyLogger.LogStall(model, agentName, providerName, d)
+			}
+			return stalled, true
+		default:
+			return nil, false
+		}
+	}
 
 	type chunkToolCall struct {
 		Index    int    `json:"index"`
@@ -467,10 +458,40 @@ func proxySSEStream(
 
 	// Collected tool calls keyed by index so we can reassemble streamed deltas.
 	toolCallsByIndex := map[int]*chunkToolCall{}
+	// mergeToolCall folds one tool-call fragment into the accumulator.
+	// Streamed deltas append to arguments; a non-delta message carries the
+	// complete arguments in one chunk and replaces them.
+	mergeToolCall := func(tc chunkToolCall, appendArgs bool) {
+		idx := tc.Index
+		if idx < 0 {
+			idx = 0
+		}
+		existing, ok := toolCallsByIndex[idx]
+		if !ok {
+			existing = &chunkToolCall{}
+			toolCallsByIndex[idx] = existing
+		}
+		if tc.ID != "" {
+			existing.ID = tc.ID
+		}
+		if tc.Type != "" {
+			existing.Type = tc.Type
+		}
+		if tc.Function.Name != "" {
+			existing.Function.Name = tc.Function.Name
+		}
+		if tc.Function.Arguments != "" {
+			if appendArgs {
+				existing.Function.Arguments += tc.Function.Arguments
+			} else {
+				existing.Function.Arguments = tc.Function.Arguments
+			}
+		}
+	}
 
 	scanner := bufio.NewScanner(body)
 	for scanner.Scan() {
-		lastByteAt = time.Now()
+		lastByteAt.Store(time.Now().UnixNano())
 		line := scanner.Text()
 		fmt.Fprintf(w, "%s\n", line)
 		flusher.Flush()
@@ -482,53 +503,12 @@ func proxySSEStream(
 				for _, c := range cd.Choices {
 					fullContent += c.Delta.Content
 					fullReasoning += c.Delta.ReasoningContent
-					// Accumulate streamed tool call deltas
 					for _, tc := range c.Delta.ToolCalls {
-						idx := tc.Index
-						if idx < 0 {
-							idx = 0
-						}
-						existing, ok := toolCallsByIndex[idx]
-						if !ok {
-							existing = &chunkToolCall{}
-							toolCallsByIndex[idx] = existing
-						}
-						if tc.ID != "" {
-							existing.ID = tc.ID
-						}
-						if tc.Type != "" {
-							existing.Type = tc.Type
-						}
-						if tc.Function.Name != "" {
-							existing.Function.Name = tc.Function.Name
-						}
-						if tc.Function.Arguments != "" {
-							existing.Function.Arguments += tc.Function.Arguments
-						}
+						mergeToolCall(tc, true)
 					}
-					// Also handle non-delta message format (some providers send full tool_calls in one chunk)
+					// Non-delta message format (some providers send full tool_calls in one chunk)
 					for _, tc := range c.Message.ToolCalls {
-						idx := tc.Index
-						if idx < 0 {
-							idx = 0
-						}
-						existing, ok := toolCallsByIndex[idx]
-						if !ok {
-							existing = &chunkToolCall{}
-							toolCallsByIndex[idx] = existing
-						}
-						if tc.ID != "" {
-							existing.ID = tc.ID
-						}
-						if tc.Type != "" {
-							existing.Type = tc.Type
-						}
-						if tc.Function.Name != "" {
-							existing.Function.Name = tc.Function.Name
-						}
-						if tc.Function.Arguments != "" {
-							existing.Function.Arguments = tc.Function.Arguments
-						}
+						mergeToolCall(tc, false)
 					}
 					if c.Message.Content != "" && fullContent == "" {
 						fullContent = c.Message.Content
@@ -579,40 +559,14 @@ func proxySSEStream(
 	}
 	close(stallCh)
 
-	if err := scanner.Err(); err != nil {
-		select {
-		case stalled := <-stallErr:
-			var d time.Duration
-			select {
-			case d = <-stallDuration:
-			default:
-				d = 0
-			}
-			if proxyLogger != nil {
-				proxyLogger.LogStall(model, agentName, providerName, d)
-			}
-			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
-		default:
-			if proxyLogger != nil {
-				proxyLogger.LogError(model, agentName, providerName, err)
-			}
-			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
-		}
-	}
-
-	select {
-	case stalled := <-stallErr:
-		var d time.Duration
-		select {
-		case d = <-stallDuration:
-		default:
-			d = 0
-		}
-		if proxyLogger != nil {
-			proxyLogger.LogStall(model, agentName, providerName, d)
-		}
+	if stalled, ok := checkStall(); ok {
 		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
-	default:
+	}
+	if err := scanner.Err(); err != nil {
+		if proxyLogger != nil {
+			proxyLogger.LogError(model, agentName, providerName, err)
+		}
+		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
 	}
 	return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), nil
 }
