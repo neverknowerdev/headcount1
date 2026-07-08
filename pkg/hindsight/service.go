@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"agent-orchestrator/db"
 )
@@ -26,6 +27,11 @@ const (
 	defaultRecallMaxTokens   = 6144
 	defaultBriefingMaxTokens = 4096
 )
+
+// maxDocFileBytes caps how large a documentation file may be before it is
+// skipped by SyncProjectDocs — every retained byte is LLM-processed by
+// Hindsight, so a stray generated/vendored .md must not burn the budget.
+const maxDocFileBytes = 1 << 20 // 1 MiB
 
 // recallTypes always includes observations — Hindsight's deduplicated,
 // consolidated knowledge — alongside raw facts, per recall recommendation:
@@ -58,6 +64,11 @@ type Service struct {
 	// ensuredBanks guards EnsureBank so the config PATCH only runs once per
 	// company per process lifetime, not on every retain/recall.
 	ensuredBanks sync.Map // companyID -> struct{}
+	// ensuredModels guards mental-model creation the same way.
+	ensuredModels sync.Map // "bank/modelID" -> struct{}
+	// docSyncs serializes SyncProjectDocs per project, so a startup sync and
+	// a repo-update sync of the same project never interleave.
+	docSyncs sync.Map // projectID -> *sync.Mutex
 }
 
 func NewService(q *db.Queries, client func() *Client) *Service {
@@ -121,6 +132,15 @@ func (s *Service) EnsureBank(ctx context.Context, company db.Company) {
 	}
 }
 
+// ResetEnsured clears the per-process "already ensured" guards for bank
+// config and mental models, so the next retain/recall re-applies them. Needed
+// when bank identity is reused for different data — e.g. the e2e DB wipe
+// resets company IDs while this process keeps running.
+func (s *Service) ResetEnsured() {
+	s.ensuredBanks.Clear()
+	s.ensuredModels.Clear()
+}
+
 // Available reports whether the Hindsight backend is reachable right now.
 func (s *Service) Available() bool {
 	return s != nil && s.client() != nil
@@ -161,6 +181,13 @@ func (s *Service) SyncProjectDocs(ctx context.Context, company db.Company, proje
 	if c == nil {
 		return 0, 0, 0, fmt.Errorf("hindsight not available")
 	}
+	// One sync per project at a time: a startup sync racing a repo-update
+	// sync would double-retain and fight over the tracking rows.
+	muAny, _ := s.docSyncs.LoadOrStore(project.ID, &sync.Mutex{})
+	mu := muAny.(*sync.Mutex)
+	mu.Lock()
+	defer mu.Unlock()
+
 	s.EnsureBank(ctx, company)
 	ctx, cancel := context.WithTimeout(ctx, 10*time.Minute)
 	defer cancel()
@@ -200,6 +227,12 @@ func (s *Service) SyncProjectDocs(ctx context.Context, company db.Company, proje
 	for _, path := range paths {
 		rel, rerr := filepath.Rel(repoPath, path)
 		if rerr != nil {
+			continue
+		}
+		if info, ierr := os.Lstat(path); ierr != nil || !info.Mode().IsRegular() || info.Size() > maxDocFileBytes {
+			if ierr == nil && info.Size() > maxDocFileBytes {
+				log.Printf("hindsight: skipping %s (%d bytes > %d limit)", path, info.Size(), maxDocFileBytes)
+			}
 			continue
 		}
 		content, rerr := os.ReadFile(path)
@@ -417,9 +450,13 @@ func (s *Service) TaskBriefing(ctx context.Context, companyID int32, projectID *
 	return FormatResults(results)
 }
 
+// firstN truncates s to at most n bytes without splitting a UTF-8 rune.
 func firstN(s string, n int) string {
 	if len(s) <= n {
 		return s
+	}
+	for n > 0 && !utf8.RuneStart(s[n]) {
+		n--
 	}
 	return s[:n] + "…"
 }

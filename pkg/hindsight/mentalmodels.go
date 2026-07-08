@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"log"
 	"strings"
-	"sync"
 
 	"agent-orchestrator/db"
 )
@@ -33,13 +32,11 @@ func agentPlaybookModelID(role string) string {
 
 const openBlockersModelID = "open-blockers"
 
-// ensuredModels guards each (bank, modelID) pair so its create call only
-// fires once per process lifetime; a 404 GET means "not created yet".
-var ensuredModels sync.Map // "bank/modelID" -> struct{}
-
-func ensureModelOnce(bank, modelID string, create func()) {
+// ensureModelOnce guards each (bank, modelID) pair so its create call only
+// fires once per Service lifetime; a 404 GET means "not created yet".
+func (s *Service) ensureModelOnce(bank, modelID string, create func()) {
 	key := bank + "/" + modelID
-	if _, done := ensuredModels.LoadOrStore(key, struct{}{}); done {
+	if _, done := s.ensuredModels.LoadOrStore(key, struct{}{}); done {
 		return
 	}
 	create()
@@ -55,7 +52,7 @@ func (s *Service) EnsureProjectStateModel(ctx context.Context, company db.Compan
 	}
 	bank := BankID(company.ID)
 	modelID := projectStateModelID(project.ID)
-	ensureModelOnce(bank, modelID, func() {
+	s.ensureModelOnce(bank, modelID, func() {
 		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
 			ID:   modelID,
 			Name: fmt.Sprintf("Project state: %s", project.Name),
@@ -79,7 +76,7 @@ func (s *Service) EnsureAgentPlaybookModel(ctx context.Context, company db.Compa
 	}
 	bank := BankID(company.ID)
 	modelID := agentPlaybookModelID(role)
-	ensureModelOnce(bank, modelID, func() {
+	s.ensureModelOnce(bank, modelID, func() {
 		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
 			ID:   modelID,
 			Name: fmt.Sprintf("Playbook: %s", role),
@@ -101,7 +98,7 @@ func (s *Service) EnsureOpenBlockersModel(ctx context.Context, company db.Compan
 		return
 	}
 	bank := BankID(company.ID)
-	ensureModelOnce(bank, openBlockersModelID, func() {
+	s.ensureModelOnce(bank, openBlockersModelID, func() {
 		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
 			ID:   openBlockersModelID,
 			Name: "Open blockers",
@@ -118,12 +115,16 @@ func (s *Service) EnsureOpenBlockersModel(ctx context.Context, company db.Compan
 // lifetime): it first checks whether the model already exists server-side.
 func (s *Service) createMentalModelIfMissing(ctx context.Context, bank string, req CreateMentalModelRequest) {
 	c := s.client()
+	if c == nil { // backend went away between the caller's check and now
+		s.ensuredModels.Delete(bank + "/" + req.ID)
+		return
+	}
 	if _, err := c.GetMentalModelRaw(ctx, bank, req.ID); err == nil {
 		return // already exists
 	}
 	if _, err := c.CreateMentalModel(ctx, bank, req); err != nil {
 		log.Printf("hindsight: create mental model %q on %s failed (non-fatal): %v", req.ID, bank, err)
-		ensuredModels.Delete(bank + "/" + req.ID) // retry on next call
+		s.ensuredModels.Delete(bank + "/" + req.ID) // retry on next call
 	}
 }
 

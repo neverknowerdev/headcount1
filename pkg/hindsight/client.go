@@ -10,6 +10,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -85,6 +86,26 @@ type ReflectResponse struct {
 	Text string `json:"text"`
 }
 
+// APIError is a non-2xx response from the Hindsight API. Callers that proxy
+// Hindsight to the frontend use StatusCode to pass the upstream status
+// through instead of flattening everything into 502.
+type APIError struct {
+	StatusCode int
+	Method     string
+	Path       string
+	Body       string
+}
+
+func (e *APIError) Error() string {
+	return fmt.Sprintf("hindsight %s %s: %d — %s", e.Method, e.Path, e.StatusCode, e.Body)
+}
+
+// IsNotFound reports whether err is a Hindsight 404.
+func IsNotFound(err error) bool {
+	var apiErr *APIError
+	return errors.As(err, &apiErr) && apiErr.StatusCode == http.StatusNotFound
+}
+
 func (c *Client) do(ctx context.Context, method, path string, body io.Reader, contentType string) (*http.Response, error) {
 	req, err := http.NewRequestWithContext(ctx, method, c.BaseURL+path, body)
 	if err != nil {
@@ -100,7 +121,10 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 	if resp.StatusCode >= 300 {
 		b, _ := io.ReadAll(io.LimitReader(resp.Body, 4096))
 		resp.Body.Close()
-		return nil, fmt.Errorf("hindsight %s %s: %d — %s", method, path, resp.StatusCode, strings.TrimSpace(string(b)))
+		return nil, &APIError{
+			StatusCode: resp.StatusCode, Method: method, Path: path,
+			Body: strings.TrimSpace(string(b)),
+		}
 	}
 	return resp, nil
 }

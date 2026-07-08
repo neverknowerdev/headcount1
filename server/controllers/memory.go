@@ -3,6 +3,7 @@ package endpoints
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -40,9 +41,25 @@ func (api *API) memoryClientOr503(w http.ResponseWriter) *hindsight.Client {
 	return memoryManager.Client()
 }
 
+// memoryErrorStatus maps an upstream Hindsight error to the status we serve:
+// 4xx pass through (404 stays a 404, 422 a 422 — the frontend relies on
+// this to distinguish "not there yet" from "backend broken"); everything
+// else is a 502.
+func memoryErrorStatus(err error) int {
+	var apiErr *hindsight.APIError
+	if errors.As(err, &apiErr) && apiErr.StatusCode >= 400 && apiErr.StatusCode < 500 {
+		return apiErr.StatusCode
+	}
+	return http.StatusBadGateway
+}
+
+func (api *API) respondMemoryError(w http.ResponseWriter, err error) {
+	api.respondError(w, memoryErrorStatus(err), err.Error())
+}
+
 func (api *API) respondRawJSON(w http.ResponseWriter, data []byte, err error) {
 	if err != nil {
-		api.respondError(w, http.StatusBadGateway, err.Error())
+		api.respondMemoryError(w, err)
 		return
 	}
 	w.Header().Set("Content-Type", "application/json")
@@ -144,16 +161,28 @@ func (api *API) GetMemoryUnit(w http.ResponseWriter, r *http.Request) {
 	api.respondRawJSON(w, data, err)
 }
 
-// UpdateMemoryUnit edits a memory's text/context. Body: {"text": "...", "context": "..."}
+// memoryPatchKeys are the fields the Memory UI may curate on a memory unit.
+// Anything else in the payload is rejected rather than blindly proxied.
+var memoryPatchKeys = map[string]bool{"text": true, "context": true, "state": true, "reason": true}
+
+// UpdateMemoryUnit edits a memory's text/context, or its state ("invalidated"
+// to soft-delete, "active" to restore). Body: {"text": ..., "context": ...,
+// "state": ..., "reason": ...} — any subset, at least one key.
 func (api *API) UpdateMemoryUnit(w http.ResponseWriter, r *http.Request) {
 	c := api.memoryClientOr503(w)
 	if c == nil {
 		return
 	}
 	var patch map[string]interface{}
-	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil || len(patch) == 0 {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
+	}
+	for k := range patch {
+		if !memoryPatchKeys[k] {
+			api.respondError(w, http.StatusBadRequest, fmt.Sprintf("unknown field %q", k))
+			return
+		}
 	}
 	data, err := c.UpdateMemory(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "memoryID"), patch)
 	api.respondRawJSON(w, data, err)
@@ -192,7 +221,7 @@ func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
 		Query: req.Query, Budget: req.Budget, MaxTokens: 4096,
 	})
 	if err != nil {
-		api.respondError(w, http.StatusBadGateway, err.Error())
+		api.respondMemoryError(w, err)
 		return
 	}
 	api.respondJSON(w, http.StatusOK, resp)
@@ -214,7 +243,7 @@ func (api *API) AskMemory(w http.ResponseWriter, r *http.Request) {
 	}
 	resp, err := c.Reflect(r.Context(), chi.URLParam(r, "bankID"), req.Query, "low")
 	if err != nil {
-		api.respondError(w, http.StatusBadGateway, err.Error())
+		api.respondMemoryError(w, err)
 		return
 	}
 	api.respondJSON(w, http.StatusOK, resp)
@@ -277,7 +306,7 @@ func (api *API) RefreshMentalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.RefreshMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
-		api.respondError(w, http.StatusBadGateway, err.Error())
+		api.respondMemoryError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
@@ -289,7 +318,7 @@ func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := c.DeleteMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
-		api.respondError(w, http.StatusBadGateway, err.Error())
+		api.respondMemoryError(w, err)
 		return
 	}
 	w.WriteHeader(http.StatusOK)

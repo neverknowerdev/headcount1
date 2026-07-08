@@ -4,11 +4,13 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/agentconfig"
@@ -964,7 +966,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 				mCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 				defer cancel()
 				if rErr := e.memory.RetainRunOutcome(mCtx, company, finalTask, updatedRun, status, runErrMsg); rErr != nil {
-					fmt.Printf("Warning: failed to retain run %d outcome in memory: %v\n", updatedRun.ID, rErr)
+					log.Printf("Warning: failed to retain run %d outcome in memory: %v", updatedRun.ID, rErr)
 				}
 			}()
 		}
@@ -991,6 +993,12 @@ const briefingMaxChars = 24000 // ~6k tokens
 // per-session step. Ensures each relevant model exists (idempotent,
 // best-effort) before fetching it. Returns "" when nothing is available.
 func (e *NativeEngine) buildMemoryBriefing(ctx context.Context, company db.Company, task db.Task, role string) string {
+	// Hard time budget: the briefing is a best-effort enhancement assembled
+	// from several sequential HTTP calls — a slow or wedged memory backend
+	// must never stall session start for minutes.
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
 	var sections []string
 
 	if task.ProjectID != nil {
@@ -1027,7 +1035,11 @@ func (e *NativeEngine) buildMemoryBriefing(ctx context.Context, company db.Compa
 	briefing := "Recalled from the company's long-term memory (may be outdated — verify anything critical, use memory_recall to dig deeper):\n\n" +
 		strings.Join(sections, "\n\n")
 	if len(briefing) > briefingMaxChars {
-		briefing = briefing[:briefingMaxChars] + "\n… (briefing truncated; use memory_recall for more)"
+		cut := briefingMaxChars
+		for cut > 0 && !utf8.RuneStart(briefing[cut]) {
+			cut--
+		}
+		briefing = briefing[:cut] + "\n… (briefing truncated; use memory_recall for more)"
 	}
 	return briefing
 }

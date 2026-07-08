@@ -30,9 +30,14 @@ type Manager struct {
 	mu      sync.RWMutex
 	client  *Client
 	cmd     *exec.Cmd
+	cmdDone chan struct{} // closed when the current cmd's Wait returns
 	llm     func(ctx context.Context) (LLMConfig, bool)
 	baseURL string
 	port    string
+
+	// startMu serializes Start so concurrent callers (startup goroutine plus
+	// a settings-change re-trigger) can never spawn two processes.
+	startMu sync.Mutex
 }
 
 func NewManager(llm func(ctx context.Context) (LLMConfig, bool)) *Manager {
@@ -65,6 +70,8 @@ func binaryPath() string {
 // background goroutine at startup. Safe to call again after a settings
 // change (it is a no-op when already healthy).
 func (m *Manager) Start(ctx context.Context) error {
+	m.startMu.Lock()
+	defer m.startMu.Unlock()
 	if m.Client() != nil {
 		return nil
 	}
@@ -102,19 +109,29 @@ func (m *Manager) Start(ctx context.Context) error {
 	cmd.Env = env
 	cmd.Stdout = os.Stderr
 	cmd.Stderr = os.Stderr
+	setProcAttrs(cmd) // on Linux: die with the parent, never orphan embedded Postgres
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start hindsight-api: %w", err)
 	}
 	m.mu.Lock()
 	m.cmd = cmd
 	m.mu.Unlock()
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.cmdDone = done
+	m.mu.Unlock()
 	go func() {
+		defer close(done)
 		if werr := cmd.Wait(); werr != nil {
 			log.Printf("hindsight-api exited: %v", werr)
 		}
 		m.mu.Lock()
-		m.client = nil
-		m.cmd = nil
+		// Only clear state we still own — a Stop+Start cycle may have
+		// already replaced cmd/client with a newer process.
+		if m.cmd == cmd {
+			m.client = nil
+			m.cmd = nil
+		}
 		m.mu.Unlock()
 	}()
 
@@ -150,13 +167,25 @@ func (m *Manager) adopt(ctx context.Context, url string, timeout time.Duration) 
 	}
 }
 
-// Stop terminates a locally-spawned hindsight-api process, if any.
+// Stop terminates a locally-spawned hindsight-api process, if any. It asks
+// politely first (SIGTERM) so the embedded Postgres can shut down cleanly,
+// and only escalates to SIGKILL after a grace period.
 func (m *Manager) Stop() {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	if m.cmd != nil && m.cmd.Process != nil {
-		_ = m.cmd.Process.Kill()
-	}
+	cmd, done := m.cmd, m.cmdDone
 	m.cmd = nil
 	m.client = nil
+	m.mu.Unlock()
+	if cmd == nil || cmd.Process == nil {
+		return
+	}
+	_ = cmd.Process.Signal(os.Interrupt)
+	if done != nil {
+		select {
+		case <-done:
+			return
+		case <-time.After(10 * time.Second):
+		}
+	}
+	_ = cmd.Process.Kill()
 }

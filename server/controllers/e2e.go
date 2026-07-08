@@ -27,6 +27,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"skills",
 		"agent_mcp_accounts",
 		"agents",
+		"hindsight_documents",
 		"llm_providers",
 		"sprints",
 		"projects",
@@ -46,6 +47,13 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
+
+	// Company/model IDs restart from 1 after the wipe, so the memory layer's
+	// per-process "already ensured" guards would wrongly skip re-configuring
+	// banks and mental models for the reused IDs.
+	if memoryService != nil {
+		memoryService.ResetEnsured()
+	}
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
