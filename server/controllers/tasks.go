@@ -186,14 +186,14 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ProjectID   *int32  `json:"project_id"`
-		AgentID     *int32  `json:"agent_id"`
-		SprintID    *int32  `json:"sprint_id"`
-		ParentID    *int32  `json:"parent_id"`
-		Title       string  `json:"title"`
-		TaskType    string  `json:"task_type"`
-		Description string  `json:"description"`
-		Priority    string  `json:"priority"`
+		ProjectID       *int32  `json:"project_id"`
+		AgentID         *int32  `json:"agent_id"`
+		SprintID        *int32  `json:"sprint_id"`
+		ParentID        *int32  `json:"parent_id"`
+		Title           string  `json:"title"`
+		TaskType        string  `json:"task_type"`
+		Description     string  `json:"description"`
+		Priority        string  `json:"priority"`
 		DueDate         *string `json:"due_date"`
 		Status          string  `json:"status"`
 		IsArchived      *bool   `json:"is_archived"`

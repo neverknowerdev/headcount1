@@ -56,7 +56,7 @@ func (m *Manager) ListCompanies() ([]string, error) {
 
 	companies := []string{}
 	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" && entry.Name() != "mcp-servers" && entry.Name() != "runs" && entry.Name() != "docker" {
+		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" && entry.Name() != "mcp-servers" && entry.Name() != "runs" && entry.Name() != "docker" && entry.Name() != "hindsight" {
 			companies = append(companies, entry.Name())
 		}
 	}

@@ -4,12 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"sort"
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/agentconfig"
@@ -18,6 +20,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/logging"
 	"gorm.io/gorm"
 )
@@ -28,7 +31,14 @@ type NativeEngine struct {
 	hub          *eventhub.Hub
 	agentFactory agentconfig.Factory
 	cancelFuncs  sync.Map // runID -> context.CancelFunc
+	// memory is the Hindsight long-term memory layer. Optional: when nil (or
+	// the backend is down) sessions run without memory_recall and the
+	// pre-task briefing, and run outcomes are simply not retained.
+	memory *hindsight.Service
 }
+
+// SetMemoryService wires the Hindsight memory layer into the engine.
+func (e *NativeEngine) SetMemoryService(s *hindsight.Service) { e.memory = s }
 
 // NewNativeEngine creates a NativeEngine pre-loaded with the default agent
 // config factory.
@@ -482,6 +492,23 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
+	// Pre-task memory refinement: before execution starts, assemble the
+	// briefing from long-term memory using Hindsight's recommended pattern —
+	// cheap mental-model fetches for synthesized understanding, plus a
+	// recall pass for task-specific facts. Reflect (expensive agentic
+	// reasoning) is deliberately not used here; it's reserved for the
+	// explicit "Ask memory" UI action.
+	if e.memory.Available() {
+		var role string
+		if agentCfg != nil {
+			role = agentCfg.Name
+		}
+		if briefing := e.buildMemoryBriefing(ctx, company, task, role); briefing != "" {
+			systemPrompt += "\n\n## Memory briefing\n" + briefing
+			e.logInfo(proxyLogger, "Memory briefing injected from long-term memory")
+		}
+	}
+
 	initialMessages := e.buildInitialMessages(ctx, task, mode)
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
@@ -740,6 +767,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
+	// Long-term memory recall (Hindsight). Read-only by design: retention is
+	// automatic (docs on sync, run outcomes on session end).
+	if e.memory.Available() {
+		registry.Register(tools.NewMemoryRecall(func(mrCtx context.Context, query, agentFilter string, maxTokens int) (string, error) {
+			if maxTokens <= 0 {
+				maxTokens = loadSettings().MemoryRecallMaxTokens // 0 falls through to the Service default
+			}
+			results, rerr := e.memory.Recall(mrCtx, task.CompanyID, task.ProjectID, agentFilter, query, maxTokens)
+			if rerr != nil {
+				return "", rerr
+			}
+			return hindsight.FormatResults(results), nil
+		}))
+	}
+
 	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
@@ -915,6 +957,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Update run metadata in filesystem.
 	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
 		storage.WriteRun(updatedRun, company.ShortName)
+
+		// Feed the session outcome into long-term memory (async; failures
+		// only logged — memory must never block or fail a run).
+		if e.memory.Available() {
+			finalTask, tErr := e.q.GetTask(ctx, task.ID)
+			if tErr != nil {
+				finalTask = task
+			}
+			go func() {
+				mCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+				defer cancel()
+				if rErr := e.memory.RetainRunOutcome(mCtx, company, finalTask, updatedRun, status, runErrMsg); rErr != nil {
+					log.Printf("Warning: failed to retain run %d outcome in memory: %v", updatedRun.ID, rErr)
+				}
+			}()
+		}
 	}
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
@@ -923,6 +981,70 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
 
 	return status
+}
+
+// briefingMaxChars bounds the total injected memory briefing so it can never
+// dominate the system prompt — mental model sections (cheap, high-signal)
+// are kept whole; the recall section is truncated first if the budget is
+// tight.
+const briefingMaxChars = 24000 // ~6k tokens
+
+// buildMemoryBriefing assembles the pre-task memory section using
+// Hindsight's recommended pre-response pattern: mental-model fetch (cheap,
+// pre-computed synthesis) for standing understanding, plus recall for
+// task-specific facts — never reflect, which is too expensive for a routine
+// per-session step. Ensures each relevant model exists (idempotent,
+// best-effort) before fetching it. Returns "" when nothing is available.
+func (e *NativeEngine) buildMemoryBriefing(ctx context.Context, company db.Company, task db.Task, role string) string {
+	// Hard time budget: the briefing is a best-effort enhancement assembled
+	// from several sequential HTTP calls — a slow or wedged memory backend
+	// must never stall session start for minutes.
+	ctx, cancel := context.WithTimeout(ctx, 45*time.Second)
+	defer cancel()
+
+	var sections []string
+
+	if task.ProjectID != nil {
+		if project, perr := e.q.GetProject(ctx, *task.ProjectID); perr == nil {
+			e.memory.EnsureProjectStateModel(ctx, company, project)
+			if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.ProjectStateModelID(project.ID)); ok {
+				sections = append(sections, "### Project state (synthesized)\n"+content)
+			}
+		}
+	}
+
+	if role != "" {
+		e.memory.EnsureAgentPlaybookModel(ctx, company, role)
+		if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.AgentPlaybookModelID(role)); ok {
+			sections = append(sections, "### Your playbook (synthesized)\n"+content)
+		}
+	}
+
+	if strings.EqualFold(role, defaultOrchestratorConfig) {
+		e.memory.EnsureOpenBlockersModel(ctx, company)
+		if content, ok := e.memory.FetchModelContent(ctx, company.ID, hindsight.OpenBlockersModelID()); ok {
+			sections = append(sections, "### Open blockers (synthesized)\n"+content)
+		}
+	}
+
+	budget := loadSettings().MemoryBriefingMaxTokens
+	if recalled := e.memory.TaskBriefing(ctx, company.ID, task.ProjectID, task, budget); recalled != "" {
+		sections = append(sections, "### Related memories (recall)\n"+recalled)
+	}
+
+	if len(sections) == 0 {
+		return ""
+	}
+	briefing := "Recalled from the company's long-term memory (may be outdated — verify anything critical, use memory_recall to dig deeper):\n\n" +
+		strings.Join(sections, "\n\n")
+	if len(briefing) > briefingMaxChars {
+		cut := briefingMaxChars
+		for cut > 0 && !utf8.RuneStart(briefing[cut]) {
+			cut--
+		}
+		briefing = briefing[:cut] + "\n… (briefing truncated; use memory_recall for more)"
+	}
+	return briefing
 }
 
 // buildInitialMessages assembles a session's conversation seed: the task

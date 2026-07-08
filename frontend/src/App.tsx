@@ -17,6 +17,7 @@ import { Backup } from './pages/Backup';
 import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 import { TaskPage } from './pages/TaskPage';
+import { Memory } from './pages/Memory';
 
 function App() {
   return (
@@ -38,6 +39,7 @@ function App() {
             <Route path="/companies/:shortName/mcp-servers" element={<MCPServers />} />
             <Route path="/companies/:shortName/runs" element={<RunLogs />} />
             <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
+            <Route path="/companies/:shortName/memory" element={<Memory />} />
             <Route path="/companies/:shortName/settings" element={<Settings />} />
             <Route path="/companies/:shortName/backup" element={<Backup />} />
             <Route path="/" element={<Dashboard />} />

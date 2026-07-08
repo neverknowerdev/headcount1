@@ -7,6 +7,8 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -19,6 +21,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -100,6 +103,7 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.HindsightDocument{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
@@ -164,6 +168,34 @@ func main() {
 		log.Printf("Warning: Initial filesystem sync failed: %v", err)
 	}
 
+	// Hindsight long-term memory layer. The manager runs a bare-metal
+	// hindsight-api process (installed into the app venv by the setup script)
+	// configured with the "Default Models" purpose hindsight_memory as its
+	// LLM (a fixed provider+model, or a model group's best free member);
+	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
+	// tests).
+	memManager := hindsight.NewManager(func(ctx context.Context) (hindsight.LLMConfig, bool) {
+		return resolveHindsightLLMConfig(ctx, db.New(database))
+	})
+	memService := hindsight.NewService(db.New(database), memManager.Client)
+	eng.SetMemoryService(memService)
+	endpoints.SetMemoryService(memService, memManager)
+
+	// Memory rides the backup archive: banks are exported to data/hindsight
+	// before each backup and re-imported after a restore.
+	backup.PreBackupHook = func(ctx context.Context) {
+		dir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		if err := memService.ExportAllToDir(ctx, dir); err != nil {
+			log.Printf("Warning: memory export before backup failed: %v", err)
+		}
+	}
+	backup.PostRestoreHook = func() {
+		dir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		if err := memService.ImportAllFromDir(context.Background(), dir); err != nil {
+			log.Printf("Warning: memory import after restore failed: %v", err)
+		}
+	}
+
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
@@ -171,6 +203,14 @@ func main() {
 		}
 		srv.InstallMCPNpmDeps(context.Background())
 		srv.CacheMCPTools(context.Background())
+
+		// Bring the memory backend up (after setup so hindsight-api is
+		// installed), then feed every project's docs into it.
+		if err := memManager.Start(context.Background()); err != nil {
+			log.Printf("WARNING: memory layer unavailable: %v", err)
+			return
+		}
+		srv.SyncAllProjectMemory(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 
@@ -277,6 +317,51 @@ func recoverStaleRuns(database *gorm.DB) {
 		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
+}
+
+// resolveHindsightLLMConfig resolves the provider+model configured for the
+// hindsight_memory purpose (see db.PurposeHindsightMemory) via the "Default
+// Models" settings, mirroring engine.NativeEngine.resolvePurposeModel's model
+// group handling but with no session provider/model to fall back to — an
+// unconfigured purpose means the memory backend simply starts without an LLM.
+func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries) (hindsight.LLMConfig, bool) {
+	setting, err := q.GetDefaultModelSetting(ctx, db.PurposeHindsightMemory)
+	if err != nil {
+		return hindsight.LLMConfig{}, false
+	}
+
+	if setting.ModelGroupID != nil {
+		group, gErr := q.GetModelGroup(ctx, *setting.ModelGroupID)
+		if gErr != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		members := db.ExpandModelGroupMembers(group.Members)
+		if len(members) == 0 {
+			return hindsight.LLMConfig{}, false
+		}
+		sort.SliceStable(members, func(i, j int) bool {
+			if members[i].IsFree != members[j].IsFree {
+				return members[i].IsFree
+			}
+			return members[i].Priority < members[j].Priority
+		})
+		best := members[0]
+		return hindsight.LLMConfig{BaseURL: best.Provider.BaseUrl, APIKey: best.Provider.ApiKey, Model: best.Model}, true
+	}
+
+	if setting.ProviderID != nil {
+		provider, pErr := q.GetLLMProvider(ctx, *setting.ProviderID)
+		if pErr != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		model := setting.Model
+		if model == "" {
+			model = provider.DefaultModel
+		}
+		return hindsight.LLMConfig{BaseURL: provider.BaseUrl, APIKey: provider.ApiKey, Model: model}, true
+	}
+
+	return hindsight.LLMConfig{}, false
 }
 
 // refreshBuiltinLLMProviderModels fetches the current free-model catalog for

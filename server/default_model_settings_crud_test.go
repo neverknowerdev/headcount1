@@ -41,14 +41,14 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	q := db.New(database)
 	require.NoError(t, q.EnsureDefaultModelSettings(context.Background()))
 
-	// List shows both purposes, initially unconfigured (no Utility group in this DB).
+	// List shows every known purpose, initially unconfigured (no Utility group in this DB).
 	req := httptest.NewRequest(http.MethodGet, "/default-model-settings", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var list []db.DefaultModelSetting
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
-	require.Len(t, list, 2)
+	require.Len(t, list, 3)
 
 	// Point commit_messages at a fixed provider+model.
 	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default"}
