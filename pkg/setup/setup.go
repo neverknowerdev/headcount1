@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"embed"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
@@ -36,6 +37,7 @@ var (
 	warnStore     atomic.Value // holds string
 	failuresStore atomic.Value // holds []Failure — blocking failures
 	warningsStore atomic.Value // holds []Failure — non-blocking (e.g. gh CLI)
+	stepStore     atomic.Value // holds string — current in-progress step, e.g. "Installing hindsight"
 	once          sync.Once
 )
 
@@ -76,6 +78,14 @@ func Status() (pending bool, ok bool, errMsg string, warning string) {
 	s, _ := errStore.Load().(string)
 	w, _ := warnStore.Load().(string)
 	return false, s == "", s, w
+}
+
+// CurrentStep returns a human-readable description of the step the setup
+// script is currently working on (e.g. "Installing hindsight (this can take a
+// few minutes)"), or an empty string when nothing slow is in progress.
+func CurrentStep() string {
+	s, _ := stepStore.Load().(string)
+	return s
 }
 
 // Failures returns the structured list of blocking dependency failures from
@@ -141,11 +151,14 @@ func runOnce() {
 	cmd.Env = append(os.Environ(), "PAPERCLIP_VENV_DIR="+venvDir())
 
 	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	tracker := &stepTracker{}
+	sink := io.MultiWriter(&out, tracker)
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 
 	log.Println("[setup] Running setup script...")
 	runErr := cmd.Run()
+	stepStore.Store("")
 	output := out.String()
 
 	// markitdown availability is determined by the script output, independent of
@@ -172,6 +185,74 @@ func runOnce() {
 	}
 
 	log.Print(output)
+}
+
+// stepLineRe matches per-dependency status lines like
+// "[setup] hindsight: not found — installing (this can take a few minutes)..."
+// after the "[setup] " prefix has been stripped.
+var stepLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_. -]*): (.+)$`)
+
+// stepTracker is an io.Writer that watches the setup script's output as it
+// streams and publishes the current slow step (an in-progress install) to
+// stepStore, so /api/setup-status can tell the UI what setup is doing right
+// now instead of a generic spinner.
+type stepTracker struct {
+	mu       sync.Mutex
+	buf      []byte
+	inDetail bool
+}
+
+func (t *stepTracker) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	for {
+		i := bytes.IndexByte(t.buf, '\n')
+		if i < 0 {
+			break
+		}
+		line := strings.TrimSpace(string(t.buf[:i]))
+		t.buf = t.buf[i+1:]
+		t.handleLine(line)
+	}
+	return len(p), nil
+}
+
+func (t *stepTracker) handleLine(line string) {
+	// Raw command output between DETAIL markers isn't step information.
+	if strings.HasPrefix(line, "[setup] DETAIL_BEGIN") {
+		t.inDetail = true
+		return
+	}
+	if line == "[setup] DETAIL_END" {
+		t.inDetail = false
+		return
+	}
+	if t.inDetail {
+		return
+	}
+	msg, ok := strings.CutPrefix(line, "[setup] ")
+	if !ok || strings.HasPrefix(msg, "WARNING:") || strings.HasPrefix(msg, "SOFT_FAIL:") {
+		return
+	}
+	m := stepLineRe.FindStringSubmatch(msg)
+	if m == nil {
+		return
+	}
+	name, status := m[1], m[2]
+	if idx := strings.Index(status, "installing"); idx >= 0 {
+		// e.g. "not found — installing via Homebrew..." → "Installing git via Homebrew"
+		note := strings.TrimSuffix(strings.TrimSpace(status[idx+len("installing"):]), "...")
+		step := "Installing " + name
+		if note != "" {
+			step += " " + note
+		}
+		stepStore.Store(step)
+	} else {
+		// "OK" / "installed" / anything else — this dependency is done; clear
+		// the step until the next slow install starts.
+		stepStore.Store("")
+	}
 }
 
 // extractSoftFailures collects "[setup] SOFT_FAIL: ..." lines emitted for
