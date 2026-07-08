@@ -180,6 +180,19 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/{id}/rediscover", api.RediscoverProviderModels)
 	})
 
+	r.Route("/model-groups", func(r chi.Router) {
+		r.Get("/", api.ListModelGroups)
+		r.Post("/", api.CreateModelGroup)
+		r.Put("/{id}", api.UpdateModelGroup)
+		r.Delete("/{id}", api.DeleteModelGroup)
+		r.Get("/{id}/stats", api.GetModelGroupStats)
+	})
+
+	r.Route("/default-model-settings", func(r chi.Router) {
+		r.Get("/", api.ListDefaultModelSettings)
+		r.Put("/{purpose}", api.UpdateDefaultModelSetting)
+	})
+
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
 		pending, ok, errMsg, warning := setup.Status()
 		if pending {

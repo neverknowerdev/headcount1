@@ -39,13 +39,13 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	Name            string    `json:"name" gorm:"not null"`
-	BaseUrl         string    `json:"base_url" gorm:"not null"`
-	ApiKey          string    `json:"api_key" gorm:"not null"`
-	ProviderType    string    `json:"provider_type"`
-	DefaultModel    string    `json:"default_model"`
-	SupportedModels string    `json:"supported_models"`
+	ID              int32  `json:"id" gorm:"primaryKey"`
+	Name            string `json:"name" gorm:"not null"`
+	BaseUrl         string `json:"base_url" gorm:"not null"`
+	ApiKey          string `json:"api_key" gorm:"not null"`
+	ProviderType    string `json:"provider_type"`
+	DefaultModel    string `json:"default_model"`
+	SupportedModels string `json:"supported_models"`
 	// Builtin marks providers seeded automatically on startup (e.g. OpenRouter,
 	// OpenCode Zen) rather than added by hand. Used to know which providers'
 	// model catalogs are safe to refresh from a live discovery fetch.
@@ -99,12 +99,17 @@ type Agent struct {
 	SystemPrompt string       `json:"system_prompt" gorm:"not null"`
 	ProviderID   *int32       `json:"provider_id"`
 	Provider     *LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
-	Model        string       `json:"model"`
-	Mode         string       `json:"mode" gorm:"not null;default:'primary'"`
-	Permissions  string       `json:"permissions"`
-	CreatedAt    time.Time    `json:"created_at"`
-	UpdatedAt    time.Time    `json:"updated_at"`
-	Skills       []Skill      `json:"skills" gorm:"many2many:agent_skills;"`
+	// ModelGroupID, when set, takes precedence over ProviderID/Model: the
+	// agent's LLM calls go through the model-group router (free-first,
+	// auto-failover) instead of a fixed provider+model.
+	ModelGroupID *int32      `json:"model_group_id"`
+	ModelGroup   *ModelGroup `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
+	Model        string      `json:"model"`
+	Mode         string      `json:"mode" gorm:"not null;default:'primary'"`
+	Permissions  string      `json:"permissions"`
+	CreatedAt    time.Time   `json:"created_at"`
+	UpdatedAt    time.Time   `json:"updated_at"`
+	Skills       []Skill     `json:"skills" gorm:"many2many:agent_skills;"`
 }
 
 type Skill struct {
@@ -345,6 +350,80 @@ type ActivityLog struct {
 	EntityType string    `json:"entity_type"`            // e.g., "task", "agent", "skill"
 	Details    string    `json:"details"`                // JSON string with more context
 	CreatedAt  time.Time `json:"created_at"`
+}
+
+// ModelGroup is a named set of provider+model pairs exposed behind a single
+// OpenAI-compatible proxy URL (/api/proxy/group/{slug}/v1). The gateway
+// routes each request to the healthiest member, preferring free models and
+// failing over automatically on errors or rate limits.
+type ModelGroup struct {
+	ID          int32              `json:"id" gorm:"primaryKey"`
+	Name        string             `json:"name" gorm:"not null"`
+	Slug        string             `json:"slug" gorm:"not null;uniqueIndex"`
+	Description string             `json:"description"`
+	Members     []ModelGroupMember `json:"members" gorm:"foreignKey:GroupID"`
+	CreatedAt   time.Time          `json:"created_at"`
+	UpdatedAt   time.Time          `json:"updated_at"`
+}
+
+// ModelGroupMember is one provider+model pair inside a ModelGroup. Free
+// members are always tried before paid ones; Priority orders members within
+// the same tier (lower = tried first).
+type ModelGroupMember struct {
+	ID         int32       `json:"id" gorm:"primaryKey"`
+	GroupID    int32       `json:"group_id" gorm:"not null;index"`
+	ProviderID int32       `json:"provider_id" gorm:"not null"`
+	Provider   LLMProvider `json:"provider" gorm:"foreignKey:ProviderID;constraint:OnDelete:CASCADE;"`
+	// Model is the concrete model id to route to. Empty when AllModels is
+	// set — the member then stands for every model currently listed in the
+	// provider's SupportedModels, resolved at request time (so it tracks a
+	// provider's catalog automatically as it changes).
+	Model     string    `json:"model"`
+	AllModels bool      `json:"all_models" gorm:"not null;default:false"`
+	IsFree    bool      `json:"is_free" gorm:"not null;default:false"`
+	Priority  int       `json:"priority" gorm:"not null;default:0"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// ModelRequestStat records the outcome of a single LLM request routed by the
+// gateway: success, hard failure, or rate limit. Rate limits are tracked
+// separately from failures so they don't count against a model's failure %.
+// TokensPerSec is completion tokens divided by wall-clock duration.
+type ModelRequestStat struct {
+	ID               int32   `json:"id" gorm:"primaryKey"`
+	GroupID          *int32  `json:"group_id" gorm:"index"`
+	ProviderID       int32   `json:"provider_id" gorm:"not null;index"`
+	Model            string  `json:"model" gorm:"not null;index"`
+	Success          bool    `json:"success" gorm:"not null;default:false"`
+	RateLimited      bool    `json:"rate_limited" gorm:"not null;default:false"`
+	StatusCode       int     `json:"status_code"`
+	DurationMs       int64   `json:"duration_ms"`
+	PromptTokens     int     `json:"prompt_tokens"`
+	CompletionTokens int     `json:"completion_tokens"`
+	TokensPerSec     float64 `json:"tokens_per_sec"`
+	// CooldownUntil is set on rate-limited rows: the gateway won't route to
+	// this provider+model again until this time (unless nothing else works).
+	CooldownUntil *time.Time `json:"cooldown_until"`
+	ErrorMessage  string     `json:"error_message" gorm:"type:text"`
+	CreatedAt     time.Time  `json:"created_at" gorm:"index"`
+}
+
+// DefaultModelSetting configures which provider+model (or model group) to
+// use for one internal purpose (e.g. commit-message generation, the
+// ask_artifact one-shot reader) — independent of any Model Group's own
+// definition, so a purpose can point at a fixed provider+model, at any
+// model group (built-in or custom), or fall back to the calling session's
+// own LLM when left unconfigured (both fields nil).
+type DefaultModelSetting struct {
+	ID           int32        `json:"id" gorm:"primaryKey"`
+	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex"`
+	ProviderID   *int32       `json:"provider_id"`
+	Provider     *LLMProvider `json:"provider,omitempty" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
+	Model        string       `json:"model"`
+	ModelGroupID *int32       `json:"model_group_id"`
+	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
+	CreatedAt    time.Time    `json:"created_at"`
+	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
 type ProxyRequestLog struct {

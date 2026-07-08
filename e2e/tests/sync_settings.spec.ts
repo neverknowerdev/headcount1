@@ -11,9 +11,7 @@ test.describe('Settings and Sync', () => {
                     body: JSON.stringify({
                         base_path: '/tmp/.paperclip2',
                         git_remote_url: 'git@github.com:test/repo.git',
-                        github_pat: 'test_pat',
-                        utility_provider_id: 0,
-                        utility_model: 'gpt-4o-mini'
+                        github_pat: 'test_pat'
                     })
                 });
             } else if (route.request().method() === 'POST') {

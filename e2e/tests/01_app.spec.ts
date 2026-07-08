@@ -63,7 +63,7 @@ test.describe.serial('Paperclip2 App', () => {
 
         await page.goto('/companies/pw-inc/agents/1');
         await page.click('button:has-text("Settings")');
-        await expect(page.locator('select').nth(0)).toHaveValue(String(mainProvider.id)); // Provider
+        await expect(page.locator('select').nth(0)).toHaveValue(`provider:${mainProvider.id}`); // Provider or Model Group
         await expect(page.locator('select').nth(1)).toHaveValue("e2e-mock-model"); // Model
         await page.goto('/companies/pw-inc');
 

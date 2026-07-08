@@ -57,10 +57,10 @@ test.describe.serial('CEO orchestration flow', () => {
     });
 
     test.afterAll(async ({ request }) => {
-        // Leave no filesystem, DB or settings state behind for the specs that follow.
+        // Leave no filesystem, DB or settings state behind for the specs that
+        // follow — wipe-db also re-seeds the built-in Utility/Memory
+        // Management model groups back to their default state.
         cleanFilesystem();
-        const settings = await (await request.get('/api/settings')).json();
-        await request.post('/api/settings', { data: { ...settings, utility_provider_id: 0, utility_model: '' } });
         await request.post('/api/e2e/wipe-db');
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
     });
@@ -77,14 +77,14 @@ test.describe.serial('CEO orchestration flow', () => {
         });
         providerId = provider.id;
 
-        // The utility LLM (used by ask_artifact's one-shot reader) is an
-        // app-level setting: any provider/model pair.
-        const currentSettings = await (await request.get('/api/settings')).json();
-        await postJSON(request, '/api/settings', {
-            ...currentSettings,
-            utility_provider_id: provider.id,
-            utility_model: 'e2e-mock-model',
+        // The Default Model for ask_artifact's one-shot reader call: point it
+        // directly at the mock provider so the reader call is deterministic.
+        const askArtifactUpd = await request.put('/api/default-model-settings/ask_artifact', {
+            data: { provider_id: provider.id, model: 'e2e-mock-model' },
         });
+        if (!askArtifactUpd.ok()) {
+            throw new Error(`PUT /api/default-model-settings/ask_artifact failed (${askArtifactUpd.status()}): ${await askArtifactUpd.text()}`);
+        }
         const company = await postJSON(request, '/api/companies', {
             name: 'CEO Co', short_name: 'ceo-co', color: '#4f46e5',
         });
@@ -167,7 +167,7 @@ test.describe.serial('CEO orchestration flow', () => {
                     filename: 'greeting-report.md',
                     question: 'Does the report confirm the greeting is casual?',
                 } } },
-                // Consumed by the one-shot reader call (utility model).
+                // Consumed by the one-shot reader call (Utility model group).
                 { text: 'Yes — the report states the casual greeting was implemented.' },
                 // CEO turn 6: plan follow-up work as a separate TOP-LEVEL task
                 // on the board (backlog — nothing executes).
