@@ -91,6 +91,11 @@ func (s *Service) EnsureBank(ctx context.Context, company db.Company) {
 		return
 	}
 	bank := BankID(company.ID)
+	if err := c.CreateBank(ctx, bank); err != nil {
+		log.Printf("hindsight: create bank %s failed (will retry next call): %v", bank, err)
+		s.ensuredBanks.Delete(company.ID)
+		return
+	}
 	updates := map[string]interface{}{
 		"reflect_mission": fmt.Sprintf(
 			"I am the collective long-term memory of %s's AI agent team. I track project "+
