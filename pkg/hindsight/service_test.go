@@ -31,6 +31,7 @@ func testDB(t *testing.T) *db.Queries {
 // what the Service sent to Hindsight, without needing a full mock engine.
 type recordingStub struct {
 	mu         sync.Mutex
+	banks      map[string]bool                   // bank -> created via PUT
 	configs    map[string]map[string]interface{} // bank -> last config PATCH
 	directives map[string][]map[string]string    // bank -> created directives
 	recalls    []map[string]interface{}          // every recall request body, in order
@@ -38,6 +39,7 @@ type recordingStub struct {
 
 func newRecordingStub() *recordingStub {
 	return &recordingStub{
+		banks:      map[string]bool{},
 		configs:    map[string]map[string]interface{}{},
 		directives: map[string][]map[string]string{},
 	}
@@ -54,6 +56,10 @@ func (s *recordingStub) server() *httptest.Server {
 		s.mu.Lock()
 		defer s.mu.Unlock()
 		switch {
+		case rest == "" && r.Method == http.MethodPut:
+			s.banks[bank] = true
+			w.WriteHeader(http.StatusOK)
+			json.NewEncoder(w).Encode(map[string]string{"bank_id": bank})
 		case rest == "config" && r.Method == http.MethodPatch:
 			var body struct {
 				Updates map[string]interface{} `json:"updates"`
@@ -100,10 +106,14 @@ func TestEnsureBankSetsMissionDispositionAndDirectivesOnce(t *testing.T) {
 
 	bank := BankID(company.ID)
 	stub.mu.Lock()
+	created := stub.banks[bank]
 	cfg := stub.configs[bank]
 	directives := stub.directives[bank]
 	stub.mu.Unlock()
 
+	if !created {
+		t.Fatal("expected the bank to be created via PUT before config/directives (directives FK requires the bank row)")
+	}
 	if cfg == nil {
 		t.Fatal("expected a bank config PATCH")
 	}
