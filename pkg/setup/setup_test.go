@@ -140,35 +140,30 @@ func TestStepTracker(t *testing.T) {
 		return s
 	}
 
-	if got := steps("[setup] hindsight: not found — installing (this can take a few minutes)..."); got != "Installing hindsight (this can take a few minutes)" {
-		t.Errorf("hindsight step = %q", got)
-	}
-	if got := steps("[setup] git: not found — installing via Homebrew..."); got != "Installing git via Homebrew" {
-		t.Errorf("git step = %q", got)
-	}
-	// A completed dependency clears the step.
-	if got := steps("[setup] npm: not found — installing Node.js...", "[setup] npm: installed"); got != "" {
-		t.Errorf("step after install completed = %q", got)
-	}
-	if got := steps("[setup] markitdown: OK"); got != "" {
-		t.Errorf("step after OK = %q", got)
-	}
-	// Lines inside DETAIL blocks, warnings, and non-dependency lines are ignored.
+	// The latest STEP marker wins.
 	if got := steps(
-		"[setup] chromium: not found — installing via Homebrew...",
+		"[setup] STEP: Checking hindsight",
+		"[setup] STEP: Installing Hindsight memory engine (this can take a few minutes)",
+	); got != "Installing Hindsight memory engine (this can take a few minutes)" {
+		t.Errorf("step = %q", got)
+	}
+	// Non-STEP lines are ignored, including STEP-looking text inside DETAIL blocks.
+	if got := steps(
+		"[setup] STEP: Installing chromium",
 		"[setup] DETAIL_BEGIN gh_CLI",
-		"[setup] fake: OK",
+		"[setup] STEP: bogus step from raw command output",
 		"[setup] DETAIL_END",
+		"[setup] chromium: installed",
 		"[setup] SOFT_FAIL: gh CLI — brew install gh failed",
 		"not a setup line",
-	); got != "Installing chromium via Homebrew" {
+	); got != "Installing chromium" {
 		t.Errorf("detail-block handling: step = %q", got)
 	}
 	// Partial writes across chunk boundaries still parse whole lines.
 	tr := &stepTracker{}
-	tr.Write([]byte("[setup] hindsight: not found — ins"))
-	tr.Write([]byte("talling (this can take a few minutes)...\n"))
-	if s, _ := stepStore.Load().(string); s != "Installing hindsight (this can take a few minutes)" {
+	tr.Write([]byte("[setup] STEP: Installing Hindsight memory eng"))
+	tr.Write([]byte("ine (this can take a few minutes)\n"))
+	if s, _ := stepStore.Load().(string); s != "Installing Hindsight memory engine (this can take a few minutes)" {
 		t.Errorf("chunked write step = %q", s)
 	}
 	stepStore.Store("")

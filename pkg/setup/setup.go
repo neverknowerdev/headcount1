@@ -187,15 +187,15 @@ func runOnce() {
 	log.Print(output)
 }
 
-// stepLineRe matches per-dependency status lines like
-// "[setup] hindsight: not found — installing (this can take a few minutes)..."
-// after the "[setup] " prefix has been stripped.
-var stepLineRe = regexp.MustCompile(`^([A-Za-z0-9][A-Za-z0-9_. -]*): (.+)$`)
+// stepMarker prefixes the progress lines the setup scripts emit (via their
+// step helpers) before each phase, e.g.
+// "[setup] STEP: Installing Hindsight memory engine (this can take a few minutes)".
+const stepMarker = "[setup] STEP: "
 
 // stepTracker is an io.Writer that watches the setup script's output as it
-// streams and publishes the current slow step (an in-progress install) to
-// stepStore, so /api/setup-status can tell the UI what setup is doing right
-// now instead of a generic spinner.
+// streams and publishes the latest STEP marker to stepStore, so
+// /api/setup-status can tell the UI what setup is doing right now instead of
+// a generic spinner.
 type stepTracker struct {
 	mu       sync.Mutex
 	buf      []byte
@@ -231,27 +231,8 @@ func (t *stepTracker) handleLine(line string) {
 	if t.inDetail {
 		return
 	}
-	msg, ok := strings.CutPrefix(line, "[setup] ")
-	if !ok || strings.HasPrefix(msg, "WARNING:") || strings.HasPrefix(msg, "SOFT_FAIL:") {
-		return
-	}
-	m := stepLineRe.FindStringSubmatch(msg)
-	if m == nil {
-		return
-	}
-	name, status := m[1], m[2]
-	if idx := strings.Index(status, "installing"); idx >= 0 {
-		// e.g. "not found — installing via Homebrew..." → "Installing git via Homebrew"
-		note := strings.TrimSuffix(strings.TrimSpace(status[idx+len("installing"):]), "...")
-		step := "Installing " + name
-		if note != "" {
-			step += " " + note
-		}
-		stepStore.Store(step)
-	} else {
-		// "OK" / "installed" / anything else — this dependency is done; clear
-		// the step until the next slow install starts.
-		stepStore.Store("")
+	if msg, ok := strings.CutPrefix(line, stepMarker); ok {
+		stepStore.Store(strings.TrimSpace(msg))
 	}
 }
 
