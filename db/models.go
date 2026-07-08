@@ -309,7 +309,7 @@ type ActivityLog struct {
 
 // HindsightDocument tracks a doc file (.md) fed into the Hindsight memory
 // layer for a project, so sync can detect changed/removed files by hash.
-// DocumentID is the stable Hindsight document id ("doc:<relative path>");
+// DocumentID is the stable Hindsight document id ("doc:<projectID>/<relative path>");
 // retaining with the same id upserts, replacing the old extracted memories.
 type HindsightDocument struct {
 	ID         int32     `json:"id" gorm:"primaryKey"`

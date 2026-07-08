@@ -1,5 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import {
     Brain, RefreshCw, Search, Trash2, Pencil, X, Sparkles, AlertTriangle, Plus, History, ChevronDown, ChevronUp,
 } from 'lucide-react';
@@ -77,6 +79,18 @@ const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '
 
 const memText = (m: MemoryItem): string =>
     typeof m.text === 'string' ? m.text : (typeof (m as any).content === 'string' ? (m as any).content : JSON.stringify(m));
+
+// Extracts the server's error message from a failed request, if present.
+const errMsg = (e: unknown, fallback: string): string => {
+    if (axios.isAxiosError(e)) {
+        const data = e.response?.data as { error?: string } | undefined;
+        if (data?.error) return data.error;
+    }
+    return fallback;
+};
+
+// Shared wrapper classes for rendered markdown (same as RunLogViewer/TaskModal).
+const MD_CLASSES = 'prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0';
 
 // ---------- Force-directed graph (self-contained, SVG) ----------
 
@@ -249,7 +263,7 @@ const MemoryDetailPanel: React.FC<{
                 setText(memText(res.data || {}));
                 setContext(res.data?.context || '');
             })
-            .catch((e) => { if (!cancelled) setError(e?.response?.data?.error || 'Failed to load memory'); })
+            .catch((e: unknown) => { if (!cancelled) setError(errMsg(e, 'Failed to load memory')); })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
     }, [bankId, memoryId]);
@@ -261,8 +275,8 @@ const MemoryDetailPanel: React.FC<{
             setMemory(res.data || { ...memory, text, context } as any);
             setEditing(false);
             onChanged();
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Failed to update memory');
+        } catch (e) {
+            alert(errMsg(e, 'Failed to update memory'));
         } finally {
             setSaving(false);
         }
@@ -274,8 +288,8 @@ const MemoryDetailPanel: React.FC<{
             await axios.delete(`/api/memory/banks/${encodeURIComponent(bankId)}/memories/${encodeURIComponent(memoryId)}`);
             onChanged();
             onClose();
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Failed to delete memory');
+        } catch (e) {
+            alert(errMsg(e, 'Failed to delete memory'));
         }
     };
 
@@ -285,18 +299,18 @@ const MemoryDetailPanel: React.FC<{
                 <h3 className="font-semibold text-sm text-gray-800">Memory details</h3>
                 <div className="flex items-center gap-1">
                     {!loading && !error && !editing && (
-                        <button onClick={() => setEditing(true)} title="Edit"
+                        <button onClick={() => setEditing(true)} title="Edit" aria-label="Edit memory"
                             className="p-1.5 text-gray-500 hover:text-indigo-600 hover:bg-indigo-50 rounded">
                             <Pencil className="w-4 h-4" />
                         </button>
                     )}
                     {!loading && !error && (
-                        <button onClick={remove} title="Delete"
+                        <button onClick={remove} title="Delete" aria-label="Delete memory"
                             className="p-1.5 text-gray-500 hover:text-red-600 hover:bg-red-50 rounded">
                             <Trash2 className="w-4 h-4" />
                         </button>
                     )}
-                    <button onClick={onClose} title="Close" className="p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
+                    <button onClick={onClose} title="Close" aria-label="Close details" className="p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         <X className="w-4 h-4" />
                     </button>
                 </div>
@@ -407,7 +421,11 @@ interface AgentConfig {
 
 const MODEL_ID_RE = /^[a-z0-9-]+$/;
 
-const agentTagFor = (name: string) => `agent:${name.trim().toLowerCase().replace(/\s+/g, '-')}`;
+// Must mirror pkg/hindsight/service.go agentTag exactly:
+// "agent:" + strings.ToLower(strings.ReplaceAll(role, " ", "-"))
+const agentTagFor = (name: string) => `agent:${name.toLowerCase().replace(/ /g, '-')}`;
+
+const clampTokens = (v: string): number => Math.max(256, Math.min(8192, Number(v) || 2048));
 
 // ---------- Mental model create/edit form ----------
 
@@ -424,7 +442,8 @@ const MentalModelForm: React.FC<{
     const [id, setId] = useState(model?.id || '');
     const [name, setName] = useState(model?.name || '');
     const [sourceQuery, setSourceQuery] = useState(model?.source_query || '');
-    const [maxTokens, setMaxTokens] = useState(model?.max_tokens || 2048);
+    // Kept as a raw string so typing isn't clamped mid-keystroke; clamped on blur/submit.
+    const [maxTokens, setMaxTokens] = useState(String(model?.max_tokens || 2048));
     const [autoRefresh, setAutoRefresh] = useState(model?.trigger?.refresh_after_consolidation !== false);
     const [tags, setTags] = useState<string[]>(model?.tags || []);
     const [tagInput, setTagInput] = useState('');
@@ -470,7 +489,7 @@ const MentalModelForm: React.FC<{
                 name: name.trim(),
                 source_query: sourceQuery.trim(),
                 tags,
-                max_tokens: maxTokens,
+                max_tokens: clampTokens(maxTokens),
                 trigger: { refresh_after_consolidation: autoRefresh },
             };
             if (isEdit && model) {
@@ -480,8 +499,8 @@ const MentalModelForm: React.FC<{
                 await axios.post(`/api/memory/banks/${encodeURIComponent(bankId)}/mental-models`, body);
             }
             onSaved();
-        } catch (e: any) {
-            setError(e?.response?.data?.error || 'Failed to save mental model');
+        } catch (e) {
+            setError(errMsg(e, 'Failed to save mental model'));
         } finally {
             setSaving(false);
         }
@@ -493,7 +512,7 @@ const MentalModelForm: React.FC<{
                 onClick={(e) => e.stopPropagation()} data-testid="mental-model-form">
                 <div className="flex items-center justify-between px-4 py-3 border-b bg-gray-50">
                     <h3 className="font-semibold text-sm text-gray-800">{isEdit ? 'Edit mental model' : 'New mental model'}</h3>
-                    <button onClick={onClose} title="Close" className="p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
+                    <button onClick={onClose} title="Close" aria-label="Close form" className="p-1.5 text-gray-500 hover:text-gray-800 hover:bg-gray-100 rounded">
                         <X className="w-4 h-4" />
                     </button>
                 </div>
@@ -520,7 +539,8 @@ const MentalModelForm: React.FC<{
                     <div>
                         <label className="block text-xs font-medium text-gray-500 mb-1">Max tokens</label>
                         <input type="number" min={256} max={8192} value={maxTokens}
-                            onChange={(e) => setMaxTokens(Math.max(256, Math.min(8192, Number(e.target.value) || 2048)))}
+                            onChange={(e) => setMaxTokens(e.target.value)}
+                            onBlur={() => setMaxTokens(String(clampTokens(maxTokens)))}
                             className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                     </div>
                     <label className="flex items-center gap-2 text-sm text-gray-700">
@@ -533,7 +553,7 @@ const MentalModelForm: React.FC<{
                             {tags.map((t) => (
                                 <span key={t} className="flex items-center gap-1 text-xs bg-indigo-50 text-indigo-700 px-2 py-0.5 rounded-full">
                                     {t}
-                                    <button onClick={() => removeTag(t)} className="hover:text-indigo-900">
+                                    <button onClick={() => removeTag(t)} aria-label={`Remove tag ${t}`} className="hover:text-indigo-900">
                                         <X className="w-3 h-3" />
                                     </button>
                                 </span>
@@ -543,13 +563,19 @@ const MentalModelForm: React.FC<{
                             <input value={tagInput}
                                 onChange={(e) => { setTagInput(e.target.value); setShowSuggestions(true); }}
                                 onFocus={() => setShowSuggestions(true)}
+                                onBlur={() => {
+                                    // Delay so clicking a suggestion (which blurs first) still registers.
+                                    window.setTimeout(() => setShowSuggestions(false), 150);
+                                }}
                                 onKeyDown={(e) => {
                                     if (e.key === 'Enter') { e.preventDefault(); addTag(tagInput); }
                                 }}
                                 placeholder="Type to search or add a tag…"
                                 className="w-full border rounded-md px-2 py-1.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500" />
                             {showSuggestions && (suggestions.length > 0 || tagInput.trim()) && (
-                                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border rounded-md shadow">
+                                <div className="absolute z-10 mt-1 w-full max-h-48 overflow-y-auto bg-white border rounded-md shadow"
+                                    /* keep input focused so blur doesn't race the click */
+                                    onMouseDown={(e) => e.preventDefault()}>
                                     {suggestions.map((s) => (
                                         <button key={s.tag} type="button" onClick={() => addTag(s.tag)}
                                             className="block w-full text-left px-2 py-1.5 text-xs hover:bg-indigo-50 text-gray-700">
@@ -625,6 +651,13 @@ export const Memory: React.FC = () => {
     const [historyLoadingId, setHistoryLoadingId] = useState<string | null>(null);
     const [historyError, setHistoryError] = useState<Record<string, string>>({});
     const [expandedHistoryEntries, setExpandedHistoryEntries] = useState<Record<string, boolean>>({});
+    const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
+    // Model refresh is async server-side (202 Accepted): remember each queued
+    // model's last_refreshed_at at queue time so the card can show a pending
+    // indicator until the value changes on a subsequent list fetch.
+    const [queuedRefresh, setQueuedRefresh] = useState<Record<string, string>>({});
+    const refreshTimersRef = useRef<number[]>([]);
+    useEffect(() => () => { refreshTimersRef.current.forEach((t) => window.clearTimeout(t)); }, []);
 
     // Sync state — with one shared bank per company, doc re-sync targets a
     // specific project rather than the (now singular) bank.
@@ -634,6 +667,29 @@ export const Memory: React.FC = () => {
     const [syncResult, setSyncResult] = useState<{ added: number; updated: number; removed: number } | null>(null);
 
     const available = status?.available === true;
+
+    // Reset per-bank UI state whenever the selected bank changes (including
+    // programmatic changes on company switch, which don't go through the
+    // bank <select>'s onChange).
+    useEffect(() => {
+        setSelectedMemoryId(null);
+        setRecallResults([]);
+        setAskAnswer(null);
+        setQueryError(null);
+        setSyncResult(null);
+        setGraph(null);
+        setQueuedRefresh({});
+    }, [selectedBankId]);
+
+    // History snapshots are per-bank and can change on any model
+    // refresh/save/delete, so drop the cache whenever either changes.
+    useEffect(() => {
+        setHistoryByModel({});
+        setHistoryError({});
+        setExpandedHistoryEntries({});
+        setHistoryLoadingId(null);
+        setExpandedHistoryId(null);
+    }, [selectedBankId, modelsRefreshKey]);
 
     // Poll status
     useEffect(() => {
@@ -694,10 +750,11 @@ export const Memory: React.FC = () => {
             : `/api/memory/banks/${encodeURIComponent(selectedBankId)}/entities-graph?limit=150`;
         axios.get(url)
             .then((res) => { if (!cancelled) setGraph({ nodes: res.data?.nodes || [], edges: res.data?.edges || [], total_units: res.data?.total_units, limit: res.data?.limit }); })
-            .catch((e) => { if (!cancelled) { setGraph(null); setGraphError(e?.response?.data?.error || 'Failed to load graph'); } })
+            .catch((e: unknown) => { if (!cancelled) { setGraph(null); setGraphError(errMsg(e, 'Failed to load graph')); } })
             .finally(() => { if (!cancelled) setGraphLoading(false); });
         return () => { cancelled = true; };
-    }, [selectedBankId, available, graphMode, tab]);
+        // memRefreshKey: re-fetch after a memory is edited/deleted so the graph doesn't show stale nodes.
+    }, [selectedBankId, available, graphMode, tab, memRefreshKey]);
 
     // Load memories list
     useEffect(() => {
@@ -705,7 +762,9 @@ export const Memory: React.FC = () => {
         let cancelled = false;
         setMemLoading(true);
         setMemError(null);
-        const params = new URLSearchParams({ limit: '100' });
+        // state=active pins the backend's list behavior: soft-deleted
+        // (invalidated) memories must not reappear after a delete + refetch.
+        const params = new URLSearchParams({ limit: '100', state: 'active' });
         if (memSearch) params.set('q', memSearch);
         if (memType) params.set('type', memType);
         const t = setTimeout(() => {
@@ -716,7 +775,7 @@ export const Memory: React.FC = () => {
                     const items = Array.isArray(data) ? data : (data?.items || data?.memories || data?.results || []);
                     setMemories(Array.isArray(items) ? items : []);
                 })
-                .catch((e) => { if (!cancelled) { setMemories([]); setMemError(e?.response?.data?.error || 'Failed to load memories'); } })
+                .catch((e: unknown) => { if (!cancelled) { setMemories([]); setMemError(errMsg(e, 'Failed to load memories')); } })
                 .finally(() => { if (!cancelled) setMemLoading(false); });
         }, 300);
         return () => { cancelled = true; clearTimeout(t); };
@@ -725,7 +784,6 @@ export const Memory: React.FC = () => {
     // Load mental models (Insights tab) — synthesized, auto-refreshing
     // knowledge (project state, agent playbooks, open blockers) rather than
     // individual memories.
-    const [modelsRefreshKey, setModelsRefreshKey] = useState(0);
     useEffect(() => {
         if (!selectedBankId || !available || tab !== 'insights') return;
         let cancelled = false;
@@ -736,9 +794,20 @@ export const Memory: React.FC = () => {
                 if (cancelled) return;
                 const data = res.data;
                 const items = Array.isArray(data) ? data : (data?.items || data?.mental_models || []);
-                setModels(Array.isArray(items) ? items : []);
+                const list: MentalModel[] = Array.isArray(items) ? items : [];
+                setModels(list);
+                // Drop "refresh queued" markers for models whose content has
+                // since been regenerated (last_refreshed_at moved on).
+                setQueuedRefresh((prev) => {
+                    const next: Record<string, string> = {};
+                    for (const [id, at] of Object.entries(prev)) {
+                        const m = list.find((x) => x.id === id);
+                        if (m && (m.last_refreshed_at || '') === at) next[id] = at;
+                    }
+                    return next;
+                });
             })
-            .catch((e) => { if (!cancelled) { setModels([]); setModelsError(e?.response?.data?.error || 'Failed to load insights'); } })
+            .catch((e: unknown) => { if (!cancelled) { setModels([]); setModelsError(errMsg(e, 'Failed to load insights')); } })
             .finally(() => { if (!cancelled) setModelsLoading(false); });
         return () => { cancelled = true; };
     }, [selectedBankId, available, tab, modelsRefreshKey]);
@@ -770,14 +839,21 @@ export const Memory: React.FC = () => {
         if (!selectedBankId) return;
         setModelActionId(id);
         try {
+            // The server responds 202 Accepted: regeneration happens in the
+            // background. Mark the model as queued and refetch the list a
+            // couple of times to pick up the new content.
             await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}/refresh`);
-            setModelsRefreshKey((k) => k + 1);
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Refresh failed');
+            const current = models.find((m) => m.id === id);
+            setQueuedRefresh((prev) => ({ ...prev, [id]: current?.last_refreshed_at || '' }));
+            for (const delay of [4000, 12000]) {
+                refreshTimersRef.current.push(window.setTimeout(() => setModelsRefreshKey((k) => k + 1), delay));
+            }
+        } catch (e) {
+            alert(errMsg(e, 'Refresh failed'));
         } finally {
             setModelActionId(null);
         }
-    }, [selectedBankId]);
+    }, [selectedBankId, models]);
 
     const deleteModel = useCallback(async (id: string) => {
         if (!selectedBankId || !confirm(`Delete insight "${id}"? It will be re-created automatically the next time it is needed.`)) return;
@@ -785,8 +861,8 @@ export const Memory: React.FC = () => {
         try {
             await axios.delete(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}`);
             setModelsRefreshKey((k) => k + 1);
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Delete failed');
+        } catch (e) {
+            alert(errMsg(e, 'Delete failed'));
         } finally {
             setModelActionId(null);
         }
@@ -804,8 +880,8 @@ export const Memory: React.FC = () => {
             const res = await axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(m.id)}`);
             setEditingModel(res.data || m);
             setShowModelForm(true);
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Failed to load mental model');
+        } catch (e) {
+            alert(errMsg(e, 'Failed to load mental model'));
         } finally {
             setEditingModelLoading(false);
         }
@@ -827,8 +903,8 @@ export const Memory: React.FC = () => {
                     const items = res.data?.items || [];
                     setHistoryByModel((prev) => ({ ...prev, [id]: Array.isArray(items) ? items : [] }));
                 })
-                .catch((e: any) => {
-                    setHistoryError((prev) => ({ ...prev, [id]: e?.response?.data?.error || 'Failed to load history' }));
+                .catch((e: unknown) => {
+                    setHistoryError((prev) => ({ ...prev, [id]: errMsg(e, 'Failed to load history') }));
                 })
                 .finally(() => setHistoryLoadingId((prev) => (prev === id ? null : prev)));
         }
@@ -836,8 +912,12 @@ export const Memory: React.FC = () => {
 
     const memoryTypes = useMemo(() => Array.from(new Set(memories.map((m) => m.type).filter(Boolean))) as string[], [memories]);
 
+    const querySeqRef = useRef(0);
     const runQuery = useCallback(async () => {
-        if (!selectedBankId || !query.trim()) return;
+        if (!selectedBankId || !query.trim() || queryLoading) return;
+        // Sequence counter: if another query starts before this one resolves,
+        // the stale response must not overwrite the newer one's state.
+        const seq = ++querySeqRef.current;
         setQueryLoading(true);
         setQueryError(null);
         setRecallResults([]);
@@ -845,17 +925,17 @@ export const Memory: React.FC = () => {
         try {
             if (queryMode === 'recall') {
                 const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/recall`, { query: query.trim() });
-                setRecallResults(res.data?.results || []);
+                if (seq === querySeqRef.current) setRecallResults(res.data?.results || []);
             } else {
                 const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/ask`, { query: query.trim() });
-                setAskAnswer(res.data?.text || '');
+                if (seq === querySeqRef.current) setAskAnswer(res.data?.text || '');
             }
-        } catch (e: any) {
-            setQueryError(e?.response?.data?.error || 'Query failed');
+        } catch (e) {
+            if (seq === querySeqRef.current) setQueryError(errMsg(e, 'Query failed'));
         } finally {
-            setQueryLoading(false);
+            if (seq === querySeqRef.current) setQueryLoading(false);
         }
-    }, [selectedBankId, query, queryMode]);
+    }, [selectedBankId, query, queryMode, queryLoading]);
 
     const resyncDocs = useCallback(async () => {
         if (!syncProjectId) return;
@@ -864,8 +944,8 @@ export const Memory: React.FC = () => {
         try {
             const res = await axios.post(`/api/memory/projects/${syncProjectId}/sync`);
             setSyncResult(res.data);
-        } catch (e: any) {
-            alert(e?.response?.data?.error || 'Sync failed');
+        } catch (e) {
+            alert(errMsg(e, 'Sync failed'));
         } finally {
             setSyncing(false);
         }
@@ -906,7 +986,8 @@ export const Memory: React.FC = () => {
                                 </button>
                             </>
                         )}
-                        <select value={selectedBankId} onChange={(e) => { setSelectedBankId(e.target.value); setSelectedMemoryId(null); setSyncResult(null); }}
+                        {/* Per-bank state (detail panel, query results, …) is reset by the selectedBankId effect above. */}
+                        <select value={selectedBankId} onChange={(e) => setSelectedBankId(e.target.value)}
                             className="border rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                             data-testid="memory-bank-select">
                             {banks.map((b) => (
@@ -1077,8 +1158,12 @@ export const Memory: React.FC = () => {
                                         )
                                     ) : (
                                         askAnswer !== null ? (
-                                            <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
-                                                {askAnswer || <span className="italic text-gray-500">No answer returned.</span>}
+                                            <div className="bg-gray-50 border rounded-lg p-4 text-sm text-gray-800 leading-relaxed">
+                                                {askAnswer ? (
+                                                    <div className={MD_CLASSES}>
+                                                        <ReactMarkdown remarkPlugins={[remarkGfm]}>{askAnswer}</ReactMarkdown>
+                                                    </div>
+                                                ) : <span className="italic text-gray-500">No answer returned.</span>}
                                             </div>
                                         ) : (
                                             !queryLoading && <div className="text-gray-500 italic text-sm">Ask a question and the memory layer will reason over the bank to answer.</div>
@@ -1113,36 +1198,49 @@ export const Memory: React.FC = () => {
                                                 <div key={m.id} className="border rounded-lg p-3 bg-white">
                                                     <div className="flex items-start justify-between gap-2 mb-1.5">
                                                         <div>
-                                                            <div className="font-medium text-sm text-gray-900">{m.name || m.id}</div>
+                                                            <div className="font-medium text-sm text-gray-900 flex items-center gap-2">
+                                                                {m.name || m.id}
+                                                                {queuedRefresh[m.id] !== undefined && (
+                                                                    <span className="flex items-center gap-1 text-[11px] font-normal text-indigo-600">
+                                                                        <RefreshCw className="w-3 h-3 animate-spin" /> Refresh queued…
+                                                                    </span>
+                                                                )}
+                                                            </div>
                                                             {m.source_query && <div className="text-xs text-gray-500 mt-0.5">{m.source_query}</div>}
                                                         </div>
                                                         <div className="flex items-center gap-1.5 shrink-0">
                                                             <button onClick={() => toggleHistory(m.id)}
-                                                                title="View history"
+                                                                title="View history" aria-label={`View history of ${m.name || m.id}`}
                                                                 className="p-1.5 rounded hover:bg-gray-100 text-gray-500">
                                                                 <History className="w-3.5 h-3.5" />
                                                             </button>
                                                             <button onClick={() => openEditModel(m)} disabled={editingModelLoading}
-                                                                title="Edit"
+                                                                title="Edit" aria-label={`Edit ${m.name || m.id}`}
                                                                 className="p-1.5 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-50">
                                                                 <Pencil className="w-3.5 h-3.5" />
                                                             </button>
                                                             <button onClick={() => refreshModel(m.id)} disabled={modelActionId === m.id}
-                                                                title="Refresh now"
+                                                                title="Refresh now" aria-label={`Refresh ${m.name || m.id}`}
                                                                 className="p-1.5 rounded hover:bg-gray-100 text-gray-500 disabled:opacity-50">
                                                                 <RefreshCw className={`w-3.5 h-3.5 ${modelActionId === m.id ? 'animate-spin' : ''}`} />
                                                             </button>
                                                             <button onClick={() => deleteModel(m.id)} disabled={modelActionId === m.id}
-                                                                title="Delete"
+                                                                title="Delete" aria-label={`Delete ${m.name || m.id}`}
                                                                 className="p-1.5 rounded hover:bg-red-50 text-gray-500 hover:text-red-600 disabled:opacity-50">
                                                                 <Trash2 className="w-3.5 h-3.5" />
                                                             </button>
                                                         </div>
                                                     </div>
-                                                    <div className="text-sm text-gray-800 whitespace-pre-wrap leading-relaxed">
-                                                        {m.content && !/^generating content/i.test(m.content)
-                                                            ? m.content
-                                                            : <span className="italic text-gray-500">Still generating…</span>}
+                                                    <div className="text-sm text-gray-800 leading-relaxed">
+                                                        {/* Structural "still generating" signal (never refreshed and not
+                                                            explicitly fresh) with the placeholder-text check as fallback. */}
+                                                        {!m.content || (!m.last_refreshed_at && m.is_stale !== false) || /^generating content/i.test(m.content)
+                                                            ? <span className="italic text-gray-500">Still generating…</span>
+                                                            : (
+                                                                <div className={MD_CLASSES}>
+                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{m.content}</ReactMarkdown>
+                                                                </div>
+                                                            )}
                                                     </div>
                                                     {Array.isArray(m.tags) && m.tags.length > 0 && (
                                                         <div className="flex flex-wrap gap-1 mt-1.5">
