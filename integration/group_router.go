@@ -195,6 +195,32 @@ func (g *LLMGateway) recordStat(stat db.ModelRequestStat) {
 // router then only contributes model_switch and exhaustion entries.
 const proxyLogModeHeader = "X-Proxy-Log-Mode"
 
+// sendProviderRequest builds and sends a chat-completions request to a
+// provider, forwarding the incoming request's headers (except the ones in
+// skipHeaders, matched case-insensitively) and swapping in the provider's
+// own bearer token. This is the single place that talks to an LLM
+// provider's /chat/completions endpoint — direct proxying and the model
+// group router's per-attempt retries all go through it.
+func sendProviderRequest(ctx context.Context, method string, provider db.LLMProvider, bodyBytes []byte, srcHeader http.Header, skipHeaders map[string]bool) (*http.Response, error) {
+	req, err := http.NewRequestWithContext(ctx, method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewReader(bodyBytes))
+	if err != nil {
+		return nil, err
+	}
+	for k, vv := range srcHeader {
+		if skipHeaders[strings.ToLower(k)] {
+			continue
+		}
+		for _, v := range vv {
+			req.Header.Add(k, v)
+		}
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+provider.ApiKey)
+	return providerHTTPClient.Do(req)
+}
+
+var providerHTTPClient = &http.Client{}
+
 // proxyChatCompletionsForGroup is the OpenAI-compatible entrypoint for a
 // model group. It tries the group's members in health order, failing over on
 // errors and rate limits, and records a ModelRequestStat row per attempt.
@@ -249,6 +275,12 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 	candidates := g.orderCandidates(group.Members, time.Now())
 	var lastErrMsg string
 	var lastStatus int
+	skipHeaders := map[string]bool{
+		"authorization":                     true,
+		"x-run-id":                          true,
+		"content-length":                    true,
+		strings.ToLower(proxyLogModeHeader): true,
+	}
 
 	for i, member := range candidates {
 		provider := member.Provider
@@ -276,27 +308,8 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 			}
 		}
 
-		proxyReq, err := http.NewRequestWithContext(r.Context(), http.MethodPost,
-			utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewReader(attemptBody))
-		if err != nil {
-			lastErrMsg = err.Error()
-			continue
-		}
-		for k, vv := range r.Header {
-			lk := strings.ToLower(k)
-			if lk == "authorization" || lk == "x-run-id" || lk == "content-length" || lk == strings.ToLower(proxyLogModeHeader) {
-				continue
-			}
-			for _, v := range vv {
-				proxyReq.Header.Add(k, v)
-			}
-		}
-		proxyReq.Header.Set("Content-Type", "application/json")
-		proxyReq.Header.Set("Authorization", "Bearer "+provider.ApiKey)
-
 		start := time.Now()
-		client := &http.Client{}
-		resp, err := client.Do(proxyReq)
+		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, attemptBody, r.Header, skipHeaders)
 		if err != nil {
 			lastErrMsg = err.Error()
 			lastStatus = http.StatusBadGateway

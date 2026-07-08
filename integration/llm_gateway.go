@@ -100,14 +100,14 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
 			if err == nil && run.Task.Company.ID > 0 {
 				var loggerErr error
-			proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-				g.basePath,
-				run.Task.Company.ShortName,
-				run.TaskID,
-				run.ID,
-				g.hub,
-				g.q,
-			)
+				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+					g.hub,
+					g.q,
+				)
 				if loggerErr != nil {
 					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 				} else {
@@ -131,25 +131,10 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 		}
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
-		return
-	}
-
-	for k, vv := range r.Header {
-		lk := strings.ToLower(k)
-		if lk == "x-provider-id" || lk == "x-run-id" {
-			continue // don't forward internal headers to provider
-		}
-		for _, v := range vv {
-			proxyReq.Header.Add(k, v)
-		}
-	}
-	proxyReq.Header.Set("Authorization", "Bearer "+provider.ApiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
+	resp, err := sendProviderRequest(r.Context(), r.Method, provider, bodyBytes, r.Header, map[string]bool{
+		"x-provider-id": true,
+		"x-run-id":      true,
+	})
 	if err != nil {
 		if proxyLogger != nil {
 			proxyLogger.LogError(reqPayload.Model, "llm-proxy", provider.Name, err)
@@ -179,51 +164,7 @@ func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request
 	if !reqPayload.Stream {
 		// Non-streaming: buffer the response so we can log it and still forward to the client
 		respBodyBytes, _ := io.ReadAll(resp.Body)
-
-		// Extract token usage and per-message reasoning from response.
-		// Reasoning in non-streaming responses can come from two places:
-		//   1) Anthropic-style message.reasoning_content (or message.reasoning)
-		//   2) OpenAI o-series completion_tokens_details.reasoning_tokens
-		var resPayload struct {
-			Choices []struct {
-				Message struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
-				} `json:"message"`
-			} `json:"choices"`
-			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
-				PromptTokensDetails struct {
-					CachedTokens int `json:"cached_tokens"`
-				} `json:"prompt_tokens_details"`
-				CompletionTokensDetails struct {
-					ReasoningTokens int `json:"reasoning_tokens"`
-				} `json:"completion_tokens_details"`
-			} `json:"usage"`
-		}
-		json.Unmarshal(respBodyBytes, &resPayload)
-
-		usage := normalizedUsage{
-			PromptTokens:     resPayload.Usage.PromptTokens,
-			CompletionTokens: resPayload.Usage.CompletionTokens,
-			TotalTokens:      resPayload.Usage.TotalTokens,
-			CachedTokens:     resPayload.Usage.PromptTokensDetails.CachedTokens,
-		}
-		var nonStreamReasoning string
-		for _, c := range resPayload.Choices {
-			if c.Message.ReasoningContent != "" {
-				nonStreamReasoning += c.Message.ReasoningContent
-			} else if c.Message.Reasoning != "" {
-				nonStreamReasoning += c.Message.Reasoning
-			}
-		}
-		usage.ReasoningTokens = resolveReasoningTokens(
-			resPayload.Usage.CompletionTokensDetails.ReasoningTokens,
-			nonStreamReasoning,
-		)
+		usage, nonStreamReasoning := parseNonStreamUsage(respBodyBytes)
 
 		// Save token stats to database
 		if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
@@ -374,14 +315,14 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
 			if err == nil && run.Task.Company.ID > 0 {
 				var loggerErr error
-			proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-				g.basePath,
-				run.Task.Company.ShortName,
-				run.TaskID,
-				run.ID,
-				g.hub,
-				g.q,
-			)
+				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
+					g.basePath,
+					run.Task.Company.ShortName,
+					run.TaskID,
+					run.ID,
+					g.hub,
+					g.q,
+				)
 				if loggerErr != nil {
 					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 				} else {
@@ -395,24 +336,9 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		}
 	}
 
-	proxyReq, err := http.NewRequest(r.Method, utils.BuildProviderURL(provider.BaseUrl, "/chat/completions"), bytes.NewBuffer(bodyBytes))
-	if err != nil {
-		http.Error(w, "Failed to create proxy request", http.StatusInternalServerError)
-		return
-	}
-
-	for k, vv := range r.Header {
-		if strings.ToLower(k) == "authorization" {
-			continue
-		}
-		for _, v := range vv {
-			proxyReq.Header.Add(k, v)
-		}
-	}
-	proxyReq.Header.Set("Authorization", "Bearer "+provider.ApiKey)
-
-	client := &http.Client{}
-	resp, err := client.Do(proxyReq)
+	resp, err := sendProviderRequest(r.Context(), r.Method, provider, bodyBytes, r.Header, map[string]bool{
+		"authorization": true,
+	})
 	if err != nil {
 		if proxyLogger != nil {
 			proxyLogger.LogError(reqPayload.Model, agent.Name, provider.Name, err)
@@ -441,46 +367,7 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 
 	if !reqPayload.Stream {
 		respBodyBytes, _ := io.ReadAll(resp.Body)
-		var resPayload struct {
-			Choices []struct {
-				Message struct {
-					Content          string `json:"content"`
-					ReasoningContent string `json:"reasoning_content"`
-					Reasoning        string `json:"reasoning"`
-				} `json:"message"`
-			} `json:"choices"`
-			Usage struct {
-				PromptTokens     int `json:"prompt_tokens"`
-				CompletionTokens int `json:"completion_tokens"`
-				TotalTokens      int `json:"total_tokens"`
-				PromptTokensDetails struct {
-					CachedTokens int `json:"cached_tokens"`
-				} `json:"prompt_tokens_details"`
-				CompletionTokensDetails struct {
-					ReasoningTokens int `json:"reasoning_tokens"`
-				} `json:"completion_tokens_details"`
-			} `json:"usage"`
-		}
-		json.Unmarshal(respBodyBytes, &resPayload)
-
-		usage := normalizedUsage{
-			PromptTokens:     resPayload.Usage.PromptTokens,
-			CompletionTokens: resPayload.Usage.CompletionTokens,
-			TotalTokens:      resPayload.Usage.TotalTokens,
-			CachedTokens:     resPayload.Usage.PromptTokensDetails.CachedTokens,
-		}
-		var nonStreamReasoning string
-		for _, c := range resPayload.Choices {
-			if c.Message.ReasoningContent != "" {
-				nonStreamReasoning += c.Message.ReasoningContent
-			} else if c.Message.Reasoning != "" {
-				nonStreamReasoning += c.Message.Reasoning
-			}
-		}
-		usage.ReasoningTokens = resolveReasoningTokens(
-			resPayload.Usage.CompletionTokensDetails.ReasoningTokens,
-			nonStreamReasoning,
-		)
+		usage, nonStreamReasoning := parseNonStreamUsage(respBodyBytes)
 
 		runIDForStats := int32(0)
 		if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
@@ -730,9 +617,9 @@ func proxySSEStream(
 	type chunkData struct {
 		Choices []chunkChoice `json:"choices"`
 		Usage   *struct {
-			PromptTokens     int `json:"prompt_tokens"`
-			CompletionTokens int `json:"completion_tokens"`
-			TotalTokens      int `json:"total_tokens"`
+			PromptTokens        int `json:"prompt_tokens"`
+			CompletionTokens    int `json:"completion_tokens"`
+			TotalTokens         int `json:"total_tokens"`
 			PromptTokensDetails struct {
 				CachedTokens int `json:"cached_tokens"`
 			} `json:"prompt_tokens_details"`
@@ -839,9 +726,9 @@ func proxySSEStream(
 				_ = json.Unmarshal([]byte(tc.Function.Arguments), &args)
 			}
 			collectedToolCalls = append(collectedToolCalls, map[string]interface{}{
-				"id":   tc.ID,
-				"type": tc.Type,
-				"name": tc.Function.Name,
+				"id":        tc.ID,
+				"type":      tc.Type,
+				"name":      tc.Function.Name,
 				"arguments": args,
 			})
 		}
@@ -862,20 +749,20 @@ func proxySSEStream(
 			var d time.Duration
 			select {
 			case d = <-stallDuration:
+			default:
+				d = 0
+			}
+			if proxyLogger != nil {
+				proxyLogger.LogStall(model, agentName, providerName, d)
+			}
+			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
 		default:
-			d = 0
+			if proxyLogger != nil {
+				proxyLogger.LogError(model, agentName, providerName, err)
+			}
+			return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
 		}
-		if proxyLogger != nil {
-			proxyLogger.LogStall(model, agentName, providerName, d)
-		}
-		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), stalled
-	default:
-		if proxyLogger != nil {
-			proxyLogger.LogError(model, agentName, providerName, err)
-		}
-		return fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBuf.Bytes(), fmt.Errorf("stream read error: %w", err)
 	}
-}
 
 	select {
 	case stalled := <-stallErr:

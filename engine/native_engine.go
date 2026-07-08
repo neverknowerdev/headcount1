@@ -1695,8 +1695,9 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 		sessionModel = provider.DefaultModel
 	}
 	provider, model := e.resolvePurposeModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
-	if len(diff) > 8000 {
-		diff = diff[:8000] + "\n... (truncated)"
+	const maxDiffChars = 60000
+	if len(diff) > maxDiffChars {
+		diff = diff[:maxDiffChars] + "\n... (truncated)"
 	}
 	prompt := fmt.Sprintf(`Summarize these code changes into a concise git commit message.
 Subject line max 72 chars. Optional body separated by blank line.
