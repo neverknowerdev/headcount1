@@ -86,6 +86,11 @@ func (m *Manager) Start(ctx context.Context) error {
 		return fmt.Errorf("hindsight-api not installed (%s): run setup first", bin)
 	}
 
+	// PDEATHSIG only exists on Linux; on macOS a crashed orchestrator leaves
+	// hindsight-api running with stale config, holding the port. Stop such
+	// leftovers before spawning fresh.
+	reclaimOrphans(m.port)
+
 	env := os.Environ()
 	if cfg, ok := m.llm(ctx); ok {
 		env = append(env,
@@ -124,6 +129,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start hindsight-api: %w", err)
 	}
+	writePIDFile(cmd.Process.Pid)
 	m.mu.Lock()
 	m.cmd = cmd
 	m.mu.Unlock()
@@ -142,6 +148,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		if m.cmd == cmd {
 			m.client = nil
 			m.cmd = nil
+			removePIDFile()
 		}
 		m.mu.Unlock()
 	}()
@@ -190,6 +197,7 @@ func (m *Manager) Stop() {
 	if cmd == nil || cmd.Process == nil {
 		return
 	}
+	defer removePIDFile()
 	_ = cmd.Process.Signal(os.Interrupt)
 	if done != nil {
 		select {
