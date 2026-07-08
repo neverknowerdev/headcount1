@@ -142,9 +142,9 @@ func TestStepTracker(t *testing.T) {
 
 	// The latest STEP marker wins.
 	if got := steps(
-		"[setup] STEP: Checking hindsight",
-		"[setup] STEP: Installing Hindsight memory engine (this can take a few minutes)",
-	); got != "Installing Hindsight memory engine (this can take a few minutes)" {
+		"[setup] STEP: Checking chromium",
+		"[setup] STEP: Installing chromium via Homebrew",
+	); got != "Installing chromium via Homebrew" {
 		t.Errorf("step = %q", got)
 	}
 	// Non-STEP lines are ignored, including STEP-looking text inside DETAIL blocks.
@@ -161,9 +161,9 @@ func TestStepTracker(t *testing.T) {
 	}
 	// Partial writes across chunk boundaries still parse whole lines.
 	tr := &stepTracker{}
-	tr.Write([]byte("[setup] STEP: Installing Hindsight memory eng"))
-	tr.Write([]byte("ine (this can take a few minutes)\n"))
-	if s, _ := stepStore.Load().(string); s != "Installing Hindsight memory engine (this can take a few minutes)" {
+	tr.Write([]byte("[setup] STEP: Installing codegraph vi"))
+	tr.Write([]byte("a npm\n"))
+	if s, _ := stepStore.Load().(string); s != "Installing codegraph via npm" {
 		t.Errorf("chunked write step = %q", s)
 	}
 	stepStore.Store("")

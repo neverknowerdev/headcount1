@@ -37,7 +37,7 @@ var (
 	warnStore     atomic.Value // holds string
 	failuresStore atomic.Value // holds []Failure — blocking failures
 	warningsStore atomic.Value // holds []Failure — non-blocking (e.g. gh CLI)
-	stepStore     atomic.Value // holds string — current in-progress step, e.g. "Installing hindsight"
+	stepStore     atomic.Value // holds string — current in-progress step, e.g. "Installing chromium"
 	once          sync.Once
 )
 
@@ -81,8 +81,8 @@ func Status() (pending bool, ok bool, errMsg string, warning string) {
 }
 
 // CurrentStep returns a human-readable description of the step the setup
-// script is currently working on (e.g. "Installing hindsight (this can take a
-// few minutes)"), or an empty string when nothing slow is in progress.
+// script is currently working on (e.g. "Installing chromium via Homebrew"),
+// or an empty string when nothing slow is in progress.
 func CurrentStep() string {
 	s, _ := stepStore.Load().(string)
 	return s
@@ -189,7 +189,7 @@ func runOnce() {
 
 // stepMarker prefixes the progress lines the setup scripts emit (via their
 // step helpers) before each phase, e.g.
-// "[setup] STEP: Installing Hindsight memory engine (this can take a few minutes)".
+// "[setup] STEP: Installing codegraph via npm".
 const stepMarker = "[setup] STEP: "
 
 // stepTracker is an io.Writer that watches the setup script's output as it
