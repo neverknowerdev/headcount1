@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
-	"runtime"
 	"sync"
 	"time"
 
@@ -105,16 +104,6 @@ func (m *Manager) Start(ctx context.Context) error {
 		// Stable worker id so background jobs survive restarts.
 		"HINDSIGHT_API_WORKER_ID=paperclip2",
 	)
-	if runtime.GOOS == "darwin" {
-		// Torch MPS crashes (SIGSEGV, pointer-authentication failures) when
-		// driven from worker threads in a daemon child process — Hindsight's
-		// own force-CPU knobs exist for exactly this. The local models
-		// (bge-small, MiniLM) are small enough that CPU inference is fine.
-		env = append(env,
-			"HINDSIGHT_API_EMBEDDINGS_LOCAL_FORCE_CPU=true",
-			"HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU=true",
-		)
-	}
 
 	cmd := exec.Command(bin, "--port", m.port, "--host", "127.0.0.1")
 	cmd.Env = env

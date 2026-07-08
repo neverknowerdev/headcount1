@@ -217,13 +217,6 @@ func (c *Client) DeleteBank(ctx context.Context, bankID string) error {
 	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, ""), nil, nil)
 }
 
-// CreateBank makes sure the bank row exists. Hindsight creates banks lazily
-// on retain, but PATCH /config is a no-op UPDATE against a missing bank and
-// POST /directives fails its foreign key — so bank setup must start here.
-func (c *Client) CreateBank(ctx context.Context, bankID string) error {
-	return c.doJSON(ctx, http.MethodPut, bankPath(bankID, ""), map[string]interface{}{}, nil)
-}
-
 // UpdateBankConfig applies per-bank configuration overrides (mission,
 // disposition, etc). Keys use Hindsight's Python field names, e.g.
 // "reflect_mission", "disposition_skepticism".
