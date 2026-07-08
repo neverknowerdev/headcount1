@@ -55,10 +55,23 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 				if compSettings.Name != "" {
 					newComp.Name = compSettings.Name
 				}
+				// settings.yml may have been written against a different DB
+				// (another worktree, a wiped DB): if its ID already belongs
+				// to some other company here, let SQLite assign a fresh one.
+				var idOwner db.Company
+				if api.db.First(&idOwner, compSettings.CompanyID).Error == nil {
+					log.Printf("Company ID %d from %s/settings.yml is taken by %q; assigning a new ID",
+						compSettings.CompanyID, shortName, idOwner.ShortName)
+					newComp.ID = 0
+				}
 			}
 
 			if err := api.db.Create(&newComp).Error; err == nil {
 				existing = newComp
+				// Keep settings.yml in step with the ID the company actually got.
+				if err := fm.WriteCompanySettings(newComp); err != nil {
+					log.Printf("Failed to update settings.yml for %s: %v", shortName, err)
+				}
 			} else {
 				log.Printf("Failed to create company %s: %v", shortName, err)
 				continue
