@@ -177,10 +177,26 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Route("/providers", func(r chi.Router) {
 		r.Get("/", api.ListProviders)
+		r.Get("/presets", api.ListProviderPresets)
 		r.Post("/", api.CreateProvider)
+		r.Post("/from-preset", api.CreateProviderFromPreset)
 		r.Put("/{id}", api.UpdateProvider)
 		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
+		r.Post("/{id}/rediscover", api.RediscoverProviderModels)
+	})
+
+	r.Route("/model-groups", func(r chi.Router) {
+		r.Get("/", api.ListModelGroups)
+		r.Post("/", api.CreateModelGroup)
+		r.Put("/{id}", api.UpdateModelGroup)
+		r.Delete("/{id}", api.DeleteModelGroup)
+		r.Get("/{id}/stats", api.GetModelGroupStats)
+	})
+
+	r.Route("/default-model-settings", func(r chi.Router) {
+		r.Get("/", api.ListDefaultModelSettings)
+		r.Put("/{purpose}", api.UpdateDefaultModelSetting)
 	})
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {

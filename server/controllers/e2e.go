@@ -20,6 +20,10 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	tables := []string{
 		"activity_logs",
 		"proxy_request_logs",
+		"model_request_stats",
+		"model_group_members",
+		"model_groups",
+		"default_model_settings",
 		"runs",
 		"comments",
 		"attachments",
@@ -55,7 +59,43 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		memoryService.ResetEnsured()
 	}
 
+	// Re-seed built-in LLM providers (OpenRouter, OpenCode Zen) so tests that
+	// list providers get a consistent baseline. A wipe intentionally never
+	// makes a live network call (stays fast and deterministic), so give them
+	// an immediate placeholder catalog instead: without it, DefaultModel
+	// would stay blank until the real, once-per-process background
+	// discovery fetch completes — which, after the first wipe, may never
+	// happen again — silently blocking anything that assumes a builtin
+	// provider has a usable default (e.g. the "existing provider" onboarding
+	// step's required Model Name field).
+	q := db.New(api.db)
+	_ = q.EnsureBuiltinLLMProviders(context.Background())
+	seedPlaceholderModelCatalog(context.Background(), q)
+
+	// Re-seed the (initially unconfigured) Default Models purposes so tests
+	// get the same consistent baseline as a fresh install.
+	_ = q.EnsureDefaultModelSettings(context.Background())
+
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// seedPlaceholderModelCatalog gives freshly re-seeded builtin providers a
+// non-empty model catalog immediately, without any network call, so e2e
+// tests that list/use providers right after a wipe never see a blank
+// DefaultModel/SupportedModels. It's deliberately not a real model — a
+// builtin provider's actual catalog only ever comes from a live
+// pkg/llmdiscovery fetch (see main.go); production never calls this.
+func seedPlaceholderModelCatalog(ctx context.Context, q *db.Queries) {
+	providers, err := q.ListLLMProviders(ctx)
+	if err != nil {
+		return
+	}
+	for _, p := range providers {
+		if !p.Builtin {
+			continue
+		}
+		_ = q.UpdateLLMProviderModelCatalog(ctx, p.ID, []string{"e2e-placeholder-model"})
+	}
 }

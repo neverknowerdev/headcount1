@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -21,6 +22,7 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/hindsight"
+	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -81,6 +83,11 @@ func main() {
 		&db.Project{},
 		&db.Sprint{},
 		&db.LLMProvider{},
+		&db.ModelGroup{},
+		&db.ModelGroupMember{},
+		&db.ModelRequestStat{},
+		&db.DefaultModelSetting{},
+		&db.ProviderPreset{},
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
@@ -108,6 +115,30 @@ func main() {
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
+
+	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
+	// present. Their model catalog (and DefaultModel) is populated purely
+	// from a live fetch in the background — no hardcoded model list — so a
+	// slow/unreachable host never delays server startup, and a provider is
+	// simply left blank until the first successful fetch completes.
+	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
+	}
+	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
+	// pick from a dropdown when adding a provider. Unlike the builtin free
+	// providers above, these don't become actual LLMProvider rows until a
+	// user picks one and supplies an API key.
+	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed provider presets: %v", err)
+	}
+	// Seed the "Default Models" purposes (commit messages, ask_artifact) with
+	// no target configured, so they fall back to the calling session's own
+	// LLM until a user points them at a provider/model or a model group.
+	if err := db.New(database).EnsureDefaultModelSettings(context.Background()); err != nil {
+		log.Printf("Warning: failed to seed default model settings: %v", err)
+	}
+	go refreshBuiltinLLMProviderModels(database)
+	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
 
 	// Repair codegraph servers whose project_id was not set on creation.
 	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {
@@ -139,18 +170,12 @@ func main() {
 
 	// Hindsight long-term memory layer. The manager runs a bare-metal
 	// hindsight-api process (installed into the app venv by the setup script)
-	// configured with the cheap utility model as its LLM; HINDSIGHT_API_URL
-	// overrides with an external server (also used by e2e tests).
+	// configured with the "Default Models" purpose hindsight_memory as its
+	// LLM (a fixed provider+model, or a model group's best free member);
+	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
+	// tests).
 	memManager := hindsight.NewManager(func(ctx context.Context) (hindsight.LLMConfig, bool) {
-		settings := endpoints.LoadSettings()
-		if settings.UtilityModel == "" || settings.UtilityProviderID == 0 {
-			return hindsight.LLMConfig{}, false
-		}
-		p, err := db.New(database).GetLLMProvider(ctx, settings.UtilityProviderID)
-		if err != nil {
-			return hindsight.LLMConfig{}, false
-		}
-		return hindsight.LLMConfig{BaseURL: p.BaseUrl, APIKey: p.ApiKey, Model: settings.UtilityModel}, true
+		return resolveHindsightLLMConfig(ctx, db.New(database))
 	})
 	memService := hindsight.NewService(db.New(database), memManager.Client)
 	eng.SetMemoryService(memService)
@@ -291,5 +316,65 @@ func recoverStaleRuns(database *gorm.DB) {
 		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
 		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
+	}
+}
+
+// resolveHindsightLLMConfig resolves the provider+model configured for the
+// hindsight_memory purpose (see db.PurposeHindsightMemory) via the "Default
+// Models" settings, mirroring engine.NativeEngine.resolvePurposeModel's model
+// group handling but with no session provider/model to fall back to — an
+// unconfigured purpose means the memory backend simply starts without an LLM.
+func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries) (hindsight.LLMConfig, bool) {
+	setting, err := q.GetDefaultModelSetting(ctx, db.PurposeHindsightMemory)
+	if err != nil {
+		return hindsight.LLMConfig{}, false
+	}
+
+	if setting.ModelGroupID != nil {
+		group, gErr := q.GetModelGroup(ctx, *setting.ModelGroupID)
+		if gErr != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		members := db.ExpandModelGroupMembers(group.Members)
+		if len(members) == 0 {
+			return hindsight.LLMConfig{}, false
+		}
+		sort.SliceStable(members, func(i, j int) bool {
+			if members[i].IsFree != members[j].IsFree {
+				return members[i].IsFree
+			}
+			return members[i].Priority < members[j].Priority
+		})
+		best := members[0]
+		return hindsight.LLMConfig{BaseURL: best.Provider.BaseUrl, APIKey: best.Provider.ApiKey, Model: best.Model}, true
+	}
+
+	if setting.ProviderID != nil {
+		provider, pErr := q.GetLLMProvider(ctx, *setting.ProviderID)
+		if pErr != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		model := setting.Model
+		if model == "" {
+			model = provider.DefaultModel
+		}
+		return hindsight.LLMConfig{BaseURL: provider.BaseUrl, APIKey: provider.ApiKey, Model: model}, true
+	}
+
+	return hindsight.LLMConfig{}, false
+}
+
+// refreshBuiltinLLMProviderModels fetches the current free-model catalog for
+// the built-in OpenRouter/OpenCode Zen providers. Runs in a goroutine so a
+// slow or unreachable host never delays server startup; RefreshBuiltinProviderModels
+// itself retries transient failures and falls back to a curated model list,
+// so this always leaves the providers usable.
+func refreshBuiltinLLMProviderModels(database *gorm.DB) {
+	ctx := context.Background()
+	q := db.New(database)
+	client := &http.Client{Timeout: 20 * time.Second}
+
+	if err := llmdiscovery.RefreshBuiltinProviderModels(ctx, q, client); err != nil {
+		log.Printf("Warning: %v", err)
 	}
 }

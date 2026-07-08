@@ -53,6 +53,9 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
+		&db.ModelGroup{},
+		&db.ModelGroupMember{},
+		&db.DefaultModelSetting{},
 	))
 	return database
 }
@@ -639,9 +642,9 @@ func TestNativeEngineAskTaskOwner(t *testing.T) {
 
 // TestNativeEngineAskArtifact verifies the artifact Q&A flow: the agent asks
 // a question about an artifact via ask_artifact, the engine answers it with a
-// separate one-shot LLM call on the provider's utility model (the artifact
-// content goes into the reader call, never into the asking session), and the
-// short answer comes back as the tool result.
+// separate one-shot LLM call on the built-in Utility model group (the
+// artifact content goes into the reader call, never into the asking
+// session), and the short answer comes back as the tool result.
 func TestNativeEngineAskArtifact(t *testing.T) {
 	var count atomic.Int32
 	var readerRequest atomic.Value // body of the one-shot reader call
@@ -671,14 +674,27 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	task := seedTestData(t, database, mockSrv.URL)
 	q := db.New(database)
 
-	// Configure the app-level utility model (any provider/model; here the
-	// same provider, cheaper model) in an isolated settings home.
+	// Isolated settings/data home for this test's log-file assertions below.
 	tmpHome := t.TempDir()
 	t.Setenv("E2E_PAPERCLIP_HOME", tmpHome)
 	paperclipDir := filepath.Join(tmpHome, ".paperclip2")
 	require.NoError(t, os.MkdirAll(paperclipDir, 0755))
-	require.NoError(t, os.WriteFile(filepath.Join(paperclipDir, "settings.yaml"),
-		[]byte("utility_model: cheap-model\n"), 0644))
+
+	// Configure the "ask_artifact" Default Model to point at a model group
+	// (any provider/model; here the same provider, cheaper model) — this is
+	// what resolveDefaultModel resolves.
+	var provider db.LLMProvider
+	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
+	utilityGroup, err := q.CreateModelGroup(context.Background(), db.ModelGroup{
+		Name: "Utility", Slug: "utility",
+	})
+	require.NoError(t, err)
+	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{
+		{ProviderID: provider.ID, Model: "cheap-model"},
+	}))
+	require.NoError(t, database.Create(&db.DefaultModelSetting{
+		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID,
+	}).Error)
 
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})
 	require.NoError(t, err)

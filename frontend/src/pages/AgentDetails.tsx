@@ -3,6 +3,8 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
+import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
+
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -23,24 +25,29 @@ export const AgentDetails: React.FC = () => {
     const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
-    const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', mode: 'primary', permissions: '{}' });
+    const [modelGroups, setModelGroups] = useState<any[]>([]);
+    const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', mode: 'primary', permissions: '{}' });
 
     const fetchData = useCallback(async () => {
         try {
-            const [agentRes, statsRes, provRes] = await Promise.all([
+            const [agentRes, statsRes, provRes, groupRes] = await Promise.all([
                 axios.get(`/api/agents/${id}`),
                 axios.get(`/api/agents/${id}/stats`),
-                axios.get('/api/providers')
+                axios.get('/api/providers'),
+                axios.get('/api/model-groups')
             ]);
             setAgent(agentRes.data);
             setStats(statsRes.data);
             setProviders(provRes.data || []);
+            setModelGroups(groupRes.data || []);
             setFormData({
                 name: agentRes.data.name,
                 description: agentRes.data.description || '',
                 system_prompt: agentRes.data.system_prompt,
                 model: agentRes.data.model || '',
-                provider_id: agentRes.data.provider_id?.toString() || '', mode: agentRes.data.mode || 'primary', permissions: agentRes.data.permissions || '{}'
+                provider_id: agentRes.data.provider_id?.toString() || '',
+                model_group_id: agentRes.data.model_group_id?.toString() || '',
+                mode: agentRes.data.mode || 'primary', permissions: agentRes.data.permissions || '{}'
             });
         } catch (e) {
             console.error(e);
@@ -133,7 +140,8 @@ export const AgentDetails: React.FC = () => {
         try {
             const payload = {
                 ...formData,
-                provider_id: formData.provider_id ? parseInt(formData.provider_id) : null
+                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null
             };
             await axios.put(`/api/agents/${id}`, payload);
             fetchData();
@@ -199,12 +207,20 @@ export const AgentDetails: React.FC = () => {
                             <h3 className="font-bold mb-4">Configuration</h3>
                             <div className="space-y-4">
                                 <div>
-                                    <p className="text-sm text-gray-500 mb-1">Active Provider</p>
-                                    <p className="font-medium">{providers.find(p => p.id === agent.provider_id)?.name || 'None'}</p>
+                                    <p className="text-sm text-gray-500 mb-1">{agent.model_group_id ? 'Model Group' : 'Active Provider'}</p>
+                                    <p className="font-medium">
+                                        {agent.model_group_id
+                                            ? <>{modelGroups.find(g => g.id === agent.model_group_id)?.name || `Group #${agent.model_group_id}`} <span className="ml-1 text-xs font-normal bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">auto-routing</span></>
+                                            : (providers.find(p => p.id === agent.provider_id)?.name || 'None')}
+                                    </p>
                                 </div>
                                 <div>
-                                    <p className="text-sm text-gray-500 mb-1">Active Model</p>
-                                    <p className="font-medium">{agent.model || 'None'}</p>
+                                    <p className="text-sm text-gray-500 mb-1">{agent.model_group_id ? 'Models' : 'Active Model'}</p>
+                                    <p className="font-medium">
+                                        {agent.model_group_id
+                                            ? describeGroupModels(modelGroups.find(g => g.id === agent.model_group_id))
+                                            : (agent.model || 'None')}
+                                    </p>
                                 </div>
                                 <div className="pt-2">
                                     <p className="text-sm text-gray-500 mb-2">Proxy URL for CLI</p>
@@ -501,29 +517,15 @@ export const AgentDetails: React.FC = () => {
                             <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                             <input type="text" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2" />
                         </div>
-                        <div>
-                            <div className="flex justify-between items-center mb-1">
-                                <label className="block text-sm font-medium text-gray-700">LLM Provider</label>
-                                <Link to={`/companies/${shortName}/providers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>
-                            </div>
-                            <select value={formData.provider_id || ''} onChange={e => {
-                                const selectedProviderId = e.target.value;
-                                const provider = providers.find(p => p.id.toString() === selectedProviderId);
-                                setFormData({...formData, provider_id: selectedProviderId, model: provider?.default_model || ''});
-                            }} className="w-full border rounded p-2">
-                                <option value="">-- Select Provider --</option>
-                                {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
-                            </select>
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
-                            <select required value={formData.model || ''} onChange={e => setFormData({...formData, model: e.target.value})} className="w-full border rounded p-2">
-                                <option value="">-- Select Model --</option>
-                                {providers.find(p => p.id.toString() === formData.provider_id)?.supported_models?.split(',').map((m: string) => m.trim()).filter((m: string) => m).map((m: string) => (
-                                    <option key={m} value={m}>{m}</option>
-                                ))}
-                            </select>
-                        </div>
+                        <ProviderOrGroupSelect
+                            label="LLM Provider or Model Group"
+                            providers={providers}
+                            modelGroups={modelGroups}
+                            manageLinkTo={`/companies/${shortName}/providers`}
+                            modelRequired
+                            value={{ provider_id: formData.provider_id, model_group_id: formData.model_group_id, model: formData.model }}
+                            onChange={v => setFormData({ ...formData, provider_id: v.provider_id, model_group_id: v.model_group_id, model: v.model })}
+                        />
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
                             <textarea required rows={5} value={formData.system_prompt} onChange={e => setFormData({...formData, system_prompt: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" />

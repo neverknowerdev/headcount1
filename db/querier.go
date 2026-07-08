@@ -65,6 +65,15 @@ type LLMProviderQuerier interface {
 	ListLLMProviders(ctx context.Context) ([]LLMProvider, error)
 	DeleteLLMProvider(ctx context.Context, id int32) error
 	UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error)
+	EnsureBuiltinLLMProviders(ctx context.Context) error
+	UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
+	ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
+}
+
+type ProviderPresetQuerier interface {
+	ListProviderPresets(ctx context.Context) ([]ProviderPreset, error)
+	GetProviderPresetByKey(ctx context.Context, key string) (ProviderPreset, error)
+	EnsureProviderPresets(ctx context.Context) error
 }
 
 type SkillQuerier interface {
@@ -90,6 +99,7 @@ type Querier interface {
 	AttachmentQuerier
 	RunQuerier
 	LLMProviderQuerier
+	ProviderPresetQuerier
 	SkillQuerier
 	SprintQuerier
 	ProxyRequestLogQuerier

@@ -28,11 +28,6 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 type Settings struct {
 	BasePath         string   `yaml:"base_path"`
 	WorkspaceFolders []string `yaml:"workspace_folders"`
-	// UtilityProviderID / UtilityModel select a cheap LLM for lightweight
-	// internal calls (artifact Q&A, commit message generation). Set on the
-	// app settings page; empty model = fall back to the session's LLM.
-	UtilityProviderID int32  `yaml:"utility_provider_id"`
-	UtilityModel      string `yaml:"utility_model"`
 	// Memory recall token budget overrides — see server/controllers.Settings
 	// for the full doc comment; 0 means use the pkg/hindsight defaults.
 	MemoryRecallMaxTokens   int `yaml:"memory_recall_max_tokens"`
