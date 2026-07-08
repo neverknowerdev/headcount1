@@ -247,12 +247,7 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var reqPayload struct {
-		Model    string                   `json:"model"`
-		Stream   bool                     `json:"stream"`
-		Messages []map[string]interface{} `json:"messages"`
-	}
-	json.Unmarshal(bodyBytes, &reqPayload)
+	reqPayload := parseChatCompletionsRequest(bodyBytes)
 
 	// Parse the body into a generic map once so each attempt can swap the
 	// "model" field while preserving everything else.
@@ -266,7 +261,7 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 	switchesOnly := r.Header.Get(proxyLogModeHeader) == "switches-only"
 	var proxyLogger *logging.ProxyLogger
 	if !switchesOnly {
-		proxyLogger = g.loggerForRun(r.Context(), runID, reqPayload.Model, group.Name, bodyBytes, reqPayload.Messages)
+		proxyLogger = g.loggerForRun(r.Context(), runID, reqPayload.Model, group.Name, group.Name, bodyBytes, reqPayload.Messages)
 		if proxyLogger != nil {
 			defer proxyLogger.Close()
 		}
@@ -503,7 +498,7 @@ func (g *LLMGateway) finishRunAccounting(ctx context.Context, runID int, member 
 
 // loggerForRun builds a ProxyLogger when an X-Run-ID header is present,
 // mirroring the behavior of the other proxy entrypoints.
-func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceName string, bodyBytes []byte, messages []map[string]interface{}) *logging.ProxyLogger {
+func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceName, providerName string, bodyBytes []byte, messages []map[string]interface{}) *logging.ProxyLogger {
 	if runID <= 0 {
 		return nil
 	}
@@ -523,9 +518,9 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 		log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
 		return nil
 	}
-	proxyLogger.LogRequest(model, sourceName, sourceName, bodyBytes)
+	proxyLogger.LogRequest(model, sourceName, providerName, bodyBytes)
 	g.q.UpdateRunLogFilePath(ctx, int32(runID), proxyLogger.FilePath())
-	proxyLogger.LogToolResultsFromRequest(model, sourceName, messages)
+	proxyLogger.LogToolResultsFromRequest(model, providerName, messages)
 	return proxyLogger
 }
 

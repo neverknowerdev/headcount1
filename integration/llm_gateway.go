@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"sort"
 	"strconv"
@@ -47,7 +46,7 @@ func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(strin
 }
 
 func (g *LLMGateway) Mount(r chi.Router) {
-	r.Post("/v1/chat/completions", g.proxyChatCompletions)
+	r.Post("/v1/chat/completions", g.proxyChatCompletionsForProvider)
 	r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
 		r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
 		r.Get("/v1/models", g.getModelsForAgent)
@@ -58,207 +57,86 @@ func (g *LLMGateway) Mount(r chi.Router) {
 	})
 }
 
-func (g *LLMGateway) proxyChatCompletions(w http.ResponseWriter, r *http.Request) {
+// chatCompletionsRequest is the subset of an OpenAI chat-completions body the
+// gateway inspects: the model, whether the client wants a stream, and the
+// messages (used for tool-result logging).
+type chatCompletionsRequest struct {
+	Model    string                   `json:"model"`
+	Stream   bool                     `json:"stream"`
+	Messages []map[string]interface{} `json:"messages"`
+}
+
+func parseChatCompletionsRequest(body []byte) chatCompletionsRequest {
+	var req chatCompletionsRequest
+	json.Unmarshal(body, &req)
+	return req
+}
+
+// directProxyRequest carries everything the shared relay pipeline needs. The
+// generic and per-agent entrypoints differ only in how they resolve these
+// fields (provider selection and stat attribution); the send/relay/record
+// work itself is identical and lives in relayProviderResponse.
+type directProxyRequest struct {
+	provider    db.LLMProvider
+	sourceName  string // log label: "llm-proxy" or the agent's name
+	model       string
+	stream      bool
+	bodyBytes   []byte
+	logger      *logging.ProxyLogger
+	runID       int
+	agentID     int32           // owner of the ProxyRequestLog rows; 0 to skip
+	skipHeaders map[string]bool // request headers not forwarded upstream
+}
+
+// proxyChatCompletionsForProvider proxies to the provider named by the
+// X-Provider-ID header. Stats are attributed to the agent that owns the
+// request's run (if any).
+func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *http.Request) {
 	bodyBytes, err := io.ReadAll(r.Body)
 	if err != nil {
 		http.Error(w, "Failed to read body", http.StatusBadRequest)
 		return
 	}
-	r.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
 
-	providerIDStr := r.Header.Get("X-Provider-ID")
-	var providerID int
-	if providerIDStr != "" {
-		fmt.Sscanf(providerIDStr, "%d", &providerID)
+	providerID := 0
+	if s := r.Header.Get("X-Provider-ID"); s != "" {
+		fmt.Sscanf(s, "%d", &providerID)
 	}
-
-	// Resolve provider: X-Provider-ID header is required.
 	if providerID == 0 {
 		http.Error(w, "X-Provider-ID header missing", http.StatusBadRequest)
 		return
 	}
-
 	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
 	if err != nil {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return
 	}
 
-	// Initialize logger if we have a run ID
-	var proxyLogger *logging.ProxyLogger
-	var reqPayload struct {
-		Model    string                   `json:"model"`
-		Stream   bool                     `json:"stream"`
-		Messages []map[string]interface{} `json:"messages"`
-	}
-	json.Unmarshal(bodyBytes, &reqPayload)
-
-	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-		var runID int
-		fmt.Sscanf(runIDStr, "%d", &runID)
-		if runID > 0 {
-			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
-			if err == nil && run.Task.Company.ID > 0 {
-				var loggerErr error
-				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-					g.basePath,
-					run.Task.Company.ShortName,
-					run.TaskID,
-					run.ID,
-					g.hub,
-					g.q,
-				)
-				if loggerErr != nil {
-					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
-				} else {
-					defer proxyLogger.Close()
-					proxyLogger.LogRequest(reqPayload.Model, "llm-proxy", provider.Name, bodyBytes)
-					// Save log file path on the run
-					g.q.UpdateRunLogFilePath(r.Context(), int32(runID), proxyLogger.FilePath())
-					// Extract tool results from the request body. OpenAI's
-					// chat-completions dialect represents them as
-					// {role: "tool", content: "...", tool_call_id: "..."}
-					// messages. The AI SDK includes these in every
-					// subsequent LLM call after a tool is executed, so
-					// the proxy is the only place that sees both the
-					// tool call (in a prior response) and its result
-					// (in the next request). We log each tool result as
-					// a tool_response entry paired by tool_call_id with
-					// the engine's prior tool_call entry.
-					proxyLogger.LogToolResultsFromRequest(reqPayload.Model, provider.Name, reqPayload.Messages)
-				}
-			}
-		}
+	req := parseChatCompletionsRequest(bodyBytes)
+	runID := parseRunID(r)
+	logger := g.loggerForRun(r.Context(), runID, req.Model, "llm-proxy", provider.Name, bodyBytes, req.Messages)
+	if logger != nil {
+		defer logger.Close()
 	}
 
-	resp, err := sendProviderRequest(r.Context(), r.Method, provider, bodyBytes, r.Header, map[string]bool{
-		"x-provider-id": true,
-		"x-run-id":      true,
+	g.relayProviderResponse(w, r, directProxyRequest{
+		provider:    provider,
+		sourceName:  "llm-proxy",
+		model:       req.Model,
+		stream:      req.Stream,
+		bodyBytes:   bodyBytes,
+		logger:      logger,
+		runID:       runID,
+		agentID:     g.runAgentID(r.Context(), runID),
+		skipHeaders: map[string]bool{"x-provider-id": true, "x-run-id": true},
 	})
-	if err != nil {
-		if proxyLogger != nil {
-			proxyLogger.LogError(reqPayload.Model, "llm-proxy", provider.Name, err)
-		}
-		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
-		return
-	}
-	defer resp.Body.Close()
-
-	// Heartbeat: touch the run's last_message_time so stale-run
-	// detection knows the LLM is still working.
-	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-		var runID int
-		fmt.Sscanf(runIDStr, "%d", &runID)
-		if runID > 0 {
-			go g.q.TouchRunLastMessageTime(context.Background(), int32(runID))
-		}
-	}
-
-	for k, vv := range resp.Header {
-		for _, v := range vv {
-			w.Header().Add(k, v)
-		}
-	}
-	w.WriteHeader(resp.StatusCode)
-
-	if !reqPayload.Stream {
-		// Non-streaming: buffer the response so we can log it and still forward to the client
-		respBodyBytes, _ := io.ReadAll(resp.Body)
-		usage, nonStreamReasoning := parseNonStreamUsage(respBodyBytes)
-
-		// Save token stats to database
-		if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-			var runID int
-			fmt.Sscanf(runIDStr, "%d", &runID)
-			if runID > 0 {
-				run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
-				if err == nil && run.Task.AgentID != nil {
-					g.q.CreateProxyRequestLog(r.Context(), db.ProxyRequestLog{
-						AgentID:          *run.Task.AgentID,
-						ProviderID:       provider.ID,
-						Model:            reqPayload.Model,
-						PromptTokens:     usage.PromptTokens,
-						CompletionTokens: usage.CompletionTokens,
-						TotalTokens:      usage.TotalTokens,
-					})
-				}
-				g.q.AddRunTokenStats(r.Context(), int32(runID), db.RunTokenStats{
-					PromptTokens:     usage.PromptTokens,
-					CompletionTokens: usage.CompletionTokens,
-					ReasoningTokens:  usage.ReasoningTokens,
-					CachedTokens:     usage.CachedTokens,
-				})
-			}
-		}
-
-		if proxyLogger != nil {
-			proxyLogger.LogResponse(
-				reqPayload.Model,
-				provider.Name,
-				resp.StatusCode,
-				respBodyBytes,
-				nonStreamReasoning,
-				usage,
-			)
-		}
-
-		w.Write(respBodyBytes)
-		return
-	}
-
-	// Streaming path: parse SSE chunks line-by-line
-	flusher, ok := w.(http.Flusher)
-	if !ok {
-		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
-		return
-	}
-
-	fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(w, flusher, resp.Body, proxyLogger, reqPayload.Model, "llm-proxy", provider.Name)
-	if streamErr != nil {
-		http.Error(w, streamErr.Error(), http.StatusGatewayTimeout)
-		return
-	}
-
-	// Save token stats from streaming response
-	if lastUsage != nil {
-		if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-			var runID int
-			fmt.Sscanf(runIDStr, "%d", &runID)
-			if runID > 0 {
-				run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
-				if err == nil && run.Task.AgentID != nil {
-					g.q.CreateProxyRequestLog(r.Context(), db.ProxyRequestLog{
-						AgentID:          *run.Task.AgentID,
-						ProviderID:       provider.ID,
-						Model:            reqPayload.Model,
-						PromptTokens:     lastUsage.PromptTokens,
-						CompletionTokens: lastUsage.CompletionTokens,
-						TotalTokens:      lastUsage.TotalTokens,
-					})
-				}
-				g.q.AddRunTokenStats(r.Context(), int32(runID), db.RunTokenStats{
-					PromptTokens:     lastUsage.PromptTokens,
-					CompletionTokens: lastUsage.CompletionTokens,
-					ReasoningTokens:  lastUsage.ReasoningTokens,
-					ToolInputTokens:  lastUsage.ToolInputTokens,
-					CachedTokens:     lastUsage.CachedTokens,
-				})
-			}
-		}
-	}
-
-	if proxyLogger != nil {
-		var usage normalizedUsage
-		if lastUsage != nil {
-			usage = *lastUsage
-		}
-		proxyLogger.LogStreamResponse(reqPayload.Model, provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
-	}
 }
 
+// proxyChatCompletionsForAgent proxies on behalf of a specific agent. Agents
+// bound to a model group hand off to the group router; otherwise the agent's
+// own provider is used and stats are attributed directly to the agent.
 func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http.Request) {
-	agentIDStr := chi.URLParam(r, "agent_id")
-	agentID, err := strconv.Atoi(agentIDStr)
+	agentID, err := strconv.Atoi(chi.URLParam(r, "agent_id"))
 	if err != nil {
 		http.Error(w, "Invalid agent ID", http.StatusBadRequest)
 		return
@@ -286,7 +164,6 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		http.Error(w, "Agent has no provider or model group configured", http.StatusNotFound)
 		return
 	}
-
 	provider, err := g.q.GetLLMProvider(r.Context(), *agent.ProviderID)
 	if err != nil {
 		http.Error(w, "Provider not found", http.StatusNotFound)
@@ -299,65 +176,51 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		return
 	}
 
-	var reqPayload struct {
-		Model    string                   `json:"model"`
-		Stream   bool                     `json:"stream"`
-		Messages []map[string]interface{} `json:"messages"`
-	}
-	json.Unmarshal(bodyBytes, &reqPayload)
-
-	// Initialize logger if we have a run ID
-	var proxyLogger *logging.ProxyLogger
-	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-		var runID int
-		fmt.Sscanf(runIDStr, "%d", &runID)
-		if runID > 0 {
-			run, _, err := g.q.GetRunWithTask(r.Context(), int32(runID))
-			if err == nil && run.Task.Company.ID > 0 {
-				var loggerErr error
-				proxyLogger, loggerErr = logging.NewProxyLoggerWithHub(
-					g.basePath,
-					run.Task.Company.ShortName,
-					run.TaskID,
-					run.ID,
-					g.hub,
-					g.q,
-				)
-				if loggerErr != nil {
-					log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
-				} else {
-					defer proxyLogger.Close()
-					proxyLogger.LogRequest(reqPayload.Model, agent.Name, provider.Name, bodyBytes)
-					// Save log file path on the run
-					g.q.UpdateRunLogFilePath(r.Context(), int32(runID), proxyLogger.FilePath())
-					proxyLogger.LogToolResultsFromRequest(reqPayload.Model, provider.Name, reqPayload.Messages)
-				}
-			}
-		}
+	req := parseChatCompletionsRequest(bodyBytes)
+	runID := parseRunID(r)
+	logger := g.loggerForRun(r.Context(), runID, req.Model, agent.Name, provider.Name, bodyBytes, req.Messages)
+	if logger != nil {
+		defer logger.Close()
 	}
 
-	resp, err := sendProviderRequest(r.Context(), r.Method, provider, bodyBytes, r.Header, map[string]bool{
-		"authorization": true,
+	g.relayProviderResponse(w, r, directProxyRequest{
+		provider:    provider,
+		sourceName:  agent.Name,
+		model:       req.Model,
+		stream:      req.Stream,
+		bodyBytes:   bodyBytes,
+		logger:      logger,
+		runID:       runID,
+		agentID:     int32(agentID),
+		skipHeaders: map[string]bool{"authorization": true},
 	})
+}
+
+// relayProviderResponse sends an already-resolved chat-completions request to
+// its provider and relays the response back to the client — buffering and
+// logging a non-streaming body, or piping SSE chunks for a streaming one —
+// while recording token stats and proxy logs. It is the shared tail of the
+// generic and per-agent entrypoints; only provider resolution and stat
+// attribution differ between them, and those arrive on p.
+func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Request, p directProxyRequest) {
+	resp, err := sendProviderRequest(r.Context(), r.Method, p.provider, p.bodyBytes, r.Header, p.skipHeaders)
 	if err != nil {
-		if proxyLogger != nil {
-			proxyLogger.LogError(reqPayload.Model, agent.Name, provider.Name, err)
+		if p.logger != nil {
+			p.logger.LogError(p.model, p.sourceName, p.provider.Name, err)
 		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
 	}
 	defer resp.Body.Close()
 
-	// Heartbeat: touch the run's last_message_time so stale-run
-	// detection knows the LLM is still working.
-	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-		var runID int
-		fmt.Sscanf(runIDStr, "%d", &runID)
-		if runID > 0 {
-			go g.q.TouchRunLastMessageTime(context.Background(), int32(runID))
-		}
+	// Heartbeat: touch the run's last_message_time so stale-run detection
+	// knows the LLM is still working.
+	if p.runID > 0 {
+		go g.q.TouchRunLastMessageTime(context.Background(), int32(p.runID))
 	}
 
+	// Forward all upstream response headers verbatim (the body is relayed
+	// unchanged, so the upstream content-length still applies).
 	for k, vv := range resp.Header {
 		for _, v := range vv {
 			w.Header().Add(k, v)
@@ -365,48 +228,13 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 	}
 	w.WriteHeader(resp.StatusCode)
 
-	if !reqPayload.Stream {
+	if !p.stream {
 		respBodyBytes, _ := io.ReadAll(resp.Body)
-		usage, nonStreamReasoning := parseNonStreamUsage(respBodyBytes)
-
-		runIDForStats := int32(0)
-		if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-			var runID int
-			fmt.Sscanf(runIDStr, "%d", &runID)
-			if runID > 0 {
-				runIDForStats = int32(runID)
-			}
+		usage, reasoning := parseNonStreamUsage(respBodyBytes)
+		g.recordProxyStats(r.Context(), p.provider, p.model, p.runID, p.agentID, usage)
+		if p.logger != nil {
+			p.logger.LogResponse(p.model, p.provider.Name, resp.StatusCode, respBodyBytes, reasoning, usage)
 		}
-
-		g.q.CreateProxyRequestLog(r.Context(), db.ProxyRequestLog{
-			AgentID:          int32(agentID),
-			ProviderID:       provider.ID,
-			Model:            reqPayload.Model,
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			TotalTokens:      usage.TotalTokens,
-		})
-
-		if runIDForStats > 0 {
-			g.q.AddRunTokenStats(r.Context(), runIDForStats, db.RunTokenStats{
-				PromptTokens:     usage.PromptTokens,
-				CompletionTokens: usage.CompletionTokens,
-				ReasoningTokens:  usage.ReasoningTokens,
-				CachedTokens:     usage.CachedTokens,
-			})
-		}
-
-		if proxyLogger != nil {
-			proxyLogger.LogResponse(
-				reqPayload.Model,
-				provider.Name,
-				resp.StatusCode,
-				respBodyBytes,
-				nonStreamReasoning,
-				usage,
-			)
-		}
-
 		w.Write(respBodyBytes)
 		return
 	}
@@ -416,54 +244,62 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 		http.Error(w, "Streaming unsupported", http.StatusInternalServerError)
 		return
 	}
-
-	fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(w, flusher, resp.Body, proxyLogger, reqPayload.Model, agent.Name, provider.Name)
+	fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(
+		w, flusher, resp.Body, p.logger, p.model, p.sourceName, p.provider.Name)
 	if streamErr != nil {
 		http.Error(w, streamErr.Error(), http.StatusGatewayTimeout)
 		return
 	}
-
-	runIDForStats := int32(0)
-	if runIDStr := r.Header.Get("X-Run-ID"); runIDStr != "" {
-		var runID int
-		fmt.Sscanf(runIDStr, "%d", &runID)
-		if runID > 0 {
-			runIDForStats = int32(runID)
-		}
-	}
-
-	if proxyLogger != nil && lastUsage != nil {
-		proxyLogger.LogStreamResponse(
-			reqPayload.Model,
-			provider.Name,
-			fullContent,
-			fullReasoning,
-			collectedToolCalls,
-			rawBody,
-			*lastUsage,
-		)
-	}
-
-	// Save token stats from streaming response to database
 	if lastUsage != nil {
-		g.q.CreateProxyRequestLog(r.Context(), db.ProxyRequestLog{
-			AgentID:          int32(agentID),
-			ProviderID:       provider.ID,
-			Model:            reqPayload.Model,
-			PromptTokens:     lastUsage.PromptTokens,
-			CompletionTokens: lastUsage.CompletionTokens,
-			TotalTokens:      lastUsage.TotalTokens,
-		})
-		if runIDForStats > 0 {
-			g.q.AddRunTokenStats(r.Context(), runIDForStats, db.RunTokenStats{
-				PromptTokens:     lastUsage.PromptTokens,
-				CompletionTokens: lastUsage.CompletionTokens,
-				ReasoningTokens:  lastUsage.ReasoningTokens,
-				ToolInputTokens:  lastUsage.ToolInputTokens,
-				CachedTokens:     lastUsage.CachedTokens,
-			})
-		}
+		g.recordProxyStats(r.Context(), p.provider, p.model, p.runID, p.agentID, *lastUsage)
 	}
+	if p.logger != nil {
+		var usage normalizedUsage
+		if lastUsage != nil {
+			usage = *lastUsage
+		}
+		p.logger.LogStreamResponse(p.model, p.provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
+	}
+}
+
+// recordProxyStats persists usage for one completed direct-proxy request: a
+// per-agent ProxyRequestLog row (when agentID > 0) and per-run token stats
+// (when runID > 0). Model-group requests use finishRunAccounting instead,
+// which attributes usage to the member that actually served the request.
+func (g *LLMGateway) recordProxyStats(ctx context.Context, provider db.LLMProvider, model string, runID int, agentID int32, usage normalizedUsage) {
+	if agentID > 0 {
+		g.q.CreateProxyRequestLog(ctx, db.ProxyRequestLog{
+			AgentID:          agentID,
+			ProviderID:       provider.ID,
+			Model:            model,
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			TotalTokens:      usage.TotalTokens,
+		})
+	}
+	if runID > 0 {
+		g.q.AddRunTokenStats(ctx, int32(runID), db.RunTokenStats{
+			PromptTokens:     usage.PromptTokens,
+			CompletionTokens: usage.CompletionTokens,
+			ReasoningTokens:  usage.ReasoningTokens,
+			ToolInputTokens:  usage.ToolInputTokens,
+			CachedTokens:     usage.CachedTokens,
+		})
+	}
+}
+
+// runAgentID returns the agent that owns a run's task, or 0 when there is no
+// run or the run isn't bound to an agent. Used to attribute a provider-named
+// proxy request (which doesn't carry an agent) to the right agent.
+func (g *LLMGateway) runAgentID(ctx context.Context, runID int) int32 {
+	if runID <= 0 {
+		return 0
+	}
+	run, _, err := g.q.GetRunWithTask(ctx, int32(runID))
+	if err != nil || run.Task.AgentID == nil {
+		return 0
+	}
+	return *run.Task.AgentID
 }
 
 func (g *LLMGateway) getModelsForAgent(w http.ResponseWriter, r *http.Request) {
