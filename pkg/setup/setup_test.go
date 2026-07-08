@@ -129,3 +129,42 @@ func TestParseSoftFailures_DoesNotLeakIntoHardFailures(t *testing.T) {
 		t.Errorf("soft failure leaked into hard failures: %+v", failures)
 	}
 }
+
+func TestStepTracker(t *testing.T) {
+	steps := func(lines ...string) string {
+		tr := &stepTracker{}
+		for _, l := range lines {
+			tr.Write([]byte(l + "\n"))
+		}
+		s, _ := stepStore.Load().(string)
+		return s
+	}
+
+	// The latest STEP marker wins.
+	if got := steps(
+		"[setup] STEP: Checking chromium",
+		"[setup] STEP: Installing chromium via Homebrew",
+	); got != "Installing chromium via Homebrew" {
+		t.Errorf("step = %q", got)
+	}
+	// Non-STEP lines are ignored, including STEP-looking text inside DETAIL blocks.
+	if got := steps(
+		"[setup] STEP: Installing chromium",
+		"[setup] DETAIL_BEGIN gh_CLI",
+		"[setup] STEP: bogus step from raw command output",
+		"[setup] DETAIL_END",
+		"[setup] chromium: installed",
+		"[setup] SOFT_FAIL: gh CLI — brew install gh failed",
+		"not a setup line",
+	); got != "Installing chromium" {
+		t.Errorf("detail-block handling: step = %q", got)
+	}
+	// Partial writes across chunk boundaries still parse whole lines.
+	tr := &stepTracker{}
+	tr.Write([]byte("[setup] STEP: Installing codegraph vi"))
+	tr.Write([]byte("a npm\n"))
+	if s, _ := stepStore.Load().(string); s != "Installing codegraph via npm" {
+		t.Errorf("chunked write step = %q", s)
+	}
+	stepStore.Store("")
+}

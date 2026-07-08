@@ -42,6 +42,13 @@ brew_install() {
     HOMEBREW_NO_AUTO_UPDATE=1 brew install "$1" 2>&1
 }
 
+# step announces what setup is currently working on. The Go side watches the
+# script's output for these lines and shows the message in the UI loading
+# screen, so emit one before anything that might take a while.
+step() {
+    echo "[setup] STEP: $1"
+}
+
 # ── Homebrew (prerequisite for most installs) ─────────────────────────────────
 if ! command -v brew >/dev/null 2>&1; then
     echo "[setup] Homebrew not found — some automatic installs will be skipped."
@@ -49,9 +56,11 @@ if ! command -v brew >/dev/null 2>&1; then
 fi
 
 # ── git ──────────────────────────────────────────────────────────────────────
+step "Checking git"
 if command -v git >/dev/null 2>&1; then
     echo "[setup] git: OK"
 else
+    step "Installing git via Homebrew"
     echo "[setup] git: not found — installing via Homebrew..."
     if command -v brew >/dev/null 2>&1; then
         install_output=$(brew_install git)
@@ -66,9 +75,11 @@ else
 fi
 
 # ── python3 ──────────────────────────────────────────────────────────────────
+step "Checking python3"
 if command -v python3 >/dev/null 2>&1; then
     echo "[setup] python3: OK"
 else
+    step "Installing python3 via Homebrew"
     echo "[setup] python3: not found — installing via Homebrew..."
     if command -v brew >/dev/null 2>&1; then
         install_output=$(brew_install python3)
@@ -83,8 +94,10 @@ else
 fi
 
 # ── pip ──────────────────────────────────────────────────────────────────────
+step "Checking pip"
 if command -v python3 >/dev/null 2>&1; then
     if ! python3 -m pip --version >/dev/null 2>&1; then
+        step "Installing pip"
         echo "[setup] pip: not found — trying ensurepip..."
         install_output=$(python3 -m ensurepip --upgrade 2>&1)
         if ! python3 -m pip --version >/dev/null 2>&1; then
@@ -103,8 +116,10 @@ fi
 # "externally managed" under PEP 668, so this sidesteps that guard entirely
 # and never risks upgrading some shared Homebrew-managed dependency.
 VENV_DIR="${PAPERCLIP_VENV_DIR:-$HOME/.paperclip2/venv}"
+step "Checking markitdown"
 if command -v python3 >/dev/null 2>&1; then
     if [ ! -x "$VENV_DIR/bin/python3" ]; then
+        step "Creating Python virtualenv"
         venv_output=$(python3 -m venv "$VENV_DIR" 2>&1)
     fi
     if [ ! -x "$VENV_DIR/bin/python3" ]; then
@@ -112,6 +127,7 @@ if command -v python3 >/dev/null 2>&1; then
     elif "$VENV_DIR/bin/python3" -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
         echo "[setup] markitdown: OK"
     else
+        step "Installing markitdown"
         echo "[setup] markitdown: not found — installing..."
         install_output=$("$VENV_DIR/bin/python3" -m pip install markitdown 2>&1)
         if "$VENV_DIR/bin/python3" -c "from markitdown import MarkItDown" >/dev/null 2>&1; then
@@ -130,9 +146,11 @@ if command -v python3 >/dev/null 2>&1; then
 fi
 
 # ── Node.js / npm ────────────────────────────────────────────────────────────
+step "Checking npm"
 if command -v npm >/dev/null 2>&1; then
     echo "[setup] npm: OK"
 else
+    step "Installing Node.js via Homebrew"
     echo "[setup] npm: not found — installing Node.js via Homebrew..."
     if command -v brew >/dev/null 2>&1; then
         install_output=$(brew_install node)
@@ -147,6 +165,7 @@ else
 fi
 
 # ── chromium ─────────────────────────────────────────────────────────────────
+step "Checking chromium"
 chromium_ok=0
 for p in "/Applications/Chromium.app/Contents/MacOS/Chromium" \
          "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome" \
@@ -159,6 +178,7 @@ for p in "/Applications/Chromium.app/Contents/MacOS/Chromium" \
     fi
 done
 if [ "$chromium_ok" -eq 0 ]; then
+    step "Installing Chromium via Homebrew"
     echo "[setup] chromium: not found — installing via Homebrew..."
     if command -v brew >/dev/null 2>&1; then
         install_output=$(HOMEBREW_NO_AUTO_UPDATE=1 brew install --cask chromium 2>&1)
@@ -180,9 +200,11 @@ ${more_output}"
 fi
 
 # ── gh CLI ───────────────────────────────────────────────────────────────────
+step "Checking gh CLI"
 if command -v gh >/dev/null 2>&1; then
     echo "[setup] gh CLI: OK"
 else
+    step "Installing gh CLI via Homebrew"
     echo "[setup] gh CLI: not found — installing via Homebrew..."
     if command -v brew >/dev/null 2>&1; then
         install_output=$(brew_install gh)
@@ -197,9 +219,11 @@ else
 fi
 
 # ── codegraph ────────────────────────────────────────────────────────────────
+step "Checking codegraph"
 if command -v codegraph >/dev/null 2>&1; then
     echo "[setup] codegraph: OK"
 else
+    step "Installing codegraph via npm"
     echo "[setup] codegraph: not found — installing via npm..."
     if command -v npm >/dev/null 2>&1; then
         install_output=$(npm install -g @colbymchenry/codegraph 2>&1)
