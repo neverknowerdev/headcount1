@@ -31,6 +31,13 @@ function Add-SoftFailure($Name, $Reason, $Detail) {
     }
 }
 
+# Write-Step announces what setup is currently working on. The Go side watches
+# the script's output for these lines and shows the message in the UI loading
+# screen, so emit one before anything that might take a while.
+function Write-Step($Message) {
+    Write-Host "[setup] STEP: $Message"
+}
+
 function Test-Command($Cmd) {
     return $null -ne (Get-Command $Cmd -ErrorAction SilentlyContinue)
 }
@@ -47,9 +54,11 @@ function Invoke-Winget($Id) {
 }
 
 # ── git ──────────────────────────────────────────────────────────────────────
+Write-Step "Checking git"
 if (Test-Command git) {
     Write-Host "[setup] git: OK"
 } else {
+    Write-Step "Installing git via winget"
     Write-Host "[setup] git: not found — installing..."
     $installed = Invoke-Winget 'Git.Git'
     $installOutput = $script:LastWingetOutput
@@ -67,6 +76,7 @@ if (Test-Command git) {
 }
 
 # ── python3 ──────────────────────────────────────────────────────────────────
+Write-Step "Checking python3"
 $pythonCmd = $null
 foreach ($candidate in @('python3', 'python', 'py')) {
     if (Test-Command $candidate) {
@@ -82,6 +92,7 @@ foreach ($candidate in @('python3', 'python', 'py')) {
 if ($pythonCmd) {
     Write-Host "[setup] python3: OK ($pythonCmd)"
 } else {
+    Write-Step "Installing python3 via winget"
     Write-Host "[setup] python3: not found — installing..."
     $installed = Invoke-Winget 'Python.Python.3'
     $installOutput = $script:LastWingetOutput
@@ -99,9 +110,11 @@ if ($pythonCmd) {
 }
 
 # ── pip ──────────────────────────────────────────────────────────────────────
+Write-Step "Checking pip"
 if ($pythonCmd) {
     $pipOk = & $pythonCmd -m pip --version 2>&1
     if ($LASTEXITCODE -ne 0) {
+        Write-Step "Installing pip"
         Write-Host "[setup] pip: not found — trying ensurepip..."
         $ensureOutput = & $pythonCmd -m ensurepip --upgrade 2>&1 | Out-String
         $pipOk = & $pythonCmd -m pip --version 2>&1
@@ -116,11 +129,13 @@ if ($pythonCmd) {
 }
 
 # ── markitdown ───────────────────────────────────────────────────────────────
+Write-Step "Checking markitdown"
 if ($pythonCmd) {
     & $pythonCmd -c "from markitdown import MarkItDown" 2>&1 | Out-Null
     if ($LASTEXITCODE -eq 0) {
         Write-Host "[setup] markitdown: OK"
     } else {
+        Write-Step "Installing markitdown"
         Write-Host "[setup] markitdown: not found — installing..."
         $pipOutput = & $pythonCmd -m pip install markitdown 2>&1 | Out-String
         & $pythonCmd -c "from markitdown import MarkItDown" 2>&1 | Out-Null
@@ -138,9 +153,11 @@ if ($pythonCmd) {
 }
 
 # ── Node.js / npm ────────────────────────────────────────────────────────────
+Write-Step "Checking npm"
 if (Test-Command npm) {
     Write-Host "[setup] npm: OK"
 } else {
+    Write-Step "Installing Node.js via winget"
     Write-Host "[setup] npm: not found — installing Node.js..."
     $installed = Invoke-Winget 'OpenJS.NodeJS'
     $installOutput = $script:LastWingetOutput
@@ -157,6 +174,7 @@ if (Test-Command npm) {
 }
 
 # ── chromium ─────────────────────────────────────────────────────────────────
+Write-Step "Checking chromium"
 $chromiumPaths = @(
     "$env:LOCALAPPDATA\Chromium\Application\chrome.exe",
     "$env:PROGRAMFILES\Chromium\Application\chrome.exe",
@@ -169,6 +187,7 @@ if ($chromiumFound) {
 } elseif (Test-Command chrome) {
     Write-Host "[setup] chromium: OK ($(Get-Command chrome | Select-Object -ExpandProperty Source))"
 } else {
+    Write-Step "Installing Chromium via winget"
     Write-Host "[setup] chromium: not found — installing..."
     $installed = Invoke-Winget 'Chromium.Chromium'
     $installOutput = $script:LastWingetOutput
@@ -184,9 +203,11 @@ if ($chromiumFound) {
 }
 
 # ── gh CLI ───────────────────────────────────────────────────────────────────
+Write-Step "Checking gh CLI"
 if (Test-Command gh) {
     Write-Host "[setup] gh CLI: OK"
 } else {
+    Write-Step "Installing gh CLI via winget"
     Write-Host "[setup] gh CLI: not found — installing..."
     $installed = Invoke-Winget 'GitHub.cli'
     $installOutput = $script:LastWingetOutput
@@ -203,9 +224,11 @@ if (Test-Command gh) {
 }
 
 # ── codegraph ────────────────────────────────────────────────────────────────
+Write-Step "Checking codegraph"
 if (Test-Command codegraph) {
     Write-Host "[setup] codegraph: OK"
 } else {
+    Write-Step "Installing codegraph via npm"
     Write-Host "[setup] codegraph: not found — installing via npm..."
     if (Test-Command npm) {
         $installOutput = & npm install -g @colbymchenry/codegraph 2>&1 | Out-String
