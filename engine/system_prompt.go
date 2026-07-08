@@ -32,11 +32,16 @@ type Settings struct {
 
 // loadSettings reads the app settings. The canonical file is the one the
 // settings API writes (PaperclipHome()/settings.yaml); the legacy
-// ~/.paperclip2_settings.yaml location is kept as a fallback.
+// ~/.paperclip2_settings.yaml location is kept as a fallback. In E2E mode
+// (E2E_PAPERCLIP_HOME set) the legacy fallback is skipped — tests must stay
+// inside their isolated home and never pick up the developer's real
+// base_path.
 func loadSettings() Settings {
 	paths := []string{db.SettingsFilePath()}
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
+	if os.Getenv("E2E_PAPERCLIP_HOME") == "" {
+		if homeDir, err := os.UserHomeDir(); err == nil {
+			paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
+		}
 	}
 	for _, settingsPath := range paths {
 		data, err := os.ReadFile(settingsPath)
