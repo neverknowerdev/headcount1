@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"strings"
@@ -72,6 +73,43 @@ func resolveModel(cfg *agentconfig.AgentConfig, provider db.LLMProvider, agentMo
 		return provider.DefaultModel, nil
 	}
 	return "", fmt.Errorf("provider %q has no default model configured", provider.Name)
+}
+
+// resolveProvider resolves the LLM provider+model target for a run. Agents
+// bound to a model group (agent.ModelGroupID set) get a synthetic provider
+// pointing at the local group-router gateway — free-first ordering,
+// failover, and stats collection all happen there, keyed by the group's
+// slug used as the "model" name. Otherwise the agent's fixed provider is
+// loaded directly and its model resolved via resolveModel.
+func resolveProvider(ctx context.Context, q *db.Queries, agent db.Agent, agentCfg *agentconfig.AgentConfig) (db.LLMProvider, string, error) {
+	if agent.ModelGroupID != nil {
+		group, err := q.GetModelGroup(ctx, *agent.ModelGroupID)
+		if err != nil {
+			return db.LLMProvider{}, "", fmt.Errorf("failed to get model group: %w", err)
+		}
+		if len(group.Members) == 0 {
+			return db.LLMProvider{}, "", fmt.Errorf("model group %q has no members", group.Name)
+		}
+		provider := db.LLMProvider{
+			Name:         group.Name + " (model group)",
+			BaseUrl:      modelGroupProxyBaseURL(group.Slug),
+			ProviderType: "openai",
+		}
+		return provider, group.Slug, nil
+	}
+
+	if agent.ProviderID == nil {
+		return db.LLMProvider{}, "", fmt.Errorf("agent has no provider or model group configured")
+	}
+	provider, err := q.GetLLMProvider(ctx, *agent.ProviderID)
+	if err != nil {
+		return db.LLMProvider{}, "", fmt.Errorf("failed to get provider: %w", err)
+	}
+	model, err := resolveModel(agentCfg, provider, agent.Model)
+	if err != nil {
+		return db.LLMProvider{}, "", fmt.Errorf("model resolution failed: %w", err)
+	}
+	return provider, model, nil
 }
 
 // modelGroupProxyBaseURL returns the local gateway base URL for a model

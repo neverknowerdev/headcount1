@@ -355,44 +355,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// in-process group router (free-first ordering, failover, stats) through
 	// a synthetic provider pointing at the local gateway; otherwise the
 	// agent's fixed provider+model is used directly.
-	var provider db.LLMProvider
-	var model string
 	groupMode := agent.ModelGroupID != nil
-	if groupMode {
-		group, gErr := e.q.GetModelGroup(ctx, *agent.ModelGroupID)
-		if gErr != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("failed to get model group: %v", gErr))
-			return "failed"
-		}
-		if len(group.Members) == 0 {
-			e.failRun(ctx, run.ID, fmt.Sprintf("model group %q has no members", group.Name))
-			return "failed"
-		}
-		provider = db.LLMProvider{
-			Name:         group.Name + " (model group)",
-			BaseUrl:      modelGroupProxyBaseURL(group.Slug),
-			ProviderType: "openai",
-		}
-		model = group.Slug
-	} else {
-		if agent.ProviderID == nil {
-			e.failRun(ctx, run.ID, "agent has no provider or model group configured")
-			return "failed"
-		}
-		var err error
-		provider, err = e.q.GetLLMProvider(ctx, *agent.ProviderID)
-		if err != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("failed to get provider: %v", err))
-			return "failed"
-		}
-
-		// Resolve the model: intersect AgentConfig.AllowedModels with the
-		// provider's SupportedModels, falling back to the agent/provider default.
-		model, err = resolveModel(agentCfg, provider, agent.Model)
-		if err != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("model resolution failed: %v", err))
-			return "failed"
-		}
+	provider, model, err := resolveProvider(ctx, e.q, agent, agentCfg)
+	if err != nil {
+		e.failRun(ctx, run.ID, err.Error())
+		return "failed"
 	}
 
 	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
@@ -1419,7 +1386,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	return reply, nil
 }
 
-// resolveDefaultModel resolves the provider/model pair configured for one
+// resolvePurposeModel resolves the provider/model pair configured for one
 // internal-use purpose (see db.PurposeCommitMessages, db.PurposeAskArtifact)
 // via the "Default Models" settings — independent of any Model Group's own
 // definition. A purpose can point at a fixed provider+model or at any model
@@ -1428,7 +1395,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 // tracking, which isn't worth the bookkeeping for an infrequent one-shot
 // call). Falls back to the session's own provider and model when the
 // purpose has no override configured, or its target no longer resolves.
-func (e *NativeEngine) resolveDefaultModel(ctx context.Context, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
+func (e *NativeEngine) resolvePurposeModel(ctx context.Context, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
 	setting, err := e.q.GetDefaultModelSetting(ctx, purpose)
 	if err != nil {
 		return sessionProvider, sessionModel
@@ -1505,7 +1472,7 @@ func (e *NativeEngine) askArtifact(
 		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
 	}
 
-	provider, model := e.resolveDefaultModel(ctx, db.PurposeAskArtifact, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, db.PurposeAskArtifact, provider, sessionModel)
 
 	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
 
@@ -1727,7 +1694,7 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if sessionModel == "" {
 		sessionModel = provider.DefaultModel
 	}
-	provider, model := e.resolveDefaultModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
 	if len(diff) > 8000 {
 		diff = diff[:8000] + "\n... (truncated)"
 	}
