@@ -15,10 +15,6 @@ const PURPOSE_LABELS: Record<string, { title: string; description: string }> = {
         title: 'Artifact Q&A (ask_artifact)',
         description: 'Answers an agent\'s question about one artifact via a separate one-shot reader call, so the artifact never enters the asking session\'s context.',
     },
-    hindsight_memory: {
-        title: 'Long-term Memory (Hindsight)',
-        description: 'The LLM the memory backend uses for fact extraction, consolidation and reflect. Leave unset to run memory without an LLM (retain quality degraded).',
-    },
 };
 
 const toFormValue = (s: any): ProviderOrGroupValue => ({

@@ -28,10 +28,6 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 type Settings struct {
 	BasePath         string   `yaml:"base_path"`
 	WorkspaceFolders []string `yaml:"workspace_folders"`
-	// Memory recall token budget overrides — see server/controllers.Settings
-	// for the full doc comment; 0 means use the pkg/hindsight defaults.
-	MemoryRecallMaxTokens   int `yaml:"memory_recall_max_tokens"`
-	MemoryBriefingMaxTokens int `yaml:"memory_briefing_max_tokens"`
 }
 
 // loadSettings reads the app settings. The canonical file is the one the

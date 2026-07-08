@@ -40,10 +40,6 @@ func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 		return fmt.Errorf("failed to rebuild database: %w", err)
 	}
 
-	if PostRestoreHook != nil {
-		PostRestoreHook()
-	}
-
 	log.Printf("Restore completed successfully")
 	return nil
 }

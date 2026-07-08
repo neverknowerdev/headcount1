@@ -229,19 +229,19 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 				}
 
 				task := db.Task{
-					ID:                 rec.ID,
-					CompanyID:          comp.ID,
-					SprintID:           rec.SprintID,
-					Title:              rec.Title,
-					TaskType:           rec.TaskType,
-					Description:        rec.Description,
+					ID:          rec.ID,
+					CompanyID:   comp.ID,
+					SprintID:    rec.SprintID,
+					Title:       rec.Title,
+					TaskType:    rec.TaskType,
+					Description: rec.Description,
 					RefinedDescription: rec.RefinedDescription,
 					AcceptanceCriteria: rec.AcceptanceCriteria,
 					TestCases:          rec.TestCases,
-					Priority:           rec.Priority,
-					Status:             rec.Status,
-					DueDate:            rec.DueDate,
-					IsArchived:         rec.IsArchived,
+					Priority:    rec.Priority,
+					Status:      rec.Status,
+					DueDate:     rec.DueDate,
+					IsArchived:  rec.IsArchived,
 				}
 
 				if rec.ProjectID != nil {
@@ -422,7 +422,5 @@ func (api *API) SyncSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-	// Pick up changed/added/removed doc files into the memory layer.
-	api.SyncAllProjectMemory(context.Background())
 	w.WriteHeader(http.StatusOK)
 }

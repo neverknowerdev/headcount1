@@ -15,12 +15,6 @@ type Settings struct {
 	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
 	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
 	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-	// MemoryRecallMaxTokens / MemoryBriefingMaxTokens override the memory
-	// layer's default recall token budgets (0 = use the built-in defaults:
-	// 6144 for the memory_recall tool, 4096 for the automatic pre-task
-	// briefing — see pkg/hindsight defaultRecallMaxTokens/defaultBriefingMaxTokens).
-	MemoryRecallMaxTokens   int `json:"memory_recall_max_tokens" yaml:"memory_recall_max_tokens"`
-	MemoryBriefingMaxTokens int `json:"memory_briefing_max_tokens" yaml:"memory_briefing_max_tokens"`
 }
 
 type SSHKeyPayload struct {

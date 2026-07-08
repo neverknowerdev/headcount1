@@ -145,28 +145,6 @@ if command -v python3 >/dev/null 2>&1; then
     fi
 fi
 
-# ── hindsight (memory layer) ─────────────────────────────────────────────────
-# Bare-metal install of the Hindsight memory engine (vectorize-io/hindsight)
-# into the same app virtualenv. The server binary ($VENV_DIR/bin/hindsight-api)
-# is launched and managed by the orchestrator itself. Optional: the app runs
-# fine without long-term memory. Skipped when HINDSIGHT_API_URL points at an
-# external server (also how e2e tests inject their mock).
-if [ -z "${HINDSIGHT_API_URL:-}" ] && [ -x "$VENV_DIR/bin/python3" ]; then
-    step "Checking hindsight"
-    if [ -x "$VENV_DIR/bin/hindsight-api" ]; then
-        echo "[setup] hindsight: OK"
-    else
-        step "Installing Hindsight memory engine (this can take a few minutes)"
-        echo "[setup] hindsight: not found — installing (this can take a few minutes)..."
-        install_output=$("$VENV_DIR/bin/python3" -m pip install hindsight-api 2>&1)
-        if [ -x "$VENV_DIR/bin/hindsight-api" ]; then
-            echo "[setup] hindsight: installed"
-        else
-            add_soft_failure "hindsight" "pip install hindsight-api failed — long-term memory will be unavailable" "$install_output"
-        fi
-    fi
-fi
-
 # ── Node.js / npm ────────────────────────────────────────────────────────────
 step "Checking npm"
 if command -v npm >/dev/null 2>&1; then

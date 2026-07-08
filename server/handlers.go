@@ -44,12 +44,6 @@ func (s *Server) CacheMCPTools(ctx context.Context) {
 	api.DiscoverAndCacheAllMCPTools(ctx)
 }
 
-// SyncAllProjectMemory feeds every project's doc files into the memory layer.
-func (s *Server) SyncAllProjectMemory(ctx context.Context) {
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
-	api.SyncAllProjectMemory(ctx)
-}
-
 // InitPendingCodegraphServers runs codegraph init for any project whose
 // codegraph server is not yet in the "ready" state and whose repo is on disk.
 func (s *Server) InitPendingCodegraphServers(ctx context.Context) {
@@ -208,33 +202,6 @@ func (s *Server) Mount(r chi.Router) {
 		} else {
 			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning, "failures": setup.Failures(), "warnings": setup.Warnings()})
 		}
-	})
-
-	r.Route("/memory", func(r chi.Router) {
-		r.Get("/status", api.GetMemoryStatus)
-		r.Get("/banks", api.ListMemoryBanks)
-		r.Route("/banks/{bankID}", func(r chi.Router) {
-			r.Get("/graph", api.GetMemoryGraph)
-			r.Get("/entities-graph", api.GetMemoryEntitiesGraph)
-			r.Get("/memories", api.ListMemoryUnits)
-			r.Get("/memories/{memoryID}", api.GetMemoryUnit)
-			r.Patch("/memories/{memoryID}", api.UpdateMemoryUnit)
-			r.Delete("/memories/{memoryID}", api.DeleteMemoryUnit)
-			r.Post("/recall", api.RecallMemory)
-			r.Post("/ask", api.AskMemory)
-			r.Get("/stats", api.GetMemoryStats)
-			r.Get("/config", api.GetMemoryBankConfig)
-			r.Get("/directives", api.ListMemoryDirectives)
-			r.Get("/tags", api.ListMemoryTags)
-			r.Get("/mental-models", api.ListMentalModels)
-			r.Post("/mental-models", api.CreateMentalModel)
-			r.Get("/mental-models/{modelID}", api.GetMentalModel)
-			r.Patch("/mental-models/{modelID}", api.UpdateMentalModel)
-			r.Post("/mental-models/{modelID}/refresh", api.RefreshMentalModel)
-			r.Delete("/mental-models/{modelID}", api.DeleteMentalModel)
-			r.Get("/mental-models/{modelID}/history", api.GetMentalModelHistory)
-		})
-		r.Post("/projects/{id}/sync", api.SyncProjectMemory)
 	})
 
 	r.Route("/backup", func(r chi.Router) {
