@@ -25,6 +25,23 @@ function extractArchive(archivePath: string): string {
 }
 
 test.describe.serial('Backup & Restore', () => {
+    test.beforeAll(async ({ request }) => {
+        // Start from a clean slate. wipe-db also resets the memory layer's
+        // server-side state (hindsight_documents + the in-process "already
+        // ensured" guards via Service.ResetEnsured), so the company created
+        // below gets its bank configured from scratch even when its ID was
+        // used by an earlier spec file — or by a failed previous attempt of
+        // this serial group (retries re-run this hook).
+        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        for (const subDir of ['data/bt', 'companies/bt', 'data/artifacts/bt', 'workspace/bt']) {
+            const fullPath = path.join(paperclipBase, subDir);
+            if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+        }
+        await request.post('/api/e2e/wipe-db');
+        const resetRes = await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });
+        expect(resetRes.ok).toBeTruthy();
+    });
+
     test('can create backup via API', async ({ request }) => {
         const res = await request.post('/api/backup');
         expect(res.ok()).toBeTruthy();
@@ -84,15 +101,24 @@ test.describe.serial('Backup & Restore', () => {
             },
         });
         expect(memProjectRes.ok()).toBeTruthy();
-        await memProjectRes.json();
+        const memProject = await memProjectRes.json();
         const bank = `company-${company.id}`;
 
-        // Wait for the background doc ingestion to populate the company bank.
+        // Wait for the background doc ingestion to populate the company bank
+        // (scoped to doc memories so stray non-doc memories can never satisfy
+        // or break this wait).
         await expect.poll(async () => {
             const banks = await dumpHindsightBanks();
-            return (banks[bank] || []).length;
+            return (banks[bank] || [])
+                .map((m: any) => m.document_id)
+                .filter((id: string) => (id || '').startsWith('doc:'))
+                .sort();
         }, { timeout: 120_000, intervals: [2000], message: 'project docs should be ingested before backup' })
-            .toBe(3);
+            .toEqual([
+                `doc:${memProject.id}/README.md`,
+                `doc:${memProject.id}/docs/gm-coin.md`,
+                `doc:${memProject.id}/docs/icp-backend.md`,
+            ]);
         const memTextsBefore = (await dumpHindsightBanks())[bank]
             .map((m: any) => m.text).sort();
 
@@ -224,7 +250,8 @@ test.describe.serial('Backup & Restore', () => {
         // ── Memory: the bank was repopulated from the archive without loss ──
         await expect.poll(async () => {
             const banks = await dumpHindsightBanks();
-            return (banks[bank] || []).length;
+            return (banks[bank] || [])
+                .filter((m: any) => (m.document_id || '').startsWith('doc:')).length;
         }, { timeout: 60_000, message: 'memory bank should be re-imported on restore' }).toBe(3);
         const memTextsAfter = (await dumpHindsightBanks())[bank]
             .map((m: any) => m.text).sort();

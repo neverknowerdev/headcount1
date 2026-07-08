@@ -83,28 +83,15 @@ test.describe.serial('Memory (Hindsight) layer', () => {
 
     test.beforeAll(async ({ request }) => {
         cleanFilesystem();
+        // wipe-db fully resets the memory layer's server-side state too: it
+        // clears hindsight_documents AND the Go process's in-memory
+        // "already ensured" guards for bank config / mental models
+        // (Service.ResetEnsured, called from WipeDB), so reused company IDs —
+        // whether from earlier spec files or a serial-mode retry of this one —
+        // get their bank re-configured from scratch against the reset mock.
         await request.post('/api/e2e/wipe-db');
         await resetProviderMock();
         await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });
-
-        // hindsight.Service.EnsureBank guards its config-PATCH/directive-create
-        // work with an in-process "already ensured" flag keyed by numeric
-        // company ID — it does NOT re-check after that, only on first sight of
-        // an ID. wipe-db resets the DB's autoincrement to 1 for every spec
-        // file, but the Go server process (and its ensuredBanks set) is
-        // shared across the whole suite; other spec files that also exercise
-        // memory (e.g. backup_restore, git_project) may have already burned
-        // low company IDs, whose bank config would then never actually PATCH
-        // for the current process lifetime. Burn a generous batch of company
-        // IDs up front so this file's real company gets an ID no earlier
-        // spec file's memory-touching company could have used.
-        for (let i = 0; i < 20; i++) {
-            await request.post('/api/companies', { data: { name: `id-bump-${i}`, short_name: `idb${i}` } });
-        }
-        // NOTE: deliberately not wiping again here — DELETE FROM sqlite_sequence
-        // would reset the autoincrement counter back to 1 and undo the bump.
-        // The bump companies are harmless clutter: every assertion below scopes
-        // by this test's own company_id/bank, and afterAll wipes the DB anyway.
     });
 
     test.afterAll(async ({ request }) => {
@@ -485,9 +472,14 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         const eg = await (await request.get(`/api/memory/banks/${bank}/entities-graph`)).json();
         expect(eg.nodes).toEqual([]);
 
-        // Project memory sync endpoint (no-op here, but must respond OK)
+        // Project memory sync endpoint: docs on disk are unchanged since the
+        // last sync, so this must be a genuine no-op, not just a 200.
         const syncRes = await request.post(`/api/memory/projects/${projectId}/sync`);
         expect(syncRes.ok()).toBeTruthy();
+        const syncBody = await syncRes.json();
+        expect(syncBody.added).toBe(0);
+        expect(syncBody.updated).toBe(0);
+        expect(syncBody.removed).toBe(0);
     });
 
     test('memory UI API surface: config, directives, mental models (Phase 2/3 proxies)', async ({ request }) => {
@@ -532,6 +524,74 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         expect(deleteRes.ok()).toBeTruthy();
         const afterDeleteRes = await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`);
         expect(afterDeleteRes.ok()).toBeFalsy();
+    });
+
+    test('memory UI API surface: mental model create/edit/history and tags', async ({ request }) => {
+        // Validation: name and source_query are required by the server proxy.
+        const missingName = await request.post(`/api/memory/banks/${bank}/mental-models`, {
+            data: { source_query: 'no name given' },
+        });
+        expect(missingName.status()).toBe(400);
+        const missingQuery = await request.post(`/api/memory/banks/${bank}/mental-models`, {
+            data: { name: 'No query' },
+        });
+        expect(missingQuery.status()).toBe(400);
+
+        // Create with a custom deterministic id (Hindsight allows
+        // lowercase-hyphenated custom ids; the response echoes it).
+        const modelId = 'custom-cto-focus';
+        const createRes = await request.post(`/api/memory/banks/${bank}/mental-models`, {
+            data: {
+                id: modelId,
+                name: 'CTO focus',
+                source_query: 'What is the CTO currently working on and struggling with?',
+                tags: ['agent:cto'],
+                max_tokens: 512,
+            },
+        });
+        expect(createRes.ok()).toBeTruthy();
+        const created = await createRes.json();
+        expect(created.mental_model_id).toBe(modelId);
+
+        const model1 = await (await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`)).json();
+        expect(model1.name).toBe('CTO focus');
+        // The bank already holds CTO experience memories, so the synthesis
+        // draws on them right away.
+        expect(model1.content).toContain('ICP backend implemented');
+
+        // PATCH: only the provided fields change.
+        const patchRes = await request.patch(`/api/memory/banks/${bank}/mental-models/${modelId}`, {
+            data: { name: 'CTO focus (renamed)' },
+        });
+        expect(patchRes.ok()).toBeTruthy();
+        const model2 = await (await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}`)).json();
+        expect(model2.name).toBe('CTO focus (renamed)');
+        expect(model2.source_query).toBe('What is the CTO currently working on and struggling with?');
+        expect(model2.tags).toEqual(['agent:cto']);
+
+        // Refresh, then history: one snapshot from creation + one from the
+        // explicit refresh.
+        const refreshRes = await request.post(`/api/memory/banks/${bank}/mental-models/${modelId}/refresh`);
+        expect(refreshRes.ok()).toBeTruthy();
+        const historyRes = await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}/history`);
+        expect(historyRes.ok()).toBeTruthy();
+        const history = await historyRes.json();
+        expect((history.items as any[]).length).toBeGreaterThanOrEqual(2);
+        for (const entry of history.items as any[]) {
+            expect(typeof entry.content).toBe('string');
+            expect(entry.refreshed_at).toBeTruthy();
+        }
+
+        // Tags listing: every scoping level used by the memory layer shows up
+        // with a usage count (doc tags + run tags; only active memories count).
+        const tagsRes = await request.get(`/api/memory/banks/${bank}/tags`);
+        expect(tagsRes.ok()).toBeTruthy();
+        const tags = await tagsRes.json();
+        const byTag = new Map((tags.items as any[]).map((t: any) => [t.tag, t.count]));
+        for (const expected of ['source:docs', `project:${projectId}`, 'agent:cto', 'agent:cmo']) {
+            expect(byTag.get(expected), `tag ${expected} should be listed`).toBeGreaterThan(0);
+        }
+        expect(byTag.get('source:docs')).toBe(3);
     });
 });
 

@@ -1,5 +1,4 @@
 import * as http from 'http';
-import * as net from 'net';
 import * as crypto from 'crypto';
 import { AddressInfo } from 'net';
 
@@ -127,14 +126,27 @@ export async function startMockHindsightServer(): Promise<{ baseUrl: string; por
         }
     });
 
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    // Listen on an OS-assigned free port directly (no probe-then-listen race).
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => {
+            server.removeListener('error', reject);
+            resolve();
+        });
+    });
     const addr = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${addr.port}`;
 
+    // Print the ready line so test output shows the port (same convention as
+    // the mock provider fixture).
     process.stdout.write(`MOCK_HINDSIGHT_READY ${addr.port} ${baseUrl}\n`);
 
-    const stop = () => new Promise<void>((resolve) => server.close(() => resolve()));
+    const stop = () => new Promise<void>((resolve) => {
+        // Drop keep-alive sockets (e.g. from the Go server's http.Client) so
+        // close() resolves promptly instead of waiting out keepAliveTimeout.
+        server.closeAllConnections();
+        server.close(() => resolve());
+    });
     return { baseUrl, port: addr.port, stop };
 }
 
@@ -191,6 +203,16 @@ function handle(
     const rest = m[2] || '';
     const body = parseJSON(rawBody);
 
+    // ── delete bank (hindsight.Client.DeleteBank) ───────────────────────
+    if (method === 'DELETE' && (rest === '' || rest === '/')) {
+        banks.delete(bank);
+        bankConfigs.delete(bank);
+        bankDirectives.delete(bank);
+        bankModels.delete(bank);
+        lastRecalls.delete(bank);
+        return json(res, 200, { status: 'ok' });
+    }
+
     // ── retain ──────────────────────────────────────────────────────────
     if (method === 'POST' && rest === '/memories') {
         const mems = getBank(bank);
@@ -221,6 +243,8 @@ function handle(
             });
             // observation_scopes is accepted and otherwise ignored — the
             // mock doesn't model Hindsight's observation consolidation.
+            // update_mode is likewise ignored: the mock always replaces by
+            // document_id (real Hindsight's default); "append" is not modeled.
         }
         refreshModelsAfterRetain(bank, [...allTags]);
         return json(res, 200, { success: true });
@@ -378,11 +402,13 @@ function handle(
         const q = u.searchParams.get('q');
         const type = u.searchParams.get('type');
         const docID = u.searchParams.get('document_id');
-        const state = u.searchParams.get('state');
+        // Default to active memories only (invalidated ones are curated away);
+        // pass ?state=invalidated (or active) to filter explicitly.
+        const state = u.searchParams.get('state') || 'active';
         if (q) mems = mems.filter((mm) => (mm.text + ' ' + mm.context).toLowerCase().includes(q.toLowerCase()));
         if (type) mems = mems.filter((mm) => mm.type === type);
         if (docID) mems = mems.filter((mm) => mm.document_id === docID);
-        if (state) mems = mems.filter((mm) => mm.state === state);
+        mems = mems.filter((mm) => mm.state === state);
         const total = mems.length;
         const offset = parseInt(u.searchParams.get('offset') || '0', 10) || 0;
         const limit = parseInt(u.searchParams.get('limit') || '100', 10) || 100;
@@ -429,7 +455,8 @@ function handle(
         return json(res, 200, { nodes: [], edges: [] });
     }
     if (method === 'GET' && rest === '/stats') {
-        return json(res, 200, { memory_units: getBank(bank).length });
+        // Invalidated (soft-deleted) memories don't count toward bank stats.
+        return json(res, 200, { memory_units: getBank(bank).filter((mm) => mm.state === 'active').length });
     }
     if (method === 'GET' && rest === '/documents') {
         const docs = [...new Set(getBank(bank).map((mm) => mm.document_id).filter(Boolean))];
@@ -484,7 +511,9 @@ function recall(
         if (m.state !== 'active') continue;
         if (req.types && req.types.length > 0 && !req.types.includes(m.type)) continue;
         if (req.tags && req.tags.length > 0) {
-            // any_strict (and any): memory must share at least one tag
+            // any_strict (and any): memory must share at least one tag.
+            // tags_match "all"/"all_strict"/"exact" are NOT modeled — the Go
+            // service only ever sends "any_strict" (pkg/hindsight/service.go).
             const shared = m.tags.some((t) => req.tags!.includes(t));
             if (!shared) continue;
         }
@@ -545,17 +574,4 @@ async function readBody(req: http.IncomingMessage): Promise<Buffer> {
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     return Buffer.concat(chunks);
-}
-
-function getFreePort(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const srv = net.createServer();
-        srv.unref();
-        srv.on('error', reject);
-        srv.listen(0, '127.0.0.1', () => {
-            const addr = srv.address() as AddressInfo;
-            const port = addr.port;
-            srv.close(() => resolve(port));
-        });
-    });
 }

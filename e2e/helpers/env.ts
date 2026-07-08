@@ -26,9 +26,10 @@ export function loadE2EEnv(): E2EEnv {
         );
     }
     const data = JSON.parse(fs.readFileSync(envFile, 'utf8'));
-    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_TEST_REPO_URL || !data.E2E_PAPERCLIP_HOME) {
+    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_TEST_REPO_URL || !data.E2E_PAPERCLIP_HOME || !data.E2E_HINDSIGHT_URL) {
         throw new Error(
-            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL, or E2E_PAPERCLIP_HOME. ` +
+            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL, ` +
+            `E2E_PAPERCLIP_HOME, or E2E_HINDSIGHT_URL (stale file from an older run?). ` +
             `Got: ${JSON.stringify(data)}`,
         );
     }
