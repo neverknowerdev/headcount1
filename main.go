@@ -216,7 +216,11 @@ func main() {
 		srv.CacheMCPTools(context.Background())
 
 		// Bring the memory backend up (after setup so hindsight-api is
-		// installed), then feed every project's docs into it.
+		// installed), then feed every project's docs into it. Hindsight's
+		// LLM traffic routes through this server's own gateway, so wait for
+		// our HTTP listener to come up first — otherwise hindsight-api's
+		// early requests would hit a connection refused.
+		waitForOwnServer(60 * time.Second)
 		if err := memManager.Start(context.Background()); err != nil {
 			log.Printf("WARNING: memory layer unavailable: %v", err)
 			return
@@ -328,6 +332,27 @@ func recoverStaleRuns(database *gorm.DB) {
 		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
+}
+
+// waitForOwnServer polls this server's own /api/ping until the HTTP listener
+// answers, so components that call back into the server (hindsight-api's LLM
+// traffic rides our gateway) don't race the listener at startup. Gives up
+// after the timeout with a warning rather than blocking forever.
+func waitForOwnServer(timeout time.Duration) {
+	url := gatewayBaseURL() + "/ping"
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	log.Printf("Warning: own HTTP server not reachable at %s after %v; starting memory backend anyway", url, timeout)
 }
 
 // gatewayBaseURL is the loopback address of this server's own LLM gateway,
