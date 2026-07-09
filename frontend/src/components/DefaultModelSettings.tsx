@@ -23,7 +23,7 @@ const PURPOSE_LABELS: Record<string, { title: string; description: string }> = {
 // consolidation/reflect whenever those aren't explicitly configured.
 const HINDSIGHT_ROWS: { purpose: string; label: string; description: string; noneLabel: string }[] = [
     {
-        purpose: 'hindsight_memory',
+        purpose: 'hindsight_retain',
         label: 'Retain',
         description: 'Extracts facts, entities and relationships from new content as it\'s ingested. High volume — a fast, cheap model is usually the best fit.',
         noneLabel: '-- Not configured (memory runs without an LLM) --',
@@ -67,7 +67,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
             setSettings(list);
             setModelGroups(groupsRes.data || []);
             setForms(Object.fromEntries(list.map((s: any) => [s.purpose, toFormValue(s)])));
-            const retain = list.find((s: any) => s.purpose === 'hindsight_memory');
+            const retain = list.find((s: any) => s.purpose === 'hindsight_retain');
             onRetainConfiguredChange?.(!!(retain?.provider_id || retain?.model_group_id));
         } catch (e) {
             console.error(e);

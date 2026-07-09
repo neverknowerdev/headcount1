@@ -57,7 +57,7 @@ export const ProvidersManager: React.FC = () => {
     // purpose to "Session's own model" server-side, and this makes the UI
     // reflect it immediately.
     const [modelGroupsVersion, setModelGroupsVersion] = useState(0);
-    // Set once DefaultModelSettings has fetched the "hindsight_memory"
+    // Set once DefaultModelSettings has fetched the "hindsight_retain"
     // (retain) purpose, so the page-level alert doesn't flash on load.
     const [retainConfigured, setRetainConfigured] = useState<boolean | null>(null);
 

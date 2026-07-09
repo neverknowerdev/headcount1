@@ -170,13 +170,13 @@ func main() {
 
 	// Hindsight long-term memory layer. The manager runs a bare-metal
 	// hindsight-api process (installed into the app venv by the setup script)
-	// configured with the "Default Models" purpose hindsight_memory as its
+	// configured with the "Default Models" purpose hindsight_retain as its
 	// LLM (a fixed provider+model, or a model group's best free member);
 	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
 	// tests).
 	memManager := hindsight.NewManager(func(ctx context.Context) hindsight.OpLLMConfigs {
 		q := db.New(database)
-		retain, hasRetain := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightMemory)
+		retain, hasRetain := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightRetain)
 		consolidation, hasConsolidation := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightConsolidation)
 		reflect, hasReflect := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightReflect)
 		return hindsight.OpLLMConfigs{
@@ -331,7 +331,7 @@ func recoverStaleRuns(database *gorm.DB) {
 }
 
 // resolveHindsightLLMConfig resolves the provider+model configured for one
-// hindsight purpose (db.PurposeHindsightMemory/Consolidation/Reflect, i.e.
+// hindsight purpose (db.PurposeHindsightRetain/Consolidation/Reflect, i.e.
 // retain/consolidation/reflect) via the "Default Models" settings, mirroring
 // engine.NativeEngine.resolvePurposeModel's model group handling but with no
 // session provider/model to fall back to — an unconfigured purpose means

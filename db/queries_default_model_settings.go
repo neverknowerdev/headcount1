@@ -12,15 +12,22 @@ import (
 const (
 	PurposeCommitMessages         = "commit_messages"
 	PurposeAskArtifact            = "ask_artifact"
-	PurposeHindsightMemory        = "hindsight_memory" // retain
+	PurposeHindsightRetain        = "hindsight_retain"
 	PurposeHindsightConsolidation = "hindsight_consolidation"
 	PurposeHindsightReflect       = "hindsight_reflect"
 )
 
+// legacyPurposeRenames maps a superseded purpose string to its current name,
+// applied once by EnsureDefaultModelSettings so an existing row's
+// configuration survives the rename instead of being orphaned.
+var legacyPurposeRenames = map[string]string{
+	"hindsight_memory": PurposeHindsightRetain,
+}
+
 var defaultModelSettingPurposes = []string{
 	PurposeCommitMessages,
 	PurposeAskArtifact,
-	PurposeHindsightMemory,
+	PurposeHindsightRetain,
 	PurposeHindsightConsolidation,
 	PurposeHindsightReflect,
 }
@@ -66,6 +73,20 @@ func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, purpose string,
 // until a user points it at a provider/model or a model group. Idempotent:
 // never overwrites an existing row's configuration.
 func (q *Queries) EnsureDefaultModelSettings(ctx context.Context) error {
+	for oldPurpose, newPurpose := range legacyPurposeRenames {
+		var newExisting DefaultModelSetting
+		err := q.db.WithContext(ctx).Where("purpose = ?", newPurpose).First(&newExisting).Error
+		if err == nil {
+			continue // already migrated (or seeded fresh under the new name)
+		}
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		if err := q.db.WithContext(ctx).Model(&DefaultModelSetting{}).Where("purpose = ?", oldPurpose).Update("purpose", newPurpose).Error; err != nil {
+			return err
+		}
+	}
+
 	for _, purpose := range defaultModelSettingPurposes {
 		var existing DefaultModelSetting
 		err := q.db.WithContext(ctx).Where("purpose = ?", purpose).First(&existing).Error
