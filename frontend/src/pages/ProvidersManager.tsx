@@ -57,9 +57,6 @@ export const ProvidersManager: React.FC = () => {
     // purpose to "Session's own model" server-side, and this makes the UI
     // reflect it immediately.
     const [modelGroupsVersion, setModelGroupsVersion] = useState(0);
-    // Set once DefaultModelSettings has fetched the "hindsight_retain"
-    // (retain) purpose, so the page-level alert doesn't flash on load.
-    const [retainConfigured, setRetainConfigured] = useState<boolean | null>(null);
 
     // Built-in providers (OpenRouter/OpenCode free models) get a simplified
     // "Activate" flow instead of the generic edit modal — their model list
@@ -376,12 +373,6 @@ export const ProvidersManager: React.FC = () => {
                 </button>
             </div>
 
-            {retainConfigured === false && (
-                <div className="p-3 rounded text-sm bg-amber-50 text-amber-800 border border-amber-200">
-                    Long-term memory has no Retain model configured — the memory backend is running without an LLM, so retain quality is degraded. Set one under "Long-term Memory (Hindsight)" below.
-                </div>
-            )}
-
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {providers.map(p => (
                     <div key={p.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden ${p.builtin && !p.enabled ? 'opacity-60' : ''}`}>
@@ -471,7 +462,7 @@ export const ProvidersManager: React.FC = () => {
 
             <ModelGroups providers={providers} onChange={() => setModelGroupsVersion(v => v + 1)} />
 
-            <DefaultModelSettings providers={providers} refreshSignal={modelGroupsVersion} onRetainConfiguredChange={setRetainConfigured} />
+            <DefaultModelSettings providers={providers} refreshSignal={modelGroupsVersion} />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">

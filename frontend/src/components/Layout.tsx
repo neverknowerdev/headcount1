@@ -2,6 +2,7 @@ import React, { useEffect, useState } from 'react';
 import axios from 'axios';
 import { CompanySwitcher } from './CompanySwitcher';
 import { Sidebar } from './Sidebar';
+import { MemoryModelAlert } from './MemoryModelAlert';
 import { useStore } from '../store';
 import { AddCompany } from '../pages/AddCompany';
 import { useLocation, useNavigate } from 'react-router-dom';
@@ -78,6 +79,7 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
       <CompanySwitcher />
       <Sidebar />
       <main className="flex-1 overflow-y-auto p-8">
+        <MemoryModelAlert />
         {children}
       </main>
     </div>

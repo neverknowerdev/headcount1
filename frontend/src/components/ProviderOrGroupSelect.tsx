@@ -39,10 +39,12 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
 
     return (
         <div>
-            <div className="flex justify-between items-center mb-1">
-                <label className="block text-sm font-medium text-gray-700">{label}</label>
-                {manageLinkTo && <Link to={manageLinkTo} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>}
-            </div>
+            {(label || manageLinkTo) && (
+                <div className="flex justify-between items-center mb-1">
+                    <label className="block text-sm font-medium text-gray-700">{label}</label>
+                    {manageLinkTo && <Link to={manageLinkTo} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Providers</Link>}
+                </div>
+            )}
             <select
                 value={selectValue}
                 onChange={e => {

@@ -49,7 +49,7 @@ const toFormValue = (s: any): ProviderOrGroupValue => ({
     model: s?.model || '',
 });
 
-export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: number; onRetainConfiguredChange?: (configured: boolean) => void }> = ({ providers, refreshSignal, onRetainConfiguredChange }) => {
+export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: number }> = ({ providers, refreshSignal }) => {
     const [settings, setSettings] = useState<any[]>([]);
     const [modelGroups, setModelGroups] = useState<any[]>([]);
     const [forms, setForms] = useState<Record<string, ProviderOrGroupValue>>({});
@@ -67,12 +67,10 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
             setSettings(list);
             setModelGroups(groupsRes.data || []);
             setForms(Object.fromEntries(list.map((s: any) => [s.purpose, toFormValue(s)])));
-            const retain = list.find((s: any) => s.purpose === 'hindsight_retain');
-            onRetainConfiguredChange?.(!!(retain?.provider_id || retain?.model_group_id));
         } catch (e) {
             console.error(e);
         }
-    }, [onRetainConfiguredChange]);
+    }, []);
 
     // refreshSignal changes whenever a model group is created/edited/deleted
     // elsewhere on the page, so a purpose pointed at a deleted group shows
@@ -96,6 +94,9 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
             setSavedPurpose(purpose);
             setTimeout(() => setSavedPurpose(p => (p === purpose ? null : p)), 2000);
             fetchAll();
+            // Tell the app-level memory alert (Layout) to re-check whether a
+            // retain model is now configured.
+            window.dispatchEvent(new Event('default-model-settings-changed'));
         } catch (e: any) {
             setError(e.response?.data?.error || 'Save failed');
         } finally {
@@ -154,7 +155,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                 })}
 
                 {hindsightSettings.length > 0 && (
-                    <div className="bg-white p-6 rounded-lg border shadow-sm space-y-5 xl:col-span-2">
+                    <div className="bg-white p-6 rounded-lg border shadow-sm space-y-4 xl:col-span-2">
                         <div>
                             <h3 className="text-lg font-bold text-gray-900">Long-term Memory (Hindsight)</h3>
                             <p className="text-sm text-gray-600 mt-1">
@@ -166,17 +167,29 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                             if (!s) return null;
                             const value = forms[row.purpose] || toFormValue(s);
                             return (
-                                <div key={row.purpose} className="border-t pt-4 first:border-t-0 first:pt-0 space-y-3">
-                                    <p className="text-sm text-gray-600">{row.description}</p>
-                                    <ProviderOrGroupSelect
-                                        label={row.label}
-                                        providers={providers}
-                                        modelGroups={modelGroups}
-                                        noneLabel={row.noneLabel}
-                                        value={value}
-                                        onChange={v => setForms(f => ({ ...f, [row.purpose]: v }))}
-                                    />
-                                    {saveButton(row.purpose)}
+                                <div key={row.purpose}>
+                                    <div className="flex items-start gap-3">
+                                        <label className="w-28 shrink-0 pt-2 text-sm font-medium text-gray-700">{row.label}</label>
+                                        <div className="flex-1 min-w-0">
+                                            <ProviderOrGroupSelect
+                                                label=""
+                                                providers={providers}
+                                                modelGroups={modelGroups}
+                                                noneLabel={row.noneLabel}
+                                                value={value}
+                                                onChange={v => setForms(f => ({ ...f, [row.purpose]: v }))}
+                                            />
+                                        </div>
+                                        <button
+                                            onClick={() => handleSave(row.purpose)}
+                                            disabled={savingPurpose === row.purpose}
+                                            className={`bg-indigo-600 text-white px-3 py-1.5 rounded text-sm hover:bg-indigo-700 mt-0.5 ${savingPurpose === row.purpose ? 'opacity-50 cursor-not-allowed' : ''}`}
+                                        >
+                                            {savingPurpose === row.purpose ? 'Saving...' : 'Save'}
+                                        </button>
+                                        {savedPurpose === row.purpose && <span className="text-sm text-green-600 pt-2">Saved</span>}
+                                    </div>
+                                    <p className="text-xs text-gray-500 mt-1 pl-[7.75rem]">{row.description}</p>
                                 </div>
                             );
                         })}
