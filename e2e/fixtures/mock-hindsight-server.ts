@@ -455,10 +455,15 @@ function handle(
         const q = (u.searchParams.get('q') || '').toLowerCase();
         let mems = getBank(bank);
         if (q) mems = mems.filter((mm) => (mm.text + ' ' + mm.context).toLowerCase().includes(q));
+        // Cytoscape-style { data: {...} } envelope, matching real Hindsight's
+        // get_graph_data shape — the frontend normalizes this, so the mock
+        // must return the same wire format or it can't catch a regression there.
         const nodes = mems.map((mm) => ({
-            id: mm.id,
-            label: mm.text.length > 80 ? mm.text.slice(0, 80) + '…' : mm.text,
-            type: mm.type,
+            data: {
+                id: mm.id,
+                label: mm.text.length > 80 ? mm.text.slice(0, 80) + '…' : mm.text,
+                type: mm.type,
+            },
         }));
         return json(res, 200, { nodes, edges: [], table_rows: [], total_units: mems.length, limit: 1000 });
     }

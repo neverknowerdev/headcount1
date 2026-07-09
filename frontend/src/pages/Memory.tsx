@@ -75,7 +75,34 @@ const colorForType = (type?: string): string => {
     return palette[h % palette.length];
 };
 
-const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + '…' : s);
+const truncate = (s: string | undefined | null, n: number) => {
+    const str = s ?? '';
+    return str.length > n ? str.slice(0, n - 1) + '…' : str;
+};
+
+// Hindsight's raw graph/entities-graph responses use Cytoscape's
+// { data: { id, label, ... } } node envelope and { data: { source, target,
+// ... } } edges; normalize to the flat shape the rest of this component
+// works with so callers don't need to know which wire format the server used.
+const normalizeGraphNode = (n: any): GraphNode => {
+    const d = (n && n.data) || n || {};
+    const id = String(d.id ?? '');
+    return {
+        id,
+        label: d.label ?? d.text ?? d.canonical_name ?? id,
+        type: d.type,
+    };
+};
+
+const normalizeGraphEdge = (e: any): GraphEdge => {
+    const d = (e && e.data) || e || {};
+    return {
+        from: String(d.source ?? d.from ?? ''),
+        to: String(d.target ?? d.to ?? ''),
+        type: d.linkType ?? d.type,
+        weight: d.weight,
+    };
+};
 
 const memText = (m: MemoryItem): string =>
     typeof m.text === 'string' ? m.text : (typeof (m as any).content === 'string' ? (m as any).content : JSON.stringify(m));
@@ -749,7 +776,17 @@ export const Memory: React.FC = () => {
             ? `/api/memory/banks/${encodeURIComponent(selectedBankId)}/graph?limit=150`
             : `/api/memory/banks/${encodeURIComponent(selectedBankId)}/entities-graph?limit=150`;
         axios.get(url)
-            .then((res) => { if (!cancelled) setGraph({ nodes: res.data?.nodes || [], edges: res.data?.edges || [], total_units: res.data?.total_units, limit: res.data?.limit }); })
+            .then((res) => {
+                if (cancelled) return;
+                const rawNodes: any[] = res.data?.nodes || [];
+                const rawEdges: any[] = res.data?.edges || [];
+                setGraph({
+                    nodes: rawNodes.map(normalizeGraphNode),
+                    edges: rawEdges.map(normalizeGraphEdge),
+                    total_units: res.data?.total_units,
+                    limit: res.data?.limit,
+                });
+            })
             .catch((e: unknown) => { if (!cancelled) { setGraph(null); setGraphError(errMsg(e, 'Failed to load graph')); } })
             .finally(() => { if (!cancelled) setGraphLoading(false); });
         return () => { cancelled = true; };
