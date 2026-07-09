@@ -136,29 +136,34 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                     const info = PURPOSE_LABELS[s.purpose] || { title: s.purpose, description: '' };
                     const value = forms[s.purpose] || toFormValue(s);
                     return (
-                        <div key={s.purpose} className="bg-white p-6 rounded-lg border shadow-sm space-y-3">
+                        <div key={s.purpose} className="bg-white p-4 rounded-lg border shadow-sm space-y-2">
                             <div>
-                                <h3 className="text-lg font-bold text-gray-900">{info.title}</h3>
-                                {info.description && <p className="text-sm text-gray-600 mt-1">{info.description}</p>}
+                                <h3 className="text-base font-bold text-gray-900">{info.title}</h3>
+                                {info.description && <p className="text-xs text-gray-500 mt-0.5">{info.description}</p>}
                             </div>
-                            <ProviderOrGroupSelect
-                                label="Provider or Model Group"
-                                providers={providers}
-                                modelGroups={modelGroups}
-                                noneLabel="Session's own model (no override)"
-                                value={value}
-                                onChange={v => setForms(f => ({ ...f, [s.purpose]: v }))}
-                            />
-                            {saveButton(s.purpose)}
+                            <div className="flex items-start gap-3">
+                                <div className="flex-1 min-w-0">
+                                    <ProviderOrGroupSelect
+                                        label=""
+                                        compact
+                                        providers={providers}
+                                        modelGroups={modelGroups}
+                                        noneLabel="Session's own model (no override)"
+                                        value={value}
+                                        onChange={v => setForms(f => ({ ...f, [s.purpose]: v }))}
+                                    />
+                                </div>
+                                {saveButton(s.purpose)}
+                            </div>
                         </div>
                     );
                 })}
 
                 {hindsightSettings.length > 0 && (
-                    <div className="bg-white p-6 rounded-lg border shadow-sm space-y-4 xl:col-span-2">
+                    <div className="bg-white p-4 rounded-lg border shadow-sm space-y-3 xl:col-span-2">
                         <div>
-                            <h3 className="text-lg font-bold text-gray-900">Long-term Memory (Hindsight)</h3>
-                            <p className="text-sm text-gray-600 mt-1">
+                            <h3 className="text-base font-bold text-gray-900">Long-term Memory (Hindsight)</h3>
+                            <p className="text-xs text-gray-500 mt-0.5">
                                 The model the memory backend uses for each stage: retain (fact extraction), consolidation and reflect.
                             </p>
                         </div>
@@ -173,6 +178,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                                         <div className="flex-1 min-w-0">
                                             <ProviderOrGroupSelect
                                                 label=""
+                                                compact
                                                 providers={providers}
                                                 modelGroups={modelGroups}
                                                 noneLabel={row.noneLabel}
