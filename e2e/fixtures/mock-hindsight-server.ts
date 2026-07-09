@@ -203,6 +203,17 @@ function handle(
     const rest = m[2] || '';
     const body = parseJSON(rawBody);
 
+    // ── create bank (hindsight.Client.CreateBank) ───────────────────────
+    // Real Hindsight's PUT /v1/default/banks/{id} auto-creates the bank
+    // profile (idempotently) so a later PATCH /config or POST /directives
+    // has a row to act on; mirror that here so EnsureBank's create-then-
+    // configure sequence works against the mock the same as the real API.
+    if (method === 'PUT' && (rest === '' || rest === '/')) {
+        getBank(bank);
+        if (!bankConfigs.has(bank)) bankConfigs.set(bank, {});
+        return json(res, 200, { bank_id: bank });
+    }
+
     // ── delete bank (hindsight.Client.DeleteBank) ───────────────────────
     if (method === 'DELETE' && (rest === '' || rest === '/')) {
         banks.delete(bank);
