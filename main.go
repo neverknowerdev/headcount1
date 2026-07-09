@@ -3,12 +3,12 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
 	"os"
 	"path/filepath"
-	"sort"
 	"strings"
 	"time"
 
@@ -170,8 +170,8 @@ func main() {
 
 	// Hindsight long-term memory layer. The manager runs a bare-metal
 	// hindsight-api process (installed into the app venv by the setup script)
-	// configured with the "Default Models" purpose hindsight_retain as its
-	// LLM (a fixed provider+model, or a model group's best free member);
+	// whose LLMs come from the "Default Models" hindsight purposes, routed
+	// through this server's own LLM gateway (see resolveHindsightLLMConfig);
 	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
 	// tests).
 	memManager := hindsight.NewManager(func(ctx context.Context) hindsight.OpLLMConfigs {
@@ -330,13 +330,26 @@ func recoverStaleRuns(database *gorm.DB) {
 	}
 }
 
+// gatewayBaseURL is the loopback address of this server's own LLM gateway,
+// used as the base for the /api/proxy/... URLs handed to hindsight-api.
+func gatewayBaseURL() string {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return "http://127.0.0.1:" + port + "/api"
+}
+
 // resolveHindsightLLMConfig resolves the provider+model configured for one
 // hindsight purpose (db.PurposeHindsightRetain/Consolidation/Reflect, i.e.
-// retain/consolidation/reflect) via the "Default Models" settings, mirroring
-// engine.NativeEngine.resolvePurposeModel's model group handling but with no
-// session provider/model to fall back to — an unconfigured purpose means
-// that operation has no override (retain: no LLM at all; consolidation/
-// reflect: hindsight-api falls back to the retain LLM itself).
+// retain/consolidation/reflect) via the "Default Models" settings — an
+// unconfigured purpose means that operation has no override (retain: no LLM
+// at all; consolidation/reflect: hindsight-api falls back to the retain LLM
+// itself). Rather than the provider's own URL, hindsight is pointed at this
+// server's LLM gateway (/api/proxy/group/... or /api/proxy/provider/...), so
+// its traffic gets the gateway's proxy logging and token stats, and a model
+// group keeps its live failover/health routing instead of being flattened to
+// one member at hindsight-api startup.
 func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries, purpose string) (hindsight.LLMConfig, bool) {
 	setting, err := q.GetDefaultModelSetting(ctx, purpose)
 	if err != nil {
@@ -345,21 +358,16 @@ func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries, purpose strin
 
 	if setting.ModelGroupID != nil {
 		group, gErr := q.GetModelGroup(ctx, *setting.ModelGroupID)
-		if gErr != nil {
+		if gErr != nil || len(db.ExpandModelGroupMembers(group.Members)) == 0 {
 			return hindsight.LLMConfig{}, false
 		}
-		members := db.ExpandModelGroupMembers(group.Members)
-		if len(members) == 0 {
-			return hindsight.LLMConfig{}, false
-		}
-		sort.SliceStable(members, func(i, j int) bool {
-			if members[i].IsFree != members[j].IsFree {
-				return members[i].IsFree
-			}
-			return members[i].Priority < members[j].Priority
-		})
-		best := members[0]
-		return hindsight.LLMConfig{BaseURL: best.Provider.BaseUrl, APIKey: best.Provider.ApiKey, Model: best.Model}, true
+		// The group's slug is a routable pseudo-model: the group router
+		// substitutes each attempted member's real model into the body.
+		return hindsight.LLMConfig{
+			BaseURL: fmt.Sprintf("%s/proxy/group/%d/v1", gatewayBaseURL(), group.ID),
+			APIKey:  "internal", // gateway injects the real provider key per attempt
+			Model:   group.Slug,
+		}, true
 	}
 
 	if setting.ProviderID != nil {
@@ -371,7 +379,11 @@ func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries, purpose strin
 		if model == "" {
 			model = provider.DefaultModel
 		}
-		return hindsight.LLMConfig{BaseURL: provider.BaseUrl, APIKey: provider.ApiKey, Model: model}, true
+		return hindsight.LLMConfig{
+			BaseURL: fmt.Sprintf("%s/proxy/provider/%d/v1", gatewayBaseURL(), provider.ID),
+			APIKey:  "internal", // gateway swaps in the provider's real key
+			Model:   model,
+		}, true
 	}
 
 	return hindsight.LLMConfig{}, false

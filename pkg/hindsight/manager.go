@@ -16,8 +16,9 @@ import (
 
 // LLMConfig is the model Hindsight uses for one operation (retain,
 // consolidation, or reflect). It is resolved from the app's "Default Models"
-// settings: the provider's BaseUrl acts as an OpenAI-compatible proxy URL for
-// Hindsight.
+// settings; BaseURL points at this server's own OpenAI-compatible LLM
+// gateway (/api/proxy/provider/... or /api/proxy/group/...), so hindsight
+// traffic gets proxy logging, token stats, and group failover.
 type LLMConfig struct {
 	BaseURL string
 	APIKey  string

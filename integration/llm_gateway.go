@@ -51,6 +51,13 @@ func (g *LLMGateway) Mount(r chi.Router) {
 		r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
 		r.Get("/v1/models", g.getModelsForGroup)
 	})
+	// Path-addressed provider proxy for clients that can't set custom
+	// headers (e.g. hindsight-api's OpenAI client, which only takes a base
+	// URL and bearer token).
+	r.Route("/proxy/provider/{provider_id}", func(r chi.Router) {
+		r.Post("/v1/chat/completions", g.proxyChatCompletionsForProviderPath)
+		r.Get("/v1/models", g.getModelsForProviderPath)
+	})
 }
 
 // chatCompletionsRequest is the subset of an OpenAI chat-completions body the
@@ -126,6 +133,73 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 		agentID:     g.runAgentID(r.Context(), runID),
 		skipHeaders: map[string]bool{"x-provider-id": true, "x-run-id": true},
 	})
+}
+
+// proxyChatCompletionsForProviderPath proxies to the provider named by the
+// {provider_id} URL param instead of the X-Provider-ID header, for clients
+// that can only configure a base URL. Stats are attributed to the request's
+// run (if any), same as the header-based entrypoint.
+func (g *LLMGateway) proxyChatCompletionsForProviderPath(w http.ResponseWriter, r *http.Request) {
+	providerID, err := strconv.Atoi(chi.URLParam(r, "provider_id"))
+	if err != nil {
+		http.Error(w, "Invalid provider ID", http.StatusBadRequest)
+		return
+	}
+	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
+	if err != nil {
+		http.Error(w, "Provider not found", http.StatusNotFound)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	req := parseChatCompletionsRequest(bodyBytes)
+	runID := parseRunID(r)
+	logger := g.loggerForRun(r.Context(), runID, req.Model, "llm-proxy", provider.Name, bodyBytes, req.Messages)
+	if logger != nil {
+		defer logger.Close()
+	}
+
+	g.relayProviderResponse(w, r, directProxyRequest{
+		provider:    provider,
+		sourceName:  "llm-proxy",
+		model:       req.Model,
+		stream:      req.Stream,
+		bodyBytes:   bodyBytes,
+		logger:      logger,
+		runID:       runID,
+		agentID:     g.runAgentID(r.Context(), runID),
+		skipHeaders: map[string]bool{"authorization": true, "x-run-id": true, "content-length": true},
+	})
+}
+
+// getModelsForProviderPath answers /v1/models for a path-addressed provider.
+func (g *LLMGateway) getModelsForProviderPath(w http.ResponseWriter, r *http.Request) {
+	providerID, err := strconv.Atoi(chi.URLParam(r, "provider_id"))
+	if err != nil {
+		http.Error(w, "Invalid provider ID", http.StatusBadRequest)
+		return
+	}
+	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
+	if err != nil {
+		http.Error(w, "Provider not found", http.StatusNotFound)
+		return
+	}
+
+	resp, err := sendProviderRequest(r.Context(), r.Method, provider, "/models", nil, r.Header, map[string]bool{"authorization": true})
+	if err != nil {
+		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(w, resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // agentProxyTarget is where an agent's LLM traffic should go: a model group

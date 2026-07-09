@@ -48,7 +48,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code)
 	var list []db.DefaultModelSetting
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
-	require.Len(t, list, 3)
+	require.Len(t, list, 5)
 
 	// Point commit_messages at a fixed provider+model.
 	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default"}

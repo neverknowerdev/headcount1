@@ -2,6 +2,8 @@ package server_test
 
 import (
 	"context"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -75,5 +77,50 @@ func TestProxyChatCompletionsStreamUsage(t *testing.T) {
 
 	if log.PromptTokens != 10 || log.CompletionTokens != 5 || log.TotalTokens != 15 {
 		t.Errorf("expected 10/5/15 tokens, got %d/%d/%d", log.PromptTokens, log.CompletionTokens, log.TotalTokens)
+	}
+}
+
+// TestProxyChatCompletionsForProviderPath exercises the path-addressed
+// provider endpoint (/proxy/provider/{id}/...) used by hindsight-api, which
+// can only configure a base URL + bearer token. The request body must reach
+// the provider byte-for-byte (temperature etc. preserved) with the client's
+// placeholder Authorization replaced by the provider's real key.
+func TestProxyChatCompletionsForProviderPath(t *testing.T) {
+	database, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	database.AutoMigrate(&db.LLMProvider{}, &db.ProxyRequestLog{})
+
+	var gotBody, gotAuth string
+	targetServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		gotBody = string(b)
+		gotAuth = r.Header.Get("Authorization")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}],"usage":{"prompt_tokens":1,"completion_tokens":1,"total_tokens":2}}`))
+	}))
+	defer targetServer.Close()
+
+	provider := db.LLMProvider{Name: "P", BaseUrl: targetServer.URL, ApiKey: "real-key"}
+	database.Create(&provider)
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+
+	reqBody := `{"model":"m1","temperature":0.9,"messages":[{"role":"user","content":"hi"}]}`
+	req := httptest.NewRequest("POST", fmt.Sprintf("/proxy/provider/%d/v1/chat/completions", provider.ID), strings.NewReader(reqBody))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer internal")
+
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected status 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if gotBody != reqBody {
+		t.Errorf("body was not passed through verbatim:\n want %s\n got  %s", reqBody, gotBody)
+	}
+	if gotAuth != "Bearer real-key" {
+		t.Errorf("expected provider key to replace the placeholder, got %q", gotAuth)
 	}
 }
