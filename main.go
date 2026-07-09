@@ -174,8 +174,19 @@ func main() {
 	// LLM (a fixed provider+model, or a model group's best free member);
 	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
 	// tests).
-	memManager := hindsight.NewManager(func(ctx context.Context) (hindsight.LLMConfig, bool) {
-		return resolveHindsightLLMConfig(ctx, db.New(database))
+	memManager := hindsight.NewManager(func(ctx context.Context) hindsight.OpLLMConfigs {
+		q := db.New(database)
+		retain, hasRetain := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightMemory)
+		consolidation, hasConsolidation := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightConsolidation)
+		reflect, hasReflect := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightReflect)
+		return hindsight.OpLLMConfigs{
+			Retain:           retain,
+			HasRetain:        hasRetain,
+			Consolidation:    consolidation,
+			HasConsolidation: hasConsolidation,
+			Reflect:          reflect,
+			HasReflect:       hasReflect,
+		}
 	})
 	memService := hindsight.NewService(db.New(database), memManager.Client)
 	eng.SetMemoryService(memService)
@@ -319,13 +330,15 @@ func recoverStaleRuns(database *gorm.DB) {
 	}
 }
 
-// resolveHindsightLLMConfig resolves the provider+model configured for the
-// hindsight_memory purpose (see db.PurposeHindsightMemory) via the "Default
-// Models" settings, mirroring engine.NativeEngine.resolvePurposeModel's model
-// group handling but with no session provider/model to fall back to — an
-// unconfigured purpose means the memory backend simply starts without an LLM.
-func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries) (hindsight.LLMConfig, bool) {
-	setting, err := q.GetDefaultModelSetting(ctx, db.PurposeHindsightMemory)
+// resolveHindsightLLMConfig resolves the provider+model configured for one
+// hindsight purpose (db.PurposeHindsightMemory/Consolidation/Reflect, i.e.
+// retain/consolidation/reflect) via the "Default Models" settings, mirroring
+// engine.NativeEngine.resolvePurposeModel's model group handling but with no
+// session provider/model to fall back to — an unconfigured purpose means
+// that operation has no override (retain: no LLM at all; consolidation/
+// reflect: hindsight-api falls back to the retain LLM itself).
+func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries, purpose string) (hindsight.LLMConfig, bool) {
+	setting, err := q.GetDefaultModelSetting(ctx, purpose)
 	if err != nil {
 		return hindsight.LLMConfig{}, false
 	}

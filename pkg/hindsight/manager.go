@@ -14,13 +14,27 @@ import (
 	"agent-orchestrator/db"
 )
 
-// LLMConfig is the model Hindsight uses for fact extraction / reflection.
-// It is resolved from the app's cheap "utility model" settings: the provider's
-// BaseUrl acts as an OpenAI-compatible proxy URL for Hindsight.
+// LLMConfig is the model Hindsight uses for one operation (retain,
+// consolidation, or reflect). It is resolved from the app's "Default Models"
+// settings: the provider's BaseUrl acts as an OpenAI-compatible proxy URL for
+// Hindsight.
 type LLMConfig struct {
 	BaseURL string
 	APIKey  string
 	Model   string
+}
+
+// OpLLMConfigs bundles the per-operation LLM configs passed to hindsight-api.
+// Retain also doubles as the base/fallback LLM: hindsight-api falls back to
+// it for any operation whose own override isn't set. Consolidation and
+// Reflect are optional overrides only sent when explicitly configured.
+type OpLLMConfigs struct {
+	Retain           LLMConfig
+	HasRetain        bool
+	Consolidation    LLMConfig
+	HasConsolidation bool
+	Reflect          LLMConfig
+	HasReflect       bool
 }
 
 // Manager owns the bare-metal hindsight-api process. When HINDSIGHT_API_URL
@@ -32,7 +46,7 @@ type Manager struct {
 	client  *Client
 	cmd     *exec.Cmd
 	cmdDone chan struct{} // closed when the current cmd's Wait returns
-	llm     func(ctx context.Context) (LLMConfig, bool)
+	llm     func(ctx context.Context) OpLLMConfigs
 	baseURL string
 	port    string
 
@@ -41,7 +55,7 @@ type Manager struct {
 	startMu sync.Mutex
 }
 
-func NewManager(llm func(ctx context.Context) (LLMConfig, bool)) *Manager {
+func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
 	port := os.Getenv("HINDSIGHT_PORT")
 	if port == "" {
 		port = "8888"
@@ -92,16 +106,33 @@ func (m *Manager) Start(ctx context.Context) error {
 	reclaimOrphans(m.port)
 
 	env := os.Environ()
-	if cfg, ok := m.llm(ctx); ok {
+	cfgs := m.llm(ctx)
+	if cfgs.HasRetain {
 		env = append(env,
 			"HINDSIGHT_API_LLM_PROVIDER=openai",
-			"HINDSIGHT_API_LLM_BASE_URL="+cfg.BaseURL,
-			"HINDSIGHT_API_LLM_API_KEY="+cfg.APIKey,
-			"HINDSIGHT_API_LLM_MODEL="+cfg.Model,
+			"HINDSIGHT_API_LLM_BASE_URL="+cfgs.Retain.BaseURL,
+			"HINDSIGHT_API_LLM_API_KEY="+cfgs.Retain.APIKey,
+			"HINDSIGHT_API_LLM_MODEL="+cfgs.Retain.Model,
 		)
 	} else {
-		log.Println("hindsight: no utility model configured — starting without an LLM (retain quality degraded)")
+		log.Println("hindsight: no retain model configured — starting without an LLM (retain quality degraded)")
 		env = append(env, "HINDSIGHT_API_LLM_PROVIDER=none")
+	}
+	if cfgs.HasConsolidation {
+		env = append(env,
+			"HINDSIGHT_API_CONSOLIDATION_LLM_PROVIDER=openai",
+			"HINDSIGHT_API_CONSOLIDATION_LLM_BASE_URL="+cfgs.Consolidation.BaseURL,
+			"HINDSIGHT_API_CONSOLIDATION_LLM_API_KEY="+cfgs.Consolidation.APIKey,
+			"HINDSIGHT_API_CONSOLIDATION_LLM_MODEL="+cfgs.Consolidation.Model,
+		)
+	}
+	if cfgs.HasReflect {
+		env = append(env,
+			"HINDSIGHT_API_REFLECT_LLM_PROVIDER=openai",
+			"HINDSIGHT_API_REFLECT_LLM_BASE_URL="+cfgs.Reflect.BaseURL,
+			"HINDSIGHT_API_REFLECT_LLM_API_KEY="+cfgs.Reflect.APIKey,
+			"HINDSIGHT_API_REFLECT_LLM_MODEL="+cfgs.Reflect.Model,
+		)
 	}
 	env = append(env,
 		// Memory export/import rides the app backup path.

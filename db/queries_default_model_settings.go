@@ -10,12 +10,20 @@ import (
 // a sensible zero-value default in EnsureDefaultModelSettings) whenever a
 // new internal one-shot LLM use case is added.
 const (
-	PurposeCommitMessages  = "commit_messages"
-	PurposeAskArtifact     = "ask_artifact"
-	PurposeHindsightMemory = "hindsight_memory"
+	PurposeCommitMessages         = "commit_messages"
+	PurposeAskArtifact            = "ask_artifact"
+	PurposeHindsightMemory        = "hindsight_memory" // retain
+	PurposeHindsightConsolidation = "hindsight_consolidation"
+	PurposeHindsightReflect       = "hindsight_reflect"
 )
 
-var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeAskArtifact, PurposeHindsightMemory}
+var defaultModelSettingPurposes = []string{
+	PurposeCommitMessages,
+	PurposeAskArtifact,
+	PurposeHindsightMemory,
+	PurposeHindsightConsolidation,
+	PurposeHindsightReflect,
+}
 
 func (q *Queries) GetDefaultModelSetting(ctx context.Context, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting

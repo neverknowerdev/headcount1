@@ -19,7 +19,7 @@ func TestManagerAdoptsExternalURL(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("HINDSIGHT_API_URL", srv.URL)
 
-	m := NewManager(func(ctx context.Context) (LLMConfig, bool) { return LLMConfig{}, false })
+	m := NewManager(func(ctx context.Context) OpLLMConfigs { return OpLLMConfigs{} })
 	if m.Client() != nil {
 		t.Fatal("client must be nil before Start")
 	}
@@ -49,7 +49,7 @@ func TestManagerStartRespectsContextCancel(t *testing.T) {
 	// Point at a dead address so health never succeeds.
 	t.Setenv("HINDSIGHT_API_URL", "http://127.0.0.1:1")
 
-	m := NewManager(func(ctx context.Context) (LLMConfig, bool) { return LLMConfig{}, false })
+	m := NewManager(func(ctx context.Context) OpLLMConfigs { return OpLLMConfigs{} })
 	ctx, cancel := context.WithCancel(context.Background())
 	go func() {
 		time.Sleep(100 * time.Millisecond)
