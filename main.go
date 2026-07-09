@@ -151,6 +151,15 @@ func main() {
 		log.Printf("Warning: MCP account migration failed: %v", err)
 	}
 
+	// Secrets (provider API keys, MCP tokens) are encrypted at rest; seal any
+	// rows written before encryption was introduced. On failure the server
+	// still starts — reads of already-sealed secrets keep working or fail
+	// loudly at the point of use, never silently downgrade to plaintext.
+	log.Printf("Secrets encrypted at rest; master key source: %s", db.SecretsBackend())
+	if err := db.New(database).EncryptPlaintextSecrets(context.Background()); err != nil {
+		log.Printf("Warning: failed to encrypt pre-existing plaintext secrets: %v", err)
+	}
+
 	hub := eventhub.NewHub()
 
 	eng := engine.NewNativeEngine(database, hub)

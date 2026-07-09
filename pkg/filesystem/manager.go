@@ -15,6 +15,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/secrets"
 	"gopkg.in/yaml.v3"
 )
 
@@ -306,12 +307,27 @@ func (m *Manager) ReadCompanySettings(shortName string) (*CompanySettings, error
 	return &s, nil
 }
 
+// providerFile is the on-disk shape of an LLM provider. The API key is only
+// ever written encrypted (api_key_enc) so the mirror files — which are
+// world-readable and included in backups — never contain a raw secret. The
+// legacy plaintext api_key field is still read for files written by older
+// versions.
+type providerFile struct {
+	db.LLMProvider
+	ApiKeyEnc    string `json:"api_key_enc,omitempty"`
+	LegacyApiKey string `json:"api_key,omitempty"`
+}
+
 func (m *Manager) SaveLLMProvider(provider db.LLMProvider) error {
 	dir := filepath.Join(m.basePath, "data", "llm-providers")
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
-	data, err := json.MarshalIndent(provider, "", "  ")
+	sealed, err := secrets.Default().Seal(provider.ApiKey)
+	if err != nil {
+		return fmt.Errorf("encrypt provider %d api key for filesystem mirror: %w", provider.ID, err)
+	}
+	data, err := json.MarshalIndent(providerFile{LLMProvider: provider, ApiKeyEnc: sealed}, "", "  ")
 	if err != nil {
 		return err
 	}
@@ -337,11 +353,22 @@ func (m *Manager) ListLLMProvidersFromDisk() ([]db.LLMProvider, error) {
 			log.Printf("Skipping unreadable provider file %s: %v", e.Name(), err)
 			continue
 		}
-		var p db.LLMProvider
-		if err := json.Unmarshal(data, &p); err != nil {
+		var pf providerFile
+		if err := json.Unmarshal(data, &pf); err != nil {
 			log.Printf("Skipping invalid provider file %s: %v", e.Name(), err)
 			continue
 		}
+		p := pf.LLMProvider
+		stored := pf.ApiKeyEnc
+		if stored == "" {
+			stored = pf.LegacyApiKey // pre-encryption file
+		}
+		key, err := secrets.Default().Open(stored)
+		if err != nil {
+			log.Printf("Skipping api key of provider file %s (cannot decrypt): %v", e.Name(), err)
+			key = ""
+		}
+		p.ApiKey = key
 		result = append(result, p)
 	}
 	return result, nil
@@ -420,24 +447,24 @@ func (m *Manager) ListSprintsFromDisk(companyShortName string) ([]SprintRecord, 
 
 // TaskRecord is a flat Task for filesystem storage (no nested GORM associations).
 type TaskRecord struct {
-	ID          int32      `json:"id"`
-	CompanyID   int32      `json:"company_id"`
-	ProjectID   *int32     `json:"project_id"`
-	SprintID    int32      `json:"sprint_id"`
-	AgentID     *int32     `json:"agent_id"`
-	ParentID    *int32     `json:"parent_id"`
-	Title       string     `json:"title"`
-	TaskType    string     `json:"task_type"`
-	Description string     `json:"description"`
-	RefinedDescription string `json:"refined_description,omitempty"`
-	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
-	TestCases          string `json:"test_cases,omitempty"`
-	Priority    string     `json:"priority"`
-	Status      string     `json:"status"`
-	DueDate     *time.Time `json:"due_date"`
-	IsArchived  bool       `json:"is_archived"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID                 int32      `json:"id"`
+	CompanyID          int32      `json:"company_id"`
+	ProjectID          *int32     `json:"project_id"`
+	SprintID           int32      `json:"sprint_id"`
+	AgentID            *int32     `json:"agent_id"`
+	ParentID           *int32     `json:"parent_id"`
+	Title              string     `json:"title"`
+	TaskType           string     `json:"task_type"`
+	Description        string     `json:"description"`
+	RefinedDescription string     `json:"refined_description,omitempty"`
+	AcceptanceCriteria string     `json:"acceptance_criteria,omitempty"`
+	TestCases          string     `json:"test_cases,omitempty"`
+	Priority           string     `json:"priority"`
+	Status             string     `json:"status"`
+	DueDate            *time.Time `json:"due_date"`
+	IsArchived         bool       `json:"is_archived"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // CommentRecord is a flat Comment for filesystem storage (no nested GORM associations).
@@ -463,24 +490,24 @@ func (m *Manager) SaveTask(company db.Company, task db.Task) error {
 		return err
 	}
 	rec := TaskRecord{
-		ID:          task.ID,
-		CompanyID:   task.CompanyID,
-		ProjectID:   task.ProjectID,
-		SprintID:    task.SprintID,
-		AgentID:     task.AgentID,
-		ParentID:    task.ParentID,
-		Title:       task.Title,
-		TaskType:    task.TaskType,
-		Description: task.Description,
+		ID:                 task.ID,
+		CompanyID:          task.CompanyID,
+		ProjectID:          task.ProjectID,
+		SprintID:           task.SprintID,
+		AgentID:            task.AgentID,
+		ParentID:           task.ParentID,
+		Title:              task.Title,
+		TaskType:           task.TaskType,
+		Description:        task.Description,
 		RefinedDescription: task.RefinedDescription,
 		AcceptanceCriteria: task.AcceptanceCriteria,
 		TestCases:          task.TestCases,
-		Priority:    task.Priority,
-		Status:      task.Status,
-		DueDate:     task.DueDate,
-		IsArchived:  task.IsArchived,
-		CreatedAt:   task.CreatedAt,
-		UpdatedAt:   task.UpdatedAt,
+		Priority:           task.Priority,
+		Status:             task.Status,
+		DueDate:            task.DueDate,
+		IsArchived:         task.IsArchived,
+		CreatedAt:          task.CreatedAt,
+		UpdatedAt:          task.UpdatedAt,
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {

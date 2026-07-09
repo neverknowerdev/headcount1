@@ -27,18 +27,23 @@ const (
 
 func (q *Queries) CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	err := q.db.WithContext(ctx).Create(&p).Error
+	p.HasApiKey = p.ApiKey != ""
 	return p, err
 }
 
 func (q *Queries) GetLLMProvider(ctx context.Context, id int32) (LLMProvider, error) {
 	var p LLMProvider
 	err := q.db.WithContext(ctx).First(&p, id).Error
+	p.HasApiKey = p.ApiKey != ""
 	return p, err
 }
 
 func (q *Queries) ListLLMProviders(ctx context.Context) ([]LLMProvider, error) {
 	var p []LLMProvider
 	err := q.db.WithContext(ctx).Order("id").Find(&p).Error
+	for i := range p {
+		p[i].HasApiKey = p[i].ApiKey != ""
+	}
 	return p, err
 }
 
@@ -48,6 +53,7 @@ func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
 
 func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	err := q.db.WithContext(ctx).Save(&p).Error
+	p.HasApiKey = p.ApiKey != ""
 	return p, err
 }
 

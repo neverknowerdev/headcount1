@@ -87,6 +87,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	p.HasApiKey = p.ApiKey != ""
 	settings := LoadSettings()
 	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
 	api.respondJSON(w, http.StatusCreated, p)
@@ -270,6 +271,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	p.HasApiKey = p.ApiKey != ""
 	settings := LoadSettings()
 	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
 	api.respondJSON(w, http.StatusCreated, p)

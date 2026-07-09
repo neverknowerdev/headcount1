@@ -39,10 +39,13 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID              int32  `json:"id" gorm:"primaryKey"`
-	Name            string `json:"name" gorm:"not null"`
-	BaseUrl         string `json:"base_url" gorm:"not null"`
-	ApiKey          string `json:"api_key" gorm:"not null"`
+	ID      int32  `json:"id" gorm:"primaryKey"`
+	Name    string `json:"name" gorm:"not null"`
+	BaseUrl string `json:"base_url" gorm:"not null"`
+	// ApiKey is encrypted at rest (see pkg/secrets) and never serialized to
+	// clients — the frontend only sees HasApiKey. In memory it's plaintext.
+	ApiKey          string `json:"-" gorm:"not null;serializer:secret"`
+	HasApiKey       bool   `json:"has_api_key" gorm:"-"` // computed: ApiKey != ""
 	ProviderType    string `json:"provider_type"`
 	DefaultModel    string `json:"default_model"`
 	SupportedModels string `json:"supported_models"`
@@ -253,8 +256,8 @@ type MCPServer struct {
 	Args          string       `json:"args" gorm:"type:text"`
 	URL           string       `json:"url"`
 	Headers       string       `json:"headers" gorm:"type:text"`
-	AuthType      string       `json:"auth_type"`                            // "none", "bearer", "credentials-file"
-	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text"` // legacy; migrated to MCPAccount on startup
+	AuthType      string       `json:"auth_type"`                                              // "none", "bearer", "credentials-file"
+	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text;serializer:secret"` // legacy; migrated to MCPAccount on startup
 	AuthEnvVar    string       `json:"auth_env_var"`
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
@@ -277,9 +280,9 @@ type MCPServer struct {
 type MCPAccount struct {
 	ID          int32     `json:"id" gorm:"primaryKey"`
 	MCPServerID int32     `json:"mcp_server_id" gorm:"not null;index"`
-	Name        string    `json:"name" gorm:"not null"` // user label: "Personal", "Work"
-	AuthToken   string    `json:"-" gorm:"type:text"`   // credential; never sent to clients
-	HasToken    bool      `json:"has_token" gorm:"-"`   // computed: AuthToken != ""
+	Name        string    `json:"name" gorm:"not null"`                 // user label: "Personal", "Work"
+	AuthToken   string    `json:"-" gorm:"type:text;serializer:secret"` // credential; never sent to clients; encrypted at rest
+	HasToken    bool      `json:"has_token" gorm:"-"`                   // computed: AuthToken != ""
 	LastError   string    `json:"last_error" gorm:"type:text"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

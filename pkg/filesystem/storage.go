@@ -3,11 +3,13 @@ package filesystem
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strconv"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/secrets"
 )
 
 // CompanyMeta is the filesystem representation of a company
@@ -57,23 +59,28 @@ type TaskMeta struct {
 
 // AgentMeta is the filesystem representation of an agent
 type AgentMeta struct {
-	ID           int32   `json:"id"`
-	CompanyID    int32   `json:"company_id"`
-	Name         string  `json:"name"`
-	Description  string  `json:"description"`
-	SystemPrompt string  `json:"system_prompt"`
-	Model        string  `json:"model"`
-	Mode         string  `json:"mode"`
-	Permissions  string  `json:"permissions"`
-	ProviderID   *int32  `json:"provider_id,omitempty"`
+	ID           int32  `json:"id"`
+	CompanyID    int32  `json:"company_id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"system_prompt"`
+	Model        string `json:"model"`
+	Mode         string `json:"mode"`
+	Permissions  string `json:"permissions"`
+	ProviderID   *int32 `json:"provider_id,omitempty"`
 }
 
-// ProviderMeta is the filesystem representation of an LLM provider
+// ProviderMeta is the filesystem representation of an LLM provider. New
+// files carry the API key only encrypted (api_key_enc); the plaintext
+// api_key field remains so files written before encryption still restore.
+// ReadProviders resolves whichever is present into ApiKey (plaintext, in
+// memory only).
 type ProviderMeta struct {
 	ID              int32  `json:"id"`
 	Name            string `json:"name"`
 	BaseUrl         string `json:"base_url"`
-	ApiKey          string `json:"api_key"`
+	ApiKey          string `json:"api_key,omitempty"`
+	ApiKeyEnc       string `json:"api_key_enc,omitempty"`
 	ProviderType    string `json:"provider_type"`
 	DefaultModel    string `json:"default_model"`
 	SupportedModels string `json:"supported_models"`
@@ -106,11 +113,11 @@ type RunMeta struct {
 	ParentRunID     *int32 `json:"parent_run_id,omitempty"`
 	RootRunID       *int32 `json:"root_run_id,omitempty"`
 	AgentConfigName string `json:"agent_config_name,omitempty"`
-	Status     string `json:"status"`
-	StartedAt  string `json:"started_at,omitempty"`
-	EndedAt    string `json:"ended_at,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	LogContent string `json:"log_content,omitempty"`
+	Status          string `json:"status"`
+	StartedAt       string `json:"started_at,omitempty"`
+	EndedAt         string `json:"ended_at,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	LogContent      string `json:"log_content,omitempty"`
 }
 
 // ActivityLogMeta is the filesystem representation of an activity log
@@ -329,11 +336,15 @@ func (s *Storage) WriteProvider(provider db.LLMProvider) error {
 	if err := os.MkdirAll(dir, 0755); err != nil {
 		return err
 	}
+	sealed, err := secrets.Default().Seal(provider.ApiKey)
+	if err != nil {
+		return fmt.Errorf("encrypt provider %d api key for filesystem mirror: %w", provider.ID, err)
+	}
 	meta := ProviderMeta{
 		ID:              provider.ID,
 		Name:            provider.Name,
 		BaseUrl:         provider.BaseUrl,
-		ApiKey:          provider.ApiKey,
+		ApiKeyEnc:       sealed,
 		ProviderType:    provider.ProviderType,
 		DefaultModel:    provider.DefaultModel,
 		SupportedModels: provider.SupportedModels,
@@ -343,7 +354,21 @@ func (s *Storage) WriteProvider(provider db.LLMProvider) error {
 
 func (s *Storage) ReadProviders() ([]ProviderMeta, error) {
 	dir := filepath.Join(s.basePath, "data", "llm-providers")
-	return readJSONDir[ProviderMeta](dir)
+	metas, err := readJSONDir[ProviderMeta](dir)
+	for i := range metas {
+		stored := metas[i].ApiKeyEnc
+		if stored == "" {
+			stored = metas[i].ApiKey // pre-encryption file
+		}
+		key, openErr := secrets.Default().Open(stored)
+		if openErr != nil {
+			log.Printf("Skipping api key of provider %d (cannot decrypt): %v", metas[i].ID, openErr)
+			key = ""
+		}
+		metas[i].ApiKey = key
+		metas[i].ApiKeyEnc = ""
+	}
+	return metas, err
 }
 
 // --- Comments ---
@@ -405,10 +430,10 @@ func (s *Storage) WriteRun(run db.Run, companyShortName string) error {
 		ParentRunID:     run.ParentRunID,
 		RootRunID:       run.RootRunID,
 		AgentConfigName: run.AgentConfigName,
-		Status:     run.Status,
-		SessionID:  run.SessionID,
-		LogContent: run.LogContent,
-		StartedAt:  run.StartedAt.Format("2006-01-02T15:04:05Z"),
+		Status:          run.Status,
+		SessionID:       run.SessionID,
+		LogContent:      run.LogContent,
+		StartedAt:       run.StartedAt.Format("2006-01-02T15:04:05Z"),
 	}
 	if run.EndedAt != nil {
 		meta.EndedAt = run.EndedAt.Format("2006-01-02T15:04:05Z")
@@ -510,15 +535,15 @@ func (s *Storage) GetCompanyShortNameForTask(taskID int32) (string, error) {
 
 // GetCompanyShortNameForActivityLog finds the company short name from an activity log's company_id
 func (s *Storage) GetCompanyShortNameForActivityLog(companyID int32) (string, error) {
- companies, err := s.ListCompanyDirs()
- if err != nil {
-  return "", err
- }
- for _, shortName := range companies {
-  meta, err := s.ReadCompany(shortName)
-  if err == nil && meta.ID == companyID {
-   return shortName, nil
-  }
- }
- return "", fmt.Errorf("company %d not found", companyID)
+	companies, err := s.ListCompanyDirs()
+	if err != nil {
+		return "", err
+	}
+	for _, shortName := range companies {
+		meta, err := s.ReadCompany(shortName)
+		if err == nil && meta.ID == companyID {
+			return shortName, nil
+		}
+	}
+	return "", fmt.Errorf("company %d not found", companyID)
 }

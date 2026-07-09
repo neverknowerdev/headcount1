@@ -130,6 +130,21 @@ func restoreFilesystem(tempDir, basePath string) error {
 		}
 	}
 
+	// Restore the secrets keystore so the archived (encrypted) provider API
+	// keys can be decrypted. Only written when missing: an existing keystore
+	// also protects secrets in DB tables the restore doesn't wipe (e.g. MCP
+	// account tokens), and on the machine that made the backup the two files
+	// are identical anyway.
+	srcKeystore := filepath.Join(tempDir, "keystore.json")
+	dstKeystore := filepath.Join(basePath, "keystore.json")
+	if _, err := os.Stat(srcKeystore); err == nil {
+		if _, err := os.Stat(dstKeystore); os.IsNotExist(err) {
+			if data, err := os.ReadFile(srcKeystore); err == nil {
+				os.WriteFile(dstKeystore, data, 0600)
+			}
+		}
+	}
+
 	return nil
 }
 
@@ -362,11 +377,11 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				if err == nil {
 					for _, r := range runs {
 						run := db.Run{
-							TaskID:      task.ID,
-							AgentID:     agentIDMap[r.AgentID],
-							Status:      r.Status,
-							SessionID:   r.SessionID,
-							LogContent:  r.LogContent,
+							TaskID:     task.ID,
+							AgentID:    agentIDMap[r.AgentID],
+							Status:     r.Status,
+							SessionID:  r.SessionID,
+							LogContent: r.LogContent,
 						}
 						if r.StartedAt != "" {
 							st, _ := parseTime(r.StartedAt)

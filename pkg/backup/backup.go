@@ -84,6 +84,16 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		itemCount++
 	}
 
+	// Backup the secrets keystore (the wrapped data key). It is ciphertext
+	// under the master key, so it is safe to archive — and required to
+	// decrypt the api_key_enc values in the archived provider files when
+	// restoring. The master key itself (master.key) is deliberately never
+	// backed up.
+	if data, err := os.ReadFile(filepath.Join(basePath, "keystore.json")); err == nil {
+		writeTarEntry(tarWriter, "keystore.json", data)
+		itemCount++
+	}
+
 	// Backup filesystem data (companies, projects, skills, logs, etc.)
 	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "data"), "data", &itemCount); err != nil {
 		log.Printf("Warning: failed to backup data directory: %v", err)
