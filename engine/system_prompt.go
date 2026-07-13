@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 	"text/template"
 	"time"
 
@@ -30,34 +29,21 @@ type Settings struct {
 	WorkspaceFolders []string `yaml:"workspace_folders"`
 }
 
-// loadSettings reads the app settings. The canonical file is the one the
-// settings API writes (PaperclipHome()/settings.yaml); the legacy
-// ~/.paperclip2_settings.yaml location is kept as a fallback. In E2E mode
-// (E2E_PAPERCLIP_HOME set) the legacy fallback is skipped — tests must stay
-// inside their isolated home and never pick up the developer's real
-// base_path.
+// loadSettings reads the app settings from the canonical file the settings
+// API writes (PaperclipHome()/settings.yaml).
 func loadSettings() Settings {
-	paths := []string{db.SettingsFilePath()}
-	if os.Getenv("E2E_PAPERCLIP_HOME") == "" {
-		if homeDir, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
-		}
+	data, err := os.ReadFile(db.SettingsFilePath())
+	if err != nil {
+		return Settings{BasePath: db.PaperclipHome()}
 	}
-	for _, settingsPath := range paths {
-		data, err := os.ReadFile(settingsPath)
-		if err != nil {
-			continue
-		}
-		var settings Settings
-		if err := yaml.Unmarshal(data, &settings); err != nil {
-			continue
-		}
-		if settings.BasePath == "" {
-			settings.BasePath = db.PaperclipHome()
-		}
-		return settings
+	var settings Settings
+	if err := yaml.Unmarshal(data, &settings); err != nil {
+		return Settings{BasePath: db.PaperclipHome()}
 	}
-	return Settings{BasePath: db.PaperclipHome()}
+	if settings.BasePath == "" {
+		settings.BasePath = db.PaperclipHome()
+	}
+	return settings
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
