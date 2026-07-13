@@ -104,6 +104,7 @@ func main() {
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
 		&db.HindsightDocument{},
+		&db.SystemLLMLog{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)

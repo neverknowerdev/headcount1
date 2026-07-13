@@ -441,6 +441,31 @@ type DefaultModelSetting struct {
 	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
+// SystemLLMLog records one LLM call made outside any agent session: memory
+// layer operations (Hindsight retain/reflect/consolidation, routed through
+// the gateway's /proxy/memory endpoint), artifact Q&A reader calls, commit
+// message generation. Request/response bodies live on the filesystem
+// (LogFilePath, under data/logs/system-llm/); the DB row holds the metadata
+// the Run Logs UI lists and filters on.
+type SystemLLMLog struct {
+	ID     int32  `json:"id" gorm:"primaryKey"`
+	Source string `json:"source" gorm:"not null;index"` // "memory", "ask_artifact", "commit_message"
+	// Detail is a short human-readable label: the artifact filename, the
+	// task ref, or empty when nothing more specific is known.
+	Detail           string    `json:"detail"`
+	ProviderID       int32     `json:"provider_id"`
+	ProviderName     string    `json:"provider_name"`
+	Model            string    `json:"model"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	DurationMs       int64     `json:"duration_ms"`
+	Status           string    `json:"status"` // "ok" | "error"
+	Error            string    `json:"error" gorm:"type:text"`
+	LogFilePath      string    `json:"log_file_path"`
+	CreatedAt        time.Time `json:"created_at" gorm:"index"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`

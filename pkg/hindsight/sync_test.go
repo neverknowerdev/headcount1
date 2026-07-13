@@ -91,7 +91,7 @@ func TestSyncProjectDocsLifecycle(t *testing.T) {
 
 	writeFile(t, repo, "README.md", "# Widgets\nDocs v1")
 	writeFile(t, repo, "docs/design.md", "design doc")
-	writeFile(t, repo, "main.go", "package main") // not a doc: ignored
+	writeFile(t, repo, "main.go", "package main")                // not a doc: ignored
 	writeFile(t, repo, "node_modules/dep/README.md", "vendored") // skipped dir
 
 	added, updated, removed, err := svc.SyncProjectDocs(ctx, company, project, repo)
@@ -116,13 +116,13 @@ func TestSyncProjectDocsLifecycle(t *testing.T) {
 	if readme.Timestamp != "unset" {
 		t.Errorf("doc memories must be timeless, got timestamp %q", readme.Timestamp)
 	}
-	wantTags := []string{"project:5", "source:docs"}
+	wantTags := []string{"project:widgets", "source:docs"} // tag is the project name slug
 	for i, tag := range wantTags {
 		if readme.Tags[i] != tag {
 			t.Errorf("expected tags %v, got %v", wantTags, readme.Tags)
 		}
 	}
-	if len(readme.ObservationScopes) != 1 || readme.ObservationScopes[0][0] != "project:5" {
+	if len(readme.ObservationScopes) != 1 || readme.ObservationScopes[0][0] != "project:widgets" {
 		t.Errorf("expected project-scoped observation, got %v", readme.ObservationScopes)
 	}
 
@@ -181,7 +181,8 @@ func TestRetainRunOutcomePayload(t *testing.T) {
 	projectID := int32(7)
 	rootRunID := int32(100)
 	task := db.Task{ID: 9, CompanyID: company.ID, ProjectID: &projectID,
-		RefKey: "DEC-50", Title: "Implement ICP backend", Status: "done"}
+		Project: &db.Project{ID: projectID, Name: "GM Coin"},
+		RefKey:  "DEC-50", Title: "Implement ICP backend", Status: "done"}
 	run := db.Run{ID: 42, TaskID: task.ID, Name: "run-42",
 		AgentConfigName: "CTO", RootRunID: &rootRunID,
 		ResultDescription: "Implemented and tested"}
@@ -197,7 +198,7 @@ func TestRetainRunOutcomePayload(t *testing.T) {
 	if item.DocumentID != "run-42" {
 		t.Errorf("expected document id run-42, got %q", item.DocumentID)
 	}
-	wantTags := map[string]bool{"agent:cto": true, "session:100": true, "task:dec-50": true, "project:7": true}
+	wantTags := map[string]bool{"agent:cto": true, "session:100": true, "task:dec-50": true, "project:gm-coin": true}
 	if len(item.Tags) != len(wantTags) {
 		t.Fatalf("expected tags %v, got %v", wantTags, item.Tags)
 	}

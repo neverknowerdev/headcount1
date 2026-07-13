@@ -167,6 +167,12 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.CreateSprint)
 	})
 
+	// Non-session LLM calls (memory layer, artifact Q&A, commit messages).
+	r.Route("/system-llm-logs", func(r chi.Router) {
+		r.Get("/", api.ListSystemLLMLogs)
+		r.Get("/{id}", api.GetSystemLLMLog)
+	})
+
 	r.Route("/runs", func(r chi.Router) {
 		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)

@@ -164,7 +164,7 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         const mems = banks[bank];
         const gmCoin = mems.find((m: any) => m.document_id === `doc:${projectId}/docs/gm-coin.md`);
         expect(gmCoin.text).toContain('GM Coin is a community token');
-        expect(gmCoin.tags).toContain(`project:${projectId}`);
+        expect(gmCoin.tags).toContain('project:gm-coin'); // tag is the project name slug, not the id
         expect(gmCoin.tags).toContain('source:docs');
         expect(gmCoin.type).toBe('world');
 
@@ -588,7 +588,7 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         expect(tagsRes.ok()).toBeTruthy();
         const tags = await tagsRes.json();
         const byTag = new Map((tags.items as any[]).map((t: any) => [t.tag, t.count]));
-        for (const expected of ['source:docs', `project:${projectId}`, 'agent:cto', 'agent:cmo']) {
+        for (const expected of ['source:docs', 'project:gm-coin', 'agent:cto', 'agent:cmo']) {
             expect(byTag.get(expected), `tag ${expected} should be listed`).toBeGreaterThan(0);
         }
         expect(byTag.get('source:docs')).toBe(3);

@@ -155,7 +155,35 @@ func (s *Service) Available() bool {
 func BankID(companyID int32) string { return fmt.Sprintf("company-%d", companyID) }
 
 func agentTag(role string) string {
-	return "agent:" + strings.ToLower(strings.ReplaceAll(role, " ", "-"))
+	return "agent:" + slugify(role)
+}
+
+// ProjectTag scopes a memory to one project. Keyed by the project name's
+// slug (not the numeric id) so tags read naturally in the Memory UI —
+// "project:gm-coin" instead of "project:3". Exported for the UI/e2e to
+// derive the same tag from a project name.
+func ProjectTag(projectName string) string {
+	return "project:" + slugify(projectName)
+}
+
+// slugify lowercases and collapses any non-alphanumeric run into a single
+// hyphen ("GM Coin" → "gm-coin"). Deterministic so tags stay stable.
+func slugify(s string) string {
+	var b strings.Builder
+	lastHyphen := true // suppress a leading hyphen
+	for _, r := range strings.ToLower(strings.TrimSpace(s)) {
+		switch {
+		case r >= 'a' && r <= 'z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+			lastHyphen = false
+		default:
+			if !lastHyphen {
+				b.WriteByte('-')
+				lastHyphen = true
+			}
+		}
+	}
+	return strings.TrimSuffix(b.String(), "-")
 }
 func DocDocumentID(projectID int32, relPath string) string {
 	return fmt.Sprintf("doc:%d/%s", projectID, relPath)
@@ -252,7 +280,7 @@ func (s *Service) SyncProjectDocs(ctx context.Context, company db.Company, proje
 		if existed && prev.SHA256 == hash {
 			continue // unchanged
 		}
-		projectTag := fmt.Sprintf("project:%d", project.ID)
+		projectTag := ProjectTag(project.Name)
 		item := MemoryItem{
 			Content:    string(content),
 			Timestamp:  "unset", // reference documentation is timeless
@@ -335,9 +363,17 @@ func (s *Service) RetainRunOutcome(ctx context.Context, company db.Company, task
 	}
 	scopes := [][]string{{agentTagValue}}
 	if task.ProjectID != nil {
-		projectTag := fmt.Sprintf("project:%d", *task.ProjectID)
-		tags = append(tags, projectTag)
-		scopes = append(scopes, []string{projectTag})
+		projectName := ""
+		if task.Project != nil && task.Project.Name != "" {
+			projectName = task.Project.Name
+		} else if p, perr := s.q.GetProject(ctx, *task.ProjectID); perr == nil {
+			projectName = p.Name
+		}
+		if projectName != "" {
+			projectTag := ProjectTag(projectName)
+			tags = append(tags, projectTag)
+			scopes = append(scopes, []string{projectTag})
+		}
 	}
 	item := MemoryItem{
 		Content:    b.String(),

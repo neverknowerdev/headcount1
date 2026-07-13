@@ -450,7 +450,12 @@ const MODEL_ID_RE = /^[a-z0-9-]+$/;
 
 // Must mirror pkg/hindsight/service.go agentTag exactly:
 // "agent:" + strings.ToLower(strings.ReplaceAll(role, " ", "-"))
-const agentTagFor = (name: string) => `agent:${name.toLowerCase().replace(/ /g, '-')}`;
+// slugify matches the backend's tag convention (pkg/hindsight slugify):
+// lowercase, every run of non-alphanumerics collapses to one hyphen,
+// no leading/trailing hyphen ("GM Coin" -> "gm-coin").
+const slugify = (s: string) => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
+
+const agentTagFor = (name: string) => `agent:${slugify(name)}`;
 
 const clampTokens = (v: string): number => Math.max(256, Math.min(8192, Number(v) || 2048));
 
@@ -490,9 +495,11 @@ const MentalModelForm: React.FC<{
             set.add(tag);
             list.push({ tag, label });
         };
-        bankTags.forEach((t) => add(t, t));
+        // One-off per-task/per-session tags are noise as mental-model scopes
+        // (still enterable via free text).
+        bankTags.filter((t) => !t.startsWith('task:') && !t.startsWith('session:')).forEach((t) => add(t, t));
         agentConfigs.forEach((a) => { const t = agentTagFor(a.name); add(t, `${t} (${a.name})`); });
-        projects.forEach((p) => { const t = `project:${p.id}`; add(t, `${t} (${p.name})`); });
+        projects.forEach((p) => { const t = `project:${slugify(p.name)}`; add(t, `${t} (${p.name})`); });
         const q = tagInput.trim().toLowerCase();
         return (q ? list.filter((s) => s.tag.toLowerCase().includes(q) || s.label.toLowerCase().includes(q)) : list).slice(0, 30);
     }, [bankTags, agentConfigs, projects, tagInput, tags]);

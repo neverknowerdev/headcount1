@@ -1628,7 +1628,42 @@ Question: %s`, filename, content, truncNote, question)
 		return "", fmt.Errorf("artifact reader returned an empty answer")
 	}
 	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
+	e.recordSystemLLMCall("ask_artifact", filename, provider, model, prompt, answer,
+		resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
+}
+
+// recordSystemLLMCall persists a non-session (utility) LLM exchange to the
+// system LLM log — DB row + full-body file — so it shows up in the Run Logs
+// UI's "System LLM calls" view alongside the memory layer's calls.
+// Best-effort: failures are logged, never propagated.
+func (e *NativeEngine) recordSystemLLMCall(source, detail string, provider db.LLMProvider, model, request, response string, promptTokens, completionTokens int) {
+	basePath := loadSettings().BasePath
+	filePath, ferr := logging.WriteSystemLLMFile(basePath, logging.SystemLLMFile{
+		Source:   source,
+		Detail:   detail,
+		Provider: provider.Name,
+		Model:    model,
+		Request:  []byte(request),
+		Response: []byte(response),
+	})
+	if ferr != nil {
+		fmt.Printf("Warning: failed to write system LLM log file: %v\n", ferr)
+	}
+	if _, derr := e.q.CreateSystemLLMLog(context.Background(), db.SystemLLMLog{
+		Source:           source,
+		Detail:           detail,
+		ProviderID:       provider.ID,
+		ProviderName:     provider.Name,
+		Model:            model,
+		PromptTokens:     promptTokens,
+		CompletionTokens: completionTokens,
+		TotalTokens:      promptTokens + completionTokens,
+		Status:           "ok",
+		LogFilePath:      filePath,
+	}); derr != nil {
+		fmt.Printf("Warning: failed to store system LLM log: %v\n", derr)
+	}
 }
 
 // logAskArtifact persists one ask_artifact reader exchange to its own file in
@@ -1846,5 +1881,7 @@ Changes:
 		return "", fmt.Errorf("empty commit message")
 	}
 
+	e.recordSystemLLMCall("commit_message", task.RefKey, provider, model, prompt, msg,
+		resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	return msg, nil
 }

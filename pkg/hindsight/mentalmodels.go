@@ -59,7 +59,7 @@ func (s *Service) EnsureProjectStateModel(ctx context.Context, company db.Compan
 			SourceQuery: "What is the current implementation state of this project? Cover: what is implemented " +
 				"and working, key technical decisions, current blockers or failures, and what was attempted but " +
 				"not completed.",
-			Tags:                      []string{fmt.Sprintf("project:%d", project.ID)},
+			Tags:                      []string{ProjectTag(project.Name)},
 			MaxTokens:                 projectStateModelMaxTokens,
 			RefreshAfterConsolidation: true,
 		})

@@ -89,6 +89,11 @@ type directProxyRequest struct {
 	runID       int
 	agentID     int32           // owner of the ProxyRequestLog rows; 0 to skip
 	skipHeaders map[string]bool // request headers not forwarded upstream
+	// systemSource labels a caller that belongs to no agent run (e.g. the
+	// Hindsight memory engine → "memory"). When set and the request carries
+	// no run, the exchange is recorded as a SystemLLMLog (full bodies on
+	// disk) so non-session LLM traffic is visible in the Run Logs UI.
+	systemSource string
 }
 
 // proxyChatCompletionsForProvider proxies to the provider named by the
@@ -174,6 +179,10 @@ func (g *LLMGateway) proxyChatCompletionsForProviderPath(w http.ResponseWriter, 
 		runID:       runID,
 		agentID:     g.runAgentID(r.Context(), runID),
 		skipHeaders: map[string]bool{"authorization": true, "x-run-id": true, "content-length": true},
+		// The path-addressed proxy exists for headerless clients — today
+		// that's the Hindsight memory engine, so runless calls here are
+		// memory-layer traffic (retain/reflect/consolidation).
+		systemSource: "memory",
 	})
 }
 
@@ -297,10 +306,18 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 // generic and per-agent entrypoints; only provider resolution and stat
 // attribution differ between them, and those arrive on p.
 func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Request, p directProxyRequest) {
+	started := time.Now()
+	// A call with a system source and no run is non-session traffic (memory
+	// layer): record it as a SystemLLMLog on every exit path.
+	logSystem := p.systemSource != "" && p.runID <= 0
+
 	resp, err := sendProviderRequest(r.Context(), r.Method, p.provider, "/chat/completions", p.bodyBytes, r.Header, p.skipHeaders)
 	if err != nil {
 		if p.logger != nil {
 			p.logger.LogError(p.model, p.sourceName, p.provider.Name, err)
+		}
+		if logSystem {
+			g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, nil, normalizedUsage{}, time.Since(started), err)
 		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
@@ -323,6 +340,9 @@ func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Reques
 		if p.logger != nil {
 			p.logger.LogResponse(p.model, p.provider.Name, resp.StatusCode, respBodyBytes, reasoning, usage)
 		}
+		if logSystem {
+			g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, respBodyBytes, usage, time.Since(started), statusError(resp.StatusCode))
+		}
 		w.Write(respBodyBytes)
 		return
 	}
@@ -341,12 +361,15 @@ func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Reques
 	if lastUsage != nil {
 		g.recordProxyStats(r.Context(), p.provider, p.model, p.runID, p.agentID, *lastUsage)
 	}
+	var usage normalizedUsage
+	if lastUsage != nil {
+		usage = *lastUsage
+	}
 	if p.logger != nil {
-		var usage normalizedUsage
-		if lastUsage != nil {
-			usage = *lastUsage
-		}
 		p.logger.LogStreamResponse(p.model, p.provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
+	}
+	if logSystem {
+		g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, rawBody, usage, time.Since(started), statusError(resp.StatusCode))
 	}
 }
 
