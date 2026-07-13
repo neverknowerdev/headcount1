@@ -51,7 +51,7 @@ interface MentalModel {
     trigger?: { refresh_after_consolidation?: boolean };
     content: string;
     last_refreshed_at: string;
-    history?: Array<{ content: string; refreshed_at: string }>;
+    history?: Array<{ previous_content: string; changed_at: string }>;
 }
 
 interface BankConfig {
@@ -82,7 +82,7 @@ function synthesize(mems: Memory[], tags: string[]): string {
  * show past runs of a mental model. */
 function pushHistory(model: MentalModel): void {
     if (!model.history) model.history = [];
-    model.history.unshift({ content: model.content, refreshed_at: model.last_refreshed_at });
+    model.history.unshift({ previous_content: model.content, changed_at: model.last_refreshed_at });
 }
 
 export async function startMockHindsightServer(): Promise<{ baseUrl: string; port: number; stop: () => Promise<void> }> {
@@ -320,7 +320,7 @@ function handle(
         const id = decodeURIComponent(modelHistoryMatch[1]);
         const model = getModels(bank).get(id);
         if (!model) return json(res, 404, { error: 'mental model not found' });
-        return json(res, 200, { items: model.history || [] });
+        return json(res, 200, model.history || []); // bare array, like real Hindsight
     }
     const modelRefreshMatch = rest.match(/^\/mental-models\/([^/]+)\/refresh$/);
     if (method === 'POST' && modelRefreshMatch) {

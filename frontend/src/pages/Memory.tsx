@@ -124,8 +124,122 @@ const MD_CLASSES = 'prose prose-sm max-w-none prose-headings:mt-2 prose-headings
 interface SimNode extends GraphNode {
     x: number;
     y: number;
-    vx: number;
-    vy: number;
+    degree: number;
+    r: number;
+}
+
+interface SimEdge {
+    a: SimNode;
+    b: SimNode;
+    weight: number;
+}
+
+// computeLayout runs the whole force simulation synchronously (deterministic
+// golden-angle seeding, no randomness) so the graph appears fully settled on
+// first paint — no visible shaking. Nodes are NOT clamped to the viewport
+// during simulation (clamping is what compressed everything into a blob);
+// instead the caller fits the final bounding box into view via the SVG
+// viewBox.
+function computeLayout(data: GraphData): { nodes: SimNode[]; edges: SimEdge[] } {
+    const n = data.nodes.length;
+    if (n === 0) return { nodes: [], edges: [] };
+
+    const degree = new Map<string, number>();
+    for (const e of data.edges) {
+        degree.set(e.from, (degree.get(e.from) || 0) + 1);
+        degree.set(e.to, (degree.get(e.to) || 0) + 1);
+    }
+
+    // Deterministic golden-angle spiral seed: stable across reloads, evenly
+    // spread, no jitter needed.
+    const GOLDEN = Math.PI * (3 - Math.sqrt(5));
+    const spacing = 110; // target typical distance between neighbours
+    const sim: SimNode[] = data.nodes.map((node, i) => {
+        const rad = spacing * 0.6 * Math.sqrt(i + 1);
+        const ang = i * GOLDEN;
+        const deg = degree.get(node.id) || 0;
+        return {
+            ...node,
+            x: rad * Math.cos(ang),
+            y: rad * Math.sin(ang),
+            degree: deg,
+            r: 5 + Math.min(7, Math.sqrt(deg) * 1.6),
+        };
+    });
+    const index = new Map(sim.map((s) => [s.id, s]));
+    const edges = data.edges
+        .map((e) => ({ a: index.get(e.from), b: index.get(e.to), weight: e.weight || 1 }))
+        .filter((e) => e.a && e.b && e.a !== e.b) as SimEdge[];
+
+    // In dense graphs the sheer number of springs crushes the layout; scale
+    // each node's spring pull down by its degree so hubs don't implode.
+    const repulsion = spacing * spacing * 1.6;
+    const springLen = spacing;
+    const iterations = Math.min(400, 150 + n * 2);
+    const vx = new Float64Array(n);
+    const vy = new Float64Array(n);
+    const idx = new Map(sim.map((s, i) => [s, i]));
+
+    let alpha = 1;
+    const alphaDecay = Math.pow(0.005, 1 / iterations); // reach ~0.005 at the end
+    for (let it = 0; it < iterations; it++) {
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const a = sim[i], b = sim[j];
+                let dx = a.x - b.x, dy = a.y - b.y;
+                let d2 = dx * dx + dy * dy;
+                if (d2 < 1) { dx = (i - j) * 0.11; dy = 0.37; d2 = dx * dx + dy * dy; }
+                const f = (repulsion / d2) * alpha;
+                const d = Math.sqrt(d2);
+                vx[i] += (dx / d) * f; vy[i] += (dy / d) * f;
+                vx[j] -= (dx / d) * f; vy[j] -= (dy / d) * f;
+            }
+        }
+        for (const e of edges) {
+            const ia = idx.get(e.a)!, ib = idx.get(e.b)!;
+            const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
+            const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            const k = 0.03 * alpha * Math.min(e.weight, 2);
+            const f = k * (d - springLen);
+            const fa = f / Math.max(1, Math.sqrt(e.a.degree));
+            const fb = f / Math.max(1, Math.sqrt(e.b.degree));
+            vx[ia] += (dx / d) * fa; vy[ia] += (dy / d) * fa;
+            vx[ib] -= (dx / d) * fb; vy[ib] -= (dy / d) * fb;
+        }
+        for (let i = 0; i < n; i++) {
+            const s = sim[i];
+            // Mild gravity keeps disconnected clusters from drifting apart.
+            vx[i] += -s.x * 0.002 * alpha;
+            vy[i] += -s.y * 0.002 * alpha;
+            vx[i] *= 0.6; vy[i] *= 0.6;
+            s.x += vx[i]; s.y += vy[i];
+        }
+        alpha *= alphaDecay;
+    }
+
+    // Final overlap resolution: push any two nodes apart to at least the sum
+    // of their radii plus breathing room, so circles never sit on top of
+    // each other regardless of how dense the graph is.
+    for (let pass = 0; pass < 30; pass++) {
+        let moved = false;
+        for (let i = 0; i < n; i++) {
+            for (let j = i + 1; j < n; j++) {
+                const a = sim[i], b = sim[j];
+                const minDist = a.r + b.r + 14;
+                let dx = b.x - a.x, dy = b.y - a.y;
+                let d = Math.sqrt(dx * dx + dy * dy);
+                if (d >= minDist) continue;
+                if (d < 0.01) { dx = (i - j) * 0.13; dy = 0.41; d = Math.sqrt(dx * dx + dy * dy); }
+                const push = (minDist - d) / 2 / d;
+                a.x -= dx * push; a.y -= dy * push;
+                b.x += dx * push; b.y += dy * push;
+                moved = true;
+            }
+        }
+        if (!moved) break;
+    }
+
+    return { nodes: sim, edges };
 }
 
 const ForceGraph: React.FC<{
@@ -133,130 +247,183 @@ const ForceGraph: React.FC<{
     onNodeClick?: (node: GraphNode) => void;
 }> = ({ data, onNodeClick }) => {
     const containerRef = useRef<HTMLDivElement>(null);
-    const [size, setSize] = useState({ w: 800, h: 520 });
-    const [nodes, setNodes] = useState<SimNode[]>([]);
-    const [hover, setHover] = useState<{ node: SimNode; x: number; y: number } | null>(null);
-    const animRef = useRef<number>(0);
+    const svgRef = useRef<SVGSVGElement>(null);
+    const [size, setSize] = useState({ w: 800, h: 560 });
+    const [hover, setHover] = useState<SimNode | null>(null);
+    // view = current viewBox (world coords). null = fit-to-content default.
+    const [view, setView] = useState<{ x: number; y: number; w: number; h: number } | null>(null);
+    const panRef = useRef<{ startX: number; startY: number; view: { x: number; y: number; w: number; h: number }; moved: boolean } | null>(null);
 
     useEffect(() => {
         const el = containerRef.current;
         if (!el) return;
-        const measure = () => setSize({ w: el.clientWidth || 800, h: 520 });
+        const measure = () => setSize({ w: el.clientWidth || 800, h: 560 });
         measure();
         window.addEventListener('resize', measure);
         return () => window.removeEventListener('resize', measure);
     }, []);
 
+    // Fully settled layout, computed before paint — nothing animates or shakes.
+    const layout = useMemo(() => computeLayout(data), [data]);
+
+    // Default view: the layout's bounding box (plus padding) letterboxed to
+    // the container's aspect ratio, so the graph always fills the canvas.
+    const fitView = useMemo(() => {
+        if (layout.nodes.length === 0) return { x: -size.w / 2, y: -size.h / 2, w: size.w, h: size.h };
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        for (const s of layout.nodes) {
+            minX = Math.min(minX, s.x - s.r); maxX = Math.max(maxX, s.x + s.r);
+            minY = Math.min(minY, s.y - s.r); maxY = Math.max(maxY, s.y + s.r);
+        }
+        const pad = 60;
+        minX -= pad; minY -= pad; maxX += pad; maxY += pad;
+        let w = maxX - minX, h = maxY - minY;
+        const aspect = size.w / size.h;
+        if (w / h > aspect) {
+            const nh = w / aspect;
+            minY -= (nh - h) / 2; h = nh;
+        } else {
+            const nw = h * aspect;
+            minX -= (nw - w) / 2; w = nw;
+        }
+        return { x: minX, y: minY, w, h };
+    }, [layout, size.w, size.h]);
+
+    const vb = view ?? fitView;
+    const scale = size.w / vb.w; // screen px per world unit
+
+    // Wheel zoom (centered on cursor). Attached natively so preventDefault
+    // works — React's onWheel is passive.
     useEffect(() => {
-        cancelAnimationFrame(animRef.current);
-        const { w, h } = size;
-        const n = data.nodes.length;
-        if (n === 0) { setNodes([]); return; }
-
-        // Init positions on a circle with jitter
-        const sim: SimNode[] = data.nodes.map((node, i) => {
-            const angle = (i / n) * Math.PI * 2;
-            const r = Math.min(w, h) * 0.35;
-            return {
-                ...node,
-                x: w / 2 + r * Math.cos(angle) + (Math.random() - 0.5) * 40,
-                y: h / 2 + r * Math.sin(angle) + (Math.random() - 0.5) * 40,
-                vx: 0,
-                vy: 0,
-            };
-        });
-        const index = new Map(sim.map((s) => [s.id, s]));
-        const edges = data.edges
-            .map((e) => ({ a: index.get(e.from), b: index.get(e.to), weight: e.weight || 1 }))
-            .filter((e) => e.a && e.b) as { a: SimNode; b: SimNode; weight: number }[];
-
-        let alpha = 1;
-        const repulsion = 3000;
-        const springLen = 90;
-        const springK = 0.02;
-
-        const tick = () => {
-            // Repulsion (O(n^2), fine for a few hundred nodes)
-            for (let i = 0; i < sim.length; i++) {
-                for (let j = i + 1; j < sim.length; j++) {
-                    const a = sim[i], b = sim[j];
-                    let dx = a.x - b.x, dy = a.y - b.y;
-                    let d2 = dx * dx + dy * dy;
-                    if (d2 < 1) { dx = Math.random() - 0.5; dy = Math.random() - 0.5; d2 = 1; }
-                    const f = (repulsion / d2) * alpha;
-                    const d = Math.sqrt(d2);
-                    a.vx += (dx / d) * f; a.vy += (dy / d) * f;
-                    b.vx -= (dx / d) * f; b.vy -= (dy / d) * f;
-                }
-            }
-            // Springs
-            for (const e of edges) {
-                const dx = e.b.x - e.a.x, dy = e.b.y - e.a.y;
-                const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
-                const f = springK * (d - springLen) * alpha * Math.min(e.weight, 3);
-                e.a.vx += (dx / d) * f; e.a.vy += (dy / d) * f;
-                e.b.vx -= (dx / d) * f; e.b.vy -= (dy / d) * f;
-            }
-            // Centering + integrate
-            for (const s of sim) {
-                s.vx += (w / 2 - s.x) * 0.005 * alpha;
-                s.vy += (h / 2 - s.y) * 0.005 * alpha;
-                s.vx *= 0.85; s.vy *= 0.85;
-                s.x += s.vx; s.y += s.vy;
-                s.x = Math.max(14, Math.min(w - 14, s.x));
-                s.y = Math.max(14, Math.min(h - 14, s.y));
-            }
-            alpha *= 0.97;
-            setNodes(sim.map((s) => ({ ...s })));
-            if (alpha > 0.01) animRef.current = requestAnimationFrame(tick);
+        const svg = svgRef.current;
+        if (!svg) return;
+        const onWheel = (ev: WheelEvent) => {
+            ev.preventDefault();
+            const rect = svg.getBoundingClientRect();
+            const px = (ev.clientX - rect.left) / rect.width;
+            const py = (ev.clientY - rect.top) / rect.height;
+            setView((prev) => {
+                const cur = prev ?? fitView;
+                const factor = ev.deltaY > 0 ? 1.18 : 1 / 1.18;
+                const nw = Math.min(fitView.w * 3, Math.max(fitView.w / 24, cur.w * factor));
+                const nh = nw * (cur.h / cur.w);
+                return {
+                    x: cur.x + (cur.w - nw) * px,
+                    y: cur.y + (cur.h - nh) * py,
+                    w: nw,
+                    h: nh,
+                };
+            });
         };
-        animRef.current = requestAnimationFrame(tick);
-        return () => cancelAnimationFrame(animRef.current);
-        // eslint-disable-next-line react-hooks/exhaustive-deps
-    }, [data, size.w, size.h]);
+        svg.addEventListener('wheel', onWheel, { passive: false });
+        return () => svg.removeEventListener('wheel', onWheel);
+    }, [fitView]);
 
-    const nodeIndex = useMemo(() => new Map(nodes.map((s) => [s.id, s])), [nodes]);
+    const onPointerDown = (ev: React.PointerEvent<SVGSVGElement>) => {
+        (ev.target as Element).setPointerCapture?.(ev.pointerId);
+        panRef.current = { startX: ev.clientX, startY: ev.clientY, view: vb, moved: false };
+    };
+    const onPointerMove = (ev: React.PointerEvent<SVGSVGElement>) => {
+        const pan = panRef.current;
+        if (!pan) return;
+        const dx = ev.clientX - pan.startX, dy = ev.clientY - pan.startY;
+        if (Math.abs(dx) + Math.abs(dy) > 3) pan.moved = true;
+        if (pan.moved) {
+            setView({
+                x: pan.view.x - dx * (pan.view.w / size.w),
+                y: pan.view.y - dy * (pan.view.h / size.h),
+                w: pan.view.w,
+                h: pan.view.h,
+            });
+        }
+    };
+    const onPointerUp = () => { panRef.current = null; };
+
+    // Label culling: labels keep a constant screen size (fontSize scaled by
+    // 1/scale), so zooming in makes room for more of them. Greedy placement
+    // by degree: a label is shown only if its rectangle doesn't collide with
+    // one already placed — dense areas stay clean, hubs win, zooming reveals
+    // the rest. Hovered node always shows via the tooltip.
+    const labelled = useMemo(() => {
+        const fontWorld = 11 / scale;
+        const placed: Array<{ x1: number; y1: number; x2: number; y2: number }> = [];
+        const show = new Set<string>();
+        const sorted = [...layout.nodes].sort((a, b) => b.degree - a.degree);
+        for (const s of sorted) {
+            const text = truncate(s.label || s.id, 28);
+            const w = text.length * fontWorld * 0.62;
+            const h = fontWorld * 1.4;
+            const rect = { x1: s.x + s.r + 3, y1: s.y - h / 2, x2: s.x + s.r + 3 + w, y2: s.y + h / 2 };
+            const collides = placed.some((p) => rect.x1 < p.x2 && rect.x2 > p.x1 && rect.y1 < p.y2 && rect.y2 > p.y1);
+            if (!collides) {
+                placed.push(rect);
+                show.add(s.id);
+            }
+        }
+        return show;
+    }, [layout, scale]);
+
     const types = useMemo(() => Array.from(new Set(data.nodes.map((d) => d.type || 'unknown'))), [data]);
+    const denseEdges = layout.edges.length > 150;
 
     return (
         <div ref={containerRef} className="relative w-full">
-            <svg width={size.w} height={size.h} className="block bg-gray-50 rounded-lg border" data-testid="memory-graph">
-                {data.edges.map((e, i) => {
-                    const a = nodeIndex.get(e.from), b = nodeIndex.get(e.to);
-                    if (!a || !b) return null;
-                    return (
-                        <line key={i} x1={a.x} y1={a.y} x2={b.x} y2={b.y}
-                            stroke="#cbd5e1" strokeWidth={Math.min(1 + (e.weight || 1) * 0.4, 3)} strokeOpacity={0.6} />
-                    );
-                })}
-                {nodes.map((s) => (
+            <svg ref={svgRef} width={size.w} height={size.h}
+                viewBox={`${vb.x} ${vb.y} ${vb.w} ${vb.h}`}
+                className="block bg-gray-50 rounded-lg border cursor-grab active:cursor-grabbing touch-none"
+                data-testid="memory-graph"
+                onPointerDown={onPointerDown} onPointerMove={onPointerMove}
+                onPointerUp={onPointerUp} onPointerLeave={onPointerUp}>
+                {layout.edges.map((e, i) => (
+                    <line key={i} x1={e.a.x} y1={e.a.y} x2={e.b.x} y2={e.b.y}
+                        stroke="#cbd5e1"
+                        strokeWidth={Math.min(0.8 + e.weight * 0.3, 2.4) / Math.sqrt(scale)}
+                        strokeOpacity={denseEdges ? 0.25 : 0.55} />
+                ))}
+                {layout.nodes.map((s) => (
                     <g key={s.id}
                         transform={`translate(${s.x},${s.y})`}
                         className="cursor-pointer"
-                        onMouseEnter={() => setHover({ node: s, x: s.x, y: s.y })}
+                        onMouseEnter={() => setHover(s)}
                         onMouseLeave={() => setHover(null)}
-                        onClick={() => onNodeClick && onNodeClick(s)}>
-                        <circle r={7} fill={colorForType(s.type)} stroke="#fff" strokeWidth={1.5} />
-                        <text x={10} y={4} fontSize={10} fill="#475569" className="select-none pointer-events-none">
-                            {truncate(s.label || s.id, 24)}
-                        </text>
+                        onClick={() => { if (!panRef.current?.moved && onNodeClick) onNodeClick(s); }}>
+                        <circle r={s.r} fill={colorForType(s.type)}
+                            stroke="#fff" strokeWidth={1.5 / Math.sqrt(scale)}
+                            fillOpacity={hover && hover.id !== s.id ? 0.55 : 0.95} />
+                        {(labelled.has(s.id) || hover?.id === s.id) && (
+                            <text x={s.r + 3} y={(11 / scale) * 0.36} fontSize={11 / scale}
+                                fill="#475569" className="select-none pointer-events-none"
+                                style={{ paintOrder: 'stroke', stroke: '#f9fafb', strokeWidth: 3 / scale }}>
+                                {truncate(s.label || s.id, 28)}
+                            </text>
+                        )}
                     </g>
                 ))}
             </svg>
             {hover && (
                 <div className="absolute z-10 max-w-xs bg-gray-900 text-white text-xs rounded-md px-3 py-2 shadow-lg pointer-events-none"
-                    style={{ left: Math.min(hover.x + 12, size.w - 240), top: Math.max(hover.y - 10, 0) }}>
-                    <div className="font-semibold mb-0.5">{truncate(hover.node.label || hover.node.id, 160)}</div>
-                    <div className="text-gray-300">type: {hover.node.type || 'unknown'}</div>
+                    style={{
+                        left: Math.min(((hover.x - vb.x) / vb.w) * size.w + 14, size.w - 260),
+                        top: Math.max(((hover.y - vb.y) / vb.h) * size.h - 12, 0),
+                    }}>
+                    <div className="font-semibold mb-0.5">{truncate(hover.label || hover.id, 160)}</div>
+                    <div className="text-gray-300">type: {hover.type || 'unknown'} · {hover.degree} connection{hover.degree === 1 ? '' : 's'}</div>
                 </div>
             )}
-            <div className="flex flex-wrap gap-3 mt-2">
+            {view && (
+                <button onClick={() => setView(null)}
+                    className="absolute top-2 right-2 px-2 py-1 text-xs bg-white border rounded-md shadow-sm text-gray-600 hover:bg-gray-50">
+                    Reset view
+                </button>
+            )}
+            <div className="flex flex-wrap items-center gap-3 mt-2">
                 {types.map((t) => (
                     <span key={t} className="flex items-center gap-1.5 text-xs text-gray-600">
                         <span className="w-2.5 h-2.5 rounded-full inline-block" style={{ backgroundColor: colorForType(t) }} />
                         {t}
                     </span>
                 ))}
+                <span className="text-[11px] text-gray-400 ml-auto">scroll to zoom · drag to pan</span>
             </div>
         </div>
     );
@@ -456,6 +623,10 @@ const MODEL_ID_RE = /^[a-z0-9-]+$/;
 const slugify = (s: string) => s.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '');
 
 const agentTagFor = (name: string) => `agent:${slugify(name)}`;
+
+// Rough token estimate for insight content (~4 chars/token, the usual
+// English heuristic) — exact counts would need the model's tokenizer.
+const estimateTokens = (s: string) => Math.max(1, Math.ceil(s.length / 4));
 
 const clampTokens = (v: string): number => Math.max(256, Math.min(8192, Number(v) || 2048));
 
@@ -944,8 +1115,15 @@ export const Memory: React.FC = () => {
             setHistoryError((prev) => ({ ...prev, [id]: '' }));
             axios.get(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/mental-models/${encodeURIComponent(id)}/history`)
                 .then((res) => {
-                    const items = res.data?.items || [];
-                    setHistoryByModel((prev) => ({ ...prev, [id]: Array.isArray(items) ? items : [] }));
+                    // Real Hindsight returns a bare array of
+                    // {previous_content, changed_at}; tolerate an {items}
+                    // wrapper and legacy {content, refreshed_at} field names.
+                    const raw = Array.isArray(res.data) ? res.data : (res.data?.items || []);
+                    const items: HistoryEntry[] = (Array.isArray(raw) ? raw : []).map((e: any) => ({
+                        content: e.previous_content ?? e.content ?? '',
+                        refreshed_at: e.changed_at ?? e.refreshed_at ?? '',
+                    }));
+                    setHistoryByModel((prev) => ({ ...prev, [id]: items }));
                 })
                 .catch((e: unknown) => {
                     setHistoryError((prev) => ({ ...prev, [id]: errMsg(e, 'Failed to load history') }));
@@ -1293,11 +1471,17 @@ export const Memory: React.FC = () => {
                                                             ))}
                                                         </div>
                                                     )}
-                                                    {m.last_refreshed_at && (
-                                                        <div className="text-[11px] text-gray-400 mt-1.5">
-                                                            Last refreshed: {new Date(m.last_refreshed_at).toLocaleString()}
-                                                        </div>
-                                                    )}
+                                                    <div className="flex items-center gap-3 text-[11px] text-gray-400 mt-1.5">
+                                                        {m.content && !/^generating content/i.test(m.content) && (
+                                                            <span title="Estimated from content length (~4 chars/token)">
+                                                                ~{estimateTokens(m.content).toLocaleString()} tokens
+                                                                {m.max_tokens ? ` / ${m.max_tokens.toLocaleString()} max` : ''}
+                                                            </span>
+                                                        )}
+                                                        {m.last_refreshed_at && (
+                                                            <span>Last refreshed: {new Date(m.last_refreshed_at).toLocaleString()}</span>
+                                                        )}
+                                                    </div>
                                                     {expandedHistoryId === m.id && (
                                                         <div className="mt-2 border-t pt-2">
                                                             {historyLoadingId === m.id ? (

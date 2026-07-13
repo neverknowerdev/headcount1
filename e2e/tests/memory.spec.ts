@@ -575,11 +575,13 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         expect(refreshRes.ok()).toBeTruthy();
         const historyRes = await request.get(`/api/memory/banks/${bank}/mental-models/${modelId}/history`);
         expect(historyRes.ok()).toBeTruthy();
+        // Real Hindsight returns a bare array of {previous_content, changed_at}.
         const history = await historyRes.json();
-        expect((history.items as any[]).length).toBeGreaterThanOrEqual(2);
-        for (const entry of history.items as any[]) {
-            expect(typeof entry.content).toBe('string');
-            expect(entry.refreshed_at).toBeTruthy();
+        expect(Array.isArray(history)).toBeTruthy();
+        expect((history as any[]).length).toBeGreaterThanOrEqual(2);
+        for (const entry of history as any[]) {
+            expect(typeof entry.previous_content).toBe('string');
+            expect(entry.changed_at).toBeTruthy();
         }
 
         // Tags listing: every scoping level used by the memory layer shows up
