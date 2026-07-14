@@ -402,7 +402,7 @@ function handle(
 
     // ── reflect ─────────────────────────────────────────────────────────
     if (method === 'POST' && rest === '/reflect') {
-        const results = recall(getBank(bank), { query: body?.query || '' }).slice(0, 3);
+        const results = recall(getBank(bank), { query: body?.query || '', tags: body?.tags }).slice(0, 3);
         const text = 'Based on stored memories: ' + results.map((r) => r.text).join(' | ');
         return json(res, 200, { text });
     }
@@ -455,6 +455,10 @@ function handle(
         const q = (u.searchParams.get('q') || '').toLowerCase();
         let mems = getBank(bank);
         if (q) mems = mems.filter((mm) => (mm.text + ' ' + mm.context).toLowerCase().includes(q));
+        // tags filter (all_strict semantics, like real Hindsight's default):
+        // a memory must carry every requested tag.
+        const tagFilter = u.searchParams.getAll('tags');
+        if (tagFilter.length > 0) mems = mems.filter((mm) => tagFilter.every((t) => mm.tags.includes(t)));
         // Cytoscape-style { data: {...} } envelope, matching real Hindsight's
         // get_graph_data shape — the frontend normalizes this, so the mock
         // must return the same wire format or it can't catch a regression there.

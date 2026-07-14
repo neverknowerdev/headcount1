@@ -864,14 +864,18 @@ export const Memory: React.FC = () => {
     const refreshTimersRef = useRef<number[]>([]);
     useEffect(() => () => { refreshTimersRef.current.forEach((t) => window.clearTimeout(t)); }, []);
 
-    // Sync state — with one shared bank per company, doc re-sync targets a
-    // specific project rather than the (now singular) bank.
+    // Project filter — '' means "All projects". A specific selection scopes
+    // every view (graph, memories, query, insights) to that project's tag,
+    // and is also the target of the "Re-sync docs" button (which syncs all
+    // projects when "All" is selected).
     const [projects, setProjects] = useState<Project[]>([]);
-    const [syncProjectId, setSyncProjectId] = useState<string>('');
+    const [projectFilterId, setProjectFilterId] = useState<string>('');
     const [syncing, setSyncing] = useState(false);
     const [syncResult, setSyncResult] = useState<{ added: number; updated: number; removed: number } | null>(null);
 
     const available = status?.available === true;
+    const filterProject = projects.find((p) => String(p.id) === projectFilterId) || null;
+    const projectFilterTag = filterProject ? `project:${slugify(filterProject.name)}` : null;
 
     // Reset per-bank UI state whenever the selected bank changes (including
     // programmatic changes on company switch, which don't go through the
@@ -927,9 +931,9 @@ export const Memory: React.FC = () => {
         return () => { cancelled = true; };
     }, [selectedCompanyId, available]);
 
-    // Load the company's projects — used only to pick which project's docs
-    // to re-sync (project docs and agent run experience now share one bank
-    // per company, so there is no per-project bank to infer this from).
+    // Load the company's projects — feeds the project filter dropdown, which
+    // scopes every memory view to one project's tag and picks the "Re-sync
+    // docs" target.
     useEffect(() => {
         if (!selectedCompanyId) return;
         let cancelled = false;
@@ -938,7 +942,8 @@ export const Memory: React.FC = () => {
                 if (cancelled) return;
                 const list: Project[] = res.data || [];
                 setProjects(list);
-                setSyncProjectId((prev) => (prev && list.some((p) => String(p.id) === prev) ? prev : String(list[0]?.id || '')));
+                // Keep a still-valid selection; otherwise fall back to "All".
+                setProjectFilterId((prev) => (prev && list.some((p) => String(p.id) === prev) ? prev : ''));
             })
             .catch(() => { if (!cancelled) setProjects([]); });
         return () => { cancelled = true; };
@@ -950,8 +955,10 @@ export const Memory: React.FC = () => {
         let cancelled = false;
         setGraphLoading(true);
         setGraphError(null);
+        const tagQS = projectFilterTag && graphMode === 'memories'
+            ? `&tags=${encodeURIComponent(projectFilterTag)}&tags_match=all_strict` : '';
         const url = graphMode === 'memories'
-            ? `/api/memory/banks/${encodeURIComponent(selectedBankId)}/graph?limit=150`
+            ? `/api/memory/banks/${encodeURIComponent(selectedBankId)}/graph?limit=150${tagQS}`
             : `/api/memory/banks/${encodeURIComponent(selectedBankId)}/entities-graph?limit=150`;
         axios.get(url)
             .then((res) => {
@@ -969,7 +976,7 @@ export const Memory: React.FC = () => {
             .finally(() => { if (!cancelled) setGraphLoading(false); });
         return () => { cancelled = true; };
         // memRefreshKey: re-fetch after a memory is edited/deleted so the graph doesn't show stale nodes.
-    }, [selectedBankId, available, graphMode, tab, memRefreshKey]);
+    }, [selectedBankId, available, graphMode, tab, memRefreshKey, projectFilterTag]);
 
     // Load memories list
     useEffect(() => {
@@ -987,14 +994,20 @@ export const Memory: React.FC = () => {
                 .then((res) => {
                     if (cancelled) return;
                     const data = res.data;
-                    const items = Array.isArray(data) ? data : (data?.items || data?.memories || data?.results || []);
-                    setMemories(Array.isArray(items) ? items : []);
+                    let items = Array.isArray(data) ? data : (data?.items || data?.memories || data?.results || []);
+                    if (!Array.isArray(items)) items = [];
+                    // The list endpoint has no tag filter server-side; scope
+                    // to the selected project here.
+                    if (projectFilterTag) {
+                        items = items.filter((it: any) => Array.isArray(it.tags) && it.tags.includes(projectFilterTag));
+                    }
+                    setMemories(items);
                 })
                 .catch((e: unknown) => { if (!cancelled) { setMemories([]); setMemError(errMsg(e, 'Failed to load memories')); } })
                 .finally(() => { if (!cancelled) setMemLoading(false); });
         }, 300);
         return () => { cancelled = true; clearTimeout(t); };
-    }, [selectedBankId, available, tab, memSearch, memType, memRefreshKey]);
+    }, [selectedBankId, available, tab, memSearch, memType, memRefreshKey, projectFilterTag]);
 
     // Load mental models (Insights tab) — synthesized, auto-refreshing
     // knowledge (project state, agent playbooks, open blockers) rather than
@@ -1134,6 +1147,14 @@ export const Memory: React.FC = () => {
 
     const memoryTypes = useMemo(() => Array.from(new Set(memories.map((m) => m.type).filter(Boolean))) as string[], [memories]);
 
+    // Insights scoped to the project filter: only models sourced from that
+    // project's tag. "All projects" shows everything, including bank-wide
+    // models like open-blockers.
+    const visibleModels = useMemo(
+        () => (projectFilterTag ? models.filter((m) => Array.isArray(m.tags) && m.tags.includes(projectFilterTag)) : models),
+        [models, projectFilterTag],
+    );
+
     const querySeqRef = useRef(0);
     const runQuery = useCallback(async () => {
         if (!selectedBankId || !query.trim() || queryLoading) return;
@@ -1145,11 +1166,12 @@ export const Memory: React.FC = () => {
         setRecallResults([]);
         setAskAnswer(null);
         try {
+            const scope = projectFilterTag ? { tags: [projectFilterTag] } : {};
             if (queryMode === 'recall') {
-                const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/recall`, { query: query.trim() });
+                const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/recall`, { query: query.trim(), ...scope });
                 if (seq === querySeqRef.current) setRecallResults(res.data?.results || []);
             } else {
-                const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/ask`, { query: query.trim() });
+                const res = await axios.post(`/api/memory/banks/${encodeURIComponent(selectedBankId)}/ask`, { query: query.trim(), ...scope });
                 if (seq === querySeqRef.current) setAskAnswer(res.data?.text || '');
             }
         } catch (e) {
@@ -1157,21 +1179,28 @@ export const Memory: React.FC = () => {
         } finally {
             if (seq === querySeqRef.current) setQueryLoading(false);
         }
-    }, [selectedBankId, query, queryMode, queryLoading]);
+    }, [selectedBankId, query, queryMode, queryLoading, projectFilterTag]);
 
     const resyncDocs = useCallback(async () => {
-        if (!syncProjectId) return;
+        const targets = projectFilterId ? [projectFilterId] : projects.map((p) => String(p.id));
+        if (targets.length === 0) return;
         setSyncing(true);
         setSyncResult(null);
         try {
-            const res = await axios.post(`/api/memory/projects/${syncProjectId}/sync`);
-            setSyncResult(res.data);
+            const totals = { added: 0, updated: 0, removed: 0 };
+            for (const id of targets) {
+                const res = await axios.post(`/api/memory/projects/${id}/sync`);
+                totals.added += res.data?.added || 0;
+                totals.updated += res.data?.updated || 0;
+                totals.removed += res.data?.removed || 0;
+            }
+            setSyncResult(totals);
         } catch (e) {
             alert(errMsg(e, 'Sync failed'));
         } finally {
             setSyncing(false);
         }
-    }, [syncProjectId]);
+    }, [projectFilterId, projects]);
 
     const onMemoryChanged = useCallback(() => setMemRefreshKey((k) => k + 1), []);
 
@@ -1194,14 +1223,16 @@ export const Memory: React.FC = () => {
                         )}
                         {projects.length > 0 && (
                             <>
-                                <select value={syncProjectId} onChange={(e) => { setSyncProjectId(e.target.value); setSyncResult(null); }}
+                                <select value={projectFilterId} onChange={(e) => { setProjectFilterId(e.target.value); setSyncResult(null); }}
+                                    title="Scope all memory views to one project"
                                     className="border rounded-md px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                     data-testid="memory-sync-project-select">
+                                    <option value="">All projects</option>
                                     {projects.map((p) => (
                                         <option key={p.id} value={p.id}>{p.name}</option>
                                     ))}
                                 </select>
-                                <button onClick={resyncDocs} disabled={syncing || !syncProjectId}
+                                <button onClick={resyncDocs} disabled={syncing}
                                     className="flex items-center gap-1.5 px-3 py-1.5 text-sm border rounded-md bg-white hover:bg-gray-50 text-gray-700 disabled:opacity-50">
                                     <RefreshCw className={`w-4 h-4 ${syncing ? 'animate-spin' : ''}`} />
                                     {syncing ? 'Syncing…' : 'Re-sync docs'}
@@ -1408,15 +1439,15 @@ export const Memory: React.FC = () => {
                                         </button>
                                     </div>
                                     {modelsError && <div className="text-red-600 text-sm mb-3">{modelsError}</div>}
-                                    {modelsLoading && models.length === 0 ? (
+                                    {modelsLoading && visibleModels.length === 0 ? (
                                         <div className="text-gray-500 italic text-sm">Loading…</div>
-                                    ) : models.length === 0 ? (
+                                    ) : visibleModels.length === 0 ? (
                                         <div className="text-gray-500 italic text-sm">
                                             No insights yet — they appear once a project or agent has enough memory to synthesize from.
                                         </div>
                                     ) : (
                                         <div className="space-y-3">
-                                            {models.map((m) => (
+                                            {visibleModels.map((m) => (
                                                 <div key={m.id} className="border rounded-lg p-3 bg-white">
                                                     <div className="flex items-start justify-between gap-2 mb-1.5">
                                                         <div>

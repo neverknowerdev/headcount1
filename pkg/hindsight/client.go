@@ -190,11 +190,16 @@ func (c *Client) Recall(ctx context.Context, bankID string, req RecallRequest) (
 	return out, err
 }
 
-func (c *Client) Reflect(ctx context.Context, bankID, query, budget string) (ReflectResponse, error) {
+// Reflect runs Hindsight's agentic reasoning over the bank. tags (optional)
+// scope which memories it may consider, e.g. one project's tag.
+func (c *Client) Reflect(ctx context.Context, bankID, query, budget string, tags []string) (ReflectResponse, error) {
 	var out ReflectResponse
 	req := map[string]interface{}{"query": query}
 	if budget != "" {
 		req["budget"] = budget
+	}
+	if len(tags) > 0 {
+		req["tags"] = tags
 	}
 	err := c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/reflect"), req, &out)
 	return out, err

@@ -115,7 +115,7 @@ func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
 	}
 	bank := chi.URLParam(r, "bankID")
 	params := url.Values{}
-	for _, k := range []string{"limit", "q", "type", "tags", "document_id"} {
+	for _, k := range []string{"limit", "q", "type", "tags", "tags_match", "document_id"} {
 		if v := r.URL.Query().Get(k); v != "" {
 			params.Set(k, v)
 		}
@@ -207,8 +207,10 @@ func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Query  string `json:"query"`
-		Budget string `json:"budget"`
+		Query     string   `json:"query"`
+		Budget    string   `json:"budget"`
+		Tags      []string `json:"tags"`
+		TagsMatch string   `json:"tags_match"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Query) == "" {
 		api.respondError(w, http.StatusBadRequest, "query is required")
@@ -217,8 +219,12 @@ func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
 	if req.Budget == "" {
 		req.Budget = "mid"
 	}
+	if len(req.Tags) > 0 && req.TagsMatch == "" {
+		req.TagsMatch = "all_strict"
+	}
 	resp, err := c.Recall(r.Context(), chi.URLParam(r, "bankID"), hindsight.RecallRequest{
 		Query: req.Query, Budget: req.Budget, MaxTokens: 4096,
+		Tags: req.Tags, TagsMatch: req.TagsMatch,
 	})
 	if err != nil {
 		api.respondMemoryError(w, err)
@@ -235,13 +241,14 @@ func (api *API) AskMemory(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Query string `json:"query"`
+		Query string   `json:"query"`
+		Tags  []string `json:"tags"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil || strings.TrimSpace(req.Query) == "" {
 		api.respondError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	resp, err := c.Reflect(r.Context(), chi.URLParam(r, "bankID"), req.Query, "low")
+	resp, err := c.Reflect(r.Context(), chi.URLParam(r, "bankID"), req.Query, "low", req.Tags)
 	if err != nil {
 		api.respondMemoryError(w, err)
 		return
