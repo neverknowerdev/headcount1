@@ -397,7 +397,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Set up the session logger. All sessions of one main run share the
 	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
-	// session writes main.log, child sessions write session-{runID}.log.
+	// session writes main.jsonl, child sessions write session-{runID}.jsonl.
 	proxyLogger, logErr := logging.NewSessionLoggerWithHub(
 		settings.BasePath,
 		company.ShortName,
@@ -1153,7 +1153,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			onRunCreated: func(childRun db.Run) {
 				state.childRunID = childRun.ID
 				if parentLogger != nil {
-					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.log", childRun.ID))
+					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.jsonl", childRun.ID))
 				}
 				e.hub.BroadcastEvent("session_started", map[string]interface{}{
 					"parent_run_id": parentRun.ID,
@@ -1510,7 +1510,7 @@ Question: %s`, filename, content, truncNote, question)
 }
 
 // logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.log / session-N.log), so the short
+// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
 // answer in the session log can always be traced back to the full reader
 // prompt and the exact artifact content it saw.
 func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
