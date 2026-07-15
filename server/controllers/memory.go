@@ -66,14 +66,15 @@ func (api *API) respondRawJSON(w http.ResponseWriter, data []byte, err error) {
 	w.Write(data)
 }
 
-// GetMemoryStatus reports whether the memory backend is up.
+// GetMemoryStatus reports whether the memory backend is up, plus the last
+// startup/runtime error and any degradation notice — the frontend renders
+// both as an app-wide banner (see MemoryBackendAlert).
 func (api *API) GetMemoryStatus(w http.ResponseWriter, r *http.Request) {
-	status := map[string]interface{}{"available": false}
-	if memoryManager != nil && memoryManager.Client() != nil {
-		status["available"] = true
-		status["url"] = memoryManager.BaseURL()
+	if memoryManager == nil {
+		api.respondJSON(w, http.StatusOK, hindsight.Status{})
+		return
 	}
-	api.respondJSON(w, http.StatusOK, status)
+	api.respondJSON(w, http.StatusOK, memoryManager.Status())
 }
 
 // memoryBank describes one bank with a human-friendly label.

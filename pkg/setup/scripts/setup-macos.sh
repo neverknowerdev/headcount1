@@ -135,16 +135,29 @@ fi
 # is launched and managed by the orchestrator itself. Optional: the app runs
 # fine without long-term memory. Skipped when HINDSIGHT_API_URL points at an
 # external server (also how e2e tests inject their mock).
+# Pinned so every install runs the same migration history — an unpinned
+# install (or a stray newer/custom build) migrates the shared embedded
+# Postgres to a schema the next install can't read, killing the memory
+# layer at startup. Bump deliberately, together with app releases.
+HINDSIGHT_PIN="0.6.1"
 if [ -z "${HINDSIGHT_API_URL:-}" ] && [ -x "$VENV_DIR/bin/python3" ]; then
     if [ -x "$VENV_DIR/bin/hindsight-api" ]; then
-        echo "[setup] hindsight: OK"
+        # Never reinstall over an existing install (it may be a deliberate
+        # dev build) — but make version drift visible, since a drifted
+        # version means the memory DB may get isolated onto a fallback schema.
+        installed_hs=$(ls -d "$VENV_DIR"/lib/python*/site-packages/hindsight_api-*.dist-info 2>/dev/null | head -1 | sed -E 's/.*hindsight_api-(.*)\.dist-info/\1/')
+        if [ -n "$installed_hs" ] && [ "$installed_hs" != "$HINDSIGHT_PIN" ]; then
+            echo "[setup] hindsight: OK (v$installed_hs — differs from pinned v$HINDSIGHT_PIN; if its DB migrations are incompatible the app isolates memory onto a fresh schema automatically)"
+        else
+            echo "[setup] hindsight: OK"
+        fi
     else
-        echo "[setup] hindsight: not found — installing (this can take a few minutes)..."
-        install_output=$("$VENV_DIR/bin/python3" -m pip install hindsight-api 2>&1)
+        echo "[setup] hindsight: not found — installing v$HINDSIGHT_PIN (this can take a few minutes)..."
+        install_output=$("$VENV_DIR/bin/python3" -m pip install "hindsight-api==$HINDSIGHT_PIN" 2>&1)
         if [ -x "$VENV_DIR/bin/hindsight-api" ]; then
             echo "[setup] hindsight: installed"
         else
-            add_soft_failure "hindsight" "pip install hindsight-api failed — long-term memory will be unavailable" "$install_output"
+            add_soft_failure "hindsight" "pip install hindsight-api==$HINDSIGHT_PIN failed — long-term memory will be unavailable" "$install_output"
         fi
     fi
 fi

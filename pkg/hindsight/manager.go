@@ -3,11 +3,13 @@ package hindsight
 import (
 	"context"
 	"fmt"
+	"io"
 	"log"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strings"
 	"sync"
 	"time"
 
@@ -38,6 +40,19 @@ type OpLLMConfigs struct {
 	HasReflect       bool
 }
 
+// Status is the memory backend's health as served by /api/memory/status.
+// Error is set when the backend failed to start or died — the frontend
+// shows it as an app-wide banner. Notice carries a non-fatal degradation
+// (e.g. memory was re-initialized on a fallback schema after an
+// incompatible-migration crash) for the current process lifetime.
+type Status struct {
+	Available bool   `json:"available"`
+	URL       string `json:"url,omitempty"`
+	Schema    string `json:"schema,omitempty"`
+	Error     string `json:"error,omitempty"`
+	Notice    string `json:"notice,omitempty"`
+}
+
 // Manager owns the bare-metal hindsight-api process. When HINDSIGHT_API_URL
 // is set (external server, e2e mock) no process is spawned — the URL is used
 // as-is. Otherwise the hindsight-api binary installed by the setup script
@@ -50,6 +65,10 @@ type Manager struct {
 	llm     func(ctx context.Context) OpLLMConfigs
 	baseURL string
 	port    string
+	schema  string
+	lastErr string
+	notice  string
+	tail    *tailBuffer // rolling output of the current/last spawned process
 
 	// startMu serializes Start so concurrent callers (startup goroutine plus
 	// a settings-change re-trigger) can never spawn two processes.
@@ -77,6 +96,31 @@ func (m *Manager) BaseURL() string {
 	return m.baseURL
 }
 
+// Status reports availability plus the last startup/runtime error and any
+// degradation notice, for the app-wide memory banner.
+func (m *Manager) Status() Status {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	s := Status{Schema: m.schema, Error: m.lastErr, Notice: m.notice}
+	if m.client != nil {
+		s.Available = true
+		s.URL = m.baseURL
+	}
+	return s
+}
+
+func (m *Manager) setErr(msg string) {
+	m.mu.Lock()
+	m.lastErr = msg
+	m.mu.Unlock()
+}
+
+func (m *Manager) setNotice(msg string) {
+	m.mu.Lock()
+	m.notice = msg
+	m.mu.Unlock()
+}
+
 // binaryPath returns the hindsight-api executable inside the app venv.
 func binaryPath() string {
 	return filepath.Join(db.PaperclipHome(), "venv", "bin", "hindsight-api")
@@ -85,6 +129,12 @@ func binaryPath() string {
 // Start brings the memory backend up. Blocking; intended to run in a
 // background goroutine at startup. Safe to call again after a settings
 // change (it is a no-op when already healthy).
+//
+// Startup failures never crash-loop silently: the failure is recorded for
+// /api/memory/status, and a migration-history mismatch (the embedded
+// Postgres was migrated by a different hindsight-api build, so Alembic
+// cannot locate the DB's revision) triggers a one-time fallback to a fresh,
+// version-scoped schema — the incompatible schema's data is left untouched.
 func (m *Manager) Start(ctx context.Context) error {
 	m.startMu.Lock()
 	defer m.startMu.Unlock()
@@ -93,12 +143,20 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 
 	if url := os.Getenv("HINDSIGHT_API_URL"); url != "" {
-		return m.adopt(ctx, url, 30*time.Second)
+		err := m.adopt(ctx, url, 30*time.Second, nil)
+		if err != nil {
+			m.setErr(err.Error())
+		} else {
+			m.setErr("")
+		}
+		return err
 	}
 
 	bin := binaryPath()
-	if _, err := os.Stat(bin); err != nil {
-		return fmt.Errorf("hindsight-api not installed (%s): run setup first", bin)
+	if _, statErr := os.Stat(bin); statErr != nil {
+		err := fmt.Errorf("hindsight-api not installed (%s): run setup first", bin)
+		m.setErr(err.Error())
+		return err
 	}
 
 	// PDEATHSIG only exists on Linux; on macOS a crashed orchestrator leaves
@@ -106,6 +164,129 @@ func (m *Manager) Start(ctx context.Context) error {
 	// leftovers before spawning fresh.
 	reclaimOrphans(m.port)
 
+	schemaOverridden := os.Getenv("HINDSIGHT_API_DATABASE_SCHEMA") != ""
+	schema := resolveSchema()
+
+	err := m.startWithSchema(ctx, schema)
+	if err == nil {
+		m.setErr("")
+		return nil
+	}
+
+	// Migration-history mismatch: the schema's alembic_version points at a
+	// revision the installed hindsight-api doesn't know (data was migrated
+	// by a newer or custom build). Running the old code against the newer
+	// schema is unsafe, so isolate: re-initialize memory on a fresh schema
+	// named after the installed version. Deterministic naming means the
+	// same install always lands on the same schema (no churn across
+	// restarts) and a future incompatible version gets its own schema
+	// instead of a crash loop. An explicit HINDSIGHT_API_DATABASE_SCHEMA
+	// override is user intent — never second-guess it.
+	if isMigrationFailure(m.lastTail()) && !schemaOverridden {
+		version := installedVersion()
+		fallback := fallbackSchemaName(version)
+		if fallback != schema {
+			log.Printf("hindsight: schema %q was migrated by an incompatible hindsight-api build — re-initializing memory on schema %q (installed hindsight-api %s); previous data is preserved untouched in %q",
+				schema, fallback, versionOrUnknown(version), schema)
+			if err2 := m.startWithSchema(ctx, fallback); err2 == nil {
+				state := schemaState{
+					Schema:           fallback,
+					PreviousSchema:   schema,
+					Reason:           fmt.Sprintf("schema %q has migrations from an incompatible hindsight-api build", schema),
+					HindsightVersion: version,
+					SwitchedAt:       time.Now().UTC().Format(time.RFC3339),
+				}
+				if serr := saveSchemaState(state); serr != nil {
+					log.Printf("hindsight: warning: failed to persist schema state: %v", serr)
+				}
+				m.setNotice(m.salvageIntoFallback(ctx, schema, fallback))
+				m.setErr("")
+				return nil
+			} else {
+				err = err2
+			}
+		}
+	}
+
+	m.setErr(summarizeFailure(err.Error(), m.lastTail()))
+	return err
+}
+
+// salvageIntoFallback copies the incompatible schema's data into the fresh
+// fallback schema (see salvage.go) so agents and the UI keep their memories,
+// and returns the user-facing notice describing the outcome. The old schema
+// is read-only throughout — worst case the copy fails and the data merely
+// stays where it was.
+func (m *Manager) salvageIntoFallback(ctx context.Context, from, to string) string {
+	sctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
+	defer cancel()
+	copied, err := salvageSchemaData(sctx, from, to)
+	if err != nil {
+		log.Printf("hindsight: salvage from schema %q failed: %v", from, err)
+		return fmt.Sprintf(
+			"Long-term memory was re-initialized on a fresh database schema (%q) because the previous schema (%q) was migrated by an incompatible hindsight-api version. Existing memories could not be copied over automatically (%v); they remain preserved in %q.",
+			to, from, err, from)
+	}
+	total := totalRows(copied)
+	units := copied["memory_units"]
+	log.Printf("hindsight: salvaged %d rows (%d memories) from schema %q into %q", total, units, from, to)
+	return fmt.Sprintf(
+		"Long-term memory was re-initialized on a fresh database schema (%q) because the previous schema (%q) was migrated by an incompatible hindsight-api version. Existing memories were copied over automatically (%d memories, %d rows in total); the original data also remains untouched in %q.",
+		to, from, units, total, from)
+}
+
+// startWithSchema spawns hindsight-api against one Postgres schema and waits
+// for it to become healthy (or exit).
+func (m *Manager) startWithSchema(ctx context.Context, schema string) error {
+	env := m.buildEnv(ctx, schema)
+	tail := newTailBuffer(32 << 10)
+	out := io.MultiWriter(os.Stderr, tail)
+
+	cmd := exec.Command(binaryPath(), "--port", m.port, "--host", "127.0.0.1")
+	cmd.Env = env
+	cmd.Stdout = out
+	cmd.Stderr = out
+	setProcAttrs(cmd) // on Linux: die with the parent, never orphan embedded Postgres
+	if err := cmd.Start(); err != nil {
+		return fmt.Errorf("start hindsight-api: %w", err)
+	}
+	writePIDFile(cmd.Process.Pid)
+	done := make(chan struct{})
+	m.mu.Lock()
+	m.cmd = cmd
+	m.cmdDone = done
+	m.schema = schema
+	m.tail = tail
+	m.mu.Unlock()
+	go func() {
+		defer close(done)
+		werr := cmd.Wait()
+		if werr != nil {
+			log.Printf("hindsight-api exited: %v", werr)
+		}
+		m.mu.Lock()
+		// Only clear state we still own — a Stop+Start cycle may have
+		// already replaced cmd/client with a newer process.
+		if m.cmd == cmd {
+			if m.client != nil {
+				// Was healthy and died mid-flight: surface it app-wide.
+				m.lastErr = fmt.Sprintf("memory backend (hindsight-api) exited unexpectedly: %v", werr)
+			}
+			m.client = nil
+			m.cmd = nil
+			removePIDFile()
+		}
+		m.mu.Unlock()
+	}()
+
+	// First boot downloads models and initializes embedded Postgres — allow
+	// a generous window before declaring failure.
+	return m.adopt(ctx, "http://127.0.0.1:"+m.port, 5*time.Minute, done)
+}
+
+// buildEnv assembles the child process environment: LLM routing through the
+// app's own gateway, export/import for backups, and the storage schema.
+func (m *Manager) buildEnv(ctx context.Context, schema string) []string {
 	env := os.Environ()
 	cfgs := m.llm(ctx)
 	if cfgs.HasRetain {
@@ -141,6 +322,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		"HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API=true",
 		// Stable worker id so background jobs survive restarts.
 		"HINDSIGHT_API_WORKER_ID=paperclip2",
+		// Storage schema — see resolveSchema/fallbackSchemaName. Appended
+		// last so it wins over any inherited value.
+		"HINDSIGHT_API_DATABASE_SCHEMA="+schema,
 	)
 	if runtime.GOOS == "darwin" {
 		// Torch MPS crashes (SIGSEGV, pointer-authentication failures) when
@@ -152,46 +336,23 @@ func (m *Manager) Start(ctx context.Context) error {
 			"HINDSIGHT_API_RERANKER_LOCAL_FORCE_CPU=true",
 		)
 	}
-
-	cmd := exec.Command(bin, "--port", m.port, "--host", "127.0.0.1")
-	cmd.Env = env
-	cmd.Stdout = os.Stderr
-	cmd.Stderr = os.Stderr
-	setProcAttrs(cmd) // on Linux: die with the parent, never orphan embedded Postgres
-	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start hindsight-api: %w", err)
-	}
-	writePIDFile(cmd.Process.Pid)
-	m.mu.Lock()
-	m.cmd = cmd
-	m.mu.Unlock()
-	done := make(chan struct{})
-	m.mu.Lock()
-	m.cmdDone = done
-	m.mu.Unlock()
-	go func() {
-		defer close(done)
-		if werr := cmd.Wait(); werr != nil {
-			log.Printf("hindsight-api exited: %v", werr)
-		}
-		m.mu.Lock()
-		// Only clear state we still own — a Stop+Start cycle may have
-		// already replaced cmd/client with a newer process.
-		if m.cmd == cmd {
-			m.client = nil
-			m.cmd = nil
-			removePIDFile()
-		}
-		m.mu.Unlock()
-	}()
-
-	// First boot downloads models and initializes embedded Postgres — allow
-	// a generous window before declaring failure.
-	return m.adopt(ctx, "http://127.0.0.1:"+m.port, 5*time.Minute)
+	return env
 }
 
-// adopt polls url's health endpoint until it responds, then publishes the client.
-func (m *Manager) adopt(ctx context.Context, url string, timeout time.Duration) error {
+func (m *Manager) lastTail() string {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	if m.tail == nil {
+		return ""
+	}
+	return m.tail.String()
+}
+
+// adopt polls url's health endpoint until it responds, then publishes the
+// client. procDead (nil for external URLs) aborts the wait as soon as the
+// spawned process exits, so a startup crash fails in seconds instead of
+// burning the whole timeout polling a dead port.
+func (m *Manager) adopt(ctx context.Context, url string, timeout time.Duration, procDead <-chan struct{}) error {
 	c := NewClient(url)
 	deadline := time.Now().Add(timeout)
 	for {
@@ -212,6 +373,8 @@ func (m *Manager) adopt(ctx context.Context, url string, timeout time.Duration) 
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
+		case <-procDead: // nil channel never fires
+			return fmt.Errorf("hindsight-api exited during startup")
 		case <-time.After(2 * time.Second):
 		}
 	}
@@ -239,4 +402,111 @@ func (m *Manager) Stop() {
 		}
 	}
 	_ = cmd.Process.Kill()
+}
+
+func versionOrUnknown(v string) string {
+	if v == "" {
+		return "(unknown version)"
+	}
+	return v
+}
+
+// tailBuffer is a thread-safe writer that keeps only the last max bytes —
+// enough context to classify a startup failure without unbounded growth.
+type tailBuffer struct {
+	mu  sync.Mutex
+	max int
+	buf []byte
+}
+
+func newTailBuffer(max int) *tailBuffer { return &tailBuffer{max: max} }
+
+func (t *tailBuffer) Write(p []byte) (int, error) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	t.buf = append(t.buf, p...)
+	if len(t.buf) > t.max {
+		t.buf = t.buf[len(t.buf)-t.max:]
+	}
+	return len(p), nil
+}
+
+func (t *tailBuffer) String() string {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return string(t.buf)
+}
+
+// isMigrationFailure reports whether captured hindsight-api output shows an
+// Alembic migration failure — the signature of a DB whose migration history
+// doesn't match the installed package.
+func isMigrationFailure(output string) bool {
+	for _, sig := range []string{
+		"Database migration failed",
+		"Can't locate revision identified by",
+		"alembic.util.exc.CommandError",
+		"alembic.script.revision.ResolutionError",
+	} {
+		if strings.Contains(output, sig) {
+			return true
+		}
+	}
+	return false
+}
+
+// summarizeFailure turns a startup error plus process output into one short
+// human-readable line for the UI banner (the full output already went to the
+// server log).
+func summarizeFailure(errMsg, output string) string {
+	// The most informative single line, if present.
+	for _, line := range strings.Split(output, "\n") {
+		if idx := strings.Index(line, "Can't locate revision identified by"); idx >= 0 {
+			return "memory backend (hindsight-api) failed to start: database migration failed — " + strings.TrimSpace(line[idx:])
+		}
+	}
+	if strings.Contains(output, "Database migration failed") {
+		return "memory backend (hindsight-api) failed to start: database migration failed (see server log)"
+	}
+	msg := "memory backend (hindsight-api) failed to start: " + errMsg
+	if len(msg) > 300 {
+		msg = msg[:300] + "…"
+	}
+	return msg
+}
+
+// installedVersion returns the hindsight-api package version installed in
+// the app venv ("" when it can't be determined), read from the dist-info
+// directory name to avoid spawning Python.
+func installedVersion() string {
+	pattern := filepath.Join(db.PaperclipHome(), "venv", "lib", "python*", "site-packages", "hindsight_api-*.dist-info")
+	matches, _ := filepath.Glob(pattern)
+	for _, match := range matches {
+		base := filepath.Base(match)
+		v := strings.TrimSuffix(strings.TrimPrefix(base, "hindsight_api-"), ".dist-info")
+		if v != "" && v != base {
+			return v
+		}
+	}
+	return ""
+}
+
+// fallbackSchemaName derives the version-scoped schema used when the active
+// schema's migrations are incompatible: mem_v0_6_1 for hindsight-api 0.6.1.
+// Deterministic by design — the same installed version always maps to the
+// same schema, so restarts reuse it instead of re-initializing again.
+func fallbackSchemaName(version string) string {
+	if version == "" {
+		return "mem_fallback"
+	}
+	var b strings.Builder
+	b.WriteString("mem_v")
+	for _, r := range version {
+		switch {
+		case r >= 'a' && r <= 'z', r >= 'A' && r <= 'Z', r >= '0' && r <= '9':
+			b.WriteRune(r)
+		default:
+			b.WriteRune('_')
+		}
+	}
+	return b.String()
 }
