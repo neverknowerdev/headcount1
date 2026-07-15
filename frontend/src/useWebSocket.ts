@@ -7,6 +7,11 @@ import { useEffect, useRef } from 'react';
 const STALE_AFTER_MS = 60_000;
 const STALE_CHECK_INTERVAL_MS = 10_000;
 const MAX_RETRY_DELAY_MS = 15_000;
+// A WebSocket handshake that neither opens nor errors within this window
+// (e.g. a proxy that accepts the TCP connection but never completes the
+// upgrade) is abandoned and retried — the browser's own handshake timeout
+// can be minutes long, during which no events and no onclose would arrive.
+const CONNECT_TIMEOUT_MS = 10_000;
 
 // wsUrl builds the event-hub WebSocket URL for the current page, using wss://
 // when the page itself is served over https.
@@ -56,10 +61,12 @@ export function useWebSocket(
         let retryDelay = 1000;
         let retryTimer: ReturnType<typeof setTimeout> | null = null;
         let lastMessageAt = Date.now();
+        let connectStartedAt = Date.now();
 
         function connect() {
             retryTimer = null;
             ws = new WebSocket(url);
+            connectStartedAt = Date.now();
             lastMessageAt = Date.now();
 
             ws.onmessage = (event: MessageEvent) => {
@@ -105,16 +112,22 @@ export function useWebSocket(
                 ws = null;
                 old.onclose = null;
                 old.onmessage = null;
+                old.onopen = null;
                 try { old.close(); } catch { /* ignore */ }
             }
             connect();
         }
 
         // Watchdog: a half-open connection never fires onclose, so if the
-        // server heartbeat goes quiet the socket is dead — recycle it.
+        // server heartbeat goes quiet the socket is dead — recycle it. A
+        // handshake stuck in CONNECTING is equally dead and is retried too.
         const staleCheck = setInterval(() => {
-            if (ws && ws.readyState === WebSocket.OPEN
-                && Date.now() - lastMessageAt > STALE_AFTER_MS) {
+            if (!ws) return;
+            const openButSilent = ws.readyState === WebSocket.OPEN
+                && Date.now() - lastMessageAt > STALE_AFTER_MS;
+            const stuckConnecting = ws.readyState === WebSocket.CONNECTING
+                && Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS;
+            if (openButSilent || stuckConnecting) {
                 reconnectNow();
             }
         }, STALE_CHECK_INTERVAL_MS);
@@ -124,8 +137,10 @@ export function useWebSocket(
         const onVisible = () => {
             if (document.visibilityState !== 'visible') return;
             const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
+            const stuckConnecting = !!ws && ws.readyState === WebSocket.CONNECTING
+                && Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS;
             const stale = Date.now() - lastMessageAt > STALE_AFTER_MS;
-            if (dead || stale) reconnectNow();
+            if (dead || stuckConnecting || stale) reconnectNow();
         };
         const onOnline = () => reconnectNow();
         document.addEventListener('visibilitychange', onVisible);

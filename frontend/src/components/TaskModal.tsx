@@ -190,9 +190,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 if (!prev.some((r: any) => r.id === msg.payload.run_id)) return prev;
                 return prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, status: msg.payload.status } : r);
             });
-            setTask((prev: any) => prev ? { ...prev, run_id: null } : prev);
-            // Re-sync after run completes to catch any comments/artifacts whose WS events may have been missed
-            if (runIsOurs) fetchActivity();
+            if (runIsOurs) {
+                // Only clear the running marker when it was OUR run that ended —
+                // unrelated runs finishing elsewhere must not make this task
+                // look idle.
+                setTask((prev: any) => prev && prev.run_id === msg.payload.run_id ? { ...prev, run_id: null } : prev);
+                // Re-sync after run completes to catch any comments/artifacts whose WS events may have been missed
+                fetchActivity();
+            }
         }
         if (msg.type === 'run_log') {
             if (msg.payload.entry) {

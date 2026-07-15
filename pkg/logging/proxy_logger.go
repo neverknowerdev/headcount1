@@ -32,6 +32,14 @@ type ProxyLogger struct {
 	// messages[] (the conversation history keeps growing), but we only
 	// want to log it once.
 	loggedToolResults map[string]bool
+
+	// persistCh feeds a single writer goroutine so database entries are
+	// appended in exactly the order they were broadcast. One goroutine per
+	// logger (i.e. per run session); Close drains it before returning so no
+	// entry is ever dropped on shutdown.
+	persistCh     chan map[string]interface{}
+	persistDone   chan struct{}
+	persistClosed bool
 }
 
 func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32) (*ProxyLogger, error) {
@@ -67,7 +75,7 @@ func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interfa
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	return &ProxyLogger{
+	l := &ProxyLogger{
 		file:              f,
 		filePath:          logFile,
 		basePath:          basePath,
@@ -75,15 +83,45 @@ func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interfa
 		q:                 q,
 		runID:             runID,
 		loggedToolResults: map[string]bool{},
-	}, nil
+	}
+	if q != nil && runID > 0 {
+		l.persistCh = make(chan map[string]interface{}, 256)
+		l.persistDone = make(chan struct{})
+		go l.persistWorker()
+	}
+	return l, nil
+}
+
+// persistWorker appends queued entries to the run's log_entries column one at
+// a time, preserving the broadcast order. Transient DB errors (e.g. SQLite
+// write contention) are retried with backoff before the entry is given up on.
+func (l *ProxyLogger) persistWorker() {
+	defer close(l.persistDone)
+	for entry := range l.persistCh {
+		var err error
+		for i := 0; i < 5; i++ {
+			if err = l.q.AppendRunLogEntry(context.Background(), l.runID, entry); err == nil {
+				break
+			}
+			time.Sleep(time.Duration(i+1) * 100 * time.Millisecond)
+		}
+		if err != nil {
+			fmt.Printf("AppendRunLogEntry gave up (run %d): %v\n", l.runID, err)
+		}
+	}
 }
 
 func (l *ProxyLogger) FilePath() string {
 	return l.filePath
 }
 
-func (l *ProxyLogger) broadcastLog(entryType, content string, extra map[string]interface{}) {
-	if l.hub == nil || l.runID <= 0 {
+// logEvent builds ONE entry — with a single timestamp shared by the WebSocket
+// broadcast and the database record, so the frontend can deduplicate entries
+// by ts when it merges a re-fetched snapshot with the live stream — then
+// broadcasts it and queues it for ordered persistence. Callers must hold l.mu
+// so entries are broadcast and persisted in the same order.
+func (l *ProxyLogger) logEvent(entryType, content string, extra map[string]interface{}) {
+	if l.runID <= 0 {
 		return
 	}
 	entry := map[string]interface{}{
@@ -94,34 +132,15 @@ func (l *ProxyLogger) broadcastLog(entryType, content string, extra map[string]i
 	for k, v := range extra {
 		entry[k] = v
 	}
-	l.hub.BroadcastEvent("run_log", map[string]interface{}{
-		"run_id": l.runID,
-		"entry":  entry,
-	})
-}
-
-func (l *ProxyLogger) persistLog(entryType, content string, extra map[string]interface{}) {
-	if l.q == nil || l.runID <= 0 {
-		return
+	if l.hub != nil {
+		l.hub.BroadcastEvent("run_log", map[string]interface{}{
+			"run_id": l.runID,
+			"entry":  entry,
+		})
 	}
-	entry := map[string]interface{}{
-		"type":    entryType,
-		"content": content,
-		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+	if l.persistCh != nil && !l.persistClosed {
+		l.persistCh <- entry
 	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	go func() {
-		for i := 0; i < 3; i++ {
-			err := l.q.AppendRunLogEntry(context.Background(), l.runID, entry)
-			if err == nil {
-				break
-			}
-			fmt.Printf("AppendRunLogEntry error (attempt %d): %v\n", i+1, err)
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
 }
 
 func (l *ProxyLogger) LogRequest(model, agentName, providerName string, requestBody []byte) {
@@ -137,11 +156,7 @@ func (l *ProxyLogger) LogRequest(model, agentName, providerName string, requestB
 	l.file.Write(requestBody)
 	l.file.WriteString("\n")
 
-	l.broadcastLog("request", string(requestBody), map[string]interface{}{
-		"model":      model,
-		"agent_name": agentName,
-	})
-	l.persistLog("request", string(requestBody), map[string]interface{}{
+	l.logEvent("request", string(requestBody), map[string]interface{}{
 		"model":      model,
 		"agent_name": agentName,
 	})
@@ -188,11 +203,7 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 	}
 	respBytes, _ := json.Marshal(respData)
 
-	l.broadcastLog("response", string(respBytes), map[string]interface{}{
-		"model":       model,
-		"status_code": statusCode,
-	})
-	l.persistLog("response", string(respBytes), map[string]interface{}{
+	l.logEvent("response", string(respBytes), map[string]interface{}{
 		"model":       model,
 		"status_code": statusCode,
 	})
@@ -261,11 +272,7 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 		respData["raw"] = string(rawBody)
 	}
 	respBytes, _ := json.Marshal(respData)
-	l.broadcastLog("response", string(respBytes), map[string]interface{}{
-		"model":       model,
-		"status_code": 200,
-	})
-	l.persistLog("response", string(respBytes), map[string]interface{}{
+	l.logEvent("response", string(respBytes), map[string]interface{}{
 		"model":       model,
 		"status_code": 200,
 	})
@@ -280,15 +287,10 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 		}
 		argsJSON, _ := json.Marshal(tc["arguments"])
 		inTokens := tokens.EstimateBytes(argsJSON)
-		l.broadcastLog("tool_call", string(argsJSON), map[string]interface{}{
-			"tool_name":      name,
-			"input_tokens":   inTokens,
-			"output_tokens":  inTokens, // backwards-compat alias used by the UI today
-		})
-		l.persistLog("tool_call", string(argsJSON), map[string]interface{}{
-			"tool_name":      name,
-			"input_tokens":   inTokens,
-			"output_tokens":  inTokens,
+		l.logEvent("tool_call", string(argsJSON), map[string]interface{}{
+			"tool_name":     name,
+			"input_tokens":  inTokens,
+			"output_tokens": inTokens, // backwards-compat alias used by the UI today
 		})
 	}
 
@@ -448,11 +450,10 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 		// Emit a log entry. We don't pair by tool_call_id (the engine's
 		// tool_call entries may not have it), we just append after the
 		// prior tool_call entries; the frontend pairs them by name.
-		l.broadcastLog("tool_response", preview, map[string]interface{}{
+		l.logEvent("tool_response", preview, map[string]interface{}{
 			"tool_name":     name,
 			"output_tokens": outTokens,
 		})
-		go l.persistToolResponse(name, preview, outTokens)
 
 		// Roll into the run-level aggregate so the header bar picks
 		// it up.
@@ -524,25 +525,6 @@ func (l *ProxyLogger) recentToolCalls(n int) []toolCallSnapshot {
 	return out
 }
 
-// persistToolResponse is a fire-and-forget DB writer for tool_response
-// entries. Kept separate from broadcastLog/persistLog so the file write
-// and broadcast stay in the critical section.
-func (l *ProxyLogger) persistToolResponse(toolName, content string, outputTokens int) {
-	entry := map[string]interface{}{
-		"type":          "tool_response",
-		"content":       content,
-		"ts":            time.Now().UTC().Format(time.RFC3339Nano),
-		"tool_name":     toolName,
-		"output_tokens": outputTokens,
-	}
-	for i := 0; i < 3; i++ {
-		if err := l.q.AppendRunLogEntry(context.Background(), l.runID, entry); err == nil {
-			break
-		}
-		time.Sleep(100 * time.Millisecond)
-	}
-}
-
 func (l *ProxyLogger) LogError(model, agentName, providerName string, err error) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -555,11 +537,7 @@ func (l *ProxyLogger) LogError(model, agentName, providerName string, err error)
 	l.file.WriteString(fmt.Sprintf("Error: %s\n", err.Error()))
 	l.file.WriteString("\n")
 
-	l.broadcastLog("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
-		"model":      model,
-		"agent_name": agentName,
-	})
-	l.persistLog("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
+	l.logEvent("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
 		"model":      model,
 		"agent_name": agentName,
 	})
@@ -581,11 +559,7 @@ func (l *ProxyLogger) LogStall(model, agentName, providerName string, stallDurat
 	l.file.WriteString("\n")
 
 	msg := fmt.Sprintf("LLM stream stalled: no data for %v", stallDuration)
-	l.broadcastLog("error", msg, map[string]interface{}{
-		"model":      model,
-		"agent_name": agentName,
-	})
-	l.persistLog("error", msg, map[string]interface{}{
+	l.logEvent("error", msg, map[string]interface{}{
 		"model":      model,
 		"agent_name": agentName,
 	})
@@ -622,8 +596,7 @@ func (l *ProxyLogger) LogSessionStarted(childRunID, childTaskID int32, agentName
 		"agent_name": agentName,
 		"title":      title,
 	}
-	l.broadcastLog("session_started", string(content), extra)
-	l.persistLog("session_started", string(content), extra)
+	l.logEvent("session_started", string(content), extra)
 }
 
 // LogSessionEnded records that a delegated child session finished.
@@ -644,8 +617,7 @@ func (l *ProxyLogger) LogSessionEnded(childRunID int32, status, result string) {
 		"run_id": childRunID,
 		"status": status,
 	}
-	l.broadcastLog("session_ended", string(content), extra)
-	l.persistLog("session_ended", string(content), extra)
+	l.logEvent("session_ended", string(content), extra)
 }
 
 // LogModelSwitch records a model-group failover: the request to
@@ -666,8 +638,7 @@ func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toMode
 		"to_model":      toModel,
 		"reason":        reason,
 	}
-	l.broadcastLog("model_switch", msg, extra)
-	l.persistLog("model_switch", msg, extra)
+	l.logEvent("model_switch", msg, extra)
 }
 
 // LogInfo writes a plain informational line to the log file and persists an
@@ -679,8 +650,7 @@ func (l *ProxyLogger) LogInfo(msg string) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	l.file.WriteString(fmt.Sprintf("[INFO %s] %s\n", ts, msg))
 
-	l.broadcastLog("info", msg, nil)
-	l.persistLog("info", msg, nil)
+	l.logEvent("info", msg, nil)
 }
 
 // LogErrorMsg writes a plain error string to the log file and persists an
@@ -692,11 +662,21 @@ func (l *ProxyLogger) LogErrorMsg(msg string) {
 	ts := time.Now().UTC().Format(time.RFC3339)
 	l.file.WriteString(fmt.Sprintf("\n=== Error [%s] ===\n%s\n", ts, msg))
 
-	l.broadcastLog("error", msg, nil)
-	l.persistLog("error", msg, nil)
+	l.logEvent("error", msg, nil)
 }
 
+// Close drains the persistence queue (so every broadcast entry is also in the
+// database before the run is considered finished) and closes the log file.
 func (l *ProxyLogger) Close() error {
+	l.mu.Lock()
+	if l.persistCh != nil && !l.persistClosed {
+		l.persistClosed = true
+		close(l.persistCh)
+	}
+	l.mu.Unlock()
+	if l.persistDone != nil {
+		<-l.persistDone
+	}
 	if l.file != nil {
 		return l.file.Close()
 	}
