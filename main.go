@@ -208,6 +208,15 @@ func main() {
 		}
 	}
 
+	// After a schema fallback (the previous schema was migrated by an
+	// incompatible hindsight-api build), memories are recovered through the
+	// same export/import path: the newest backup export on disk is imported
+	// into the fresh schema via Hindsight's own API.
+	memManager.RecoverFromExport = func(ctx context.Context) string {
+		dir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		return memService.RecoverFromExportDir(ctx, dir)
+	}
+
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
@@ -227,6 +236,14 @@ func main() {
 			return
 		}
 		srv.SyncAllProjectMemory(context.Background())
+
+		// Refresh the on-disk memory export right after a successful start,
+		// so the recovery material a future schema fallback imports from is
+		// at most as stale as the last boot (not just the last daily backup).
+		exportDir := filepath.Join(endpoints.LoadSettings().BasePath, "data", "hindsight")
+		if err := memService.ExportAllToDir(context.Background(), exportDir); err != nil {
+			log.Printf("Warning: post-start memory export failed: %v", err)
+		}
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 

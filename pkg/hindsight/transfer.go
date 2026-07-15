@@ -2,10 +2,12 @@ package hindsight
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // ourBank reports whether a bank id follows this app's naming convention
@@ -107,4 +109,42 @@ func (s *Service) ImportAllFromDir(ctx context.Context, dir string) error {
 		}
 	}
 	return nil
+}
+
+// RecoverFromExportDir restores memory banks into a freshly initialized
+// backend from the most recent on-disk backup export (the "<bank>.zip" +
+// "<bank>.template.json" files ExportAllToDir writes before every backup).
+// This is the recovery path after a schema fallback: the previous schema
+// can't be read by the installed hindsight-api at all, but the export on
+// disk can be imported through Hindsight's own supported API — which
+// re-embeds facts and restores bank config/mental models/directives
+// consistently, unlike any raw copy between incompatibly-migrated schemas.
+// Returns a human-readable summary for the memory status notice.
+func (s *Service) RecoverFromExportDir(ctx context.Context, dir string) string {
+	entries, err := os.ReadDir(dir)
+	if err != nil && !os.IsNotExist(err) {
+		return fmt.Sprintf("Restoring memories from the backup export failed: %v.", err)
+	}
+	banks := 0
+	var newest time.Time
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".zip") || !ourBank(strings.TrimSuffix(e.Name(), ".zip")) {
+			continue
+		}
+		banks++
+		if info, ierr := e.Info(); ierr == nil && info.ModTime().After(newest) {
+			newest = info.ModTime()
+		}
+	}
+	if banks == 0 {
+		return "No backup export of the previous memories was found, so they were not carried over — they remain only in the previous database schema. Project docs are re-synced from the repos automatically."
+	}
+	ictx, cancel := context.WithTimeout(ctx, 5*time.Minute)
+	defer cancel()
+	if err := s.ImportAllFromDir(ictx, dir); err != nil {
+		return fmt.Sprintf("Restoring memories from the backup export failed: %v.", err)
+	}
+	return fmt.Sprintf(
+		"%d memory bank(s) were restored from the latest backup export (from %s). Project docs are re-synced from the repos automatically; anything memorized after that export remains only in the previous database schema.",
+		banks, newest.Format("2006-01-02 15:04 MST"))
 }

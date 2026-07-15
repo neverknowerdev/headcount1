@@ -73,6 +73,12 @@ type Manager struct {
 	// startMu serializes Start so concurrent callers (startup goroutine plus
 	// a settings-change re-trigger) can never spawn two processes.
 	startMu sync.Mutex
+
+	// RecoverFromExport, when set (wired from main), restores memories into a
+	// freshly initialized backend from the newest on-disk backup export via
+	// Hindsight's own import API, and returns a user-facing summary. Called
+	// after a schema fallback succeeds.
+	RecoverFromExport func(ctx context.Context) string
 }
 
 func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
@@ -199,7 +205,7 @@ func (m *Manager) Start(ctx context.Context) error {
 				if serr := saveSchemaState(state); serr != nil {
 					log.Printf("hindsight: warning: failed to persist schema state: %v", serr)
 				}
-				m.setNotice(m.salvageIntoFallback(ctx, schema, fallback))
+				m.setNotice(m.recoveryNotice(ctx, schema, fallback))
 				m.setErr("")
 				return nil
 			} else {
@@ -212,27 +218,24 @@ func (m *Manager) Start(ctx context.Context) error {
 	return err
 }
 
-// salvageIntoFallback copies the incompatible schema's data into the fresh
-// fallback schema (see salvage.go) so agents and the UI keep their memories,
-// and returns the user-facing notice describing the outcome. The old schema
-// is read-only throughout — worst case the copy fails and the data merely
-// stays where it was.
-func (m *Manager) salvageIntoFallback(ctx context.Context, from, to string) string {
-	sctx, cancel := context.WithTimeout(ctx, 3*time.Minute)
-	defer cancel()
-	copied, err := salvageSchemaData(sctx, from, to)
-	if err != nil {
-		log.Printf("hindsight: salvage from schema %q failed: %v", from, err)
-		return fmt.Sprintf(
-			"Long-term memory was re-initialized on a fresh database schema (%q) because the previous schema (%q) was migrated by an incompatible hindsight-api version. Existing memories could not be copied over automatically (%v); they remain preserved in %q.",
-			to, from, err, from)
+// recoveryNotice restores memories into the fresh fallback schema and builds
+// the user-facing notice. Recovery goes through Hindsight's own export/import
+// API (the newest backup export on disk) rather than copying raw rows between
+// schemas: across incompatible migrations a raw copy can silently corrupt
+// data (changed column semantics, moved tables, a different embedding model
+// or vector dimension), while import re-embeds facts and restores bank
+// config/mental models against the schema actually in use. The old schema is
+// never modified — whatever the export doesn't cover stays preserved there.
+func (m *Manager) recoveryNotice(ctx context.Context, from, to string) string {
+	notice := fmt.Sprintf(
+		"Long-term memory was re-initialized on a fresh database schema (%q) because the previous schema (%q) was migrated by an incompatible hindsight-api version; the previous data remains untouched in %q. ",
+		to, from, from)
+	if m.RecoverFromExport == nil {
+		return notice + "No recovery hook is configured, so previous memories were not carried over."
 	}
-	total := totalRows(copied)
-	units := copied["memory_units"]
-	log.Printf("hindsight: salvaged %d rows (%d memories) from schema %q into %q", total, units, from, to)
-	return fmt.Sprintf(
-		"Long-term memory was re-initialized on a fresh database schema (%q) because the previous schema (%q) was migrated by an incompatible hindsight-api version. Existing memories were copied over automatically (%d memories, %d rows in total); the original data also remains untouched in %q.",
-		to, from, units, total, from)
+	result := m.RecoverFromExport(ctx)
+	log.Printf("hindsight: schema fallback recovery: %s", result)
+	return notice + result
 }
 
 // startWithSchema spawns hindsight-api against one Postgres schema and waits
