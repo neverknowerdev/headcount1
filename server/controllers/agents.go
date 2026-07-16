@@ -17,6 +17,10 @@ func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
 	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 	agents, err := api.q.ListAgentsByCompany(r.Context(), int32(compID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -33,7 +37,7 @@ func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := api.q.GetAgent(r.Context(), int32(id))
+	agent, err := api.authorizeAgent(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
@@ -64,7 +68,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := api.q.GetAgent(r.Context(), int32(id))
+	agent, err := api.authorizeAgent(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
@@ -114,6 +118,11 @@ func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := api.authorizeAgent(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+
 	var stats struct {
 		TotalRequests    int `json:"total_requests"`
 		TotalTokens      int `json:"total_tokens"`
@@ -143,6 +152,10 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 	p := db.Agent{
@@ -181,6 +194,10 @@ func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := api.authorizeAgent(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	var runs []db.Run

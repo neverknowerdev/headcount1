@@ -65,7 +65,7 @@ type LLMProviderQuerier interface {
 	ListLLMProviders(ctx context.Context) ([]LLMProvider, error)
 	DeleteLLMProvider(ctx context.Context, id int32) error
 	UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error)
-	EnsureBuiltinLLMProviders(ctx context.Context) error
+	EnsureBuiltinLLMProvidersForUser(ctx context.Context, userID int32) error
 	UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
 	ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
 }

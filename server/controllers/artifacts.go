@@ -15,6 +15,10 @@ func (api *API) ListTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid task id")
 		return
 	}
+	if _, err := api.authorizeTask(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
 	// Include subtask artifacts: delegated sessions produce artifacts on
 	// their own task ids, but they belong to the main task's deliverables.
 	artifacts, err := api.q.ListArtifactsByTaskTree(r.Context(), int32(id))
@@ -37,6 +41,10 @@ func (api *API) DownloadArtifact(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "artifact not found")
 		return
 	}
+	if _, err := api.authorizeTask(r, artifact.TaskID); err != nil {
+		api.respondError(w, http.StatusNotFound, "artifact not found")
+		return
+	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", artifact.Filename))
 	w.Write([]byte(artifact.Content))
@@ -48,6 +56,10 @@ func (api *API) DownloadTaskArtifacts(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid task id")
+		return
+	}
+	if _, err := api.authorizeTask(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
 	artifacts, err := api.q.ListArtifactsByTaskTree(r.Context(), int32(id))

@@ -33,7 +33,7 @@ func slugify(name string) string {
 }
 
 func (api *API) ListModelGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := api.q.ListModelGroups(r.Context())
+	groups, err := api.q.ListModelGroupsForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -57,9 +57,11 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uid := api.currentUserID(r)
 	group, err := api.q.CreateModelGroup(r.Context(), db.ModelGroup{
 		Name:        req.Name,
 		Slug:        slug,
+		UserID:      &uid,
 		Description: req.Description,
 	})
 	if err != nil {
@@ -87,7 +89,7 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, group.UserID) {
 		api.respondError(w, http.StatusNotFound, "model group not found")
 		return
 	}
@@ -111,6 +113,10 @@ func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if group, err := api.q.GetModelGroup(r.Context(), int32(id)); err != nil || !ownedByUser(r, group.UserID) {
+		api.respondError(w, http.StatusNotFound, "model group not found")
 		return
 	}
 	if err := api.q.DeleteModelGroup(r.Context(), int32(id)); err != nil {
@@ -180,7 +186,7 @@ func (api *API) GetModelGroupStats(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, group.UserID) {
 		api.respondError(w, http.StatusNotFound, "model group not found")
 		return
 	}

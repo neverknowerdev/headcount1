@@ -78,6 +78,12 @@ func (api *API) Register(w http.ResponseWriter, r *http.Request) {
 // (per-user encryption keys, builtin provider seeding). Failures are logged,
 // not fatal — the account itself is already usable.
 func (api *API) onUserCreated(ctx context.Context, user db.User, password string) error {
+	if err := api.q.EnsureBuiltinLLMProvidersForUser(ctx, user.ID); err != nil {
+		log.Printf("auth: seeding builtin providers for %s failed: %v", user.Email, err)
+	}
+	if err := api.q.EnsureDefaultModelSettingsForUser(ctx, user.ID); err != nil {
+		log.Printf("auth: seeding default model settings for %s failed: %v", user.Email, err)
+	}
 	return secrets.Default().EnsureUserKey(user.ID, password)
 }
 
@@ -220,7 +226,7 @@ func (api *API) authenticate(r *http.Request) (db.User, bool) {
 		}
 	}
 	if utils.IsE2E() {
-		if user, err := api.e2eUser(r); err == nil {
+		if user, err := api.e2eUser(r.Context()); err == nil {
 			return user, true
 		}
 	}
@@ -233,10 +239,10 @@ const e2eUserEmail = "e2e@local"
 // requests at a fresh DB, and SQLite reports races as constraint errors.
 var e2eUserMu sync.Mutex
 
-func (api *API) e2eUser(r *http.Request) (db.User, error) {
+func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 	e2eUserMu.Lock()
 	defer e2eUserMu.Unlock()
-	user, err := api.q.GetUserByEmail(r.Context(), e2eUserEmail)
+	user, err := api.q.GetUserByEmail(ctx, e2eUserEmail)
 	if err == nil {
 		return user, nil
 	}
@@ -247,11 +253,11 @@ func (api *API) e2eUser(r *http.Request) (db.User, error) {
 	if err != nil {
 		return db.User{}, err
 	}
-	user, err = api.q.CreateUser(r.Context(), e2eUserEmail, string(hash))
+	user, err = api.q.CreateUser(ctx, e2eUserEmail, string(hash))
 	if err != nil {
 		return db.User{}, err
 	}
-	if err := api.onUserCreated(r.Context(), user, "e2e-password"); err != nil {
+	if err := api.onUserCreated(ctx, user, "e2e-password"); err != nil {
 		log.Printf("auth: e2e fixture user setup failed: %v", err)
 	}
 	return user, nil

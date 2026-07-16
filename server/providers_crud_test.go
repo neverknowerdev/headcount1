@@ -23,11 +23,11 @@ func setupProvidersTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}, &db.ProviderPreset{}))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}, &db.ProviderPreset{}))
 	return database
 }
 
-func setupProvidersRouter(database *gorm.DB) chi.Router {
+func setupProvidersRouter(t *testing.T, database *gorm.DB) chi.Router {
 	api := endpoints.NewAPI(database, nil, nil)
 	r := chi.NewRouter()
 	r.Get("/providers", api.ListProviders)
@@ -37,12 +37,12 @@ func setupProvidersRouter(database *gorm.DB) chi.Router {
 	r.Put("/providers/{id}", api.UpdateProvider)
 	r.Delete("/providers/{id}", api.DeleteProvider)
 	r.Post("/providers/{id}/rediscover", api.RediscoverProviderModels)
-	return r
+	return withTestUser(t, database, r)
 }
 
 func TestProviderCRUD(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 
 	// Create
 	payload := map[string]string{
@@ -78,10 +78,10 @@ func TestProviderCRUD(t *testing.T) {
 
 func TestProvider_CannotDeleteBuiltin(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 
 	q := db.New(database)
-	require.NoError(t, q.EnsureBuiltinLLMProviders(context.Background()))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(context.Background(), testSeedUserID(t, q)))
 	var builtin db.LLMProvider
 	require.NoError(t, database.Where("builtin = ?", true).First(&builtin).Error)
 
@@ -97,10 +97,10 @@ func TestProvider_CannotDeleteBuiltin(t *testing.T) {
 
 func TestProvider_ToggleEnabled(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 
 	q := db.New(database)
-	require.NoError(t, q.EnsureBuiltinLLMProviders(context.Background()))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(context.Background(), testSeedUserID(t, q)))
 	var builtin db.LLMProvider
 	require.NoError(t, database.Where("builtin = ?", true).First(&builtin).Error)
 	assert.True(t, builtin.Enabled, "builtin providers should be seeded enabled")
@@ -170,7 +170,7 @@ func TestCreateProviderFromPreset_FetchesModelsAndSkipsProbe(t *testing.T) {
 	defer mock.Close()
 
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	seedTestPreset(t, database, "test-preset", mock.URL)
 
 	payload := map[string]string{"preset_key": "test-preset", "api_key": "sk-test-key"}
@@ -192,7 +192,7 @@ func TestCreateProviderFromPreset_FetchesModelsAndSkipsProbe(t *testing.T) {
 
 func TestCreateProviderFromPreset_MissingApiKeyRejected(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	seedTestPreset(t, database, "test-preset", "https://example.com")
 
 	payload := map[string]string{"preset_key": "test-preset", "api_key": ""}
@@ -210,7 +210,7 @@ func TestCreateProviderFromPreset_FailedFetchDoesNotCreateProvider(t *testing.T)
 	defer mock.Close()
 
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	seedTestPreset(t, database, "test-preset", mock.URL)
 
 	payload := map[string]string{"preset_key": "test-preset", "api_key": "sk-bad-key"}
@@ -237,11 +237,12 @@ func TestRediscoverProviderModels_PresetProviderUsesSavedApiKey(t *testing.T) {
 	defer mock.Close()
 
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	q := db.New(database)
+	uid := testSeedUserID(t, q)
 	provider, err := q.CreateLLMProvider(context.Background(), db.LLMProvider{
 		Name: "Test Preset", BaseUrl: mock.URL, ApiKey: "sk-saved-key",
-		ProviderType: "openai", PresetKey: "test-preset", Enabled: true,
+		ProviderType: "openai", PresetKey: "test-preset", Enabled: true, UserID: &uid,
 	})
 	require.NoError(t, err)
 
@@ -258,11 +259,12 @@ func TestRediscoverProviderModels_PresetProviderUsesSavedApiKey(t *testing.T) {
 
 func TestRediscoverProviderModels_PresetProviderWithoutApiKeyRejected(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	q := db.New(database)
+	uid := testSeedUserID(t, q)
 	provider, err := q.CreateLLMProvider(context.Background(), db.LLMProvider{
 		Name: "Test Preset", BaseUrl: "https://example.com", ProviderType: "openai",
-		PresetKey: "test-preset", Enabled: true,
+		PresetKey: "test-preset", Enabled: true, UserID: &uid,
 	})
 	require.NoError(t, err)
 
@@ -274,7 +276,7 @@ func TestRediscoverProviderModels_PresetProviderWithoutApiKeyRejected(t *testing
 
 func TestListProviderPresets(t *testing.T) {
 	database := setupProvidersTestDB(t)
-	r := setupProvidersRouter(database)
+	r := setupProvidersRouter(t, database)
 	seedTestPreset(t, database, "test-preset", "https://example.com")
 
 	req := httptest.NewRequest(http.MethodGet, "/providers/presets", nil)

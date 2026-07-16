@@ -54,6 +54,14 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
 
+	// Recreate the e2e fixture user (auth is always on; the wipe removed it).
+	// Its onUserCreated hook seeds the per-user builtin providers and default
+	// model settings.
+	if _, err := api.e2eUser(context.Background()); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to recreate e2e user: "+err.Error())
+		return
+	}
+
 	// Re-seed built-in LLM providers (OpenRouter, OpenCode Zen) so tests that
 	// list providers get a consistent baseline. A wipe intentionally never
 	// makes a live network call (stays fast and deterministic), so give them
@@ -64,12 +72,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// provider has a usable default (e.g. the "existing provider" onboarding
 	// step's required Model Name field).
 	q := db.New(api.db)
-	_ = q.EnsureBuiltinLLMProviders(context.Background())
 	seedPlaceholderModelCatalog(context.Background(), q)
-
-	// Re-seed the (initially unconfigured) Default Models purposes so tests
-	// get the same consistent baseline as a fresh install.
-	_ = q.EnsureDefaultModelSettings(context.Background())
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)

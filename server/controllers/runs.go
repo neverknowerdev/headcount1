@@ -68,6 +68,10 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compID, _ := strconv.Atoi(compIDStr)
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	// Fetch all tasks for company
 	var taskIDs []int32
@@ -111,9 +115,9 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	run, err := api.q.GetRun(r.Context(), int32(id))
+	run, err := api.authorizeRun(r, int32(id))
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	resp := toRunResponse(run)
@@ -136,6 +140,10 @@ func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := api.authorizeRun(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	var runs []db.Run
@@ -167,7 +175,7 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	task, err := api.q.GetTask(r.Context(), int32(id))
+	task, err := api.authorizeTask(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "task not found")
 		return
@@ -203,7 +211,11 @@ func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := api.q.GetRunBySessionID(r.Context(), sessionID)
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+		api.respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if _, err := api.authorizeRun(r, run.ID); err != nil {
+		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	api.respondJSON(w, http.StatusOK, toRunResponse(run))
@@ -216,7 +228,7 @@ func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	run, err := api.q.GetRun(r.Context(), int32(id))
+	run, err := api.authorizeRun(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Run not found")
 		return

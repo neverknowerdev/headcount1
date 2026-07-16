@@ -16,13 +16,23 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 	return s, err
 }
 
-// ListMCPServers returns all MCP servers with their accounts preloaded.
+// ListMCPServers returns MCP servers with their accounts preloaded.
 // For non-builtin servers, Enabled is computed from account presence.
 // When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
-// to only those whose project belongs to the given company.
-func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPServer, error) {
+// to only those whose project belongs to the given company. When userID > 0,
+// visibility is tenant-scoped: builtin catalog rows, the user's own custom
+// servers, and codegraph servers; account preloads are filtered to the
+// user's own credentials. userID 0 (background cache refresh) sees all.
+func (q *Queries) ListMCPServers(ctx context.Context, companyID, userID int32) ([]MCPServer, error) {
 	var servers []MCPServer
-	db := q.db.WithContext(ctx).Order("id").Preload("Accounts").Preload("Project")
+	db := q.db.WithContext(ctx).Order("id").Preload("Project")
+	if userID > 0 {
+		db = db.
+			Preload("Accounts", "user_id = ?", userID).
+			Where("builtin = ? OR owner_user_id = ? OR project_id IS NOT NULL", true, userID)
+	} else {
+		db = db.Preload("Accounts")
+	}
 	if companyID > 0 {
 		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE company_id = ?)", companyID)
 	} else {

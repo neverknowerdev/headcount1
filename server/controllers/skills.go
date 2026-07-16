@@ -19,6 +19,10 @@ func (api *API) ListSkills(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
 	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 	var skills []db.Skill
 	if err := api.db.Where("company_id = ?", compID).Find(&skills).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -38,8 +42,8 @@ func (api *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, req.CompanyID).Error; err != nil {
+	comp, err := api.authorizeCompany(r, req.CompanyID)
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Company not found")
 		return
 	}
@@ -75,8 +79,8 @@ func (api *API) ListSkillFiles(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
+	skill, err := api.authorizeSkill(r, int32(id))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Skill not found")
 		return
 	}
@@ -115,8 +119,8 @@ func (api *API) GetSkillFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
+	skill, err := api.authorizeSkill(r, int32(id))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Skill not found")
 		return
 	}
@@ -153,8 +157,8 @@ func (api *API) UpdateSkillFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
+	skill, err := api.authorizeSkill(r, int32(id))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Skill not found")
 		return
 	}

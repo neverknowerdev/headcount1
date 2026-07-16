@@ -14,6 +14,14 @@ func (q *Queries) ListCompanies(ctx context.Context) ([]Company, error) {
 	return c, err
 }
 
+// ListCompaniesForUser returns only the companies the user owns — the
+// tenancy boundary for everything scoped under a company.
+func (q *Queries) ListCompaniesForUser(ctx context.Context, userID int32) ([]Company, error) {
+	var c []Company
+	err := q.db.WithContext(ctx).Where("user_id = ?", userID).Order("id").Find(&c).Error
+	return c, err
+}
+
 func (q *Queries) GetCompany(ctx context.Context, id int32) (Company, error) {
 	var c Company
 	err := q.db.WithContext(ctx).First(&c, id).Error

@@ -23,23 +23,23 @@ func setupDefaultModelSettingsTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{}))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{}))
 	return database
 }
 
-func setupDefaultModelSettingsRouter(database *gorm.DB) chi.Router {
+func setupDefaultModelSettingsRouter(t *testing.T, database *gorm.DB) chi.Router {
 	api := endpoints.NewAPI(database, nil, nil)
 	r := chi.NewRouter()
 	r.Get("/default-model-settings", api.ListDefaultModelSettings)
 	r.Put("/default-model-settings/{purpose}", api.UpdateDefaultModelSetting)
-	return r
+	return withTestUser(t, database, r)
 }
 
 func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	database := setupDefaultModelSettingsTestDB(t)
-	r := setupDefaultModelSettingsRouter(database)
+	r := setupDefaultModelSettingsRouter(t, database)
 	q := db.New(database)
-	require.NoError(t, q.EnsureDefaultModelSettings(context.Background()))
+	require.NoError(t, q.EnsureDefaultModelSettingsForUser(context.Background(), testSeedUserID(t, q)))
 
 	// List shows both purposes, initially unconfigured (no Utility group in this DB).
 	req := httptest.NewRequest(http.MethodGet, "/default-model-settings", nil)
@@ -83,7 +83,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 
 func TestDefaultModelSettings_UpdateUnknownPurpose(t *testing.T) {
 	database := setupDefaultModelSettingsTestDB(t)
-	r := setupDefaultModelSettingsRouter(database)
+	r := setupDefaultModelSettingsRouter(t, database)
 
 	req := httptest.NewRequest(http.MethodPut, "/default-model-settings/not-a-real-purpose", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()

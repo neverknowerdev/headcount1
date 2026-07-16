@@ -760,7 +760,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Load MCP accounts enabled for this agent and register external servers in the store.
 	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
-		allServers, _ := e.q.ListMCPServers(ctx, 0) // 0 = all companies
+		allServers, _ := e.q.ListMCPServers(ctx, 0, 0) // all companies/users — accounts are already agent-scoped
 		serverByID := make(map[int32]db.MCPServer, len(allServers))
 		for _, s := range allServers {
 			serverByID[s.ID] = s
@@ -1417,6 +1417,25 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	return reply, nil
 }
 
+// ownerUserIDForCompany resolves a company's owning user, or 0 when unset —
+// Default Models settings are per-user, so internal one-shot LLM calls made
+// on behalf of a task use the task owner's configuration.
+func (e *NativeEngine) ownerUserIDForCompany(ctx context.Context, companyID int32) int32 {
+	company, err := e.q.GetCompany(ctx, companyID)
+	if err != nil || company.UserID == nil {
+		return 0
+	}
+	return *company.UserID
+}
+
+func (e *NativeEngine) ownerUserIDForCompanyOfTask(ctx context.Context, taskID int32) int32 {
+	task, err := e.q.GetTask(ctx, taskID)
+	if err != nil {
+		return 0
+	}
+	return e.ownerUserIDForCompany(ctx, task.CompanyID)
+}
+
 // resolvePurposeModel resolves the provider/model pair configured for one
 // internal-use purpose (see db.PurposeCommitMessages, db.PurposeAskArtifact)
 // via the "Default Models" settings — independent of any Model Group's own
@@ -1426,8 +1445,8 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 // tracking, which isn't worth the bookkeeping for an infrequent one-shot
 // call). Falls back to the session's own provider and model when the
 // purpose has no override configured, or its target no longer resolves.
-func (e *NativeEngine) resolvePurposeModel(ctx context.Context, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
-	setting, err := e.q.GetDefaultModelSetting(ctx, purpose)
+func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
+	setting, err := e.q.GetDefaultModelSetting(ctx, userID, purpose)
 	if err != nil {
 		return sessionProvider, sessionModel
 	}
@@ -1503,7 +1522,7 @@ func (e *NativeEngine) askArtifact(
 		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
 	}
 
-	provider, model := e.resolvePurposeModel(ctx, db.PurposeAskArtifact, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompanyOfTask(ctx, rootTaskID), db.PurposeAskArtifact, provider, sessionModel)
 
 	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
 
@@ -1725,7 +1744,7 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if sessionModel == "" {
 		sessionModel = provider.DefaultModel
 	}
-	provider, model := e.resolvePurposeModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeCommitMessages, provider, sessionModel)
 	const maxDiffChars = 60000
 	if len(diff) > maxDiffChars {
 		diff = diff[:maxDiffChars] + "\n... (truncated)"

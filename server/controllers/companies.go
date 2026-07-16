@@ -14,7 +14,7 @@ import (
 )
 
 func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
-	companies, err := api.q.ListCompanies(r.Context())
+	companies, err := api.q.ListCompaniesForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -43,10 +43,12 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uid := api.currentUserID(r)
 	comp := db.Company{
 		Name:      req.Name,
 		ShortName: req.ShortName,
 		Color:     req.Color,
+		UserID:    &uid,
 	}
 
 	if err := api.db.Create(&comp).Error; err != nil {
@@ -90,8 +92,8 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
+	comp, err := api.authorizeCompany(r, int32(id))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Company not found")
 		return
 	}
@@ -126,8 +128,8 @@ func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
+	comp, err := api.authorizeCompany(r, int32(id))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Company not found")
 		return
 	}

@@ -24,6 +24,10 @@ func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
 	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 	projects, err := api.q.ListProjectsByCompany(r.Context(), int32(compID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -43,6 +47,11 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 
@@ -154,7 +163,7 @@ func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	project, err := api.q.GetProject(r.Context(), int32(id))
+	project, err := api.authorizeProject(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Project not found")
 		return
@@ -180,7 +189,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := api.q.GetProject(r.Context(), int32(id))
+	project, err := api.authorizeProject(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Project not found")
 		return
@@ -263,6 +272,10 @@ func (api *API) GetProjectCodegraph(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := api.authorizeProject(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "project not found")
 		return
 	}
 	srv, err := api.q.GetCodegraphServerForProject(r.Context(), int32(id))

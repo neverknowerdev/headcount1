@@ -125,10 +125,11 @@ func (s *Store) SealForUser(userID int32, plaintext string) (string, error) {
 	}
 	dek, err := s.userDEK(userID)
 	if err != nil {
-		if s.userKeysConfigured() {
-			return s.Seal(plaintext) // no key for this user yet — root-DEK fallback
-		}
-		return "", err
+		// No key for this user (or no user-key storage at all — tests,
+		// stripped-down deployments): fall back to the root DEK so the value
+		// is still never stored raw; it gets re-sealed per-user on its next
+		// write once the key exists.
+		return s.Seal(plaintext)
 	}
 	blob, err := gcmSeal(dek, []byte(plaintext))
 	if err != nil {

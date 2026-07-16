@@ -121,26 +121,29 @@ func main() {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
 
-	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
-	// present. Their model catalog (and DefaultModel) is populated purely
-	// from a live fetch in the background — no hardcoded model list — so a
-	// slow/unreachable host never delays server startup, and a provider is
-	// simply left blank until the first successful fetch completes.
-	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
-		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
+	// Builtin free-model providers (OpenRouter, OpenCode Zen) and the
+	// "Default Models" purposes are per-user: seeded at registration and, for
+	// every existing user, here at startup (covers upgrades adding new
+	// builtins/purposes). Their model catalog is populated purely from a live
+	// fetch in the background — no hardcoded model list.
+	if users, err := db.New(database).ListUsers(context.Background()); err != nil {
+		log.Printf("Warning: failed to list users for builtin seeding: %v", err)
+	} else {
+		for _, u := range users {
+			if err := db.New(database).EnsureBuiltinLLMProvidersForUser(context.Background(), u.ID); err != nil {
+				log.Printf("Warning: failed to seed built-in LLM providers for %s: %v", u.Email, err)
+			}
+			if err := db.New(database).EnsureDefaultModelSettingsForUser(context.Background(), u.ID); err != nil {
+				log.Printf("Warning: failed to seed default model settings for %s: %v", u.Email, err)
+			}
+		}
 	}
 	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
-	// pick from a dropdown when adding a provider. Unlike the builtin free
-	// providers above, these don't become actual LLMProvider rows until a
-	// user picks one and supplies an API key.
+	// pick from a dropdown when adding a provider. These are a global catalog;
+	// they don't become actual LLMProvider rows until a user picks one and
+	// supplies an API key.
 	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed provider presets: %v", err)
-	}
-	// Seed the "Default Models" purposes (commit messages, ask_artifact) with
-	// no target configured, so they fall back to the calling session's own
-	// LLM until a user points them at a provider/model or a model group.
-	if err := db.New(database).EnsureDefaultModelSettings(context.Background()); err != nil {
-		log.Printf("Warning: failed to seed default model settings: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})

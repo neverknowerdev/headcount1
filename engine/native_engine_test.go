@@ -40,6 +40,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(4)
 	require.NoError(t, database.AutoMigrate(
+		&db.User{},
 		&db.Company{},
 		&db.Project{},
 		&db.Sprint{},
@@ -704,8 +705,15 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{
 		{ProviderID: provider.ID, Model: "cheap-model"},
 	}))
+	// Default Models are per-user: give the task's company an owner and
+	// register the setting under that owner.
+	owner, err := q.CreateUser(context.Background(), "owner@test.local", "not-a-real-hash")
+	require.NoError(t, err)
+	var comp db.Company
+	require.NoError(t, database.First(&comp, task.CompanyID).Error)
+	require.NoError(t, database.Model(&comp).Update("user_id", owner.ID).Error)
 	require.NoError(t, database.Create(&db.DefaultModelSetting{
-		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID,
+		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID, UserID: &owner.ID,
 	}).Error)
 
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})

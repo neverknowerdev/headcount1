@@ -22,6 +22,10 @@ func (api *API) ListSprints(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid company_id")
 		return
 	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	sprints, err := api.q.ListSprintsByCompany(r.Context(), int32(compID))
 	if err != nil {
@@ -41,6 +45,10 @@ func (api *API) CreateSprint(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 

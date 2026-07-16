@@ -57,10 +57,13 @@ type UserKey struct {
 }
 
 type Company struct {
-	ID        int32     `json:"id" gorm:"primaryKey"`
-	Name      string    `json:"name" gorm:"not null"`
-	ShortName string    `json:"short_name" gorm:"not null"`
-	Color     string    `json:"color"`
+	ID        int32  `json:"id" gorm:"primaryKey"`
+	Name      string `json:"name" gorm:"not null"`
+	ShortName string `json:"short_name" gorm:"not null"`
+	Color     string `json:"color"`
+	// UserID is the owning user (owner-only tenancy): everything scoped to a
+	// company — projects, agents, tasks, runs — is visible only to its owner.
+	UserID    *int32    `json:"user_id" gorm:"index"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -109,7 +112,7 @@ type LLMProvider struct {
 	// model catalogs are safe to refresh from a live discovery fetch.
 	Builtin bool `json:"builtin" gorm:"not null;default:false"`
 	// Enabled lets a builtin provider be turned off without deleting it —
-	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProviders
+	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProvidersForUser
 	// just recreates it (blank) on the next startup. Defaults to true so
 	// existing/freshly-seeded providers stay usable.
 	Enabled bool `json:"enabled" gorm:"not null;default:true"`
@@ -302,8 +305,12 @@ func (s RunTokenStats) IsEmpty() bool {
 // MCPServer stores configuration for an MCP (Model Context Protocol) server.
 // MCP servers are global (not company-scoped), like LLM providers.
 type MCPServer struct {
-	ID            int32        `json:"id" gorm:"primaryKey"`
-	Name          string       `json:"name" gorm:"not null;uniqueIndex"` // unique slug, e.g. "github"
+	ID   int32  `json:"id" gorm:"primaryKey"`
+	Name string `json:"name" gorm:"not null;uniqueIndex"` // unique slug, e.g. "github"
+	// OwnerUserID is set for user-created custom servers only. Builtin rows
+	// (the shared catalog) and codegraph servers (scoped via ProjectID →
+	// Project → Company) stay NULL. Per-user credentials live in MCPAccount.
+	OwnerUserID   *int32       `json:"owner_user_id" gorm:"index"`
 	DisplayName   string       `json:"display_name"`
 	Description   string       `json:"description"`
 	Transport     string       `json:"transport" gorm:"not null"` // "stdio", "http", "builtin"
@@ -416,9 +423,12 @@ type ActivityLog struct {
 // routes each request to the healthiest member, preferring free models and
 // failing over automatically on errors or rate limits.
 type ModelGroup struct {
-	ID          int32              `json:"id" gorm:"primaryKey"`
-	Name        string             `json:"name" gorm:"not null"`
+	ID   int32  `json:"id" gorm:"primaryKey"`
+	Name string `json:"name" gorm:"not null"`
+	// Slug stays globally unique (not per-user): the machine proxy route
+	// /api/proxy/group/{slug} resolves it without any user context.
 	Slug        string             `json:"slug" gorm:"not null;uniqueIndex"`
+	UserID      *int32             `json:"user_id" gorm:"index"` // owning user
 	Description string             `json:"description"`
 	Members     []ModelGroupMember `json:"members" gorm:"foreignKey:GroupID"`
 	CreatedAt   time.Time          `json:"created_at"`
@@ -475,7 +485,8 @@ type ModelRequestStat struct {
 // own LLM when left unconfigured (both fields nil).
 type DefaultModelSetting struct {
 	ID           int32        `json:"id" gorm:"primaryKey"`
-	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex"`
+	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex:idx_dms_user_purpose"`
+	UserID       *int32       `json:"user_id" gorm:"uniqueIndex:idx_dms_user_purpose"` // owning user
 	ProviderID   *int32       `json:"provider_id"`
 	Provider     *LLMProvider `json:"provider,omitempty" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
 	Model        string       `json:"model"`

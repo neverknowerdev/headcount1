@@ -25,6 +25,10 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compID, _ := strconv.Atoi(compIDStr)
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	query := api.db.Where("company_id = ?", compID)
 
@@ -117,6 +121,10 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
 	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	p := db.Task{
 		CompanyID:       req.CompanyID,
@@ -171,9 +179,9 @@ func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	task, err := api.q.GetTask(r.Context(), int32(id))
+	task, err := api.authorizeTask(r, int32(id))
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
 	api.respondJSON(w, http.StatusOK, task)
@@ -204,7 +212,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := api.q.GetTask(r.Context(), int32(id))
+	task, err := api.authorizeTask(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Task not found")
 		return
@@ -303,6 +311,10 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 	id, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	if _, err := api.authorizeTask(r, int32(id)); err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
 	var runs []db.Run

@@ -219,27 +219,33 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 		return fmt.Errorf("list providers: %w", err)
 	}
 
+	// Builtin providers are per-user rows sharing a vendor catalog — fetch
+	// each vendor once and fan the result out to every matching row.
+	catalogs := map[string][]string{}
 	var errs []string
 	for _, p := range providers {
 		if !p.Builtin {
 			continue
 		}
 
-		var models []string
-		var fetchErr error
-		switch p.ProviderName {
-		case db.ProviderVendorOpenRouter:
-			models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
-		case db.ProviderVendorOpenCodeZen:
-			models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
-		default:
-			continue
+		models, fetched := catalogs[p.ProviderName]
+		if !fetched {
+			var fetchErr error
+			switch p.ProviderName {
+			case db.ProviderVendorOpenRouter:
+				models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
+			case db.ProviderVendorOpenCodeZen:
+				models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
+			default:
+				continue
+			}
+			if fetchErr != nil {
+				log.Printf("llmdiscovery: %v — leaving %s's model catalog untouched", fetchErr, p.Name)
+				catalogs[p.ProviderName] = nil
+				continue
+			}
+			catalogs[p.ProviderName] = models
 		}
-		if fetchErr != nil {
-			log.Printf("llmdiscovery: %v — leaving %s's model catalog untouched", fetchErr, p.Name)
-			continue
-		}
-
 		if len(models) == 0 {
 			continue
 		}

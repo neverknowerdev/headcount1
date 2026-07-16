@@ -103,7 +103,7 @@ func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account
 // DiscoverAndCacheAllMCPTools discovers and caches tools for every enabled MCP
 // server via its accounts. Called in a background goroutine on startup.
 func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
-	servers, err := api.q.ListMCPServers(ctx, 0) // 0 = all companies
+	servers, err := api.q.ListMCPServers(ctx, 0, 0) // all companies/users — background cache refresh
 	if err != nil {
 		log.Printf("MCP cache: failed to list servers: %v", err)
 		return
@@ -167,7 +167,13 @@ func (api *API) sortToolsByPopularity(ctx context.Context, serverID int32, tools
 
 func (api *API) ListMCPServers(w http.ResponseWriter, r *http.Request) {
 	companyID, _ := strconv.Atoi(r.URL.Query().Get("company_id"))
-	servers, err := api.q.ListMCPServers(r.Context(), int32(companyID))
+	if companyID > 0 {
+		if _, err := api.authorizeCompany(r, int32(companyID)); err != nil {
+			api.respondError(w, http.StatusNotFound, "company not found")
+			return
+		}
+	}
+	servers, err := api.q.ListMCPServers(r.Context(), int32(companyID), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -186,6 +192,8 @@ func (api *API) CreateMCPServer(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	req.Builtin = false // UI-created servers are never builtin
+	uid := api.currentUserID(r)
+	req.OwnerUserID = &uid
 	s, err := api.q.CreateMCPServer(r.Context(), req)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -208,7 +216,7 @@ func (api *API) GetMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	s, err := api.q.GetMCPServer(r.Context(), int32(id))
+	s, err := api.authorizeMCPServer(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
@@ -222,7 +230,7 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	existing, err := api.q.GetMCPServer(r.Context(), int32(id))
+	existing, err := api.authorizeMCPServer(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
@@ -235,6 +243,7 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	}
 	req.ID = existing.ID
 	req.Builtin = existing.Builtin
+	req.OwnerUserID = existing.OwnerUserID
 	// Don't clear an existing auth token if the request sends an empty one.
 	if req.AuthToken == "" {
 		req.AuthToken = existing.AuthToken
@@ -274,7 +283,7 @@ func (api *API) DeleteMCPServer(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	s, err := api.q.GetMCPServer(r.Context(), int32(id))
+	s, err := api.authorizeMCPServer(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
@@ -298,11 +307,13 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	s, err := api.q.GetMCPServer(r.Context(), int32(id))
+	s, err := api.authorizeMCPServer(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
 	}
+	// Only the user's own credentials are candidates for discovery.
+	s.Accounts = filterAccountsForUser(r, s.Accounts)
 	if len(s.Accounts) == 0 {
 		api.respondError(w, http.StatusBadRequest, "no accounts configured — add an account first")
 		return
@@ -369,6 +380,10 @@ func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 	if input.Name == "" {
 		input.Name = "Default"
 	}
+	if _, err := api.authorizeMCPServer(r, int32(serverID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "server not found")
+		return
+	}
 	authToken := input.AuthToken
 	if input.CredentialsJSON != "" {
 		path, err := saveCredentialsFile(input.Name, input.CredentialsJSON)
@@ -378,10 +393,12 @@ func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 		}
 		authToken = path
 	}
+	uid := api.currentUserID(r)
 	acc, err := api.q.CreateMCPAccount(r.Context(), db.MCPAccount{
 		MCPServerID: int32(serverID),
 		Name:        input.Name,
 		AuthToken:   authToken,
+		UserID:      &uid,
 	})
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -398,7 +415,7 @@ func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing, err := api.q.GetMCPAccount(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, existing.UserID) {
 		api.respondError(w, http.StatusNotFound, "not found")
 		return
 	}
@@ -435,6 +452,10 @@ func (api *API) DeleteMCPAccount(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid account id")
 		return
 	}
+	if acc, err := api.q.GetMCPAccount(r.Context(), int32(id)); err != nil || !ownedByUser(r, acc.UserID) {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
 	if err := api.q.DeleteMCPAccount(r.Context(), int32(id)); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -450,7 +471,7 @@ func (api *API) DiscoverMCPAccountTools(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	acc, err := api.q.GetMCPAccount(r.Context(), int32(accountID))
-	if err != nil {
+	if err != nil || !ownedByUser(r, acc.UserID) {
 		api.respondError(w, http.StatusNotFound, "account not found")
 		return
 	}
@@ -501,6 +522,10 @@ func (api *API) StartGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if _, err := api.authorizeMCPServer(r, int32(serverID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "server not found")
 		return
 	}
 	if input.AccountName == "" {
@@ -561,10 +586,15 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 
 	accountID, _ := strconv.Atoi(accountIDStr)
 
+	if _, err := api.authorizeMCPServer(r, int32(serverID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "server not found")
+		return
+	}
+
 	var acc db.MCPAccount
 	if accountID > 0 {
 		existing, err := api.q.GetMCPAccount(r.Context(), int32(accountID))
-		if err != nil {
+		if err != nil || !ownedByUser(r, existing.UserID) {
 			api.respondError(w, http.StatusNotFound, "account not found")
 			return
 		}
@@ -576,10 +606,12 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
+		uid := api.currentUserID(r)
 		acc, err = api.q.CreateMCPAccount(r.Context(), db.MCPAccount{
 			MCPServerID: int32(serverID),
 			Name:        accountName,
 			AuthToken:   tokenPath,
+			UserID:      &uid,
 		})
 		if err != nil {
 			api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -596,6 +628,10 @@ func (api *API) GetAgentMCPAccounts(w http.ResponseWriter, r *http.Request) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	accounts, err := api.q.ListAllAgentMCPAccountAssignments(r.Context(), int32(agentID))
@@ -636,6 +672,19 @@ func (api *API) SetAgentMCPAccounts(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
+		return
+	}
+	// An assignment must reference the user's own credentials — otherwise a
+	// user could point their agent at another tenant's tokens.
+	for _, a := range payload.Accounts {
+		acc, err := api.q.GetMCPAccount(r.Context(), a.MCPAccountID)
+		if err != nil || !ownedByUser(r, acc.UserID) {
+			api.respondError(w, http.StatusNotFound, "mcp account not found")
+			return
+		}
+	}
 	if err := api.q.SetAgentMCPAccounts(r.Context(), int32(agentID), payload.Accounts); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -658,6 +707,10 @@ func (api *API) GetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid agent id")
 		return
 	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
+		return
+	}
 	assignments, err := api.q.ListAllAgentMCPAssignments(r.Context(), int32(agentID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -678,6 +731,10 @@ func (api *API) SetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
+		return
+	}
 	if err := api.q.SetAgentMCPServers(r.Context(), int32(agentID), assignments); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -691,6 +748,10 @@ func (api *API) GetAgentMCPToolFilters(w http.ResponseWriter, r *http.Request) {
 	agentID, err := strconv.Atoi(chi.URLParam(r, "id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid agent id")
+		return
+	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	filters, err := api.q.GetAgentMCPToolFilters(r.Context(), int32(agentID))
@@ -712,6 +773,10 @@ func (api *API) SetAgentMCPToolFilters(w http.ResponseWriter, r *http.Request) {
 	var filters []db.AgentMCPToolFilter
 	if err := json.NewDecoder(r.Body).Decode(&filters); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if _, err := api.authorizeAgent(r, int32(agentID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "agent not found")
 		return
 	}
 	if err := api.q.SetAgentMCPToolFilters(r.Context(), int32(agentID), filters); err != nil {

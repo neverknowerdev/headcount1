@@ -17,7 +17,7 @@ import (
 )
 
 func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := api.q.ListLLMProviders(r.Context())
+	providers, err := api.q.ListLLMProvidersForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -73,10 +73,12 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	uid := api.currentUserID(r)
 	p := db.LLMProvider{
 		Name:            preset.Name,
 		BaseUrl:         preset.BaseUrl,
 		ApiKey:          req.ApiKey,
+		UserID:          &uid,
 		ProviderType:    preset.ProviderType,
 		DefaultModel:    models[0],
 		SupportedModels: strings.Join(models, ","),
@@ -102,12 +104,12 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, provider.UserID) {
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
 	if provider.Builtin {
-		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProviders
+		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProvidersForUser
 		// just recreates it (blank) on the next startup. Disable it instead.
 		api.respondError(w, http.StatusForbidden, "built-in providers cannot be deleted — disable it instead")
 		return
@@ -149,7 +151,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, provider.UserID) {
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
@@ -193,7 +195,7 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 	}
 
 	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
+	if err != nil || !ownedByUser(r, provider.UserID) {
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
@@ -258,10 +260,12 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
+	uid := api.currentUserID(r)
 	p := db.LLMProvider{
 		Name:            req.Name,
 		BaseUrl:         req.BaseUrl,
 		ApiKey:          req.ApiKey,
+		UserID:          &uid,
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
@@ -296,7 +300,7 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	if req.ProviderID != nil && (apiKey == "" || baseUrl == "" || providerType == "") {
 		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
-		if err == nil {
+		if err == nil && ownedByUser(r, provider.UserID) {
 			if apiKey == "" {
 				apiKey = provider.ApiKey
 			}
