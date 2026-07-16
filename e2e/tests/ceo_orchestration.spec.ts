@@ -38,15 +38,9 @@ test.describe.serial('CEO orchestration flow', () => {
     const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
 
     const cleanFilesystem = () => {
-        for (const subDir of ['data/ceo-co', 'companies/ceo-co', 'workspace/ceo-co', 'data/runs/ceo-co']) {
-            const fullPath = path.join(paperclipBase, subDir);
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(paperclipBase, root, 'ceo-co');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
-        }
-        // Remove the provider file too: leftover entity files get re-imported by
-        // the filesystem sync tests and collide with their freshly created ids.
-        if (providerId) {
-            const providerFile = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
-            if (fs.existsSync(providerFile)) fs.rmSync(providerFile, { force: true });
         }
     };
 
@@ -256,12 +250,12 @@ test.describe.serial('CEO orchestration flow', () => {
 
         // The root run's structured log records its (single) session boundary;
         // the CTO run's log records its two.
-        const rootDetails = await (await request.get(`/api/runs/${rootRun.id}`)).json();
-        const rootEntryTypes = (rootDetails.log_entries as any[]).map(e => e.type);
+        const rootLog = await (await request.get(`/api/runs/${rootRun.id}/log`)).json();
+        const rootEntryTypes = (rootLog.entries as any[]).map(e => e.type);
         expect(rootEntryTypes.filter(t => t === 'session_started').length).toBe(1);
         expect(rootEntryTypes.filter(t => t === 'session_ended').length).toBe(1);
-        const ctoDetails = await (await request.get(`/api/runs/${ctoRun.id}`)).json();
-        const ctoEntryTypes = (ctoDetails.log_entries as any[]).map(e => e.type);
+        const ctoLog = await (await request.get(`/api/runs/${ctoRun.id}/log`)).json();
+        const ctoEntryTypes = (ctoLog.entries as any[]).map(e => e.type);
         expect(ctoEntryTypes.filter(t => t === 'session_started').length).toBe(2);
         expect(ctoEntryTypes.filter(t => t === 'session_ended').length).toBe(2);
 
@@ -347,19 +341,20 @@ test.describe.serial('CEO orchestration flow', () => {
         const qaTask = (ctoSubtasks as any[]).find(t => t.title === 'Verify greeting');
         expect(qaTask.agent_config_name).toBe('QA');
 
-        // ── Filesystem: logs grouped by main run id, one file per session ────
+        // ── Filesystem: JSONL logs grouped by main run id, one file per session ─
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        const runDir = path.join(basePath, 'data', 'ceo-co', 'logs', String(taskId), `run-${rootRun.id}`);
-        const mainLog = path.join(runDir, 'main.log');
+        const runDir = path.join(basePath, 'logs', 'ceo-co', String(taskId), `run-${rootRun.id}`);
+        const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();
-        const mainContent = fs.readFileSync(mainLog, 'utf8');
-        expect(mainContent).toContain('Session Started');
-        expect(mainContent).toContain('Session Ended');
+        const parseJsonl = (file: string) =>
+            fs.readFileSync(file, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        const mainTypes = parseJsonl(mainLog).map((e: any) => e.type);
+        expect(mainTypes).toContain('session_started');
+        expect(mainTypes).toContain('session_ended');
         for (const child of [ctoRun, ...ctoChildren]) {
-            const sessionLog = path.join(runDir, `session-${child.id}.log`);
+            const sessionLog = path.join(runDir, `session-${child.id}.jsonl`);
             expect(fs.existsSync(sessionLog)).toBeTruthy();
-            const sessionContent = fs.readFileSync(sessionLog, 'utf8');
-            expect(sessionContent).toContain('LLM Request');
+            expect(parseJsonl(sessionLog).map((e: any) => e.type)).toContain('request');
         }
 
         // The ask_artifact reader exchange got its own log file in the run

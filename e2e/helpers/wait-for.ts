@@ -48,20 +48,28 @@ export async function waitForTaskStatus(
                     });
                 if (mine.length > 0) {
                     const latest = mine[0];
-                    // The list endpoint omits log_content/log_entries (they're
-                    // full transcripts, only fetched lazily by the Run Log
-                    // Details page) — re-fetch the single run for diagnostics.
+                    // Full log content lives in JSONL files; fetch the run for
+                    // its status/error and the tail of its log entries from
+                    // the dedicated log endpoint for diagnostics.
                     let full: any = latest;
+                    let logTail = '';
                     try {
                         const runRes = await request.get(`/api/runs/${latest.id}`);
                         if (runRes.ok()) full = await runRes.json();
+                        const logRes = await request.get(`/api/runs/${latest.id}/log`);
+                        if (logRes.ok()) {
+                            const entries = (await logRes.json())?.entries || [];
+                            logTail = entries.slice(-10)
+                                .map((e: any) => `[${e.type}] ${String(e.content || '').slice(0, 200)}`)
+                                .join('\n');
+                        }
                     } catch { /* fall back to list data below */ }
-                    const log = full.log_content || full.LogContent || '';
                     const status = full.status || full.Status || '';
                     const sess = full.session_id || full.SessionID || '';
+                    const errMsg = full.error_message || '';
                     runLogHint =
-                        `\nLatest run for task ${taskId}: status="${status}" session="${sess}"\n` +
-                        `Run log (last 2000 chars):\n${log.slice(-2000)}`;
+                        `\nLatest run for task ${taskId}: status="${status}" session="${sess}" error="${errMsg}"\n` +
+                        `Last log entries:\n${logTail}`;
                 } else {
                     runLogHint = `\nNo runs found for task ${taskId}. runs endpoint returned ${runs.length} total runs; first run keys: ${runs.length > 0 ? Object.keys(runs[0]).join(',') : '(empty)'}`;
                 }

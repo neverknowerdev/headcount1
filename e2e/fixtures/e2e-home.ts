@@ -12,14 +12,8 @@ export function createE2EHome(): string {
     const e2eHome = path.join(os.tmpdir(), `paperclip-e2e-home-${Date.now()}`);
     fs.mkdirSync(e2eHome, { recursive: true });
 
-    // Create necessary subdirectories
-    const dirs = [
-        path.join(e2eHome, '.paperclip2', 'data'),
-        path.join(e2eHome, '.paperclip2', 'companies'),
-    ];
-    for (const dir of dirs) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
+    // The server creates the base directory tree itself on startup.
+    fs.mkdirSync(path.join(e2eHome, '.paperclip2'), { recursive: true });
 
     return e2eHome;
 }
