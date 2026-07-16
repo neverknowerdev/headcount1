@@ -76,6 +76,9 @@ func main() {
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
+		&db.User{},
+		&db.Session{},
+		&db.PasswordResetToken{},
 		&db.Company{},
 		&db.Project{},
 		&db.Sprint{},
@@ -216,11 +219,33 @@ func main() {
 			})
 		}
 
-		srv.Mount(r)
+		// Public: auth endpoints + the setup-status probe polled pre-login.
+		srv.MountPublic(r)
 
+		// Machine-to-machine: the agent subprocess calls the local LLM proxy
+		// with provider headers, not a user session — user auth must not gate
+		// these routes or every agent run breaks.
 		gw := integration.NewLLMGatewayWithHub(database, hub)
 		gw.Mount(r)
+
+		// Everything else — the human-facing API, including /ws — requires a
+		// logged-in user.
+		r.Group(func(r chi.Router) {
+			r.Use(srv.AuthMiddleware())
+			srv.Mount(r)
+		})
 	})
+
+	// Expired sessions accumulate silently; sweep them hourly.
+	go func() {
+		q := db.New(database)
+		for {
+			time.Sleep(time.Hour)
+			if err := q.DeleteExpiredSessions(context.Background()); err != nil {
+				log.Printf("session GC failed: %v", err)
+			}
+		}
+	}()
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {

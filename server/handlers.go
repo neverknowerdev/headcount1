@@ -85,6 +85,36 @@ func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
 	}
 }
 
+// MountPublic registers the routes that must work without a login: the auth
+// endpoints themselves and the setup-status probe the frontend polls before
+// anyone is signed in. Everything else lives in Mount, behind RequireAuth.
+func (s *Server) MountPublic(r chi.Router) {
+	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/register", api.Register)
+		r.Post("/login", api.Login)
+		r.Post("/logout", api.Logout)
+		r.Get("/me", api.Me)
+	})
+
+	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
+		pending, ok, errMsg, warning := setup.Status()
+		if pending {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": true, "step": setup.CurrentStep()})
+		} else if ok {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": true, "warning": warning, "warnings": setup.Warnings()})
+		} else {
+			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning, "failures": setup.Failures(), "warnings": setup.Warnings()})
+		}
+	})
+}
+
+// AuthMiddleware returns the session middleware used to gate Mount's routes.
+func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
+	return endpoints.NewAPI(s.db, s.engine, s.hub).RequireAuth
+}
+
 func (s *Server) Mount(r chi.Router) {
 
 	go s.hub.Run()
@@ -191,17 +221,6 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/default-model-settings", func(r chi.Router) {
 		r.Get("/", api.ListDefaultModelSettings)
 		r.Put("/{purpose}", api.UpdateDefaultModelSetting)
-	})
-
-	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
-		pending, ok, errMsg, warning := setup.Status()
-		if pending {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": true, "step": setup.CurrentStep()})
-		} else if ok {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": true, "warning": warning, "warnings": setup.Warnings()})
-		} else {
-			respondJSON(w, http.StatusOK, map[string]interface{}{"pending": false, "ok": false, "error": errMsg, "warning": warning, "failures": setup.Failures(), "warnings": setup.Warnings()})
-		}
 	})
 
 	r.Route("/backup", func(r chi.Router) {

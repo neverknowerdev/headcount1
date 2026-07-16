@@ -4,6 +4,41 @@ import (
 	"time"
 )
 
+// User is an account in cloud multi-user mode. The password is used for
+// authentication only (bcrypt hash) — it is never an encryption key; see
+// pkg/secrets for how stored credentials are protected.
+type User struct {
+	ID           int32     `json:"id" gorm:"primaryKey"`
+	Email        string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
+	PasswordHash string    `json:"-" gorm:"not null"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// Session is a server-side login session. The cookie carries an opaque random
+// token; only its SHA-256 is stored, so a DB dump never yields live sessions.
+type Session struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	TokenHash string    `json:"-" gorm:"uniqueIndex;not null"`
+	UserID    int32     `json:"user_id" gorm:"not null;index"`
+	User      User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt time.Time `json:"expires_at" gorm:"not null"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// PasswordResetToken is a single-use, short-lived token mailed to a user for
+// the forgot-password flow. Like sessions, only the SHA-256 is stored.
+type PasswordResetToken struct {
+	ID        int32      `json:"id" gorm:"primaryKey"`
+	TokenHash string     `json:"-" gorm:"uniqueIndex;not null"`
+	UserID    int32      `json:"user_id" gorm:"not null;index"`
+	User      User       `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt time.Time  `json:"expires_at" gorm:"not null"`
+	UsedAt    *time.Time `json:"used_at"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
 type Company struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Name      string    `json:"name" gorm:"not null"`
