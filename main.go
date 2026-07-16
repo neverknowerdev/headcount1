@@ -192,13 +192,13 @@ func main() {
 	if backup.ShouldBackupOnStartup(basePath) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
 		go func() {
-			_, err := backup.CreateBackup(basePath)
+			_, err := backup.CreateBackup(basePath, database)
 			if err != nil {
 				log.Printf("Startup backup failed: %v", err)
 			}
 		}()
 	}
-	go backup.StartDailyScheduler(basePath)
+	go backup.StartDailyScheduler(basePath, database)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

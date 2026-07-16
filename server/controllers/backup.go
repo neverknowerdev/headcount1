@@ -26,7 +26,7 @@ func (api *API) CreateBackup(w http.ResponseWriter, r *http.Request) {
 		basePath = db.PaperclipHome()
 	}
 
-	archivePath, err := backup.CreateBackup(basePath)
+	archivePath, err := backup.CreateBackup(basePath, api.db)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Failed to create backup: "+err.Error())
 		return
