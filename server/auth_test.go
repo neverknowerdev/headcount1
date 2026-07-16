@@ -6,6 +6,8 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
+	"sync"
 	"testing"
 	"time"
 
@@ -37,6 +39,8 @@ func setupAuthRouter(database *gorm.DB) chi.Router {
 	r.Post("/auth/login", api.Login)
 	r.Post("/auth/logout", api.Logout)
 	r.Get("/auth/me", api.Me)
+	r.Post("/auth/reset-request", api.ResetRequest)
+	r.Post("/auth/reset-confirm", api.ResetConfirm)
 	// A representative protected route.
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireAuth)
@@ -186,4 +190,92 @@ func TestPasswordHashNeverSerialized(t *testing.T) {
 	require.NoError(t, database.First(&u).Error)
 	b, _ := json.Marshal(u)
 	assert.NotContains(t, string(b), "password_hash")
+}
+
+// recordingMailer captures sent mail for assertions.
+type recordingMailer struct {
+	mu   sync.Mutex
+	last string
+}
+
+func (m *recordingMailer) Send(to, subject, body string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.last = body
+	return nil
+}
+
+func (m *recordingMailer) waitForToken(t *testing.T) string {
+	t.Helper()
+	re := regexp.MustCompile(`reset-password\?token=([A-Za-z0-9_-]+)`)
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		m.mu.Lock()
+		match := re.FindStringSubmatch(m.last)
+		m.mu.Unlock()
+		if match != nil {
+			return match[1]
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	t.Fatal("no reset email captured")
+	return ""
+}
+
+func TestPasswordResetFlow(t *testing.T) {
+	database := setupAuthTestDB(t)
+	r := setupAuthRouter(database)
+	rec := &recordingMailer{}
+	endpoints.SetMailer(rec)
+
+	w := postJSON(t, r, "/auth/register", map[string]string{"email": "a@b.co", "password": "original-pw-123"})
+	require.Equal(t, http.StatusCreated, w.Code)
+	oldCookie := sessionCookie(t, w)
+
+	// Unknown email answers identically (no enumeration) and sends nothing.
+	w = postJSON(t, r, "/auth/reset-request", map[string]string{"email": "nobody@b.co"})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	w = postJSON(t, r, "/auth/reset-request", map[string]string{"email": "a@b.co"})
+	require.Equal(t, http.StatusOK, w.Code)
+	token := rec.waitForToken(t)
+
+	// Confirm with the emailed token.
+	w = postJSON(t, r, "/auth/reset-confirm", map[string]string{"token": token, "new_password": "brand-new-pw-456"})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+
+	// All prior sessions are revoked.
+	req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+	req.AddCookie(oldCookie)
+	mw := httptest.NewRecorder()
+	r.ServeHTTP(mw, req)
+	require.Equal(t, http.StatusUnauthorized, mw.Code, "old session must die on reset")
+
+	// Old password dead, new password works.
+	w = postJSON(t, r, "/auth/login", map[string]string{"email": "a@b.co", "password": "original-pw-123"})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
+	w = postJSON(t, r, "/auth/login", map[string]string{"email": "a@b.co", "password": "brand-new-pw-456"})
+	require.Equal(t, http.StatusOK, w.Code)
+
+	// The token is single-use.
+	w = postJSON(t, r, "/auth/reset-confirm", map[string]string{"token": token, "new_password": "yet-another-pw"})
+	require.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+func TestPasswordResetTokenExpiry(t *testing.T) {
+	database := setupAuthTestDB(t)
+	r := setupAuthRouter(database)
+	rec := &recordingMailer{}
+	endpoints.SetMailer(rec)
+
+	postJSON(t, r, "/auth/register", map[string]string{"email": "a@b.co", "password": "original-pw-123"})
+	postJSON(t, r, "/auth/reset-request", map[string]string{"email": "a@b.co"})
+	token := rec.waitForToken(t)
+
+	require.NoError(t, database.Model(&db.PasswordResetToken{}).
+		Where("used_at IS NULL").
+		Update("expires_at", time.Now().Add(-time.Minute)).Error)
+
+	w := postJSON(t, r, "/auth/reset-confirm", map[string]string{"token": token, "new_password": "brand-new-pw-456"})
+	require.Equal(t, http.StatusBadRequest, w.Code, "expired token must be rejected")
 }

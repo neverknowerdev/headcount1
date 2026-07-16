@@ -4,14 +4,17 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 
@@ -178,6 +181,113 @@ func (api *API) ChangePassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// ── forgot-password flow ─────────────────────────────────────────────────────
+
+// apiMailer sends the reset emails. Package-level (with a logging fallback)
+// so main.go can inject the SMTP configuration without threading it through
+// every NewAPI call site.
+var apiMailer mailer.Mailer = mailer.NopMailer{}
+
+// SetMailer installs the transactional mailer (called once from main).
+func SetMailer(m mailer.Mailer) {
+	if m != nil {
+		apiMailer = m
+	}
+}
+
+// ResetRequest starts the forgot-password flow. It always answers 200 with
+// the same body — whether or not the email exists — so the endpoint can't be
+// used to enumerate accounts. The emailed link works once, for one hour.
+func (api *API) ResetRequest(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Email string `json:"email"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if user, err := api.q.GetUserByEmail(r.Context(), req.Email); err == nil {
+		token, tokenErr := authctx.NewToken()
+		if tokenErr == nil {
+			_, tokenErr = api.q.CreatePasswordResetToken(r.Context(), user.ID, authctx.HashToken(token))
+		}
+		if tokenErr != nil {
+			log.Printf("auth: creating reset token for %s failed: %v", user.Email, tokenErr)
+		} else {
+			resetURL := fmt.Sprintf("%s/reset-password?token=%s", appBaseURL(r), token)
+			body := fmt.Sprintf(
+				"Someone requested a password reset for your headcount1 account.\n\n"+
+					"Reset your password within one hour:\n%s\n\n"+
+					"If this wasn't you, ignore this email — your password is unchanged.",
+				resetURL)
+			// Send off the request path: mail relays can be slow, and send
+			// duration must not become an account-existence oracle.
+			go func(email string) {
+				if err := apiMailer.Send(email, "Reset your headcount1 password", body); err != nil {
+					log.Printf("auth: sending reset email to %s failed: %v", email, err)
+				}
+			}(user.Email)
+		}
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{
+		"status": "ok",
+		"detail": "If that email has an account, a reset link is on its way.",
+	})
+}
+
+// ResetConfirm completes the forgot-password flow: burns the token, sets the
+// new password, re-wraps the user's encryption keyring (recovered via the
+// server wrap — no stored secret is lost), and revokes every session.
+func (api *API) ResetConfirm(w http.ResponseWriter, r *http.Request) {
+	var req struct {
+		Token       string `json:"token"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		api.respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	user, err := api.q.ConsumePasswordResetToken(r.Context(), authctx.HashToken(req.Token))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid or expired reset link — request a new one")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := api.q.UpdateUserPassword(r.Context(), user.ID, string(hash)); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := secrets.Default().RewrapUserPassword(user.ID, req.NewPassword); err != nil {
+		// bcrypt hash is rotated; the wrap self-heals on next login.
+		log.Printf("auth: password-wrap rotation on reset for %s failed: %v", user.Email, err)
+	}
+	if err := api.q.DeleteSessionsForUser(r.Context(), user.ID); err != nil {
+		log.Printf("auth: session revocation on reset for %s failed: %v", user.Email, err)
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
+}
+
+// appBaseURL is the public URL reset links point at: APP_BASE_URL when set
+// (cloud, behind a proxy), otherwise reconstructed from the request.
+func appBaseURL(r *http.Request) string {
+	if base := os.Getenv("APP_BASE_URL"); base != "" {
+		return strings.TrimRight(base, "/")
+	}
+	scheme := "http"
+	if requestIsTLS(r) {
+		scheme = "https"
+	}
+	return scheme + "://" + r.Host
 }
 
 func (api *API) Logout(w http.ResponseWriter, r *http.Request) {

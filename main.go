@@ -21,6 +21,7 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/llmdiscovery"
+	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -172,6 +173,10 @@ func main() {
 	if err := db.New(database).EncryptPlaintextSecrets(context.Background()); err != nil {
 		log.Printf("Warning: failed to encrypt pre-existing plaintext secrets: %v", err)
 	}
+
+	// Transactional mail (password resets): SMTP_* env vars, or a logging
+	// no-op mailer that prints the reset link to the server log.
+	endpoints.SetMailer(mailer.FromEnv())
 
 	hub := eventhub.NewHub()
 	hub.SetCompanyOwnerResolver(newCompanyOwnerResolver(database))
