@@ -15,7 +15,7 @@ import (
 
 // sandboxChildArg is the hidden argv[1] marker that tells a re-executed copy
 // of this binary to apply the Landlock ruleset and exec the shell command.
-const sandboxChildArg = "__headcount-sandbox-child__"
+const sandboxChildArg = "__headcount1-sandbox-child__"
 
 // landlockABI returns the kernel's Landlock ABI version (0 if unsupported).
 func landlockABI() int {

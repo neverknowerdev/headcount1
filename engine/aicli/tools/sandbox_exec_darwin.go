@@ -32,7 +32,7 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string) (*exec
 	if err != nil {
 		return nil, nil, fmt.Errorf("building sandbox profile: %w", err)
 	}
-	f, err := os.CreateTemp("", "headcount-sandbox-*.sb")
+	f, err := os.CreateTemp("", "headcount1-sandbox-*.sb")
 	if err != nil {
 		return nil, nil, fmt.Errorf("writing sandbox profile: %w", err)
 	}

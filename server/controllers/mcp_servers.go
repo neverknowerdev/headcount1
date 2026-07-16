@@ -337,7 +337,7 @@ type mcpAccountInput struct {
 // saveCredentialsFile writes JSON content to ~/.headcount1/credentials/{name}.json
 // and returns the file path to store as the auth token.
 func saveCredentialsFile(name, jsonContent string) (string, error) {
-	dir := filepath.Join(db.HeadcountHome(), "credentials")
+	dir := filepath.Join(db.Headcount1Home(), "credentials")
 	if err := os.MkdirAll(dir, 0700); err != nil {
 		return "", err
 	}
@@ -517,7 +517,7 @@ func (api *API) StartGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	dir := filepath.Join(db.HeadcountHome(), "credentials")
+	dir := filepath.Join(db.Headcount1Home(), "credentials")
 	tokenPath := filepath.Join(dir, sanitizeName(input.AccountName)+"-gdrive-token.json")
 
 	// Remove stale token so polling can detect the new auth.

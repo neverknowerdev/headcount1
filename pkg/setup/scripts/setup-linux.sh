@@ -1,5 +1,5 @@
 #!/bin/sh
-# Headcount setup script — Linux
+# Headcount1 setup script — Linux
 # Checks and installs all runtime dependencies.
 # Exits 1 with a summary if any dependency could not be installed.
 
@@ -117,7 +117,7 @@ fi
 # recommend a venv) rather than the system Python. A venv is never
 # "externally managed" under PEP 668, so this sidesteps that guard entirely
 # and never risks upgrading some shared system/Homebrew-managed dependency.
-VENV_DIR="${HEADCOUNT_VENV_DIR:-$HOME/.headcount1/venv}"
+VENV_DIR="${HEADCOUNT1_VENV_DIR:-$HOME/.headcount1/venv}"
 step "Checking markitdown"
 if command -v python3 >/dev/null 2>&1; then
     if [ ! -x "$VENV_DIR/bin/python3" ]; then

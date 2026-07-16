@@ -51,7 +51,7 @@ func main() {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
 			if utils.IsE2E() {
-				dbConnStr = "headcount-e2e.db"
+				dbConnStr = "headcount1-e2e.db"
 			} else {
 				dbConnStr = "orchestrator.db"
 			}
@@ -178,17 +178,17 @@ func main() {
 	go srv.InitPendingCodegraphServers(context.Background())
 
 	// Check if backup is needed on startup
-	headcountHome := db.HeadcountHome()
-	if backup.ShouldBackupOnStartup(headcountHome) {
+	headcount1Home := db.Headcount1Home()
+	if backup.ShouldBackupOnStartup(headcount1Home) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
 		go func() {
-			_, err := backup.CreateBackup(headcountHome)
+			_, err := backup.CreateBackup(headcount1Home)
 			if err != nil {
 				log.Printf("Startup backup failed: %v", err)
 			}
 		}()
 	}
-	go backup.StartDailyScheduler(headcountHome)
+	go backup.StartDailyScheduler(headcount1Home)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

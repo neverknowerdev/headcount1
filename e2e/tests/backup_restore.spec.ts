@@ -183,9 +183,9 @@ test.describe.serial('Backup & Restore', () => {
         // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
         // when sync_filesystem.spec.ts calls POST /api/settings/sync.
         const env = loadE2EEnv();
-        const headcountBase = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1');
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         for (const subDir of ['data/bt', 'companies/bt']) {
-            const fullPath = path.join(headcountBase, subDir);
+            const fullPath = path.join(headcount1Base, subDir);
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
     });

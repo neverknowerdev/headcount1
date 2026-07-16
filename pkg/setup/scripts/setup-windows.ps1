@@ -1,5 +1,5 @@
 #Requires -Version 5
-# Headcount setup script — Windows
+# Headcount1 setup script — Windows
 # Checks and installs all runtime dependencies.
 # Exits 1 with a summary if any dependency could not be installed.
 

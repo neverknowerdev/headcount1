@@ -9,7 +9,7 @@ import * as path from 'path';
  * Returns the path to the temporary home directory.
  */
 export function createE2EHome(): string {
-    const e2eHome = path.join(os.tmpdir(), `headcount-e2e-home-${Date.now()}`);
+    const e2eHome = path.join(os.tmpdir(), `headcount1-e2e-home-${Date.now()}`);
     fs.mkdirSync(e2eHome, { recursive: true });
 
     // Create necessary subdirectories
@@ -27,7 +27,7 @@ export function createE2EHome(): string {
 /**
  * Returns the headcount1 base path within the given home directory.
  */
-export function getHeadcountBase(homeDir: string): string {
+export function getHeadcount1Base(homeDir: string): string {
     return path.join(homeDir, '.headcount1');
 }
 

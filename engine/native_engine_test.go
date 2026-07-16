@@ -688,9 +688,9 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 
 	// Isolated settings/data home for this test's log-file assertions below.
 	tmpHome := t.TempDir()
-	t.Setenv("E2E_HEADCOUNT_HOME", tmpHome)
-	headcountDir := filepath.Join(tmpHome, ".headcount1")
-	require.NoError(t, os.MkdirAll(headcountDir, 0755))
+	t.Setenv("E2E_HEADCOUNT1_HOME", tmpHome)
+	headcount1Dir := filepath.Join(tmpHome, ".headcount1")
+	require.NoError(t, os.MkdirAll(headcount1Dir, 0755))
 
 	// Configure the "ask_artifact" Default Model to point at a model group
 	// (any provider/model; here the same provider, cheaper model) — this is
@@ -747,7 +747,7 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 
 	// The reader exchange was persisted to its own log file in the run folder.
 	var askLogs []string
-	require.NoError(t, filepath.WalkDir(headcountDir, func(path string, d os.DirEntry, err error) error {
+	require.NoError(t, filepath.WalkDir(headcount1Dir, func(path string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "ask-artifact-") && strings.HasSuffix(d.Name(), ".log") {
 			askLogs = append(askLogs, path)
 		}

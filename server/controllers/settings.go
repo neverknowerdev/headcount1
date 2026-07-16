@@ -30,16 +30,16 @@ func LoadSettings() Settings {
 	data, err := os.ReadFile(settingsPath)
 
 	if err != nil {
-		return Settings{BasePath: db.HeadcountHome(), WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.Headcount1Home(), WorkspaceFolders: []string{}}
 	}
 
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.HeadcountHome(), WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.Headcount1Home(), WorkspaceFolders: []string{}}
 	}
 
 	if settings.BasePath == "" {
-		settings.BasePath = db.HeadcountHome()
+		settings.BasePath = db.Headcount1Home()
 	}
 	return settings
 }

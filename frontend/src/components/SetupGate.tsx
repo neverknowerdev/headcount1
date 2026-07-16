@@ -126,7 +126,7 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
             <h1 className="text-lg font-semibold">Setup failed</h1>
           </div>
           <p className="mb-3 text-sm text-slate-400">
-            Headcount couldn't finish installing its required dependencies. Fix the issue below and restart the
+            Headcount1 couldn't finish installing its required dependencies. Fix the issue below and restart the
             server — the app will unlock automatically once setup succeeds.
           </p>
           {status.failures && status.failures.length > 0 ? (

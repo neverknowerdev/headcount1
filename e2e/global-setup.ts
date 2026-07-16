@@ -41,7 +41,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const envData = {
         E2E_MOCK_PROVIDER_URL: mock.baseUrl,
         E2E_TEST_REPO_URL: repoUrl,
-        E2E_HEADCOUNT_HOME: e2eHome,
+        E2E_HEADCOUNT1_HOME: e2eHome,
     };
     fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
     process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
@@ -52,7 +52,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const env: Record<string, string> = { ...process.env as Record<string, string> };
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
-    env.E2E_HEADCOUNT_HOME = e2eHome;
+    env.E2E_HEADCOUNT1_HOME = e2eHome;
 
     const projectRoot = path.resolve(__dirname, '..');
     serverProcess = spawn('go', ['run', '.'], {
