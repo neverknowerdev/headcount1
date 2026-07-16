@@ -6,54 +6,21 @@ import (
 	"os"
 	"path/filepath"
 
-	"agent-orchestrator/db"
-	"gopkg.in/yaml.v3"
+	"agent-orchestrator/pkg/appsettings"
 )
 
-type Settings struct {
-	BasePath         string   `json:"base_path" yaml:"base_path"`
-	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
-	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
-	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-}
+type Settings = appsettings.Settings
 
 type SSHKeyPayload struct {
 	Key string `json:"key"`
 }
 
-func getSettingsFilePath() string {
-	return db.SettingsFilePath()
-}
-
 func LoadSettings() Settings {
-	settingsPath := getSettingsFilePath()
-	data, err := os.ReadFile(settingsPath)
-
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
-	}
-
-	var settings Settings
-	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
-	}
-
-	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
-	}
-	return settings
+	return appsettings.Load()
 }
 
 func SaveSettings(settings Settings) error {
-	settingsPath := getSettingsFilePath()
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(&settings)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, data, 0644)
+	return appsettings.Save(settings)
 }
 
 func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
