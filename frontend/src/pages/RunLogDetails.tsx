@@ -6,6 +6,8 @@ import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
 
+import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
+
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
     const lines = logContent.split('\n').filter((l: string) => l.trim());
@@ -88,7 +90,7 @@ export const RunLogDetails: React.FC = () => {
 
                 let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
-                    messages = res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
+                    messages = sortBySeq(res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry })));
                 } else {
                     messages = parseLogContent(res.data?.log_content || '');
                 }
@@ -119,11 +121,21 @@ export const RunLogDetails: React.FC = () => {
                     }
                 }
 
-                setLogMessages(messages);
+                setLogMessages(prev => mergeSnapshotWithLiveTail(messages, prev));
             } catch (e) {
                 console.error(e);
             }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
+
+    // Navigating to a different run must start from a clean slate — the
+    // snapshot merge below deliberately preserves on-screen entries, which
+    // would leak the previous run's tail into the new one.
+    useEffect(() => {
+        setLogMessages([]);
+        setRun(null);
+        setStreamStalled(null);
+        lastEventAtRef.current = Date.now();
     }, [id]);
 
     useEffect(() => {

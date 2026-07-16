@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agent-orchestrator/db"
@@ -19,6 +20,50 @@ import (
 // Usage is re-exported from pkg/tokens so call sites in this package can
 // name the type without importing the tokens package directly.
 type Usage = tokens.Usage
+
+// runSeqCounters allocates monotonically increasing per-run sequence numbers
+// for run_log entries. One counter per run id, shared by every producer in
+// the process (session loggers, per-request gateway loggers, routing events),
+// seeded from the run's persisted entries on first use so seq keeps growing
+// across server restarts. The frontend uses seq to deduplicate and order the
+// live stream against DB snapshots, so it must never repeat within a run.
+// Entries are one int64 per run; the map is reset by process restart.
+var runSeqCounters sync.Map // int32 → *atomic.Int64
+
+// NextRunLogSeq returns the next sequence number for the run's log entries.
+func NextRunLogSeq(ctx context.Context, q *db.Queries, runID int32) int64 {
+	if c, ok := runSeqCounters.Load(runID); ok {
+		return c.(*atomic.Int64).Add(1)
+	}
+	counter := &atomic.Int64{}
+	counter.Store(highestPersistedSeq(ctx, q, runID))
+	actual, _ := runSeqCounters.LoadOrStore(runID, counter)
+	return actual.(*atomic.Int64).Add(1)
+}
+
+// highestPersistedSeq inspects the run's stored entries and returns the
+// largest seq already used. Entries persisted before seq existed count by
+// position, so restarted runs continue above them.
+func highestPersistedSeq(ctx context.Context, q *db.Queries, runID int32) int64 {
+	if q == nil {
+		return 0
+	}
+	run, err := q.GetRun(ctx, runID)
+	if err != nil || run.LogEntries == "" {
+		return 0
+	}
+	var entries []map[string]interface{}
+	if json.Unmarshal([]byte(run.LogEntries), &entries) != nil {
+		return 0
+	}
+	max := int64(len(entries))
+	for _, e := range entries {
+		if s, ok := e["seq"].(float64); ok && int64(s) > max {
+			max = int64(s)
+		}
+	}
+	return max
+}
 
 // ProxyLogger records every LLM interaction of a run. Each event goes to
 // three sinks with one shared entry shape ({type, content, ts, ...extra}):
@@ -40,6 +85,14 @@ type ProxyLogger struct {
 	// messages[] (the conversation history keeps growing), but we only
 	// want to log it once.
 	loggedToolResults map[string]bool
+
+	// persistCh feeds a single writer goroutine so database entries are
+	// appended in exactly the order they were broadcast. One goroutine per
+	// logger (i.e. per run session); Close drains it before returning so no
+	// entry is ever dropped on shutdown.
+	persistCh     chan map[string]interface{}
+	persistDone   chan struct{}
+	persistClosed bool
 }
 
 func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32) (*ProxyLogger, error) {
@@ -75,7 +128,7 @@ func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interfa
 		return nil, fmt.Errorf("failed to open log file: %w", err)
 	}
 
-	return &ProxyLogger{
+	l := &ProxyLogger{
 		file:              f,
 		filePath:          logFile,
 		basePath:          basePath,
@@ -83,21 +136,49 @@ func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interfa
 		q:                 q,
 		runID:             runID,
 		loggedToolResults: map[string]bool{},
-	}, nil
+	}
+	if q != nil && runID > 0 {
+		l.persistCh = make(chan map[string]interface{}, 256)
+		l.persistDone = make(chan struct{})
+		go l.persistWorker()
+	}
+	return l, nil
+}
+
+// persistWorker appends queued entries to the run's log_entries column one at
+// a time, preserving the broadcast order. Transient DB errors (e.g. SQLite
+// write contention) are retried with backoff before the entry is given up on.
+func (l *ProxyLogger) persistWorker() {
+	defer close(l.persistDone)
+	for entry := range l.persistCh {
+		var err error
+		for i := 0; i < 5; i++ {
+			if err = l.q.AppendRunLogEntry(context.Background(), l.runID, entry); err == nil {
+				break
+			}
+			time.Sleep(time.Duration(i+1) * 100 * time.Millisecond)
+		}
+		if err != nil {
+			fmt.Printf("AppendRunLogEntry gave up (run %d): %v\n", l.runID, err)
+		}
+	}
 }
 
 func (l *ProxyLogger) FilePath() string {
 	return l.filePath
 }
 
-// makeEntry builds one structured log entry: {type, content, ts, ...extra}.
-// The same entry shape is used for every sink a log line goes to — the run's
-// .jsonl log file, the WebSocket stream and the runs.log_entries DB column.
-func makeEntry(entryType, content string, extra map[string]interface{}) map[string]interface{} {
+// makeEntry builds one structured log entry: {type, content, ts, seq,
+// ...extra}. The same entry object is used for every sink a log line goes to
+// — the run's .jsonl log file, the WebSocket stream and the runs.log_entries
+// DB column — so the per-run monotonic seq lets the frontend order the
+// stream and deduplicate it against DB snapshots on resync.
+func (l *ProxyLogger) makeEntry(entryType, content string, extra map[string]interface{}) map[string]interface{} {
 	entry := map[string]interface{}{
 		"type":    entryType,
 		"content": content,
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"seq":     NextRunLogSeq(context.Background(), l.q, l.runID),
 	}
 	for k, v := range extra {
 		entry[k] = v
@@ -129,20 +210,13 @@ func (l *ProxyLogger) broadcastEntry(entry map[string]interface{}) {
 	})
 }
 
+// persistEntry queues the entry for the ordered persistence worker, so DB
+// order always matches broadcast order. Callers must hold l.mu.
 func (l *ProxyLogger) persistEntry(entry map[string]interface{}) {
-	if l.q == nil || l.runID <= 0 {
+	if l.persistCh == nil || l.persistClosed {
 		return
 	}
-	go func() {
-		for i := 0; i < 3; i++ {
-			err := l.q.AppendRunLogEntry(context.Background(), l.runID, entry)
-			if err == nil {
-				break
-			}
-			fmt.Printf("AppendRunLogEntry error (attempt %d): %v\n", i+1, err)
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
+	l.persistCh <- entry
 }
 
 // logEntry sends one entry to all three sinks: log file, WebSocket, DB.
@@ -157,7 +231,7 @@ func (l *ProxyLogger) LogRequest(model, agentName, providerName string, requestB
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.logEntry(makeEntry("request", string(requestBody), map[string]interface{}{
+	l.logEntry(l.makeEntry("request", string(requestBody), map[string]interface{}{
 		"model":      model,
 		"agent_name": agentName,
 		"provider":   providerName,
@@ -191,7 +265,7 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 	}
 	respBytes, _ := json.Marshal(respData)
 
-	l.logEntry(makeEntry("response", string(respBytes), map[string]interface{}{
+	l.logEntry(l.makeEntry("response", string(respBytes), map[string]interface{}{
 		"model":       model,
 		"provider":    providerName,
 		"status_code": statusCode,
@@ -229,7 +303,7 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 		respData["raw"] = string(rawBody)
 	}
 	respBytes, _ := json.Marshal(respData)
-	l.logEntry(makeEntry("response", string(respBytes), map[string]interface{}{
+	l.logEntry(l.makeEntry("response", string(respBytes), map[string]interface{}{
 		"model":       model,
 		"provider":    providerName,
 		"status_code": 200,
@@ -253,7 +327,7 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 		if id, _ := tc["id"].(string); id != "" {
 			extra["tool_call_id"] = id
 		}
-		l.logEntry(makeEntry("tool_call", string(argsJSON), extra))
+		l.logEntry(l.makeEntry("tool_call", string(argsJSON), extra))
 	}
 
 	// Inject the actual prompt_tokens into the engine's "request" entry. The
@@ -403,7 +477,7 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 		// The file gets the full untruncated tool output so the JSONL log
 		// stays a faithful trajectory of what the LLM actually saw. The
 		// WebSocket/DB mirrors carry a bounded preview.
-		entry := makeEntry("tool_response", r.content, extra)
+		entry := l.makeEntry("tool_response", r.content, extra)
 		l.writeFileEntry(entry)
 
 		preview := r.content
@@ -492,7 +566,7 @@ func (l *ProxyLogger) LogError(model, agentName, providerName string, err error)
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.logEntry(makeEntry("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
+	l.logEntry(l.makeEntry("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
 		"model":      model,
 		"agent_name": agentName,
 		"provider":   providerName,
@@ -507,7 +581,7 @@ func (l *ProxyLogger) LogStall(model, agentName, providerName string, stallDurat
 	defer l.mu.Unlock()
 
 	msg := fmt.Sprintf("LLM stream stalled: no data for %v", stallDuration)
-	l.logEntry(makeEntry("error", msg, map[string]interface{}{
+	l.logEntry(l.makeEntry("error", msg, map[string]interface{}{
 		"model":          model,
 		"agent_name":     agentName,
 		"provider":       providerName,
@@ -536,7 +610,7 @@ func (l *ProxyLogger) LogSessionStarted(childRunID, childTaskID int32, agentName
 		"agent_name": agentName,
 		"title":      title,
 	})
-	l.logEntry(makeEntry("session_started", string(content), map[string]interface{}{
+	l.logEntry(l.makeEntry("session_started", string(content), map[string]interface{}{
 		"run_id":     childRunID,
 		"task_id":    childTaskID,
 		"agent_name": agentName,
@@ -555,7 +629,7 @@ func (l *ProxyLogger) LogSessionEnded(childRunID int32, status, result string) {
 		"status": status,
 		"result": result,
 	})
-	l.logEntry(makeEntry("session_ended", string(content), map[string]interface{}{
+	l.logEntry(l.makeEntry("session_ended", string(content), map[string]interface{}{
 		"run_id": childRunID,
 		"status": status,
 	}))
@@ -569,7 +643,7 @@ func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toMode
 	defer l.mu.Unlock()
 
 	msg := fmt.Sprintf("Model switch: %s @ %s → %s @ %s (%s)", fromModel, fromProvider, toModel, toProvider, reason)
-	l.logEntry(makeEntry("model_switch", msg, map[string]interface{}{
+	l.logEntry(l.makeEntry("model_switch", msg, map[string]interface{}{
 		"from_provider": fromProvider,
 		"from_model":    fromModel,
 		"to_provider":   toProvider,
@@ -605,7 +679,7 @@ func (l *ProxyLogger) LogOutcome(status, endReason, taskStatus, agentName string
 	if taskStatus != "" {
 		extra["task_status"] = taskStatus
 	}
-	l.logEntry(makeEntry("outcome", summary, extra))
+	l.logEntry(l.makeEntry("outcome", summary, extra))
 }
 
 // LogInfo writes a plain informational line to the log file and persists an
@@ -614,7 +688,7 @@ func (l *ProxyLogger) LogInfo(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.logEntry(makeEntry("info", msg, nil))
+	l.logEntry(l.makeEntry("info", msg, nil))
 }
 
 // LogErrorMsg writes a plain error string to the log file and persists an
@@ -623,10 +697,21 @@ func (l *ProxyLogger) LogErrorMsg(msg string) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	l.logEntry(makeEntry("error", msg, nil))
+	l.logEntry(l.makeEntry("error", msg, nil))
 }
 
+// Close drains the persistence queue (so every broadcast entry is also in the
+// database before the run is considered finished) and closes the log file.
 func (l *ProxyLogger) Close() error {
+	l.mu.Lock()
+	if l.persistCh != nil && !l.persistClosed {
+		l.persistClosed = true
+		close(l.persistCh)
+	}
+	l.mu.Unlock()
+	if l.persistDone != nil {
+		<-l.persistDone
+	}
 	if l.file != nil {
 		return l.file.Close()
 	}
