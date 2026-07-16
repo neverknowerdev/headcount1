@@ -166,11 +166,6 @@ func main() {
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
-	// Sync database with filesystem on startup
-	if err := srv.Sync(context.Background()); err != nil {
-		log.Printf("Warning: Initial filesystem sync failed: %v", err)
-	}
-
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
