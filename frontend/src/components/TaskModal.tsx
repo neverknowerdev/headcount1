@@ -197,11 +197,25 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if (msg.type === 'run_log') {
             if (msg.payload.entry) {
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
-            } else if (msg.payload.line) {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
             }
         }
     }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
+
+    // Historical entries live in run_log_entries + JSONL; fetch them once
+    // when a run's log is expanded (live entries keep arriving via WS).
+    const loadRunLog = async (runId: number) => {
+        const run = runs.find((r: any) => r.id === runId);
+        if (!run || run.log_loaded) return;
+        try {
+            const res = await axios.get(`/api/runs/${runId}/log`);
+            const entries = res.data?.entries || [];
+            setRuns(prev => prev.map((r: any) => r.id === runId
+                ? { ...r, log_loaded: true, log_entries: [...entries, ...(r.log_entries || [])] }
+                : r));
+        } catch (e) {
+            console.error('failed to load run log', e);
+        }
+    };
 
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -682,7 +696,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 const menuOpen = openRunMenu === r.id;
                                                 return (
                                                     <div key={`r-${r.id}`} className="w-full min-w-0">
-                                                        <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
+                                                        <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm" onToggle={e => { if ((e.target as HTMLDetailsElement).open) loadRunLog(r.id); }}>
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
                                                                 <span className="font-semibold text-gray-600 flex items-center gap-1.5">
                                                                     ⚙️ Run {r.name || `#${r.id}`}

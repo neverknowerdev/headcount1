@@ -242,7 +242,7 @@ export const AgentDetails: React.FC = () => {
                                 <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
                                     <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} for Task #{r.task_id} ({r.status})</summary>
                                     <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
-                                        {r.log_content}
+                                        {r.result_description || r.error_message || '(no summary)'}
                                     </pre>
                                 </details>
                             ))
