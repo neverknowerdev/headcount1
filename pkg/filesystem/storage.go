@@ -57,15 +57,15 @@ type TaskMeta struct {
 
 // AgentMeta is the filesystem representation of an agent
 type AgentMeta struct {
-	ID           int32   `json:"id"`
-	CompanyID    int32   `json:"company_id"`
-	Name         string  `json:"name"`
-	Description  string  `json:"description"`
-	SystemPrompt string  `json:"system_prompt"`
-	Model        string  `json:"model"`
-	Mode         string  `json:"mode"`
-	Permissions  string  `json:"permissions"`
-	ProviderID   *int32  `json:"provider_id,omitempty"`
+	ID           int32  `json:"id"`
+	CompanyID    int32  `json:"company_id"`
+	Name         string `json:"name"`
+	Description  string `json:"description"`
+	SystemPrompt string `json:"system_prompt"`
+	Model        string `json:"model"`
+	Mode         string `json:"mode"`
+	Permissions  string `json:"permissions"`
+	ProviderID   *int32 `json:"provider_id,omitempty"`
 }
 
 // ProviderMeta is the filesystem representation of an LLM provider
@@ -106,11 +106,11 @@ type RunMeta struct {
 	ParentRunID     *int32 `json:"parent_run_id,omitempty"`
 	RootRunID       *int32 `json:"root_run_id,omitempty"`
 	AgentConfigName string `json:"agent_config_name,omitempty"`
-	Status     string `json:"status"`
-	StartedAt  string `json:"started_at,omitempty"`
-	EndedAt    string `json:"ended_at,omitempty"`
-	SessionID  string `json:"session_id,omitempty"`
-	LogContent string `json:"log_content,omitempty"`
+	Status          string `json:"status"`
+	StartedAt       string `json:"started_at,omitempty"`
+	EndedAt         string `json:"ended_at,omitempty"`
+	SessionID       string `json:"session_id,omitempty"`
+	LogContent      string `json:"log_content,omitempty"`
 }
 
 // ActivityLogMeta is the filesystem representation of an activity log
@@ -405,10 +405,10 @@ func (s *Storage) WriteRun(run db.Run, companyShortName string) error {
 		ParentRunID:     run.ParentRunID,
 		RootRunID:       run.RootRunID,
 		AgentConfigName: run.AgentConfigName,
-		Status:     run.Status,
-		SessionID:  run.SessionID,
-		LogContent: run.LogContent,
-		StartedAt:  run.StartedAt.Format("2006-01-02T15:04:05Z"),
+		Status:          run.Status,
+		SessionID:       run.SessionID,
+		LogContent:      run.LogContent,
+		StartedAt:       run.StartedAt.Format("2006-01-02T15:04:05Z"),
 	}
 	if run.EndedAt != nil {
 		meta.EndedAt = run.EndedAt.Format("2006-01-02T15:04:05Z")
@@ -510,15 +510,15 @@ func (s *Storage) GetCompanyShortNameForTask(taskID int32) (string, error) {
 
 // GetCompanyShortNameForActivityLog finds the company short name from an activity log's company_id
 func (s *Storage) GetCompanyShortNameForActivityLog(companyID int32) (string, error) {
- companies, err := s.ListCompanyDirs()
- if err != nil {
-  return "", err
- }
- for _, shortName := range companies {
-  meta, err := s.ReadCompany(shortName)
-  if err == nil && meta.ID == companyID {
-   return shortName, nil
-  }
- }
- return "", fmt.Errorf("company %d not found", companyID)
+	companies, err := s.ListCompanyDirs()
+	if err != nil {
+		return "", err
+	}
+	for _, shortName := range companies {
+		meta, err := s.ReadCompany(shortName)
+		if err == nil && meta.ID == companyID {
+			return shortName, nil
+		}
+	}
+	return "", fmt.Errorf("company %d not found", companyID)
 }

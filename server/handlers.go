@@ -11,7 +11,8 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/setup"
-	"agent-orchestrator/server/controllers"
+	endpoints "agent-orchestrator/server/controllers"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"

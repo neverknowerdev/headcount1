@@ -21,6 +21,7 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -43,6 +44,12 @@ func main() {
 
 	settings := appsettings.Load()
 	basePath := settings.BasePath
+
+	// Create the base directory tree (db/, ssh/, uploads/, repos/, ...) so
+	// every subsystem can rely on its root existing.
+	if err := filesystem.NewManager(basePath).SetupBaseDirectories(); err != nil {
+		log.Printf("Warning: failed to create base directories: %v", err)
+	}
 
 	dbConnStr := os.Getenv("DATABASE_URL")
 

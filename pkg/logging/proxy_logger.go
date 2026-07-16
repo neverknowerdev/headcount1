@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/tokens"
 )
 
@@ -39,17 +40,17 @@ func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32
 }
 
 func NewProxyLoggerWithHub(basePath, companyShortName string, taskID int32, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
-	logDir := filepath.Join(basePath, "data", companyShortName, "logs", fmt.Sprintf("%d", taskID))
+	logDir := filesystem.NewPaths(basePath).TaskLogsDir(companyShortName, taskID)
 	logFile := filepath.Join(logDir, fmt.Sprintf("run-%d.log", runID))
 	return newProxyLoggerAt(basePath, logDir, logFile, runID, hub, q)
 }
 
 // NewSessionLoggerWithHub creates a logger for an execution session. All
 // sessions of one main run are grouped in a folder named after the root run:
-// data/{company}/logs/{rootTaskID}/run-{rootRunID}/. The root session logs to
+// logs/{company}/{rootTaskID}/run-{rootRunID}/. The root session logs to
 // main.log; each delegated child session gets its own session-{runID}.log.
 func NewSessionLoggerWithHub(basePath, companyShortName string, rootTaskID, rootRunID, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
-	logDir := filepath.Join(basePath, "data", companyShortName, "logs", fmt.Sprintf("%d", rootTaskID), fmt.Sprintf("run-%d", rootRunID))
+	logDir := filesystem.NewPaths(basePath).RunLogsDir(companyShortName, rootTaskID, rootRunID)
 	fileName := "main.log"
 	if runID != rootRunID {
 		fileName = fmt.Sprintf("session-%d.log", runID)
@@ -281,14 +282,14 @@ func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, rea
 		argsJSON, _ := json.Marshal(tc["arguments"])
 		inTokens := tokens.EstimateBytes(argsJSON)
 		l.broadcastLog("tool_call", string(argsJSON), map[string]interface{}{
-			"tool_name":      name,
-			"input_tokens":   inTokens,
-			"output_tokens":  inTokens, // backwards-compat alias used by the UI today
+			"tool_name":     name,
+			"input_tokens":  inTokens,
+			"output_tokens": inTokens, // backwards-compat alias used by the UI today
 		})
 		l.persistLog("tool_call", string(argsJSON), map[string]interface{}{
-			"tool_name":      name,
-			"input_tokens":   inTokens,
-			"output_tokens":  inTokens,
+			"tool_name":     name,
+			"input_tokens":  inTokens,
+			"output_tokens": inTokens,
 		})
 	}
 

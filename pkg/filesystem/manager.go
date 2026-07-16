@@ -15,80 +15,46 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/git"
+
 	"gopkg.in/yaml.v3"
 )
 
 type Manager struct {
 	basePath string
+	paths    Paths
 }
 
 func NewManager(basePath string) *Manager {
 	if basePath == "" {
 		basePath = db.PaperclipHome()
 	}
-	return &Manager{basePath: basePath}
+	return &Manager{basePath: basePath, paths: NewPaths(basePath)}
 }
 
 func (m *Manager) GetBasePath() string {
 	return m.basePath
 }
 
+// Paths exposes the layout helpers rooted at this manager's base path.
+func (m *Manager) Paths() Paths {
+	return m.paths
+}
+
 func (m *Manager) CreateCompanyDirectories(company db.Company) error {
-	compPath := filepath.Join(m.basePath, "data", company.ShortName)
-	return os.MkdirAll(compPath, 0755)
-}
-
-func (m *Manager) CompanyExists(company db.Company) bool {
-	compPath := filepath.Join(m.basePath, "data", company.ShortName)
-	info, err := os.Stat(compPath)
-	return err == nil && info.IsDir()
-}
-
-func (m *Manager) ListCompanies() ([]string, error) {
-	dataPath := filepath.Join(m.basePath, "data")
-	entries, err := os.ReadDir(dataPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
-	}
-
-	companies := []string{}
-	for _, entry := range entries {
-		if entry.IsDir() && entry.Name() != "memory" && entry.Name() != "artifacts" && entry.Name() != "skills" && entry.Name() != "logs" && entry.Name() != "llm-providers" && entry.Name() != "activity-logs" && entry.Name() != "mcp-servers" && entry.Name() != "runs" && entry.Name() != "docker" {
-			companies = append(companies, entry.Name())
+	for _, dir := range m.paths.CompanyDirs(company.ShortName) {
+		if err := os.MkdirAll(dir, 0755); err != nil {
+			return err
 		}
 	}
-	return companies, nil
+	return nil
 }
 
 func (m *Manager) CreateProjectDirectories(company db.Company, project db.Project) error {
-	projPath := filepath.Join(m.basePath, "data", "artifacts", company.ShortName, project.Name)
-	return os.MkdirAll(projPath, 0755)
-}
-
-func (m *Manager) ListProjects(companyShortName string) ([]string, error) {
-	projectsPath := filepath.Join(m.basePath, "data", "artifacts", companyShortName)
-	entries, err := os.ReadDir(projectsPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return []string{}, nil
-		}
-		return nil, err
-	}
-
-	projects := []string{}
-	for _, entry := range entries {
-		if entry.IsDir() {
-			projects = append(projects, entry.Name())
-		}
-	}
-	return projects, nil
+	return os.MkdirAll(m.paths.RepoDir(company.ShortName, project.Name), 0755)
 }
 
 func (m *Manager) GetProjectRepoPath(company db.Company, project db.Project) string {
-	return filepath.Join(m.basePath, "data", "artifacts", company.ShortName, project.Name)
+	return m.paths.RepoDir(company.ShortName, project.Name)
 }
 
 func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project) error {
@@ -101,8 +67,7 @@ func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, pr
 		return err
 	}
 
-	sshDir := filepath.Join(m.basePath, ".ssh")
-	gitMgr := git.NewGitManager(repoDir, sshDir)
+	gitMgr := git.NewGitManager(repoDir, m.paths.SSHDir())
 	return gitMgr.CloneOrFetchProject(ctx, project.RepositoryUrl, repoDir)
 }
 
@@ -123,35 +88,32 @@ func (m *Manager) CreateTaskWorkspace(company db.Company, project db.Project, ta
 }
 
 func (m *Manager) GetTaskWorktreePath(company db.Company, task db.Task) string {
-	return filepath.Join(m.basePath, "workspace", company.ShortName, fmt.Sprintf("task-%d", task.ID))
+	return m.paths.WorktreeDir(company.ShortName, task.ID)
 }
 
 func (m *Manager) CreateSkillDirectory(company db.Company, skill db.Skill) error {
-	skillPath := filepath.Join(m.basePath, "data", "skills", company.ShortName, skill.Name)
-	if err := os.MkdirAll(skillPath, 0755); err != nil {
+	if err := os.MkdirAll(m.paths.SkillDir(company.ShortName, skill.Name), 0755); err != nil {
 		return fmt.Errorf("failed to create skill directory: %w", err)
 	}
 	return nil
 }
 
 func (m *Manager) GetSkillPath(company db.Company, skill db.Skill) string {
-	return filepath.Join(m.basePath, "data", "skills", company.ShortName, skill.Name)
-}
-
-func (m *Manager) GetCompanyPath(company db.Company) string {
-	return filepath.Join(m.basePath, "data", company.ShortName)
+	return m.paths.SkillDir(company.ShortName, skill.Name)
 }
 
 func (m *Manager) SetupBaseDirectories() error {
 	dirs := []string{
-		filepath.Join(m.basePath, "workspace"),
-		filepath.Join(m.basePath, "data"),
-		filepath.Join(m.basePath, "data", "memory"),
-		filepath.Join(m.basePath, "data", "artifacts"),
-		filepath.Join(m.basePath, "data", "skills"),
-		filepath.Join(m.basePath, "data", "skills", "basic"),
-		filepath.Join(m.basePath, "data", "logs"),
-		filepath.Join(m.basePath, ".ssh"),
+		m.paths.DBDir(),
+		m.paths.SSHDir(),
+		m.paths.CredentialsDir(),
+		m.paths.UploadsDir(),
+		m.paths.BackupsDir(),
+		m.paths.ReposDir(),
+		m.paths.WorkspaceDir(),
+		m.paths.ArtifactsDir(),
+		m.paths.LogsDir(),
+		m.paths.SkillsDir(),
 	}
 
 	for _, dir := range dirs {
@@ -160,25 +122,24 @@ func (m *Manager) SetupBaseDirectories() error {
 		}
 	}
 
-	gitignorePath := filepath.Join(m.basePath, "data", ".gitignore")
-	if _, err := os.Stat(gitignorePath); os.IsNotExist(err) {
-		os.WriteFile(gitignorePath, []byte("artifacts/\n"), 0644)
-	}
-
 	return nil
 }
 
+// ArchiveCompany tars every company-scoped directory (repos, workspace,
+// artifacts, logs, skills) into archive/{shortName}_{timestamp}.tar.gz.
+// Returns "" without error when the company has no files worth archiving.
 func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
-	companyPath := m.GetCompanyPath(company)
-	if _, err := os.Stat(companyPath); os.IsNotExist(err) {
+	roots := []string{}
+	for _, dir := range m.paths.CompanyDirs(company.ShortName) {
+		if info, err := os.Stat(dir); err == nil && info.IsDir() && hasFiles(dir) {
+			roots = append(roots, dir)
+		}
+	}
+	if len(roots) == 0 {
 		return "", nil
 	}
 
-	if !hasFiles(companyPath) {
-		return "", nil
-	}
-
-	archiveDir := filepath.Join(m.basePath, "archive")
+	archiveDir := m.paths.ArchiveDir()
 	if err := os.MkdirAll(archiveDir, 0755); err != nil {
 		return "", fmt.Errorf("failed to create archive directory: %w", err)
 	}
@@ -199,7 +160,23 @@ func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
 	tarWriter := tar.NewWriter(gzipWriter)
 	defer tarWriter.Close()
 
-	err = filepath.Walk(companyPath, func(path string, info os.FileInfo, err error) error {
+	for _, root := range roots {
+		// Entries are prefixed with the top-level dir name (repos/, workspace/,
+		// ...) so the archive mirrors the runtime layout under BasePath.
+		prefix, err := filepath.Rel(m.basePath, root)
+		if err != nil {
+			prefix = filepath.Base(root)
+		}
+		if err := addDirToTar(tarWriter, root, prefix); err != nil {
+			return "", fmt.Errorf("failed to create archive: %w", err)
+		}
+	}
+
+	return archivePath, nil
+}
+
+func addDirToTar(tarWriter *tar.Writer, root, prefix string) error {
+	return filepath.Walk(root, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
@@ -209,11 +186,11 @@ func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
 			return err
 		}
 
-		relPath, err := filepath.Rel(companyPath, path)
+		relPath, err := filepath.Rel(root, path)
 		if err != nil {
 			return err
 		}
-		header.Name = relPath
+		header.Name = filepath.ToSlash(filepath.Join(prefix, relPath))
 
 		if err := tarWriter.WriteHeader(header); err != nil {
 			return err
@@ -233,37 +210,27 @@ func (m *Manager) ArchiveCompany(company db.Company) (string, error) {
 
 		return nil
 	})
-
-	if err != nil {
-		return "", fmt.Errorf("failed to create archive: %w", err)
-	}
-
-	return archivePath, nil
 }
 
+// DeleteCompanyFiles removes every company-scoped directory.
 func (m *Manager) DeleteCompanyFiles(company db.Company) error {
-	companyPath := m.GetCompanyPath(company)
-	if _, err := os.Stat(companyPath); os.IsNotExist(err) {
-		return nil
+	for _, dir := range m.paths.CompanyDirs(company.ShortName) {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
 	}
-	return os.RemoveAll(companyPath)
+	return nil
 }
 
 func hasFiles(dir string) bool {
 	found := false
-	metadataFiles := map[string]bool{
-		"company.json": true,
-		"project.json": true,
-	}
 	filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
 		if err != nil {
 			return err
 		}
 		if !info.IsDir() {
-			if !metadataFiles[info.Name()] {
-				found = true
-				return filepath.SkipAll
-			}
+			found = true
+			return filepath.SkipAll
 		}
 		return nil
 	})
@@ -420,24 +387,24 @@ func (m *Manager) ListSprintsFromDisk(companyShortName string) ([]SprintRecord, 
 
 // TaskRecord is a flat Task for filesystem storage (no nested GORM associations).
 type TaskRecord struct {
-	ID          int32      `json:"id"`
-	CompanyID   int32      `json:"company_id"`
-	ProjectID   *int32     `json:"project_id"`
-	SprintID    int32      `json:"sprint_id"`
-	AgentID     *int32     `json:"agent_id"`
-	ParentID    *int32     `json:"parent_id"`
-	Title       string     `json:"title"`
-	TaskType    string     `json:"task_type"`
-	Description string     `json:"description"`
-	RefinedDescription string `json:"refined_description,omitempty"`
-	AcceptanceCriteria string `json:"acceptance_criteria,omitempty"`
-	TestCases          string `json:"test_cases,omitempty"`
-	Priority    string     `json:"priority"`
-	Status      string     `json:"status"`
-	DueDate     *time.Time `json:"due_date"`
-	IsArchived  bool       `json:"is_archived"`
-	CreatedAt   time.Time  `json:"created_at"`
-	UpdatedAt   time.Time  `json:"updated_at"`
+	ID                 int32      `json:"id"`
+	CompanyID          int32      `json:"company_id"`
+	ProjectID          *int32     `json:"project_id"`
+	SprintID           int32      `json:"sprint_id"`
+	AgentID            *int32     `json:"agent_id"`
+	ParentID           *int32     `json:"parent_id"`
+	Title              string     `json:"title"`
+	TaskType           string     `json:"task_type"`
+	Description        string     `json:"description"`
+	RefinedDescription string     `json:"refined_description,omitempty"`
+	AcceptanceCriteria string     `json:"acceptance_criteria,omitempty"`
+	TestCases          string     `json:"test_cases,omitempty"`
+	Priority           string     `json:"priority"`
+	Status             string     `json:"status"`
+	DueDate            *time.Time `json:"due_date"`
+	IsArchived         bool       `json:"is_archived"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // CommentRecord is a flat Comment for filesystem storage (no nested GORM associations).
@@ -463,24 +430,24 @@ func (m *Manager) SaveTask(company db.Company, task db.Task) error {
 		return err
 	}
 	rec := TaskRecord{
-		ID:          task.ID,
-		CompanyID:   task.CompanyID,
-		ProjectID:   task.ProjectID,
-		SprintID:    task.SprintID,
-		AgentID:     task.AgentID,
-		ParentID:    task.ParentID,
-		Title:       task.Title,
-		TaskType:    task.TaskType,
-		Description: task.Description,
+		ID:                 task.ID,
+		CompanyID:          task.CompanyID,
+		ProjectID:          task.ProjectID,
+		SprintID:           task.SprintID,
+		AgentID:            task.AgentID,
+		ParentID:           task.ParentID,
+		Title:              task.Title,
+		TaskType:           task.TaskType,
+		Description:        task.Description,
 		RefinedDescription: task.RefinedDescription,
 		AcceptanceCriteria: task.AcceptanceCriteria,
 		TestCases:          task.TestCases,
-		Priority:    task.Priority,
-		Status:      task.Status,
-		DueDate:     task.DueDate,
-		IsArchived:  task.IsArchived,
-		CreatedAt:   task.CreatedAt,
-		UpdatedAt:   task.UpdatedAt,
+		Priority:           task.Priority,
+		Status:             task.Status,
+		DueDate:            task.DueDate,
+		IsArchived:         task.IsArchived,
+		CreatedAt:          task.CreatedAt,
+		UpdatedAt:          task.UpdatedAt,
 	}
 	data, err := json.MarshalIndent(rec, "", "  ")
 	if err != nil {

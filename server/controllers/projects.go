@@ -55,7 +55,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
+		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
@@ -193,7 +193,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
+		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())

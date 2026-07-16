@@ -13,6 +13,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+
 	"gorm.io/gorm"
 )
 
@@ -362,11 +363,11 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				if err == nil {
 					for _, r := range runs {
 						run := db.Run{
-							TaskID:      task.ID,
-							AgentID:     agentIDMap[r.AgentID],
-							Status:      r.Status,
-							SessionID:   r.SessionID,
-							LogContent:  r.LogContent,
+							TaskID:     task.ID,
+							AgentID:    agentIDMap[r.AgentID],
+							Status:     r.Status,
+							SessionID:  r.SessionID,
+							LogContent: r.LogContent,
 						}
 						if r.StartedAt != "" {
 							st, _ := parseTime(r.StartedAt)

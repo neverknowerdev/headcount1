@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
+
 	"gorm.io/gorm"
 )
 
@@ -419,8 +420,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
-			sshDir := filepath.Join(settings.BasePath, ".ssh")
-			gitMgr = git.NewGitManager(projectRepoDir, sshDir)
+			gitMgr = git.NewGitManager(projectRepoDir, fsMgr.Paths().SSHDir())
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())
 			}
@@ -444,14 +444,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
 	}
 
-	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
-	artifactDir := func() string {
-		base := settings.BasePath
-		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
-			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
-		}
-		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
-	}()
+	// Artifact (deliverable) directory: {basePath}/artifacts/{company}/{rootTaskID}.
+	// Always keyed by the root task so it matches ListArtifactsByTaskTree —
+	// every session of one execution tree shares the same deliverables dir.
+	artifactDir := fsMgr.Paths().TaskArtifactsDir(company.ShortName, rootTaskID)
 	// Artifact files are readable by every session's file tools (the CEO has
 	// no file tools, so it only ever sees the metadata list below).
 	readOnlyDirs = append(readOnlyDirs, artifactDir)

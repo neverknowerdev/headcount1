@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -318,7 +317,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
 	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
-	sshDir := filepath.Join(settings.BasePath, ".ssh")
+	sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 	gitMgr := git.NewGitManager(repoDir, sshDir)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)

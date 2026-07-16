@@ -5,7 +5,6 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 
 	"agent-orchestrator/db"
@@ -86,15 +85,18 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rename company directory on disk if shortname changed
+	// Rename the company-scoped directories on disk if the shortname changed.
 	if oldShortName != req.ShortName {
 		settings := LoadSettings()
-		fsManager := filesystem.NewManager(settings.BasePath)
-		oldPath := filepath.Join(fsManager.GetBasePath(), "data", oldShortName)
-		newPath := filepath.Join(fsManager.GetBasePath(), "data", req.ShortName)
-		if _, err := os.Stat(oldPath); err == nil {
-			if err := os.Rename(oldPath, newPath); err != nil {
-				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldPath, newPath, err)
+		paths := filesystem.NewPaths(settings.BasePath)
+		oldDirs := paths.CompanyDirs(oldShortName)
+		newDirs := paths.CompanyDirs(req.ShortName)
+		for i := range oldDirs {
+			if _, err := os.Stat(oldDirs[i]); err != nil {
+				continue
+			}
+			if err := os.Rename(oldDirs[i], newDirs[i]); err != nil {
+				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldDirs[i], newDirs[i], err)
 			}
 		}
 	}

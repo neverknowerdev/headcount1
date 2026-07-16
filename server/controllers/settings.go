@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 type Settings = appsettings.Settings
@@ -53,7 +54,7 @@ func (api *API) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings := LoadSettings()
-	sshDir := filepath.Join(settings.BasePath, ".ssh")
+	sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 	if err := os.MkdirAll(sshDir, 0700); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
