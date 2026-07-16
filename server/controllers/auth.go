@@ -12,6 +12,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 
 	"golang.org/x/crypto/bcrypt"
@@ -74,10 +75,10 @@ func (api *API) Register(w http.ResponseWriter, r *http.Request) {
 }
 
 // onUserCreated runs per-user provisioning after an account is created
-// (builtin provider seeding, per-user encryption keys). Failures are logged,
+// (per-user encryption keys, builtin provider seeding). Failures are logged,
 // not fatal — the account itself is already usable.
 func (api *API) onUserCreated(ctx context.Context, user db.User, password string) error {
-	return nil // extended by the per-user encryption and tenancy phases
+	return secrets.Default().EnsureUserKey(user.ID, password)
 }
 
 func (api *API) Login(w http.ResponseWriter, r *http.Request) {
@@ -99,11 +100,78 @@ func (api *API) Login(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusUnauthorized, "invalid email or password")
 		return
 	}
+	api.syncUserKeyOnLogin(user, req.Password)
 	if err := api.startSession(w, r, user); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	api.respondJSON(w, http.StatusOK, userResponse{ID: user.ID, Email: user.Email})
+}
+
+// syncUserKeyOnLogin keeps the user's encryption keyring consistent with the
+// password that just authenticated: creates the key for accounts that predate
+// per-user keys, and re-wraps a stale password wrap (possible after a crash
+// between password update and re-wrap). Best-effort — login never fails on it.
+func (api *API) syncUserKeyOnLogin(user db.User, password string) {
+	store := secrets.Default()
+	if err := store.EnsureUserKey(user.ID, password); err != nil {
+		log.Printf("auth: ensuring encryption key for %s failed: %v", user.Email, err)
+		return
+	}
+	if !store.VerifyUserPassword(user.ID, password) {
+		log.Printf("auth: password wrap for %s is stale, re-wrapping", user.Email)
+		if err := store.RewrapUserPassword(user.ID, password); err != nil {
+			log.Printf("auth: re-wrap for %s failed: %v", user.Email, err)
+		}
+	}
+}
+
+// ChangePassword lets an authenticated user rotate their password. The
+// encryption keyring's password wrap is re-created and every session is
+// revoked (a fresh one is issued to this client).
+func (api *API) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	user, ok := api.authenticate(r)
+	if !ok {
+		api.respondError(w, http.StatusUnauthorized, "unauthenticated")
+		return
+	}
+	var req struct {
+		OldPassword string `json:"old_password"`
+		NewPassword string `json:"new_password"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)) != nil {
+		api.respondError(w, http.StatusUnauthorized, "current password is incorrect")
+		return
+	}
+	if len(req.NewPassword) < 8 {
+		api.respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
+		return
+	}
+	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := api.q.UpdateUserPassword(r.Context(), user.ID, string(hash)); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := secrets.Default().RewrapUserPassword(user.ID, req.NewPassword); err != nil {
+		// The bcrypt hash is already rotated; the wrap heals on next login.
+		log.Printf("auth: password-wrap rotation for %s failed: %v", user.Email, err)
+	}
+	if err := api.q.DeleteSessionsForUser(r.Context(), user.ID); err != nil {
+		log.Printf("auth: session revocation for %s failed: %v", user.Email, err)
+	}
+	if err := api.startSession(w, r, user); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (api *API) Logout(w http.ResponseWriter, r *http.Request) {

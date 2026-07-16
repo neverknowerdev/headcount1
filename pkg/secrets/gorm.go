@@ -46,6 +46,41 @@ func (GormSerializer) Value(ctx context.Context, field *schema.Field, dst reflec
 	if !ok {
 		return nil, fmt.Errorf("secrets: field %s must be a string, got %T", field.Name, fieldValue)
 	}
-	// Seal keeps "" empty and never double-encrypts an already-sealed value.
+	// Rows owned by a user are sealed with that user's DEK; ownerless rows
+	// (builtins, legacy fields) with the root DEK. Reading the sibling
+	// UserID here is safe: writes go through full structs (Create/Save).
+	// Seal/SealForUser keep "" empty and never double-encrypt.
+	if uid := ownerUserID(ctx, field, dst); uid != 0 {
+		return Default().SealForUser(uid, s)
+	}
 	return Default().Seal(s)
+}
+
+// ownerUserID returns the value of the model's UserID field, or 0 when the
+// model has no such field or it is nil/zero.
+func ownerUserID(ctx context.Context, field *schema.Field, dst reflect.Value) int32 {
+	if field.Schema == nil {
+		return 0
+	}
+	owner := field.Schema.LookUpField("UserID")
+	if owner == nil {
+		return 0
+	}
+	v, isZero := owner.ValueOf(ctx, dst)
+	if isZero || v == nil {
+		return 0
+	}
+	switch id := v.(type) {
+	case int32:
+		return id
+	case *int32:
+		if id != nil {
+			return *id
+		}
+	case int64:
+		return int32(id)
+	case int:
+		return int32(id)
+	}
+	return 0
 }

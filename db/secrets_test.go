@@ -3,6 +3,7 @@ package db_test
 import (
 	"context"
 	"encoding/json"
+	"strings"
 	"testing"
 
 	"agent-orchestrator/db"
@@ -67,6 +68,44 @@ func TestSecretsEncryptedAtRest(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "ghp_raw_token", gotAcc.AuthToken)
 	assert.True(t, gotAcc.HasToken)
+}
+
+// TestUserOwnedSecretsSealedWithUserDEK verifies the serializer routes secrets
+// on user-owned rows to the owner's DEK ("enc:u1:<id>:"), that they decrypt
+// transparently, and that deleting the user's key crypto-shreds them.
+func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.UserKey{}, &db.LLMProvider{}))
+	secrets.SetUserKeyStorage(db.NewUserKeyStorage(database))
+	q := db.New(database)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, "owner@example.com", "irrelevant-hash")
+	require.NoError(t, err)
+	require.NoError(t, secrets.Default().CreateUserKey(user.ID, "owner-password"))
+
+	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
+		Name: "mine", BaseUrl: "https://u", ApiKey: "sk-user-owned", UserID: &user.ID,
+	})
+	require.NoError(t, err)
+
+	var raw string
+	require.NoError(t, database.Raw("SELECT api_key FROM llm_providers WHERE id = ?", created.ID).Scan(&raw).Error)
+	assert.True(t, strings.HasPrefix(raw, secrets.PrefixUser), "expected user-sealed value, got %q", raw)
+	assert.NotContains(t, raw, "sk-user-owned")
+
+	got, err := q.GetLLMProvider(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "sk-user-owned", got.ApiKey)
+
+	// Crypto-shredding: dropping the user's key makes the row unreadable.
+	require.NoError(t, q.DeleteUserKey(ctx, user.ID))
+	secrets.SetUserKeyStorage(db.NewUserKeyStorage(database)) // reset the wrapped-key cache
+	_, err = q.GetLLMProvider(ctx, created.ID)
+	require.Error(t, err)
 }
 
 // TestEncryptPlaintextSecretsSweep verifies the startup migration seals rows

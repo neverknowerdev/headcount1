@@ -30,9 +30,11 @@ func SecretsBackend() string {
 func (q *Queries) EncryptPlaintextSecrets(ctx context.Context) error {
 	sealedPattern := secrets.Prefix + "%"
 
+	userSealedPattern := secrets.PrefixUser + "%"
+
 	var providerIDs []int32
 	if err := q.db.WithContext(ctx).Raw(
-		"SELECT id FROM llm_providers WHERE api_key != '' AND api_key NOT LIKE ?", sealedPattern,
+		"SELECT id FROM llm_providers WHERE api_key != '' AND api_key NOT LIKE ? AND api_key NOT LIKE ?", sealedPattern, userSealedPattern,
 	).Scan(&providerIDs).Error; err != nil {
 		return err
 	}
@@ -48,7 +50,7 @@ func (q *Queries) EncryptPlaintextSecrets(ctx context.Context) error {
 
 	var accountIDs []int32
 	if err := q.db.WithContext(ctx).Raw(
-		"SELECT id FROM mcp_accounts WHERE auth_token != '' AND auth_token NOT LIKE ?", sealedPattern,
+		"SELECT id FROM mcp_accounts WHERE auth_token != '' AND auth_token NOT LIKE ? AND auth_token NOT LIKE ?", sealedPattern, userSealedPattern,
 	).Scan(&accountIDs).Error; err != nil {
 		return err
 	}

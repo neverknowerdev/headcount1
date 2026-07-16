@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/llmdiscovery"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -77,6 +78,7 @@ func main() {
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
 		&db.User{},
+		&db.UserKey{},
 		&db.Session{},
 		&db.PasswordResetToken{},
 		&db.Company{},
@@ -107,6 +109,10 @@ func main() {
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
+
+	// Per-user encryption keys live in the user_keys table; hand the secrets
+	// package its storage before anything can seal a user-owned secret.
+	secrets.SetUserKeyStorage(db.NewUserKeyStorage(database))
 
 	recoverStaleRuns(database)
 

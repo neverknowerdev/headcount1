@@ -39,6 +39,23 @@ type PasswordResetToken struct {
 	CreatedAt time.Time  `json:"created_at"`
 }
 
+// UserKey holds a user's data-encryption key (DEK) — never in plain form.
+// The same DEK is wrapped twice: by the server's root key chain (so agent
+// runs and schedulers can decrypt with nobody logged in, and so a password
+// reset can re-wrap without data loss) and by an Argon2id key derived from
+// the user's password (defense-in-depth, verified at login). Deleting this
+// row crypto-shreds every "enc:u1:" secret the user owns. See pkg/secrets.
+type UserKey struct {
+	UserID             int32     `json:"user_id" gorm:"primaryKey"`
+	User               User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	WrappedDEKServer   string    `json:"-" gorm:"not null"`
+	WrappedDEKPassword string    `json:"-" gorm:"not null"`
+	PwSalt             string    `json:"-" gorm:"not null"`
+	PwParams           string    `json:"-" gorm:"not null"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
+}
+
 type Company struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Name      string    `json:"name" gorm:"not null"`
@@ -79,8 +96,11 @@ type LLMProvider struct {
 	BaseUrl string `json:"base_url" gorm:"not null"`
 	// ApiKey is encrypted at rest (see pkg/secrets) and never serialized to
 	// clients — the frontend only sees HasApiKey. In memory it's plaintext.
-	ApiKey          string `json:"-" gorm:"not null;serializer:secret"`
-	HasApiKey       bool   `json:"has_api_key" gorm:"-"` // computed: ApiKey != ""
+	ApiKey    string `json:"-" gorm:"not null;serializer:secret"`
+	HasApiKey bool   `json:"has_api_key" gorm:"-"` // computed: ApiKey != ""
+	// UserID is the owning user; secrets on owned rows are sealed with that
+	// user's DEK ("enc:u1:"). Nil = ownerless (sealed with the root DEK).
+	UserID          *int32 `json:"user_id" gorm:"index"`
 	ProviderType    string `json:"provider_type"`
 	DefaultModel    string `json:"default_model"`
 	SupportedModels string `json:"supported_models"`
@@ -318,6 +338,7 @@ type MCPAccount struct {
 	Name        string    `json:"name" gorm:"not null"`                 // user label: "Personal", "Work"
 	AuthToken   string    `json:"-" gorm:"type:text;serializer:secret"` // credential; never sent to clients; encrypted at rest
 	HasToken    bool      `json:"has_token" gorm:"-"`                   // computed: AuthToken != ""
+	UserID      *int32    `json:"user_id" gorm:"index"`                 // owning user; their DEK seals AuthToken
 	LastError   string    `json:"last_error" gorm:"type:text"`
 	CreatedAt   time.Time `json:"created_at"`
 	UpdatedAt   time.Time `json:"updated_at"`

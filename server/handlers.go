@@ -96,6 +96,7 @@ func (s *Server) MountPublic(r chi.Router) {
 		r.Post("/login", api.Login)
 		r.Post("/logout", api.Logout)
 		r.Get("/me", api.Me)
+		r.Post("/change-password", api.ChangePassword)
 	})
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {

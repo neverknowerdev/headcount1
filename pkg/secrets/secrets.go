@@ -35,8 +35,11 @@ import (
 // they are written.
 const Prefix = "enc:v1:"
 
-// IsSealed reports whether a stored value is ciphertext produced by Seal.
-func IsSealed(v string) bool { return strings.HasPrefix(v, Prefix) }
+// IsSealed reports whether a stored value is ciphertext produced by this
+// package (root-DEK "enc:v1:" or per-user "enc:u1:").
+func IsSealed(v string) bool {
+	return strings.HasPrefix(v, Prefix) || strings.HasPrefix(v, PrefixUser)
+}
 
 // Store seals and opens secret values using a DEK wrapped by the KeySource's
 // master key. Safe for concurrent use.
@@ -51,6 +54,11 @@ type Store struct {
 	// the Vault TTL at worst).
 	wrappedDEK []byte
 	kekFP      string
+
+	// Per-user key material (see userkeys.go). userKeyCache holds wrapped
+	// records only, same revocation reasoning as wrappedDEK.
+	userKeys     UserKeyStorage
+	userKeyCache map[int32]UserKeyRecord
 }
 
 func NewStore(source KeySource, keystorePath string) *Store {
@@ -78,11 +86,15 @@ func (s *Store) Seal(plaintext string) (string, error) {
 	return Prefix + base64.StdEncoding.EncodeToString(blob), nil
 }
 
-// Open decrypts a stored value. Values without the sealed prefix are legacy
-// plaintext and are returned as-is.
+// Open decrypts a stored value, routing by its self-describing prefix:
+// "enc:u1:" uses the embedded owner's DEK, "enc:v1:" the root DEK, and
+// anything else is legacy plaintext returned as-is.
 func (s *Store) Open(stored string) (string, error) {
 	if !IsSealed(stored) {
 		return stored, nil
+	}
+	if strings.HasPrefix(stored, PrefixUser) {
+		return s.openUser(stored)
 	}
 	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, Prefix))
 	if err != nil {
