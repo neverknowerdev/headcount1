@@ -79,9 +79,10 @@ func TestProxyLoggerJSONL(t *testing.T) {
 	logger.LogSessionStarted(2, 3, "qa", "Verify things", "session-2.jsonl")
 	logger.LogSessionEnded(2, "completed", "all good")
 	logger.LogModelSwitch("openai", "gpt-a", "other", "gpt-b", "rate limited")
+	logger.LogOutcome("completed", "finish_task", "done", "coder", 1, "Implemented the feature.")
 
 	entries := readEntries(t, logger.FilePath())
-	require.Len(t, entries, 7)
+	require.Len(t, entries, 8)
 
 	byType := map[string]map[string]interface{}{}
 	var types []string
@@ -91,7 +92,7 @@ func TestProxyLoggerJSONL(t *testing.T) {
 		byType[typ] = e
 		assert.NotEmpty(t, e["ts"], "entry %s must carry a timestamp", typ)
 	}
-	assert.Equal(t, []string{"request", "response", "tool_response", "info", "session_started", "session_ended", "model_switch"}, types)
+	assert.Equal(t, []string{"request", "response", "tool_response", "info", "session_started", "session_ended", "model_switch", "outcome"}, types)
 
 	assert.Equal(t, reqBody, byType["request"]["content"])
 	assert.Equal(t, "coder", byType["request"]["agent_name"])
@@ -106,6 +107,17 @@ func TestProxyLoggerJSONL(t *testing.T) {
 	assert.Equal(t, "call_1", byType["tool_response"]["tool_call_id"])
 
 	assert.Equal(t, "session-2.jsonl", byType["session_started"]["log_file"])
+
+	// The outcome entry — the trajectory's training label — is the last
+	// line and is self-describing (run/task/agent identity embedded).
+	outcome := entries[len(entries)-1]
+	assert.Equal(t, "outcome", outcome["type"])
+	assert.Equal(t, "completed", outcome["status"])
+	assert.Equal(t, "finish_task", outcome["end_reason"])
+	assert.Equal(t, "done", outcome["task_status"])
+	assert.Equal(t, "Implemented the feature.", outcome["content"])
+	assert.Equal(t, float64(runID), outcome["run_id"])
+	assert.Equal(t, float64(1), outcome["task_id"])
 
 	// The DB mirror gets the same entries but with the tool output capped
 	// to a preview. persistEntry is async, so poll briefly.

@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -487,8 +488,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
 
-	// Track whether finish_task was called so we can force it if not.
+	// Track whether finish_task was called so we can force it if not, plus
+	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
+	var finishTaskStatus, finishSummary string
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -496,6 +499,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return err
 		}
 		taskFinished = true
+		finishTaskStatus = status
+		finishSummary = finishStatus
 		prevStatus := t.Status
 		t.Status = status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
@@ -875,6 +880,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
+			if proxyLogger != nil {
+				proxyLogger.LogOutcome("canceled", "canceled", finishTaskStatus, agentDisplayName, task.ID, "Run canceled by user")
+			}
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
@@ -886,7 +894,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// If finish_task was not called, force a follow-up turn.
+	forcedFinish := false
 	if agentErr == nil && !taskFinished {
+		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
 			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
@@ -908,6 +918,27 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			finalStats.ReasoningTokens, finalStats.ToolInputTokens,
 			finalStats.ToolOutputTokens, finalStats.TotalTokens,
 		))
+	}
+
+	// Close the trajectory with an outcome entry: how the loop terminated
+	// and the agent's own verdict. Written last so it's the final line of
+	// the run's JSONL log.
+	if proxyLogger != nil {
+		endReason := "no_finish"
+		summary := finishSummary
+		switch {
+		case agentErr != nil && errors.Is(agentErr, aicli.ErrMaxTurns):
+			endReason = "max_turns"
+			summary = agentErr.Error()
+		case agentErr != nil:
+			endReason = "error"
+			summary = agentErr.Error()
+		case taskFinished && forcedFinish:
+			endReason = "finish_task_forced"
+		case taskFinished:
+			endReason = "finish_task"
+		}
+		proxyLogger.LogOutcome(status, endReason, finishTaskStatus, agentDisplayName, task.ID, summary)
 	}
 
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)

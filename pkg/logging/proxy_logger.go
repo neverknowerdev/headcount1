@@ -578,6 +578,36 @@ func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toMode
 	}))
 }
 
+// LogOutcome writes the final entry of a run's log: how the session ended.
+// This is the label that makes the JSONL file usable as a training
+// trajectory without joining the DB:
+//   - status: the run's mechanical result (completed / failed / canceled)
+//   - endReason: how the loop terminated — finish_task (agent called the
+//     terminal tool on its own), finish_task_forced (only after the engine's
+//     follow-up nudge), no_finish (ended without ever calling it), max_turns,
+//     error, canceled
+//   - taskStatus: the agent's own verdict passed to finish_task
+//     (done / in-review / blocked / refinement), empty if it never called it
+//   - summary: the agent's finish_status one-liner, or the error message
+//
+// run_id/task_id/agent_name are embedded so each log file is self-describing.
+func (l *ProxyLogger) LogOutcome(status, endReason, taskStatus, agentName string, taskID int32, summary string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	extra := map[string]interface{}{
+		"status":     status,
+		"end_reason": endReason,
+		"run_id":     l.runID,
+		"task_id":    taskID,
+		"agent_name": agentName,
+	}
+	if taskStatus != "" {
+		extra["task_status"] = taskStatus
+	}
+	l.logEntry(makeEntry("outcome", summary, extra))
+}
+
 // LogInfo writes a plain informational line to the log file and persists an
 // "info" entry in the run's log_entries column.
 func (l *ProxyLogger) LogInfo(msg string) {
