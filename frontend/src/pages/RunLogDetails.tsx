@@ -16,6 +16,18 @@ function parseLogContent(logContent: string): any[] {
         if (trimmed.startsWith('{')) {
             try {
                 const parsed = JSON.parse(trimmed);
+                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
+                    messages.push({ id: i++, entry: { ...parsed, type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name } });
+                    continue;
+                }
+                // JSONL run log: every line is a structured entry with a type,
+                // the same shape as the DB log_entries — use it as-is.
+                if (typeof parsed.type === 'string') {
+                    messages.push({ id: i++, entry: parsed });
+                    continue;
+                }
+                // Legacy text-log heuristics: raw request/response bodies that
+                // were embedded in the old ===-delimited format.
                 if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
                     messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model } });
                     continue;
@@ -34,10 +46,6 @@ function parseLogContent(logContent: string): any[] {
                 }
                 if (parsed.reasoning || parsed.tokens || parsed.raw) {
                     messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
-                    continue;
-                }
-                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
-                    messages.push({ id: i++, entry: { type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name, output_tokens: parsed.output_tokens } });
                     continue;
                 }
             } catch { /* treat as info */ }

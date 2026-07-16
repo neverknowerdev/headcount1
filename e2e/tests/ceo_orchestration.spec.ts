@@ -350,16 +350,16 @@ test.describe.serial('CEO orchestration flow', () => {
         // ── Filesystem: logs grouped by main run id, one file per session ────
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
         const runDir = path.join(basePath, 'data', 'ceo-co', 'logs', String(taskId), `run-${rootRun.id}`);
-        const mainLog = path.join(runDir, 'main.log');
+        const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();
-        const mainContent = fs.readFileSync(mainLog, 'utf8');
-        expect(mainContent).toContain('Session Started');
-        expect(mainContent).toContain('Session Ended');
+        const mainEntries = fs.readFileSync(mainLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(mainEntries.some(e => e.type === 'session_started')).toBeTruthy();
+        expect(mainEntries.some(e => e.type === 'session_ended')).toBeTruthy();
         for (const child of [ctoRun, ...ctoChildren]) {
-            const sessionLog = path.join(runDir, `session-${child.id}.log`);
+            const sessionLog = path.join(runDir, `session-${child.id}.jsonl`);
             expect(fs.existsSync(sessionLog)).toBeTruthy();
-            const sessionContent = fs.readFileSync(sessionLog, 'utf8');
-            expect(sessionContent).toContain('LLM Request');
+            const sessionEntries = fs.readFileSync(sessionLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+            expect(sessionEntries.some(e => e.type === 'request')).toBeTruthy();
         }
 
         // The ask_artifact reader exchange got its own log file in the run
