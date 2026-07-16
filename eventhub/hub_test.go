@@ -25,7 +25,7 @@ func newTestServer(t *testing.T, hub *Hub) *httptest.Server {
 			t.Logf("upgrade error: %v", err)
 			return
 		}
-		hub.Serve(conn)
+		hub.Serve(conn, 1)
 	}))
 }
 
@@ -382,4 +382,64 @@ func TestHubConcurrentBroadcastAndConnect(t *testing.T) {
 		conn.Close()
 	}
 	close(stop)
+}
+
+// newTestServerForUser is newTestServer with a controllable client user ID,
+// for tenant-scoped delivery tests.
+func newTestServerForUser(t *testing.T, hub *Hub, userID int32) *httptest.Server {
+	t.Helper()
+	return httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := testUpgrader.Upgrade(w, r, nil)
+		if err != nil {
+			t.Logf("upgrade error: %v", err)
+			return
+		}
+		hub.Serve(conn, userID)
+	}))
+}
+
+// TestBroadcastEventForCompanyDeliversOnlyToOwner verifies tenant scoping:
+// an event for company 10 (owned by user 1) reaches user 1's client and
+// never user 2's; with an unknown owner it reaches nobody.
+func TestBroadcastEventForCompanyDeliversOnlyToOwner(t *testing.T) {
+	hub := NewHub()
+	defer hub.Close()
+	hub.SetCompanyOwnerResolver(func(companyID int32) (int32, bool) {
+		if companyID == 10 {
+			return 1, true
+		}
+		return 0, false
+	})
+
+	srvOwner := newTestServerForUser(t, hub, 1)
+	defer srvOwner.Close()
+	srvOther := newTestServerForUser(t, hub, 2)
+	defer srvOther.Close()
+
+	ownerConn := dialTestServer(t, srvOwner, hub)
+	defer ownerConn.Close()
+	otherConn := dialTestServer(t, srvOther, hub)
+	defer otherConn.Close()
+
+	hub.BroadcastEventForCompany(10, "task_updated", map[string]interface{}{"id": 1})
+	hub.BroadcastEventForCompany(99, "task_updated", map[string]interface{}{"id": 2}) // unknown owner → nobody
+
+	ownerConn.SetReadDeadline(time.Now().Add(2 * time.Second))
+	_, msg, err := ownerConn.ReadMessage()
+	if err != nil {
+		t.Fatalf("owner never received the event: %v", err)
+	}
+	var ev struct {
+		Type    string                 `json:"type"`
+		Payload map[string]interface{} `json:"payload"`
+	}
+	if err := json.Unmarshal(msg, &ev); err != nil || ev.Type != "task_updated" || ev.Payload["id"].(float64) != 1 {
+		t.Fatalf("owner got wrong event: %s", msg)
+	}
+
+	// The other user must receive nothing (a short deadline read must time out).
+	otherConn.SetReadDeadline(time.Now().Add(300 * time.Millisecond))
+	if _, msg, err := otherConn.ReadMessage(); err == nil {
+		t.Fatalf("non-owner received a tenant event: %s", msg)
+	}
 }

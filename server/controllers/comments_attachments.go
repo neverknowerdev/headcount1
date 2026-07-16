@@ -45,7 +45,8 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	if _, err := api.authorizeTask(r, req.TaskID); err != nil {
+	authTask, err := api.authorizeTask(r, req.TaskID)
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
@@ -61,7 +62,7 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("comment_created", comment)
+	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
 
 	var task db.Task
 	if api.db.First(&task, req.TaskID).Error == nil {

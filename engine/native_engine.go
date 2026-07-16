@@ -179,7 +179,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
 			e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 			go e.run(context.Background(), task, "implement")
 		} else {
@@ -188,7 +188,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
 			e.emitStatusChange(ctx, task.ID, prevStatus, "refinement")
 			go e.run(context.Background(), task, "plan")
 		}
@@ -205,7 +205,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
 		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 		go e.run(context.Background(), task, "implement")
 	}
@@ -230,7 +230,7 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 		return
 	}
 	e.q.UpdateRunLog(ctx, runID, "Run marked as failed: previous run no longer active", "failed")
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 	e.q.UnlockTaskRun(ctx, run.TaskID)
 }
 
@@ -316,7 +316,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		parent.onRunCreated(run)
 	}
 
-	e.hub.BroadcastEvent("run_started", run)
+	e.hub.BroadcastEventForCompany(task.CompanyID, "run_started", run)
 
 	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
 	if compErr != nil {
@@ -405,7 +405,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		rootTaskID,
 		rootRunID,
 		run.ID,
-		e.hub,
+		e.hub.ForCompany(task.CompanyID),
 		e.q,
 	)
 	if logErr != nil {
@@ -506,7 +506,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, resultDetails); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
@@ -520,7 +520,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			RunID:       &runID,
 		})
 		if cErr == nil {
-			e.hub.BroadcastEvent("comment_created", comment)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", comment)
 		}
 		return nil
 	}))
@@ -557,7 +557,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			if upErr := e.q.UpdateArtifactContent(wCtx, existing.ID, content, run.ID); upErr != nil {
 				fmt.Printf("Warning: failed to update artifact in DB: %v\n", upErr)
 			}
-			e.hub.BroadcastEvent("artifact_created", *existing)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "artifact_created", *existing)
 			if existing.RunID == run.ID {
 				return fmt.Sprintf("Artifact %q updated.", filename), nil
 			}
@@ -577,7 +577,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
 			return "", nil
 		}
-		e.hub.BroadcastEvent("artifact_created", artifact)
+		e.hub.BroadcastEventForCompany(task.CompanyID, "artifact_created", artifact)
 		commentContent, _ := json.Marshal(map[string]string{
 			"artifact_id": fmt.Sprintf("%d", artifact.ID),
 			"filename":    filename,
@@ -589,7 +589,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			CommentType: "artifact_created",
 			Content:     string(commentContent),
 		}); cErr == nil {
-			e.hub.BroadcastEvent("comment_created", ac)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", ac)
 		}
 		return fmt.Sprintf("Artifact %q written.", filename), nil
 	}))
@@ -684,7 +684,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
 		e.logInfo(proxyLogger, "Status: "+status)
 		return nil
 	}))
@@ -884,7 +884,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 				proxyLogger.LogOutcome("canceled", "canceled", finishTaskStatus, agentDisplayName, task.ID, "Run canceled by user")
 			}
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
-			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
 		}
@@ -948,7 +948,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		storage.WriteRun(updatedRun, company.ShortName)
 	}
 
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
+	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
 	// Notify the parent task that this subtask has completed or failed.
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
@@ -1065,8 +1065,8 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	if err != nil {
 		return "", fmt.Errorf("ask_human: failed to post question: %w", err)
 	}
-	e.hub.BroadcastEvent("comment_created", questionComment)
-	e.hub.BroadcastEvent("human_input_requested", map[string]interface{}{
+	e.broadcastForTask(ctx, taskID, "comment_created", questionComment)
+	e.broadcastForTask(ctx, taskID, "human_input_requested", map[string]interface{}{
 		"task_id":  taskID,
 		"run_id":   runID,
 		"question": question,
@@ -1161,7 +1161,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			return "", fmt.Errorf("failed to create subtask: %w", err)
 		}
 
-		e.hub.BroadcastEvent("task_created", map[string]interface{}{
+		e.hub.BroadcastEventForCompany(subtask.CompanyID, "task_created", map[string]interface{}{
 			"id":        subtask.ID,
 			"parent_id": parentTask.ID,
 			"title":     subtask.Title,
@@ -1186,7 +1186,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 				if parentLogger != nil {
 					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.jsonl", childRun.ID))
 				}
-				e.hub.BroadcastEvent("session_started", map[string]interface{}{
+				e.hub.BroadcastEventForCompany(subtask.CompanyID, "session_started", map[string]interface{}{
 					"parent_run_id": parentRun.ID,
 					"run_id":        childRun.ID,
 					"task_id":       subtask.ID,
@@ -1242,7 +1242,7 @@ func (e *NativeEngine) waitForSubtaskEvent(
 		if !ev.done {
 			pending.put(state)
 			e.logInfo(logger, fmt.Sprintf("Subtask #%d asked its owner: %s", state.subtaskID, ev.question))
-			e.hub.BroadcastEvent("subtask_question", map[string]interface{}{
+			e.broadcastForTask(ctx, state.subtaskID, "subtask_question", map[string]interface{}{
 				"subtask_id":   state.subtaskID,
 				"owner_run_id": ownerRun.ID,
 				"question":     ev.question,
@@ -1293,7 +1293,7 @@ func (e *NativeEngine) buildSubtaskReply(
 	if logger != nil {
 		logger.LogSessionEnded(state.childRunID, status, result)
 	}
-	e.hub.BroadcastEvent("session_ended", map[string]interface{}{
+	e.broadcastForTask(context.Background(), ownerRun.TaskID, "session_ended", map[string]interface{}{
 		"parent_run_id": ownerRun.ID,
 		"run_id":        state.childRunID,
 		"status":        status,
@@ -1389,7 +1389,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
-	e.hub.BroadcastEvent("task_created", newTask)
+	e.hub.BroadcastEventForCompany(newTask.CompanyID, "task_created", newTask)
 
 	// Mirror the API endpoint's filesystem bookkeeping so the task shows up
 	// in exports/sync exactly like a human-created one.
@@ -1608,7 +1608,7 @@ func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32,
 		fmt.Printf("Warning: failed to record subtask %s comment: %v\n", commentType, err)
 		return
 	}
-	e.hub.BroadcastEvent("comment_created", created)
+	e.broadcastForTask(ctx, taskID, "comment_created", created)
 }
 
 // notifyParentOfSubtaskCompletion adds a comment to the parent task when this
@@ -1627,8 +1627,8 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 		fmt.Printf("Warning: failed to notify parent task %d of subtask completion: %v\n", *subtask.ParentID, err)
 		return
 	}
-	e.hub.BroadcastEvent("comment_created", comment)
-	e.hub.BroadcastEvent("subtask_completed", map[string]interface{}{
+	e.broadcastForTask(ctx, *subtask.ParentID, "comment_created", comment)
+	e.broadcastForTask(ctx, *subtask.ParentID, "subtask_completed", map[string]interface{}{
 		"subtask_id":    subtask.ID,
 		"parent_id":     *subtask.ParentID,
 		"status":        status,
@@ -1657,6 +1657,17 @@ func formatArtifactList(arts []db.Artifact) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// broadcastForTask delivers a tenant-scoped event by resolving the task's
+// company owner; when the task can't be loaded the event goes to in-process
+// subscribers only (fail closed for WS clients).
+func (e *NativeEngine) broadcastForTask(ctx context.Context, taskID int32, event string, payload interface{}) {
+	if task, err := e.q.GetTask(ctx, taskID); err == nil {
+		e.hub.BroadcastEventForCompany(task.CompanyID, event, payload)
+		return
+	}
+	e.hub.BroadcastEventForCompany(-1, event, payload)
+}
+
 // emitStatusChange creates a status_change comment and broadcasts it.
 func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from, to string) {
 	content, _ := json.Marshal(map[string]string{"from": from, "to": to})
@@ -1667,14 +1678,19 @@ func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from,
 		Content:     string(content),
 	})
 	if err == nil {
-		e.hub.BroadcastEvent("comment_created", comment)
+		e.broadcastForTask(ctx, taskID, "comment_created", comment)
 	}
 }
 
 // failRun marks a run as failed and broadcasts the event.
 func (e *NativeEngine) failRun(ctx context.Context, runID int32, errMsg string) {
 	e.q.UpdateRunLog(ctx, runID, errMsg, "failed")
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+	payload := map[string]interface{}{"run_id": runID, "status": "failed"}
+	if run, err := e.q.GetRun(ctx, runID); err == nil {
+		e.broadcastForTask(ctx, run.TaskID, "run_ended", payload)
+	} else {
+		e.hub.BroadcastEventForCompany(-1, "run_ended", payload) // owner unknown — subscribers only
+	}
 }
 
 // logInfo writes an info entry to the proxy logger (if non-nil).

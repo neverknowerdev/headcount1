@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -173,6 +174,7 @@ func main() {
 	}
 
 	hub := eventhub.NewHub()
+	hub.SetCompanyOwnerResolver(newCompanyOwnerResolver(database))
 
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
@@ -298,6 +300,38 @@ func main() {
 
 	log.Printf("Starting server on port %s", port)
 	log.Fatal(http.ListenAndServe(":"+port, r))
+}
+
+// newCompanyOwnerResolver returns a TTL-cached company → owning-user lookup
+// for tenant-scoped WebSocket event delivery. Ownership changes only on
+// company creation, so a short TTL is plenty.
+func newCompanyOwnerResolver(database *gorm.DB) func(companyID int32) (int32, bool) {
+	type entry struct {
+		owner int32
+		ok    bool
+		at    time.Time
+	}
+	var mu sync.Mutex
+	cache := map[int32]entry{}
+	const ttl = 30 * time.Second
+	q := db.New(database)
+	return func(companyID int32) (int32, bool) {
+		mu.Lock()
+		e, hit := cache[companyID]
+		mu.Unlock()
+		if hit && time.Since(e.at) < ttl {
+			return e.owner, e.ok
+		}
+		company, err := q.GetCompany(context.Background(), companyID)
+		owner, ok := int32(0), false
+		if err == nil && company.UserID != nil {
+			owner, ok = *company.UserID, true
+		}
+		mu.Lock()
+		cache[companyID] = entry{owner: owner, ok: ok, at: time.Now()}
+		mu.Unlock()
+		return owner, ok
+	}
 }
 
 func recoverStaleRuns(database *gorm.DB) {

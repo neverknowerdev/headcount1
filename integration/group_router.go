@@ -502,6 +502,32 @@ func (g *LLMGateway) finishRunAccounting(ctx context.Context, runID int, member 
 	}
 }
 
+// companyScopedHub adapts the gateway hub to the plain BroadcastEvent
+// interface the proxy logger expects, pinning delivery to one company.
+type companyScopedHub struct {
+	hub       GatewayHub
+	companyID int32
+}
+
+func (h companyScopedHub) BroadcastEvent(eventType string, payload interface{}) {
+	h.hub.BroadcastEventForCompany(h.companyID, eventType, payload)
+}
+
+// companyForRun resolves (and caches) the company a run belongs to, for
+// tenant-scoped run_log events. Returns -1 (matches no client) when the run
+// can't be resolved — fail closed rather than leak across tenants.
+func (g *LLMGateway) companyForRun(runID int32) int32 {
+	if v, ok := g.runCompany.Load(runID); ok {
+		return v.(int32)
+	}
+	_, task, err := g.q.GetRunWithTask(context.Background(), runID)
+	if err != nil {
+		return -1
+	}
+	g.runCompany.Store(runID, task.CompanyID)
+	return task.CompanyID
+}
+
 // loggerForRun builds a ProxyLogger when an X-Run-ID header is present,
 // mirroring the behavior of the other proxy entrypoints.
 func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceName, providerName string, bodyBytes []byte, messages []map[string]interface{}) *logging.ProxyLogger {
@@ -512,12 +538,16 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 	if err != nil || run.Task.Company.ID == 0 {
 		return nil
 	}
+	var scopedHub interface{ BroadcastEvent(string, interface{}) }
+	if g.hub != nil {
+		scopedHub = companyScopedHub{hub: g.hub, companyID: run.Task.CompanyID}
+	}
 	proxyLogger, loggerErr := logging.NewProxyLoggerWithHub(
 		g.basePath,
 		run.Task.Company.ShortName,
 		run.TaskID,
 		run.ID,
-		g.hub,
+		scopedHub,
 		g.q,
 	)
 	if loggerErr != nil {
@@ -545,7 +575,7 @@ func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map
 		entry[k] = v
 	}
 	if g.hub != nil {
-		g.hub.BroadcastEvent("run_log", map[string]interface{}{
+		g.hub.BroadcastEventForCompany(g.companyForRun(int32(runID)), "run_log", map[string]interface{}{
 			"run_id": int32(runID),
 			"entry":  entry,
 		})

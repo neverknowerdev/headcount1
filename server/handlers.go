@@ -5,11 +5,13 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"net/url"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/authctx"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/server/controllers"
 	"github.com/go-chi/chi/v5"
@@ -282,8 +284,16 @@ func respondError(w http.ResponseWriter, status int, message string) {
 }
 
 var upgrader = websocket.Upgrader{
+	// Same-origin only: the cookie authenticates the upgrade, so a cross-site
+	// page must not be able to open an authenticated socket. Non-browser
+	// clients (tests, tools) send no Origin header and are allowed.
 	CheckOrigin: func(r *http.Request) bool {
-		return true
+		origin := r.Header.Get("Origin")
+		if origin == "" {
+			return true
+		}
+		u, err := url.Parse(origin)
+		return err == nil && u.Host == r.Host
 	},
 }
 
@@ -292,5 +302,7 @@ func (s *Server) serveWs(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		return
 	}
-	s.hub.Serve(conn)
+	// Mounted behind RequireAuth, so the user is always in context; events
+	// are delivered per-tenant based on this ID.
+	s.hub.Serve(conn, authctx.UserID(r.Context()))
 }

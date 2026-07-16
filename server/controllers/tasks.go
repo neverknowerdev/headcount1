@@ -146,7 +146,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("task_created", task)
+	api.hub.BroadcastEventForCompany(task.CompanyID, "task_created", task)
 
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
@@ -267,7 +267,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("task_updated", task)
+	api.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", task)
 
 	if statusChanged {
 		content, _ := json.Marshal(map[string]string{"from": prevStatus, "to": task.Status})
@@ -277,7 +277,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			CommentType: "status_change",
 			Content:     string(content),
 		}); err == nil {
-			api.hub.BroadcastEvent("comment_created", sc)
+			api.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", sc)
 		}
 	}
 

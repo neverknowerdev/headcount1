@@ -50,15 +50,20 @@ type Hub struct {
 	clients     map[*Client]struct{}
 	subscribers map[string]Subscriber
 
+	// companyOwner resolves a company to its owning user for per-tenant
+	// event delivery (installed from main.go; nil in local/legacy mode).
+	companyOwner func(companyID int32) (int32, bool)
+
 	done      chan struct{}
 	closeOnce sync.Once
 }
 
 // Client is one WebSocket connection managed by the hub.
 type Client struct {
-	hub  *Hub
-	conn *websocket.Conn
-	send chan []byte
+	hub    *Hub
+	conn   *websocket.Conn
+	send   chan []byte
+	userID int32 // authenticated user this connection belongs to
 
 	closed    chan struct{}
 	closeOnce sync.Once
@@ -131,11 +136,12 @@ func (h *Hub) ClientCount() int {
 // Serve registers conn with the hub and starts its read/write pumps in
 // background goroutines. It returns immediately. The hub owns conn from this
 // point and closes it when the client disconnects or falls behind.
-func (h *Hub) Serve(conn *websocket.Conn) *Client {
+func (h *Hub) Serve(conn *websocket.Conn, userID int32) *Client {
 	c := &Client{
 		hub:    h,
 		conn:   conn,
 		send:   make(chan []byte, sendBufferSize),
+		userID: userID,
 		closed: make(chan struct{}),
 	}
 	h.mu.Lock()
@@ -146,12 +152,73 @@ func (h *Hub) Serve(conn *websocket.Conn) *Client {
 	return c
 }
 
-// BroadcastEvent delivers the event to all in-process subscribers and all
-// connected WebSocket clients. It never blocks on a slow client: a client
-// whose send queue is full is disconnected so it can reconnect and re-sync.
+// SetCompanyOwnerResolver installs the company → owning-user lookup used by
+// BroadcastEventForCompany. Installed once from main.go before the server
+// starts accepting connections.
+func (h *Hub) SetCompanyOwnerResolver(fn func(companyID int32) (int32, bool)) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.companyOwner = fn
+}
+
+// BroadcastEventForCompany delivers the event to in-process subscribers
+// (server-internal — they always see everything) and to the WebSocket clients
+// of the company's owner only. With no resolver installed (local/legacy mode)
+// it behaves like BroadcastEvent; with a resolver installed but an unknown
+// owner it fails closed — no WS client receives the event.
+func (h *Hub) BroadcastEventForCompany(companyID int32, eventType string, payload interface{}) {
+	h.mu.RLock()
+	resolve := h.companyOwner
+	h.mu.RUnlock()
+
+	if resolve == nil {
+		h.BroadcastEvent(eventType, payload)
+		return
+	}
+	owner, ok := resolve(companyID)
+	if !ok {
+		owner = -1 // matches no client
+	}
+	h.notifySubscribers(eventType, payload)
+	if data, err := marshalEvent(eventType, payload); err == nil {
+		h.broadcastRawTo(owner, data)
+	}
+}
+
+// ScopedBroadcaster is a Hub pre-bound to one company — it satisfies the
+// `BroadcastEvent(string, interface{})` interface the proxy logger and LLM
+// gateway expect, while delivering only to the company owner's clients.
+type ScopedBroadcaster struct {
+	hub       *Hub
+	companyID int32
+}
+
+func (h *Hub) ForCompany(companyID int32) *ScopedBroadcaster {
+	return &ScopedBroadcaster{hub: h, companyID: companyID}
+}
+
+func (b *ScopedBroadcaster) BroadcastEvent(eventType string, payload interface{}) {
+	b.hub.BroadcastEventForCompany(b.companyID, eventType, payload)
+}
+
+// BroadcastEvent delivers the event to all in-process subscribers and ALL
+// connected WebSocket clients regardless of user — reserved for genuinely
+// global events (hub heartbeats); tenant data must go through
+// BroadcastEventForCompany. It never blocks on a slow client: a client whose
+// send queue is full is disconnected so it can reconnect and re-sync.
 func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
-	// Snapshot subscribers under the lock, invoke outside it — a subscriber
-	// may be slow, panic, or call back into the hub.
+	h.notifySubscribers(eventType, payload)
+	data, err := marshalEvent(eventType, payload)
+	if err != nil {
+		log.Printf("eventhub: error marshaling %q event: %v", eventType, err)
+		return
+	}
+	h.broadcastRaw(data)
+}
+
+// notifySubscribers invokes in-process subscribers outside the hub lock — a
+// subscriber may be slow, panic, or call back into the hub.
+func (h *Hub) notifySubscribers(eventType string, payload interface{}) {
 	h.mu.RLock()
 	subs := make([]Subscriber, 0, len(h.subscribers))
 	for _, fn := range h.subscribers {
@@ -168,23 +235,27 @@ func (h *Hub) BroadcastEvent(eventType string, payload interface{}) {
 			fn(eventType, payload)
 		}()
 	}
+}
 
-	data, err := json.Marshal(map[string]interface{}{
+func marshalEvent(eventType string, payload interface{}) ([]byte, error) {
+	return json.Marshal(map[string]interface{}{
 		"type":    eventType,
 		"payload": payload,
 	})
-	if err != nil {
-		log.Printf("eventhub: error marshaling %q event: %v", eventType, err)
-		return
-	}
-	h.broadcastRaw(data)
 }
 
 func (h *Hub) broadcastRaw(data []byte) {
+	h.broadcastRawTo(0, data)
+}
+
+// broadcastRawTo sends to the given user's clients; userID 0 sends to all.
+func (h *Hub) broadcastRawTo(userID int32, data []byte) {
 	h.mu.RLock()
 	clients := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
-		clients = append(clients, c)
+		if userID == 0 || c.userID == userID {
+			clients = append(clients, c)
+		}
 	}
 	h.mu.RUnlock()
 

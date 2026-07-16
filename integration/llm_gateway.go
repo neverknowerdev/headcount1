@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,18 +22,28 @@ import (
 	"gorm.io/gorm"
 )
 
+// GatewayHub is the event surface the gateway needs: tenant-scoped delivery
+// for run logs (the gateway serves every user's proxy traffic, so events must
+// reach only the owning user's clients).
+type GatewayHub interface {
+	BroadcastEvent(string, interface{})
+	BroadcastEventForCompany(int32, string, interface{})
+}
+
 type LLMGateway struct {
 	q           *db.Queries
 	basePath    string
-	hub         interface{ BroadcastEvent(string, interface{}) }
+	hub         GatewayHub
 	groupHealth *groupHealthState
+	// runCompany caches run → company for tenant-scoped run_log events.
+	runCompany sync.Map
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
 	return NewLLMGatewayWithHub(database, nil)
 }
 
-func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(string, interface{}) }) *LLMGateway {
+func NewLLMGatewayWithHub(database *gorm.DB, hub GatewayHub) *LLMGateway {
 	return &LLMGateway{
 		q:           db.New(database),
 		basePath:    db.Headcount1Home(),
