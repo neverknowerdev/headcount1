@@ -104,7 +104,7 @@ export const CompanyView: React.FC = () => {
                 }} className="w-full border rounded p-2" placeholder="e.g. NextGen Mobile App" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Relative to .paperclip2/)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Relative to .headcount1/)</label>
                 <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" />
                 <p className="text-xs text-gray-500 mt-1">This directory will be created automatically.</p>
               </div>

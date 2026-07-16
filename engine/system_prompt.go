@@ -31,12 +31,12 @@ type Settings struct {
 }
 
 // loadSettings reads the app settings. The canonical file is the one the
-// settings API writes (PaperclipHome()/settings.yaml); the legacy
-// ~/.paperclip2_settings.yaml location is kept as a fallback.
+// settings API writes (Headcount1Home()/settings.yaml); the legacy
+// ~/.headcount1_settings.yaml location is kept as a fallback.
 func loadSettings() Settings {
 	paths := []string{db.SettingsFilePath()}
 	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
+		paths = append(paths, filepath.Join(homeDir, ".headcount1_settings.yaml"))
 	}
 	for _, settingsPath := range paths {
 		data, err := os.ReadFile(settingsPath)
@@ -48,11 +48,11 @@ func loadSettings() Settings {
 			continue
 		}
 		if settings.BasePath == "" {
-			settings.BasePath = db.PaperclipHome()
+			settings.BasePath = db.Headcount1Home()
 		}
 		return settings
 	}
-	return Settings{BasePath: db.PaperclipHome()}
+	return Settings{BasePath: db.Headcount1Home()}
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.

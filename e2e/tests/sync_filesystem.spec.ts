@@ -7,9 +7,9 @@ import { loadE2EEnv } from '../helpers/env';
 test.describe.serial('Entity filesystem sync (export / import)', () => {
     const env = loadE2EEnv();
     const shortName = 'ent-sync-test';
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-    const compDataDir = path.join(paperclipBase, 'data', shortName);
-    const compSettingsDir = path.join(paperclipBase, 'companies', shortName);
+    const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+    const compDataDir = path.join(headcount1Base, 'data', shortName);
+    const compSettingsDir = path.join(headcount1Base, 'companies', shortName);
 
     let companyId: number;
     let providerId: number;
@@ -80,7 +80,7 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
         const settingsYml = fs.readFileSync(settingsPath, 'utf8');
         expect(settingsYml).toContain(`company_id: ${companyId}`);
 
-        const providerPath = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
+        const providerPath = path.join(headcount1Base, 'data', 'llm-providers', `${providerId}.json`);
         expect(fs.existsSync(providerPath)).toBe(true);
         const providerFile = JSON.parse(fs.readFileSync(providerPath, 'utf8'));
         expect(providerFile.name).toBe('Sync Provider');
@@ -149,7 +149,7 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
     });
 
     test('removes provider file when provider is deleted', async ({ request }) => {
-        const providerPath = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
+        const providerPath = path.join(headcount1Base, 'data', 'llm-providers', `${providerId}.json`);
         expect(fs.existsSync(providerPath)).toBe(true);
 
         await request.delete(`/api/providers/${providerId}`);
@@ -165,7 +165,7 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
         for (const dir of [compDataDir, compSettingsDir]) {
             if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true, force: true });
         }
-        const providerPath = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
+        const providerPath = path.join(headcount1Base, 'data', 'llm-providers', `${providerId}.json`);
         if (fs.existsSync(providerPath)) fs.rmSync(providerPath);
     });
 });
@@ -173,9 +173,9 @@ test.describe.serial('Entity filesystem sync (export / import)', () => {
 test.describe('Filesystem as Source of Truth', () => {
     const env = loadE2EEnv();
     const companyShortName = 'fs-sync-test';
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-    const companyPath = path.join(paperclipBase, 'data', companyShortName);
-    const backupPath = path.join(os.tmpdir(), `paperclip-backup-${Date.now()}`);
+    const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+    const companyPath = path.join(headcount1Base, 'data', companyShortName);
+    const backupPath = path.join(os.tmpdir(), `headcount1-backup-${Date.now()}`);
 
     test.beforeAll(async ({ request }) => {
         if (fs.existsSync(companyPath)) {
@@ -204,7 +204,7 @@ test.describe('Filesystem as Source of Truth', () => {
         await page.getByRole('dialog').getByRole('button', { name: 'Create' }).click();
         await page.waitForTimeout(1000);
 
-        const projectPath = path.join(paperclipBase, 'data', 'artifacts', companyShortName, 'Test Project');
+        const projectPath = path.join(headcount1Base, 'data', 'artifacts', companyShortName, 'Test Project');
         expect(fs.existsSync(projectPath)).toBe(true);
 
         // 3. Move the company folder away

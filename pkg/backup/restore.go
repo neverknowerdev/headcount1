@@ -20,7 +20,7 @@ func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 	log.Printf("Starting restore from %s...", archivePath)
 
 	// Extract archive to a temp directory
-	tempDir, err := os.MkdirTemp("", "paperclip-restore-*")
+	tempDir, err := os.MkdirTemp("", "headcount1-restore-*")
 	if err != nil {
 		return fmt.Errorf("failed to create temp directory: %w", err)
 	}

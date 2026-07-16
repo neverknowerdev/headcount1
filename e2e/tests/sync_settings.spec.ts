@@ -9,7 +9,7 @@ test.describe('Settings and Sync', () => {
                     status: 200,
                     contentType: 'application/json',
                     body: JSON.stringify({
-                        base_path: '/tmp/.paperclip2',
+                        base_path: '/tmp/.headcount1',
                         git_remote_url: 'git@github.com:test/repo.git',
                         github_pat: 'test_pat'
                     })

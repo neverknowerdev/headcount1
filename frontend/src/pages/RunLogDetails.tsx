@@ -6,6 +6,8 @@ import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
 
+import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
+
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
     const lines = logContent.split('\n').filter((l: string) => l.trim());
@@ -16,6 +18,18 @@ function parseLogContent(logContent: string): any[] {
         if (trimmed.startsWith('{')) {
             try {
                 const parsed = JSON.parse(trimmed);
+                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
+                    messages.push({ id: i++, entry: { ...parsed, type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name } });
+                    continue;
+                }
+                // JSONL run log: every line is a structured entry with a type,
+                // the same shape as the DB log_entries — use it as-is.
+                if (typeof parsed.type === 'string') {
+                    messages.push({ id: i++, entry: parsed });
+                    continue;
+                }
+                // Legacy text-log heuristics: raw request/response bodies that
+                // were embedded in the old ===-delimited format.
                 if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
                     messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model } });
                     continue;
@@ -34,10 +48,6 @@ function parseLogContent(logContent: string): any[] {
                 }
                 if (parsed.reasoning || parsed.tokens || parsed.raw) {
                     messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
-                    continue;
-                }
-                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
-                    messages.push({ id: i++, entry: { type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name, output_tokens: parsed.output_tokens } });
                     continue;
                 }
             } catch { /* treat as info */ }
@@ -80,7 +90,7 @@ export const RunLogDetails: React.FC = () => {
 
                 let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
-                    messages = res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
+                    messages = sortBySeq(res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry })));
                 } else {
                     messages = parseLogContent(res.data?.log_content || '');
                 }
@@ -111,11 +121,21 @@ export const RunLogDetails: React.FC = () => {
                     }
                 }
 
-                setLogMessages(messages);
+                setLogMessages(prev => mergeSnapshotWithLiveTail(messages, prev));
             } catch (e) {
                 console.error(e);
             }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
+
+    // Navigating to a different run must start from a clean slate — the
+    // snapshot merge below deliberately preserves on-screen entries, which
+    // would leak the previous run's tail into the new one.
+    useEffect(() => {
+        setLogMessages([]);
+        setRun(null);
+        setStreamStalled(null);
+        lastEventAtRef.current = Date.now();
     }, [id]);
 
     useEffect(() => {

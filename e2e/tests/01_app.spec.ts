@@ -7,16 +7,16 @@ import { waitForTaskStatus, waitForComment } from '../helpers/wait-for';
 const env = loadE2EEnv();
 
 // Use serial mode because subsequent tests depend on state created by the first
-test.describe.serial('Paperclip2 App', () => {
+test.describe.serial('Headcount1 App', () => {
     test.beforeAll(async ({ request }) => {
         // Clean up any filesystem state left by a failed previous attempt.
         // In serial mode, beforeAll re-runs on retry, so this prevents
         // data/pw-inc/ (and nw, second-co) from causing the app to skip
         // onboarding and redirect to an existing company on the retry run.
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         for (const shortName of ['pw-inc', 'nw', 'second-co']) {
             for (const subDir of [`data/${shortName}`, `companies/${shortName}`]) {
-                const fullPath = path.join(paperclipBase, subDir);
+                const fullPath = path.join(headcount1Base, subDir);
                 if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
@@ -128,14 +128,14 @@ test.describe.serial('Paperclip2 App', () => {
         const runs = await runsRes.json();
         expect(runs.length).toBeGreaterThan(0);
         const run = runs[0];
-        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         // Session-based layout: logs are grouped per main run in run-{id}/, with
-        // the root session writing main.log.
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.log');
+        // the root session writing main.jsonl (one structured entry per line).
+        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.jsonl');
         expect(fs.existsSync(logFile)).toBeTruthy();
-        const logContent = fs.readFileSync(logFile, 'utf8');
-        expect(logContent).toContain('LLM Request');
-        expect(logContent).toContain('LLM Response');
+        const logEntries = fs.readFileSync(logFile, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
+        expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
         // Re-open the task to verify both the user comment and the agent comment are visible
         await page.goto('/companies/pw-inc/tasks');
