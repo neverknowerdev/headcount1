@@ -50,6 +50,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunLogEntry{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -453,12 +454,20 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 	// are persisted by fire-and-forget goroutines, so poll instead of reading
 	// once — the run can complete a moment before the last entry lands.
 	require.Eventually(t, func() bool {
-		parentRun, err := q.GetRun(context.Background(), runID)
+		entries, err := q.ListRunLogEntries(context.Background(), runID)
 		if err != nil {
 			return false
 		}
-		return strings.Contains(parentRun.LogEntries, "session_started") &&
-			strings.Contains(parentRun.LogEntries, "session_ended")
+		var started, ended bool
+		for _, e := range entries {
+			switch e.Type {
+			case "session_started":
+				started = true
+			case "session_ended":
+				ended = true
+			}
+		}
+		return started && ended
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
 }
 

@@ -105,6 +105,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunLogEntry{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -284,7 +285,7 @@ func recoverStaleRuns(database *gorm.DB) {
 	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
 	for _, run := range staleRuns {
 		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
-		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
+		_ = q.UpdateRunStatus(ctx, run.ID, "failed", "Run marked as failed: server restarted while run was in progress")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
 }

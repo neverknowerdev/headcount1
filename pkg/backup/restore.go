@@ -134,6 +134,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	tables := []string{
 		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
 		"mcp_accounts", "mcp_servers",
+		"run_log_entries",
 		"activity_logs", "proxy_request_logs", "artifacts", "runs", "comments",
 		"attachments", "tasks", "skills", "agents",
 		"model_group_members", "model_groups", "default_model_settings",

@@ -229,7 +229,7 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 	if err != nil {
 		return
 	}
-	e.q.UpdateRunLog(ctx, runID, "Run marked as failed: previous run no longer active", "failed")
+	e.q.UpdateRunStatus(ctx, runID, "failed", "Run marked as failed: previous run no longer active")
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 	e.q.UnlockTaskRun(ctx, run.TaskID)
 }
@@ -866,7 +866,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
-			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
+			e.q.UpdateRunStatus(context.Background(), run.ID, "canceled", "")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
@@ -901,7 +901,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		))
 	}
 
-	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
+	e.q.UpdateRunStatus(ctx, run.ID, status, runErrMsg)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
@@ -1230,7 +1230,7 @@ func (e *NativeEngine) buildSubtaskReply(
 				childDetails = "\nDetails:\n" + childRun.ResultExplanation
 			}
 			if childRun.Status == "failed" {
-				childErr = childRun.LogContent
+				childErr = childRun.ErrorMessage
 			}
 		}
 		if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
@@ -1604,7 +1604,7 @@ func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from,
 
 // failRun marks a run as failed and broadcasts the event.
 func (e *NativeEngine) failRun(ctx context.Context, runID int32, errMsg string) {
-	e.q.UpdateRunLog(ctx, runID, errMsg, "failed")
+	e.q.UpdateRunStatus(ctx, runID, "failed", errMsg)
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 }
 

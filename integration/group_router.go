@@ -16,6 +16,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/utils"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -530,15 +531,17 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 	return proxyLogger
 }
 
-// logRunEvent appends a structured entry to a run's log and broadcasts it
-// over the WebSocket hub. Used in switches-only log mode, where no
-// ProxyLogger (and thus no log file) is created — the engine's session
-// logger owns the file; the router only contributes routing events.
+// logRunEvent records a routing event for a run and broadcasts it over the
+// WebSocket hub. Used in switches-only log mode, where no ProxyLogger (and
+// thus no log file) is created — the engine's session logger owns the file;
+// the router only contributes routing events, which are short enough that
+// the metadata row's preview carries the whole content.
 func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map[string]interface{}) {
+	ts := time.Now().UTC()
 	entry := map[string]interface{}{
 		"type":    entryType,
 		"content": content,
-		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"ts":      ts.Format(time.RFC3339Nano),
 	}
 	for k, v := range extra {
 		entry[k] = v
@@ -549,9 +552,22 @@ func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map
 			"entry":  entry,
 		})
 	}
+
+	row := db.RunLogEntry{
+		RunID:   int32(runID),
+		Type:    entryType,
+		Ts:      ts,
+		Preview: content,
+	}
+	if name, ok := extra["tool_name"].(string); ok {
+		row.ToolName = name
+	}
+	if model, ok := extra["model"].(string); ok {
+		row.Model = model
+	}
 	go func() {
 		for i := 0; i < 3; i++ {
-			if err := g.q.AppendRunLogEntry(context.Background(), int32(runID), entry); err == nil {
+			if err := g.q.CreateRunLogEntry(context.Background(), row); err == nil {
 				return
 			}
 			time.Sleep(100 * time.Millisecond)

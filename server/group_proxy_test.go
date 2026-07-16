@@ -31,7 +31,7 @@ func setupGroupTestDB(t *testing.T) *gorm.DB {
 	if err := database.AutoMigrate(
 		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
-		&db.Sprint{}, &db.Task{}, &db.Run{},
+		&db.Sprint{}, &db.Task{}, &db.Run{}, &db.RunLogEntry{},
 	); err != nil {
 		t.Fatal(err)
 	}
@@ -316,13 +316,11 @@ func TestGroupProxySwitchesOnlyLogging(t *testing.T) {
 	}
 	time.Sleep(200 * time.Millisecond)
 
-	var reloaded db.Run
-	database.First(&reloaded, run.ID)
-	var entries []map[string]interface{}
-	json.Unmarshal([]byte(reloaded.LogEntries), &entries)
+	var entries []db.RunLogEntry
+	database.Where("run_id = ?", run.ID).Order("seq asc").Find(&entries)
 	var switches, other int
 	for _, e := range entries {
-		switch e["type"] {
+		switch e.Type {
 		case "model_switch":
 			switches++
 		case "request", "response":
@@ -330,7 +328,7 @@ func TestGroupProxySwitchesOnlyLogging(t *testing.T) {
 		}
 	}
 	if switches != 1 {
-		t.Errorf("expected 1 model_switch entry, got %d (entries: %s)", switches, reloaded.LogEntries)
+		t.Errorf("expected 1 model_switch entry, got %d (%d total entries)", switches, len(entries))
 	}
 	if other != 0 {
 		t.Errorf("switches-only mode must not log request/response entries, got %d", other)

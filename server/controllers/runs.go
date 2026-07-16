@@ -3,7 +3,9 @@ package endpoints
 import (
 	"encoding/json"
 	"net/http"
+	"os"
 	"strconv"
+	"time"
 
 	"agent-orchestrator/db"
 
@@ -11,50 +13,38 @@ import (
 	"gorm.io/gorm"
 )
 
-// RunResponse is the wire shape returned to the frontend. It is identical to
-// db.Run except that log_entries is exposed as a parsed JSON array rather
-// than a stringified blob — so the frontend can call .slice()/.map() on it
-// directly without an extra JSON.parse step. token_stats is exposed the
-// same way so the Run Log viewer can render the header breakdown without
-// an extra round trip to /runs/{id}/token-stats.
+// RunResponse is the wire shape returned to the frontend. It is identical
+// to db.Run except that token_stats is exposed as a parsed object rather
+// than a stringified blob, so the Run Log viewer can render the header
+// breakdown without an extra round trip. Log entries are NOT embedded —
+// the frontend fetches them from GET /runs/{id}/log.
 type RunResponse struct {
 	db.Run
 	IsLatest         bool
-	parsedEntries    []interface{}
 	parsedTokenStats interface{}
 }
 
-// MarshalJSON renders log_entries as a parsed JSON array, matching what the
-// frontend expects when it calls .slice()/.map() on the field. It also
-// promotes token_stats from a stringified blob to a parsed object.
+// MarshalJSON promotes token_stats from a stringified blob to a parsed
+// object.
 func (r RunResponse) MarshalJSON() ([]byte, error) {
 	type Alias RunResponse // avoid infinite recursion
-	entries := r.parsedEntries
-	if entries == nil {
-		entries = []interface{}{}
-	}
 	tokenStats := r.parsedTokenStats
 	if tokenStats == nil {
 		tokenStats = map[string]interface{}{}
 	}
 	return json.Marshal(&struct {
 		Alias
-		IsLatest   bool          `json:"is_latest"`
-		LogEntries []interface{} `json:"log_entries"`
-		TokenStats interface{}   `json:"token_stats"`
+		IsLatest   bool        `json:"is_latest"`
+		TokenStats interface{} `json:"token_stats"`
 	}{
 		Alias:      Alias(r),
 		IsLatest:   r.IsLatest,
-		LogEntries: entries,
 		TokenStats: tokenStats,
 	})
 }
 
 func toRunResponse(run db.Run) RunResponse {
 	resp := RunResponse{Run: run}
-	if run.LogEntries != "" {
-		_ = json.Unmarshal([]byte(run.LogEntries), &resp.parsedEntries)
-	}
 	if run.TokenStats != "" {
 		_ = json.Unmarshal([]byte(run.TokenStats), &resp.parsedTokenStats)
 	}
@@ -78,15 +68,10 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// The list view only needs overview info: log_content/log_entries are
-	// full transcripts (can be megabytes for long sessions) and are only
-	// ever rendered on the Run Log Details page, so they're omitted here to
-	// keep the list fast and responsive as run history grows. Task/Agent
-	// preloads are similarly trimmed to the handful of fields the list
-	// actually renders.
+	// The list view only needs overview info. Task/Agent preloads are
+	// trimmed to the handful of fields the list actually renders.
 	var runs []db.Run
 	err := api.db.
-		Omit("log_content", "log_entries").
 		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
 		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
 		Where("task_id IN ?", taskIDs).
@@ -126,6 +111,142 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 		resp.IsLatest = int64(run.ID) == maxID
 	}
 	api.respondJSON(w, http.StatusOK, resp)
+}
+
+// maxHydratedEntryBytes caps how much of a single entry's content is
+// hydrated into the list response; the UI can fetch the full entry from
+// GET /runs/{id}/log/{seq} when it needs more.
+const maxHydratedEntryBytes = 512 * 1024
+
+// GetRunLog returns the run's log entries in order. With ?full=0 only the
+// stored metadata (type, ts, preview, token counts) is returned; by default
+// each entry's full content is hydrated from the run's JSONL log file via
+// the stored byte offsets. The response shape matches the legacy embedded
+// log_entries array (plus a "seq" field), so the frontend renderer and the
+// live WebSocket stream stay compatible.
+func (api *API) GetRunLog(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	entries, err := api.q.ListRunLogEntries(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	full := r.URL.Query().Get("full") != "0"
+	files := map[string]*os.File{}
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+
+	out := make([]map[string]interface{}, 0, len(entries))
+	for _, e := range entries {
+		out = append(out, hydrateEntry(e, full, maxHydratedEntryBytes, files))
+	}
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{"entries": out})
+}
+
+// GetRunLogEntry returns one fully-hydrated log entry (no size cap).
+func (api *API) GetRunLogEntry(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	seq, err := strconv.Atoi(chi.URLParam(r, "seq"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid seq")
+		return
+	}
+	entry, err := api.q.GetRunLogEntry(r.Context(), int32(id), int32(seq))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, err.Error())
+		return
+	}
+	files := map[string]*os.File{}
+	defer func() {
+		for _, f := range files {
+			f.Close()
+		}
+	}()
+	api.respondJSON(w, http.StatusOK, hydrateEntry(entry, true, 0, files))
+}
+
+// hydrateEntry converts a metadata row into the wire entry map. When full
+// is true and the row points into a JSONL file, the original entry line is
+// read back via its byte offset (sharing open file handles through files).
+// maxBytes > 0 caps how much content is returned. Falls back to the stored
+// metadata when the file is missing or unreadable.
+func hydrateEntry(e db.RunLogEntry, full bool, maxBytes int, files map[string]*os.File) map[string]interface{} {
+	if full && e.LogFilePath != "" && e.ByteLen > 0 {
+		f, ok := files[e.LogFilePath]
+		if !ok {
+			var err error
+			f, err = os.Open(e.LogFilePath)
+			if err == nil {
+				files[e.LogFilePath] = f
+			}
+		}
+		if f != nil {
+			buf := make([]byte, e.ByteLen)
+			if _, err := f.ReadAt(buf, e.ByteOffset); err == nil {
+				var entry map[string]interface{}
+				if json.Unmarshal(buf, &entry) == nil {
+					entry["seq"] = e.Seq
+					// The metadata row's prompt_tokens may have been patched
+					// after the line was written (SetFirstRequestPromptTokens).
+					if e.PromptTokens > 0 {
+						entry["prompt_tokens"] = e.PromptTokens
+					}
+					if maxBytes > 0 {
+						if content, ok := entry["content"].(string); ok && len(content) > maxBytes {
+							entry["content"] = content[:maxBytes]
+							entry["content_truncated"] = true
+						}
+					}
+					return entry
+				}
+			}
+		}
+	}
+
+	// Metadata-only fallback (also used for ?full=0 and file-less entries).
+	entry := map[string]interface{}{
+		"seq":     e.Seq,
+		"type":    e.Type,
+		"content": e.Preview,
+		"ts":      e.Ts.UTC().Format(time.RFC3339Nano),
+	}
+	if e.ToolName != "" {
+		entry["tool_name"] = e.ToolName
+	}
+	if e.Model != "" {
+		entry["model"] = e.Model
+	}
+	if e.AgentName != "" {
+		entry["agent_name"] = e.AgentName
+	}
+	if e.StatusCode != 0 {
+		entry["status_code"] = e.StatusCode
+	}
+	if e.PromptTokens != 0 {
+		entry["prompt_tokens"] = e.PromptTokens
+	}
+	if e.InputTokens != 0 {
+		entry["input_tokens"] = e.InputTokens
+	}
+	if e.OutputTokens != 0 {
+		entry["output_tokens"] = e.OutputTokens
+	}
+	if e.ChildRunID != nil {
+		entry["run_id"] = *e.ChildRunID
+	}
+	return entry
 }
 
 // ListChildRuns returns the delegated session runs spawned by the given run,

@@ -82,6 +82,9 @@ type RunLogger interface {
 	LogRequest(model, agentName, providerName string, body []byte)
 	LogResponse(model, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
 	LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{})
+	// AppendEntry is the generic entry sink (JSONL file + metadata row +
+	// WebSocket broadcast) used for tool_call/tool_response/error entries.
+	AppendEntry(entryType, content string, extra map[string]interface{})
 	FilePath() string
 }
 
@@ -416,30 +419,13 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-// appendRunLog persists a structured log entry to the run's log_entries column
-// and broadcasts it over WebSocket via db.Queries. It is a fire-and-forget
-// goroutine so it never blocks the agent loop.
+// appendRunLog routes a structured log entry through the session's run
+// logger (JSONL file + run_log_entries row + WebSocket broadcast).
 func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
-	if a.q == nil || a.runID <= 0 {
+	if a.logger == nil {
 		return
 	}
-	entry := map[string]interface{}{
-		"type":    entryType,
-		"content": content,
-		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
-	}
-	for k, v := range extra {
-		entry[k] = v
-	}
-	runID := a.runID
-	go func() {
-		for i := 0; i < 3; i++ {
-			if err := a.q.AppendRunLogEntry(context.Background(), runID, entry); err == nil {
-				break
-			}
-			time.Sleep(100 * time.Millisecond)
-		}
-	}()
+	a.logger.AppendEntry(entryType, content, extra)
 }
 
 // pruneHistory compacts the request payload without losing the in-memory
