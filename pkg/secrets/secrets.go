@@ -6,11 +6,11 @@
 //   - Every secret value is encrypted with AES-256-GCM under a random data
 //     encryption key (DEK) and stored as "enc:v1:<base64(nonce||ciphertext)>".
 //   - The DEK itself is stored wrapped (encrypted) by a master key (KEK) in a
-//     small keystore file next to the rest of the paperclip2 data. The wrapped
+//     small keystore file next to the rest of the headcount1 data. The wrapped
 //     DEK is ciphertext, so the keystore file is safe to keep on disk and to
 //     include in backups.
 //   - The master key comes from a KeySource: HashiCorp Vault (when VAULT_ADDR
-//     is set), the PAPERCLIP_MASTER_KEY env var, or — as a zero-config last
+//     is set), the HEADCOUNT1_MASTER_KEY env var, or — as a zero-config last
 //     resort — an auto-generated 0600 key file.
 package secrets
 
@@ -264,14 +264,14 @@ func baseDir() string {
 		return f()
 	}
 	// Fallback mirrors db.PaperclipHome for standalone use of this package.
-	if e2eHome := os.Getenv("E2E_PAPERCLIP_HOME"); e2eHome != "" {
-		return filepath.Join(e2eHome, ".paperclip2")
+	if e2eHome := os.Getenv("E2E_HEADCOUNT1_HOME"); e2eHome != "" {
+		return filepath.Join(e2eHome, ".headcount1")
 	}
 	homeDir, err := os.UserHomeDir()
 	if err != nil {
-		return "/tmp/.paperclip2"
+		return "/tmp/.headcount1"
 	}
-	return filepath.Join(homeDir, ".paperclip2")
+	return filepath.Join(homeDir, ".headcount1")
 }
 
 // Default returns the process-wide store, configured from the environment on

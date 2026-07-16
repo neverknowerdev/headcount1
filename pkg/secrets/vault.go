@@ -21,9 +21,9 @@ import (
 //	VAULT_ADDR                      https://vault.example.com:8200 (selects this source)
 //	VAULT_TOKEN                     auth token
 //	VAULT_NAMESPACE                 optional, Vault Enterprise namespaces
-//	PAPERCLIP_VAULT_SECRET_PATH     API path of the secret, default "secret/data/paperclip2" (KV v2)
-//	PAPERCLIP_VAULT_SECRET_FIELD    field inside the secret, default "master_key"
-//	PAPERCLIP_VAULT_KEY_TTL_SECONDS in-memory cache TTL for the fetched key, default 300; 0 fetches every time
+//	HEADCOUNT1_VAULT_SECRET_PATH     API path of the secret, default "secret/data/headcount1" (KV v2)
+//	HEADCOUNT1_VAULT_SECRET_FIELD    field inside the secret, default "master_key"
+//	HEADCOUNT1_VAULT_KEY_TTL_SECONDS in-memory cache TTL for the fetched key, default 300; 0 fetches every time
 //
 // Unlike the env/file sources, fetches go over the network, so the key is
 // cached in memory for the TTL. Revoking the Vault token therefore locks the
@@ -44,16 +44,16 @@ type vaultKeySource struct {
 }
 
 func newVaultKeySourceFromEnv(addr string) *vaultKeySource {
-	path := os.Getenv("PAPERCLIP_VAULT_SECRET_PATH")
+	path := os.Getenv("HEADCOUNT1_VAULT_SECRET_PATH")
 	if path == "" {
-		path = "secret/data/paperclip2"
+		path = "secret/data/headcount1"
 	}
-	field := os.Getenv("PAPERCLIP_VAULT_SECRET_FIELD")
+	field := os.Getenv("HEADCOUNT1_VAULT_SECRET_FIELD")
 	if field == "" {
 		field = "master_key"
 	}
 	ttl := 300 * time.Second
-	if v := os.Getenv("PAPERCLIP_VAULT_KEY_TTL_SECONDS"); v != "" {
+	if v := os.Getenv("HEADCOUNT1_VAULT_KEY_TTL_SECONDS"); v != "" {
 		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
 			ttl = time.Duration(n) * time.Second
 		}

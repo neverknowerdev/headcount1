@@ -36,23 +36,23 @@ The server will start on port `8080`. You can access the UI at [http://localhost
 
 ## Secrets Encryption at Rest
 
-User-supplied credentials (LLM provider API keys, MCP auth tokens) are never stored raw. Each secret is encrypted with AES-256-GCM under a random **data key**; the data key is itself stored wrapped (encrypted) by a **master key** in `~/.paperclip2/keystore.json` (envelope encryption). Secrets are decrypted in memory only at the moment they are used for an outbound request, and the API never returns them to the browser — clients only see a `has_api_key` / `has_token` flag.
+User-supplied credentials (LLM provider API keys, MCP auth tokens) are never stored raw. Each secret is encrypted with AES-256-GCM under a random **data key**; the data key is itself stored wrapped (encrypted) by a **master key** in `~/.headcount1/keystore.json` (envelope encryption). Secrets are decrypted in memory only at the moment they are used for an outbound request, and the API never returns them to the browser — clients only see a `has_api_key` / `has_token` flag.
 
 The master key is taken from the first configured source:
 
-1. **HashiCorp Vault** — set `VAULT_ADDR` and `VAULT_TOKEN`. The key is read from the KV secret at `PAPERCLIP_VAULT_SECRET_PATH` (default `secret/data/paperclip2`, KV v2), field `PAPERCLIP_VAULT_SECRET_FIELD` (default `master_key`). The fetched key is cached in memory for `PAPERCLIP_VAULT_KEY_TTL_SECONDS` (default 300), so revoking the Vault token locks the app out of all stored secrets within one TTL. If Vault is configured but unreachable, secret operations fail loudly — there is no silent fallback to a weaker source.
+1. **HashiCorp Vault** — set `VAULT_ADDR` and `VAULT_TOKEN`. The key is read from the KV secret at `HEADCOUNT1_VAULT_SECRET_PATH` (default `secret/data/headcount1`, KV v2), field `HEADCOUNT1_VAULT_SECRET_FIELD` (default `master_key`). The fetched key is cached in memory for `HEADCOUNT1_VAULT_KEY_TTL_SECONDS` (default 300), so revoking the Vault token locks the app out of all stored secrets within one TTL. If Vault is configured but unreachable, secret operations fail loudly — there is no silent fallback to a weaker source.
 
    ```sh
    # one-time setup
-   vault kv put secret/paperclip2 master_key="$(openssl rand -hex 32)"
+   vault kv put secret/headcount1 master_key="$(openssl rand -hex 32)"
    # run
    export VAULT_ADDR=https://vault.example.com:8200
    export VAULT_TOKEN=...
    ./orchestrator
    ```
 
-2. **Environment variable** — set `PAPERCLIP_MASTER_KEY` (64 hex chars, base64 of 32 bytes, or any passphrase, which is SHA-256-derived).
+2. **Environment variable** — set `HEADCOUNT1_MASTER_KEY` (64 hex chars, base64 of 32 bytes, or any passphrase, which is SHA-256-derived).
 
-3. **Key file (zero-config default)** — with neither of the above set, a random key is auto-generated at `~/.paperclip2/master.key` (mode 0600). This protects database dumps, the filesystem mirror, and backups, but not an attacker with full filesystem access as the same user — use Vault or the env var for stronger isolation.
+3. **Key file (zero-config default)** — with neither of the above set, a random key is auto-generated at `~/.headcount1/master.key` (mode 0600). This protects database dumps, the filesystem mirror, and backups, but not an attacker with full filesystem access as the same user — use Vault or the env var for stronger isolation.
 
 Existing installs upgrade automatically: any secrets stored in plaintext by older versions are encrypted on the next startup. Backups include the keystore (safe — it holds only the wrapped data key) but never the master key itself; to restore a backup on a new machine, configure the same master key source first.

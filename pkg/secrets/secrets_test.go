@@ -158,7 +158,7 @@ func TestVaultKeySourceKV2AndTTLCache(t *testing.T) {
 			w.WriteHeader(http.StatusForbidden)
 			return
 		}
-		if r.URL.Path != "/v1/secret/data/paperclip2" {
+		if r.URL.Path != "/v1/secret/data/headcount1" {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
@@ -171,7 +171,7 @@ func TestVaultKeySourceKV2AndTTLCache(t *testing.T) {
 
 	src := &vaultKeySource{
 		addr: srv.URL, token: "test-token",
-		path: "secret/data/paperclip2", field: "master_key",
+		path: "secret/data/headcount1", field: "master_key",
 		ttl: time.Hour, client: srv.Client(),
 	}
 	k1, err := src.MasterKey()
@@ -206,7 +206,7 @@ func TestVaultKeySourceKV1(t *testing.T) {
 	defer srv.Close()
 	src := &vaultKeySource{
 		addr: srv.URL, token: "t",
-		path: "kv/paperclip2", field: "master_key",
+		path: "kv/headcount1", field: "master_key",
 		ttl: 0, client: srv.Client(),
 	}
 	if _, err := src.MasterKey(); err != nil {

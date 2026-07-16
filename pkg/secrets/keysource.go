@@ -13,7 +13,7 @@ import (
 
 // EnvMasterKey is the env var holding the master key when no external vault
 // is configured.
-const EnvMasterKey = "PAPERCLIP_MASTER_KEY"
+const EnvMasterKey = "HEADCOUNT1_MASTER_KEY"
 
 // KeySource supplies the 32-byte master key (KEK) that wraps the data key.
 // Implementations are consulted on every seal/open so that revoking the key
@@ -30,7 +30,7 @@ type KeySource interface {
 //  1. VAULT_ADDR set → HashiCorp Vault. Deliberately no fallback to the
 //     sources below on failure — a configured vault that errors must surface,
 //     not silently downgrade to a weaker key source.
-//  2. PAPERCLIP_MASTER_KEY set → environment variable.
+//  2. HEADCOUNT1_MASTER_KEY set → environment variable.
 //  3. otherwise → auto-generated 0600 key file under dir (zero-config
 //     default; protects DB dumps and backups, but not an attacker with full
 //     filesystem access as the same user).
@@ -69,7 +69,7 @@ func parseMasterKey(v string) ([32]byte, error) {
 
 // ── env var source ───────────────────────────────────────────────────────────
 
-// envKeySource reads PAPERCLIP_MASTER_KEY on every call — reading an env var
+// envKeySource reads HEADCOUNT1_MASTER_KEY on every call — reading an env var
 // is free, so there is nothing to cache.
 type envKeySource struct{}
 

@@ -12,7 +12,7 @@ import (
 // Registering here (rather than in main) guarantees every gorm.Open in the
 // codebase — including tests — can parse models tagged `serializer:secret`.
 func init() {
-	secrets.SetBaseDirResolver(PaperclipHome)
+	secrets.SetBaseDirResolver(Headcount1Home)
 	schema.RegisterSerializer("secret", secrets.GormSerializer{})
 }
 
