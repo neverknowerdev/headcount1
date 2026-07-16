@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,6 +19,7 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
@@ -39,6 +41,9 @@ func main() {
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
 
+	settings := appsettings.Load()
+	basePath := settings.BasePath
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -50,29 +55,31 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
+			// The SQLite file lives under BasePath so every worktree process
+			// pointed at the same home shares one database (WAL handles the
+			// cross-process concurrency).
+			fileName := "paperclip.db"
 			if utils.IsE2E() {
-				dbConnStr = "paperclip-e2e.db"
-			} else {
-				dbConnStr = "orchestrator.db"
+				fileName = "paperclip-e2e.db"
 			}
+			dbDir := filepath.Join(basePath, "db")
+			if err := os.MkdirAll(dbDir, 0755); err != nil {
+				log.Fatalf("Failed to create database directory %s: %v", dbDir, err)
+			}
+			dbConnStr = filepath.Join(dbDir, fileName)
 		}
-		database, err = gorm.Open(sqlite.Open(dbConnStr), &gorm.Config{})
+		dsn := dbConnStr + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+		database, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	}
 
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// SQLite needs single connection to avoid WAL visibility issues
+	// Single in-process connection avoids GORM+SQLite lock churn; WAL covers
+	// concurrency between processes.
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-
-	// Enable FK enforcement for SQLite (disabled by default; must be set per-connection).
-	if database.Dialector.Name() == "sqlite" {
-		if err := database.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
-			log.Printf("Warning: failed to enable SQLite foreign keys: %v", err)
-		}
-	}
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
@@ -177,18 +184,19 @@ func main() {
 	// Resume codegraph init for any project whose knowledge graph isn't ready yet.
 	go srv.InitPendingCodegraphServers(context.Background())
 
-	// Check if backup is needed on startup
-	paperclipHome := db.PaperclipHome()
-	if backup.ShouldBackupOnStartup(paperclipHome) {
+	// Check if backup is needed on startup. Backups operate on the configured
+	// BasePath (not the raw PaperclipHome) so a custom storage location is
+	// what actually gets backed up.
+	if backup.ShouldBackupOnStartup(basePath) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
 		go func() {
-			_, err := backup.CreateBackup(paperclipHome)
+			_, err := backup.CreateBackup(basePath)
 			if err != nil {
 				log.Printf("Startup backup failed: %v", err)
 			}
 		}()
 	}
-	go backup.StartDailyScheduler(paperclipHome)
+	go backup.StartDailyScheduler(basePath)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
