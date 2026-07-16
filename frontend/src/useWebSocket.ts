@@ -2,9 +2,13 @@
 import { useEffect, useRef } from 'react';
 import ReactUseWebSocketModule from 'react-use-websocket';
 
-// react-use-websocket ships CommonJS with only a default export; Vite's dep
-// optimizer surfaces the module object as the default import while vitest's
-// interop unwraps it to the hook. Handle both shapes.
+// react-use-websocket ships CommonJS with only a default export, and every
+// bundler surfaces that differently: vitest's interop unwraps it to the hook,
+// while rolldown-vite's dev optimizer hands over the module object (its
+// import rewrite skips the CJS-default unwrap even with
+// optimizeDeps.needsInterop, and a deep import of dist/lib/use-websocket
+// crashes on cold loads). This shape-agnostic unwrap is the one form that
+// works under all of them — don't "simplify" it back to a plain import.
 const useReactWebSocket = (typeof ReactUseWebSocketModule === 'function'
     ? ReactUseWebSocketModule
     : (ReactUseWebSocketModule as { default: unknown }).default) as typeof ReactUseWebSocketModule;
