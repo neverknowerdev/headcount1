@@ -1,4 +1,3 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
@@ -8,6 +7,7 @@ import type { DropResult } from '@hello-pangea/dnd';
 import { Plus, Settings } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+import { useCoalescedCallback } from '../utils/useCoalescedCallback';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
 
@@ -86,19 +86,7 @@ export const ProjectBoard: React.FC = () => {
 
   // Event bursts (an agent updating many tasks) coalesce into one refetch
   // instead of firing a request per event.
-  const refetchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const fetchTasksRef = useRef(fetchTasks);
-  useEffect(() => { fetchTasksRef.current = fetchTasks; }, [fetchTasks]);
-  const scheduleFetchTasks = useCallback(() => {
-    if (refetchTimerRef.current !== null) return;
-    refetchTimerRef.current = setTimeout(() => {
-      refetchTimerRef.current = null;
-      fetchTasksRef.current();
-    }, 250);
-  }, []);
-  useEffect(() => () => {
-    if (refetchTimerRef.current !== null) clearTimeout(refetchTimerRef.current);
-  }, []);
+  const scheduleFetchTasks = useCoalescedCallback(fetchTasks);
 
   useEffect(() => {
     fetchFiltersData();
