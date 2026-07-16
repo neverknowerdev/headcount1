@@ -241,6 +241,18 @@ func TestNativeEngineProcessTask(t *testing.T) {
 		}
 	}
 	assert.Greater(t, agentComments, 0, "agent comment should have been created")
+
+	// The run's JSONL log must close with an outcome entry labelling the
+	// trajectory: finish_task was called organically with status in-review.
+	logData, err := os.ReadFile(run.LogFilePath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	var outcome map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &outcome))
+	assert.Equal(t, "outcome", outcome["type"])
+	assert.Equal(t, "completed", outcome["status"])
+	assert.Equal(t, "finish_task", outcome["end_reason"])
+	assert.Equal(t, "in-review", outcome["task_status"])
 }
 
 // TestNativeEngineStopRun verifies that StopRun cancels an in-progress run.

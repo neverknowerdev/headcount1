@@ -130,12 +130,12 @@ test.describe.serial('Paperclip2 App', () => {
         const run = runs[0];
         const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
         // Session-based layout: logs are grouped per main run in run-{id}/, with
-        // the root session writing main.log.
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.log');
+        // the root session writing main.jsonl (one structured entry per line).
+        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.jsonl');
         expect(fs.existsSync(logFile)).toBeTruthy();
-        const logContent = fs.readFileSync(logFile, 'utf8');
-        expect(logContent).toContain('LLM Request');
-        expect(logContent).toContain('LLM Response');
+        const logEntries = fs.readFileSync(logFile, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
+        expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
         // Re-open the task to verify both the user comment and the agent comment are visible
         await page.goto('/companies/pw-inc/tasks');
