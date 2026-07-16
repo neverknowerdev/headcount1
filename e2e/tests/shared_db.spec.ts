@@ -100,8 +100,11 @@ test.describe.serial('Shared database across processes', () => {
         const company = (companies as any[]).find(c => c.short_name === 'shared-db');
         expect(company).toBeTruthy();
 
+        // Tasks reference a sprint (FK-enforced); reuse the cross-process one.
+        const sprints = await (await request.get(`/api/sprints?company_id=${company.id}`)).json();
+        expect(sprints.length).toBeGreaterThan(0);
         const taskRes = await request.post('/api/tasks', {
-            data: { company_id: company.id, title: 'Upload target', sprint_id: 0 },
+            data: { company_id: company.id, title: 'Upload target', sprint_id: sprints[0].id },
         });
         expect(taskRes.ok()).toBeTruthy();
         const task = await taskRes.json();
