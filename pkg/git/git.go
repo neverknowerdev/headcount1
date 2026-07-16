@@ -78,7 +78,7 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 
 	// Make sure user config exists
 	g.runGitCommand(ctx, "config", "user.name", "Agent Orchestrator")
-	g.runGitCommand(ctx, "config", "user.email", "agent@paperclip.local")
+	g.runGitCommand(ctx, "config", "user.email", "agent@headcount.local")
 
 	_, err = g.runGitCommand(ctx, "commit", "-m", message)
 	if err != nil {
@@ -277,7 +277,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	}
 
 	run("config", "user.name", "Agent Orchestrator")
-	run("config", "user.email", "agent@paperclip.local")
+	run("config", "user.email", "agent@headcount.local")
 
 	if _, err := run("commit", "-m", message); err != nil {
 		return err

@@ -51,7 +51,7 @@ func main() {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
 			if utils.IsE2E() {
-				dbConnStr = "paperclip-e2e.db"
+				dbConnStr = "headcount-e2e.db"
 			} else {
 				dbConnStr = "orchestrator.db"
 			}
@@ -107,7 +107,7 @@ func main() {
 
 	recoverStaleRuns(database)
 
-	// Seed predefined MCP servers (paperclip2, github, google-docs) if not present.
+	// Seed predefined MCP servers (headcount1, github, google-docs) if not present.
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
@@ -178,17 +178,17 @@ func main() {
 	go srv.InitPendingCodegraphServers(context.Background())
 
 	// Check if backup is needed on startup
-	paperclipHome := db.PaperclipHome()
-	if backup.ShouldBackupOnStartup(paperclipHome) {
+	headcountHome := db.HeadcountHome()
+	if backup.ShouldBackupOnStartup(headcountHome) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
 		go func() {
-			_, err := backup.CreateBackup(paperclipHome)
+			_, err := backup.CreateBackup(headcountHome)
 			if err != nil {
 				log.Printf("Startup backup failed: %v", err)
 			}
 		}()
 	}
-	go backup.StartDailyScheduler(paperclipHome)
+	go backup.StartDailyScheduler(headcountHome)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

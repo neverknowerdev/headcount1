@@ -19,7 +19,7 @@ test.describe('Delete Company', () => {
         const company = await companyRes.json();
 
         // Verify company exists in filesystem
-        const companyPath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'data', 'dtc');
+        const companyPath = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1', 'data', 'dtc');
         expect(fs.existsSync(companyPath)).toBe(true);
 
         // Add some content to the company folder so it gets archived
@@ -79,7 +79,7 @@ test.describe('Delete Company', () => {
         expect(fs.existsSync(companyPath)).toBe(false);
 
         // Verify archive was created
-        const archiveDir = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'archive');
+        const archiveDir = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1', 'archive');
         expect(fs.existsSync(archiveDir)).toBe(true);
 
         const archives = fs.readdirSync(archiveDir);
@@ -143,11 +143,11 @@ test.describe('Delete Company', () => {
         expect(companyRes.ok()).toBeTruthy();
 
         // Verify company exists in filesystem
-        const companyPath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'data', 'ec');
+        const companyPath = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1', 'data', 'ec');
         expect(fs.existsSync(companyPath)).toBe(true);
 
         // Check archive dir before deletion
-        const archiveDir = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'archive');
+        const archiveDir = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1', 'archive');
         const archivesBefore = fs.existsSync(archiveDir) ? fs.readdirSync(archiveDir).filter(a => a.startsWith('ec_')) : [];
 
         // Navigate to company settings and delete

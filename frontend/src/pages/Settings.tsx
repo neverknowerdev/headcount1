@@ -162,7 +162,7 @@ export const Settings: React.FC = () => {
                             value={basePath}
                             onChange={e => setBasePath(e.target.value)}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="/home/user/.paperclip2"
+                            placeholder="/home/user/.headcount1"
                         />
                     </div>
                     <div>
@@ -174,7 +174,7 @@ export const Settings: React.FC = () => {
                             value={gitRemoteUrl}
                             onChange={e => setGitRemoteUrl(e.target.value)}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="git@github.com:user/paperclip2-data.git"
+                            placeholder="git@github.com:user/headcount1-data.git"
                         />
                     </div>
                     <div>

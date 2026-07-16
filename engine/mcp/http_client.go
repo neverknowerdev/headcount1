@@ -103,7 +103,7 @@ func (c *httpClient) Initialize(ctx context.Context) (*InitializeResult, error) 
 	params := InitializeParams{
 		ProtocolVersion: "2024-11-05",
 		Capabilities:    map[string]any{},
-		ClientInfo:      ClientInfo{Name: "paperclip2", Version: "1.0.0"},
+		ClientInfo:      ClientInfo{Name: "headcount1", Version: "1.0.0"},
 	}
 	resp, err := c.post(ctx, "initialize", params)
 	if err != nil {

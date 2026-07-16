@@ -35,17 +35,17 @@ test.describe.serial('CEO orchestration flow', () => {
     let taskId: number;
     let providerId: number;
 
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+    const headcountBase = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1');
 
     const cleanFilesystem = () => {
         for (const subDir of ['data/ceo-co', 'companies/ceo-co', 'workspace/ceo-co', 'data/runs/ceo-co']) {
-            const fullPath = path.join(paperclipBase, subDir);
+            const fullPath = path.join(headcountBase, subDir);
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
         // Remove the provider file too: leftover entity files get re-imported by
         // the filesystem sync tests and collide with their freshly created ids.
         if (providerId) {
-            const providerFile = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
+            const providerFile = path.join(headcountBase, 'data', 'llm-providers', `${providerId}.json`);
             if (fs.existsSync(providerFile)) fs.rmSync(providerFile, { force: true });
         }
     };
@@ -348,7 +348,7 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(qaTask.agent_config_name).toBe('QA');
 
         // ── Filesystem: logs grouped by main run id, one file per session ────
-        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const basePath = path.join(env.E2E_HEADCOUNT_HOME, '.headcount1');
         const runDir = path.join(basePath, 'data', 'ceo-co', 'logs', String(taskId), `run-${rootRun.id}`);
         const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();

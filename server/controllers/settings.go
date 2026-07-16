@@ -30,16 +30,16 @@ func LoadSettings() Settings {
 	data, err := os.ReadFile(settingsPath)
 
 	if err != nil {
-		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.HeadcountHome(), WorkspaceFolders: []string{}}
 	}
 
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
+		return Settings{BasePath: db.HeadcountHome(), WorkspaceFolders: []string{}}
 	}
 
 	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
+		settings.BasePath = db.HeadcountHome()
 	}
 	return settings
 }

@@ -23,7 +23,7 @@ func (api *API) CreateBackup(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	basePath := settings.BasePath
 	if basePath == "" {
-		basePath = db.PaperclipHome()
+		basePath = db.HeadcountHome()
 	}
 
 	archivePath, err := backup.CreateBackup(basePath)
@@ -42,7 +42,7 @@ func (api *API) GetBackupStatus(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	basePath := settings.BasePath
 	if basePath == "" {
-		basePath = db.PaperclipHome()
+		basePath = db.HeadcountHome()
 	}
 
 	latest, err := backup.GetLatestBackup(basePath)
@@ -77,7 +77,7 @@ func (api *API) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	basePath := settings.BasePath
 	if basePath == "" {
-		basePath = db.PaperclipHome()
+		basePath = db.HeadcountHome()
 	}
 
 	// Resolve archive path
@@ -106,7 +106,7 @@ func (api *API) ListBackups(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	basePath := settings.BasePath
 	if basePath == "" {
-		basePath = db.PaperclipHome()
+		basePath = db.HeadcountHome()
 	}
 
 	backups, err := backup.ListBackups(basePath)

@@ -69,7 +69,7 @@ func (t *WebFetch) Execute(ctx context.Context, args json.RawMessage) (string, e
 	if err != nil {
 		return "", fmt.Errorf("web_fetch: invalid URL: %w", err)
 	}
-	req.Header.Set("User-Agent", "paperclip-agent/1.0")
+	req.Header.Set("User-Agent", "headcount-agent/1.0")
 
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {

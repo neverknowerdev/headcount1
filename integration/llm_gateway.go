@@ -35,7 +35,7 @@ func NewLLMGateway(database *gorm.DB) *LLMGateway {
 func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(string, interface{}) }) *LLMGateway {
 	return &LLMGateway{
 		q:           db.New(database),
-		basePath:    db.PaperclipHome(),
+		basePath:    db.HeadcountHome(),
 		hub:         hub,
 		groupHealth: newGroupHealthState(),
 	}
