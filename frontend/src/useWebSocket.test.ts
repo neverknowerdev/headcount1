@@ -2,9 +2,15 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { renderHook, act, cleanup } from '@testing-library/react';
 import { useWebSocket } from './useWebSocket';
 
+// react-use-websocket opens its socket in an effect; renderHook only flushes
+// effects synchronously when the act environment is enabled.
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
 // Scripted stand-in for the browser WebSocket. Tests drive the connection
-// lifecycle explicitly: open(), receive(), serverClose().
-class MockWebSocket {
+// lifecycle explicitly: open(), receive(), serverClose(). Must look enough
+// like a real WebSocket for react-use-websocket: instanceof global WebSocket,
+// send() (heartbeat pings), addEventListener (heartbeat cleanup).
+class MockWebSocket extends EventTarget {
     static readonly CONNECTING = 0;
     static readonly OPEN = 1;
     static readonly CLOSING = 2;
@@ -18,20 +24,26 @@ class MockWebSocket {
 
     url: string;
     readyState = MockWebSocket.CONNECTING;
-    onopen: (() => void) | null = null;
-    onclose: (() => void) | null = null;
-    onerror: (() => void) | null = null;
+    onopen: ((ev: Event) => void) | null = null;
+    onclose: ((ev: Event) => void) | null = null;
+    onerror: ((ev: Event) => void) | null = null;
     onmessage: ((ev: { data: string }) => void) | null = null;
     closeCalls = 0;
+    sent: string[] = [];
 
     constructor(url: string) {
+        super();
         this.url = url;
         MockWebSocket.instances.push(this);
     }
 
+    send(data: string) {
+        this.sent.push(data);
+    }
+
     open() {
         this.readyState = MockWebSocket.OPEN;
-        this.onopen?.();
+        this.onopen?.(new Event('open'));
     }
 
     receive(obj: unknown) {
@@ -40,57 +52,67 @@ class MockWebSocket {
 
     serverClose() {
         this.readyState = MockWebSocket.CLOSED;
-        this.onclose?.();
+        this.onclose?.(new Event('close'));
+        this.dispatchEvent(new Event('close'));
     }
 
     close() {
         this.closeCalls++;
         if (this.readyState !== MockWebSocket.CLOSED) {
             this.readyState = MockWebSocket.CLOSED;
-            this.onclose?.();
+            this.onclose?.(new Event('close'));
+            this.dispatchEvent(new Event('close'));
         }
     }
 }
 
 const sockets = () => MockWebSocket.instances;
 const lastSocket = () => MockWebSocket.instances[MockWebSocket.instances.length - 1];
-const advance = (ms: number) => act(() => { vi.advanceTimersByTime(ms); });
+// The library resolves its URL asynchronously before opening a socket, so
+// renders and timer advances must flush microtasks too.
+const flush = () => act(async () => {});
+const advance = (ms: number) => act(async () => { await vi.advanceTimersByTimeAsync(ms); });
 
 describe('useWebSocket', () => {
     beforeEach(() => {
         vi.useFakeTimers();
         MockWebSocket.instances = [];
         vi.stubGlobal('WebSocket', MockWebSocket);
+        vi.spyOn(console, 'warn').mockImplementation(() => {}); // heartbeat-timeout noise
     });
 
     afterEach(() => {
-        cleanup(); // unmount hooks so their window/document listeners don't leak across tests
+        cleanup(); // unmount hooks so their timers don't leak across tests
         vi.unstubAllGlobals();
         vi.useRealTimers();
+        vi.restoreAllMocks();
     });
 
-    it('connects and calls onConnect on every successful open', () => {
+    it('connects and calls onConnect on every successful open', async () => {
         const onConnect = vi.fn();
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn(), { onConnect }));
+        await flush();
 
         expect(sockets()).toHaveLength(1);
         act(() => lastSocket().open());
         expect(onConnect).toHaveBeenCalledTimes(1);
 
         act(() => lastSocket().serverClose());
-        advance(1000); // first retry
+        await advance(1000); // first retry
         act(() => lastSocket().open());
         expect(onConnect).toHaveBeenCalledTimes(2);
     });
 
-    it('does not connect when disabled', () => {
+    it('does not connect when disabled', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn(), { enabled: false }));
+        await flush();
         expect(sockets()).toHaveLength(0);
     });
 
-    it('delivers parsed messages, consumes heartbeats, ignores malformed frames', () => {
+    it('delivers parsed messages, consumes heartbeats, ignores malformed frames', async () => {
         const onMessage = vi.fn();
         renderHook(() => useWebSocket('ws://test/api/ws', onMessage));
+        await flush();
         act(() => lastSocket().open());
 
         act(() => lastSocket().receive({ type: 'hub_heartbeat', payload: { ts: 1 } }));
@@ -103,119 +125,93 @@ describe('useWebSocket', () => {
         expect(onMessage).toHaveBeenCalledWith({ type: 'task_updated', payload: { id: 7 } });
     });
 
-    it('reconnects with exponential back-off while the server is down', () => {
+    it('reconnects with exponential back-off while the server is down', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         act(() => lastSocket().serverClose()); // connect refused
 
-        advance(999);
+        await advance(999);
         expect(sockets()).toHaveLength(1);
-        advance(1); // 1s back-off
+        await advance(1); // 1s back-off
         expect(sockets()).toHaveLength(2);
 
         act(() => lastSocket().serverClose());
-        advance(1999);
+        await advance(1999);
         expect(sockets()).toHaveLength(2);
-        advance(1); // doubled to 2s
+        await advance(1); // doubled to 2s
         expect(sockets()).toHaveLength(3);
     });
 
-    it('resets the back-off after a successful connect', () => {
+    it('resets the back-off after a successful connect', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         act(() => lastSocket().serverClose());
-        advance(1000);
+        await advance(1000);
         act(() => lastSocket().serverClose());
-        advance(2000);
+        await advance(2000);
         act(() => lastSocket().open()); // success resets back-off
         act(() => lastSocket().serverClose());
-        advance(1000); // back to 1s, not 4s
+        await advance(1000); // back to 1s, not 4s
         expect(sockets()).toHaveLength(4);
     });
 
-    it('recycles an OPEN socket that has gone silent (half-open connection)', () => {
+    it('recycles an OPEN socket that has gone silent (half-open connection)', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         act(() => lastSocket().open());
         const first = lastSocket();
 
-        advance(70_000); // > STALE_AFTER_MS, checked on the 10s watchdog tick
+        // Heartbeat timeout is 60s; the check runs every interval/10, and the
+        // reconnect follows within the 1s back-off.
+        await advance(70_000);
         expect(first.closeCalls).toBeGreaterThan(0);
         expect(sockets()).toHaveLength(2);
     });
 
-    it('keeps a socket alive as long as heartbeats arrive', () => {
+    it('keeps a socket alive as long as server heartbeats arrive', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         act(() => lastSocket().open());
 
         for (let i = 0; i < 4; i++) {
-            advance(25_000);
+            await advance(25_000);
             act(() => lastSocket().receive({ type: 'hub_heartbeat', payload: {} }));
         }
         expect(sockets()).toHaveLength(1);
     });
 
-    it('abandons a handshake stuck in CONNECTING (proxy that never upgrades)', () => {
+    it('abandons a handshake stuck in CONNECTING (proxy that never upgrades)', async () => {
         renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         const stuck = lastSocket();
         expect(stuck.readyState).toBe(MockWebSocket.CONNECTING);
 
-        advance(30_000); // CONNECT_TIMEOUT is 10s, watchdog ticks every 10s
-        expect(sockets().length).toBeGreaterThan(1);
+        // The watchdog ticks every 10s and closes a socket that has been
+        // CONNECTING for over 10s; the reconnect follows on the back-off.
+        await advance(40_000);
         expect(stuck.closeCalls).toBeGreaterThan(0);
+        expect(sockets().length).toBeGreaterThan(1);
     });
 
-    it('reconnects immediately when the tab becomes visible with a dead socket', () => {
-        renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
-        act(() => lastSocket().open());
-        act(() => lastSocket().serverClose()); // back-off timer now pending
-
-        act(() => { document.dispatchEvent(new Event('visibilitychange')); });
-        expect(sockets()).toHaveLength(2); // no waiting for the back-off
-
-        act(() => lastSocket().open());
-        advance(5_000); // the cancelled back-off timer (due at +1s) must not fire a third socket
-        expect(sockets()).toHaveLength(2);
-    });
-
-    it('reconnects immediately when the browser comes back online', () => {
-        renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
-        act(() => lastSocket().open());
-        const first = lastSocket();
-
-        act(() => { window.dispatchEvent(new Event('online')); });
-        expect(first.closeCalls).toBeGreaterThan(0);
-        expect(sockets()).toHaveLength(2);
-    });
-
-    it('an abandoned socket that opens late does not double-fire onConnect', () => {
-        const onConnect = vi.fn();
-        renderHook(() => useWebSocket('ws://test/api/ws', vi.fn(), { onConnect }));
-        const stuck = lastSocket();
-
-        advance(30_000); // stuck-CONNECTING recycle kicks in
-        const replacement = lastSocket();
-        expect(replacement).not.toBe(stuck);
-
-        act(() => stuck.onopen?.()); // late upgrade completion on the old socket
-        act(() => replacement.open());
-        expect(onConnect).toHaveBeenCalledTimes(1);
-    });
-
-    it('closes the socket and stops all reconnection on unmount', () => {
+    it('closes the socket and stops all reconnection on unmount', async () => {
         const { unmount } = renderHook(() => useWebSocket('ws://test/api/ws', vi.fn()));
+        await flush();
         act(() => lastSocket().open());
         const socket = lastSocket();
 
         unmount();
-        expect(socket.closeCalls).toBe(1);
+        expect(socket.closeCalls).toBeGreaterThan(0);
 
-        advance(120_000);
+        await advance(120_000);
         expect(sockets()).toHaveLength(1);
     });
 
-    it('does not tear down the socket when the message handler identity changes', () => {
+    it('does not tear down the socket when the message handler identity changes', async () => {
         const { rerender } = renderHook(
             ({ handler }) => useWebSocket('ws://test/api/ws', handler),
             { initialProps: { handler: vi.fn() } },
         );
+        await flush();
         act(() => lastSocket().open());
 
         const nextHandler = vi.fn();

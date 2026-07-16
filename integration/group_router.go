@@ -539,6 +539,7 @@ func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map
 		"type":    entryType,
 		"content": content,
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"seq":     logging.NextRunLogSeq(context.Background(), g.q, int32(runID)),
 	}
 	for k, v := range extra {
 		entry[k] = v

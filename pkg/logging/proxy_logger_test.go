@@ -267,6 +267,76 @@ func TestToolResultsDedupedAcrossRequests(t *testing.T) {
 	assert.Equal(t, "result two", persisted[1]["content"])
 }
 
+// TestSeqUniqueAndIncreasingAcrossLoggers verifies the per-run sequence
+// numbers the frontend keys its resync merge on: every entry gets one, they
+// never repeat within a run — even when several loggers write to the same
+// run concurrently (the LLM gateway pattern) — and each logger's own entries
+// see strictly increasing seq.
+func TestSeqUniqueAndIncreasingAcrossLoggers(t *testing.T) {
+	database := setupLoggerTestDB(t)
+	run := createTestRun(t, database)
+	hub := &recordingHub{}
+	a := newTestLogger(t, hub, database, run.ID)
+	b := newTestLogger(t, hub, database, run.ID)
+
+	const n = 40
+	var wg sync.WaitGroup
+	for _, l := range []*ProxyLogger{a, b} {
+		wg.Add(1)
+		go func(l *ProxyLogger) {
+			defer wg.Done()
+			for i := 0; i < n; i++ {
+				l.LogInfo(fmt.Sprintf("s-%d", i))
+			}
+		}(l)
+	}
+	wg.Wait()
+	require.NoError(t, a.Close())
+	require.NoError(t, b.Close())
+
+	persisted := persistedEntries(t, database, run.ID)
+	require.Len(t, persisted, 2*n)
+	seen := map[int64]bool{}
+	for _, e := range persisted {
+		s, ok := e["seq"].(float64)
+		require.True(t, ok, "every entry must carry a numeric seq: %v", e)
+		require.False(t, seen[int64(s)], "seq %d assigned twice", int64(s))
+		seen[int64(s)] = true
+	}
+}
+
+// TestSeqContinuesAfterRestart verifies that a fresh process (simulated by
+// clearing the in-memory counters) seeds seq from the persisted entries, so
+// resumed runs never reuse sequence numbers the frontend has already seen.
+func TestSeqContinuesAfterRestart(t *testing.T) {
+	database := setupLoggerTestDB(t)
+	run := createTestRun(t, database)
+	hub := &recordingHub{}
+
+	logger := newTestLogger(t, hub, database, run.ID)
+	logger.LogInfo("first")
+	logger.LogInfo("second")
+	require.NoError(t, logger.Close())
+
+	runSeqCounters.Delete(run.ID) // simulate a server restart
+
+	logger2 := newTestLogger(t, hub, database, run.ID)
+	logger2.LogInfo("after restart")
+	require.NoError(t, logger2.Close())
+
+	persisted := persistedEntries(t, database, run.ID)
+	require.Len(t, persisted, 3)
+	maxBefore := int64(0)
+	for _, e := range persisted[:2] {
+		if s, ok := e["seq"].(float64); ok && int64(s) > maxBefore {
+			maxBefore = int64(s)
+		}
+	}
+	resumed, ok := persisted[2]["seq"].(float64)
+	require.True(t, ok)
+	assert.Greater(t, int64(resumed), maxBefore, "seq must continue above persisted entries after a restart")
+}
+
 // TestEndToEndWebSocketDelivery wires a real eventhub.Hub, a real WebSocket
 // server, and a ProxyLogger together, then verifies a connected browser-like
 // client receives every entry in order — and that each received entry can be

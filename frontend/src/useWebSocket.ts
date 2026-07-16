@@ -1,17 +1,27 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import { useEffect, useRef } from 'react';
+import ReactUseWebSocketModule from 'react-use-websocket';
 
-// Server emits an application-level heartbeat every 25s (see eventhub).
-// If we see no message at all for STALE_AFTER_MS, the connection is assumed
-// half-open (dead TCP that never fires onclose) and is forcibly recycled.
+// react-use-websocket ships CommonJS with only a default export; Vite's dep
+// optimizer surfaces the module object as the default import while vitest's
+// interop unwraps it to the hook. Handle both shapes.
+const useReactWebSocket = (typeof ReactUseWebSocketModule === 'function'
+    ? ReactUseWebSocketModule
+    : (ReactUseWebSocketModule as { default: unknown }).default) as typeof ReactUseWebSocketModule;
+
+// The server broadcasts an application-level hub_heartbeat every 25s (see
+// eventhub). The library's heartbeat option treats ANY incoming message as
+// liveness, so after STALE_AFTER_MS of silence it closes the socket — that is
+// how a half-open (silently dead) connection gets recycled. The outgoing
+// 'ping' text frame is read and discarded by the server.
 const STALE_AFTER_MS = 60_000;
-const STALE_CHECK_INTERVAL_MS = 10_000;
+const HEARTBEAT_INTERVAL_MS = 25_000;
 const MAX_RETRY_DELAY_MS = 15_000;
-// A WebSocket handshake that neither opens nor errors within this window
-// (e.g. a proxy that accepts the TCP connection but never completes the
-// upgrade) is abandoned and retried — the browser's own handshake timeout
-// can be minutes long, during which no events and no onclose would arrive.
+// A handshake that neither opens nor errors within this window (e.g. a proxy
+// that accepts the TCP connection but never completes the upgrade) is closed
+// and retried — the heartbeat can't cover this because it only starts on open.
 const CONNECT_TIMEOUT_MS = 10_000;
+const CONNECT_CHECK_INTERVAL_MS = 10_000;
 
 // wsUrl builds the event-hub WebSocket URL for the current page, using wss://
 // when the page itself is served over https.
@@ -28,15 +38,11 @@ export interface UseWebSocketOptions {
     onConnect?: () => void;
 }
 
-// useWebSocket maintains a durable connection to the event hub:
-//  - reconnects automatically with capped exponential back-off;
-//  - detects half-open connections via the server heartbeat and recycles them;
-//  - reconnects immediately when the tab becomes visible or the browser
-//    comes back online;
-//  - invokes onConnect after every (re)connect so callers can re-sync state.
-// Each call to onMessage receives exactly one parsed JSON object (matches the
-// server guarantee of one JSON object per frame). Heartbeat frames are
-// consumed internally and not passed to onMessage.
+// useWebSocket maintains a durable connection to the event hub. Reconnection,
+// exponential back-off, and half-open detection are delegated to
+// react-use-websocket; this wrapper adds the event-hub protocol (one JSON
+// object per frame, hub_heartbeat frames consumed internally) and a watchdog
+// for handshakes stuck in CONNECTING, which the library does not time out.
 export function useWebSocket(
     url: string,
     onMessage: (msg: any) => void,
@@ -44,8 +50,8 @@ export function useWebSocket(
 ) {
     const { enabled = true, onConnect } = options;
 
-    // Keep callbacks in refs so we never need to restart the socket just
-    // because a callback identity changed (common with inline arrow fns).
+    // Keep callbacks in refs so the socket never restarts just because a
+    // callback identity changed (common with inline arrow fns).
     const onMessageRef = useRef(onMessage);
     const onConnectRef = useRef(onConnect);
     useEffect(() => {
@@ -53,108 +59,49 @@ export function useWebSocket(
         onConnectRef.current = onConnect;
     });
 
+    const { getWebSocket } = useReactWebSocket(url, {
+        shouldReconnect: () => true,
+        reconnectAttempts: Infinity,
+        reconnectInterval: (attempt) => Math.min(1000 * 2 ** attempt, MAX_RETRY_DELAY_MS),
+        retryOnError: true,
+        heartbeat: {
+            message: 'ping',
+            interval: HEARTBEAT_INTERVAL_MS,
+            timeout: STALE_AFTER_MS,
+        },
+        onOpen: () => onConnectRef.current?.(),
+        onMessage: (event) => {
+            let msg: any;
+            try {
+                msg = JSON.parse(event.data as string);
+            } catch {
+                return; // ignore malformed frames
+            }
+            if (msg?.type === 'hub_heartbeat') return; // liveness only
+            onMessageRef.current(msg);
+        },
+        // lastMessage state is unused (delivery goes through onMessage), so
+        // skip the per-frame re-render it would otherwise cause.
+        filter: () => false,
+    }, enabled);
+
+    // Watchdog for hung handshakes: closing a CONNECTING socket aborts it,
+    // which fires the library's close handler and its normal reconnect path.
     useEffect(() => {
         if (!enabled) return;
-
-        let ws: WebSocket | null = null;
-        let unmounted = false;
-        let retryDelay = 1000;
-        let retryTimer: ReturnType<typeof setTimeout> | null = null;
-        let lastMessageAt = Date.now();
-        let connectStartedAt = Date.now();
-
-        function connect() {
-            retryTimer = null;
-            ws = new WebSocket(url);
-            connectStartedAt = Date.now();
-            lastMessageAt = Date.now();
-
-            ws.onmessage = (event: MessageEvent) => {
-                lastMessageAt = Date.now();
-                let msg: any;
-                try {
-                    msg = JSON.parse(event.data as string);
-                } catch {
-                    return; // ignore malformed frames
+        let connectingSince: number | null = null;
+        const check = setInterval(() => {
+            const ws = getWebSocket();
+            if (ws && ws.readyState === WebSocket.CONNECTING) {
+                connectingSince ??= Date.now();
+                if (Date.now() - connectingSince > CONNECT_TIMEOUT_MS) {
+                    connectingSince = null;
+                    try { ws.close(); } catch { /* ignore */ }
                 }
-                if (msg?.type === 'hub_heartbeat') return; // liveness only
-                onMessageRef.current(msg);
-            };
-
-            ws.onopen = () => {
-                retryDelay = 1000; // reset back-off on successful connect
-                lastMessageAt = Date.now();
-                onConnectRef.current?.();
-            };
-
-            ws.onclose = () => {
-                ws = null;
-                if (unmounted) return;
-                retryTimer = setTimeout(connect, retryDelay);
-                retryDelay = Math.min(retryDelay * 2, MAX_RETRY_DELAY_MS);
-            };
-
-            ws.onerror = () => {
-                // onclose fires after onerror, so reconnect is handled there
-            };
-        }
-
-        function reconnectNow() {
-            if (unmounted) return;
-            if (retryTimer !== null) {
-                clearTimeout(retryTimer);
-                retryTimer = null;
+            } else {
+                connectingSince = null;
             }
-            if (ws) {
-                // Closing triggers onclose; connect immediately instead of
-                // waiting out the back-off.
-                const old = ws;
-                ws = null;
-                old.onclose = null;
-                old.onmessage = null;
-                old.onopen = null;
-                try { old.close(); } catch { /* ignore */ }
-            }
-            connect();
-        }
-
-        // Watchdog: a half-open connection never fires onclose, so if the
-        // server heartbeat goes quiet the socket is dead — recycle it. A
-        // handshake stuck in CONNECTING is equally dead and is retried too.
-        const staleCheck = setInterval(() => {
-            if (!ws) return;
-            const openButSilent = ws.readyState === WebSocket.OPEN
-                && Date.now() - lastMessageAt > STALE_AFTER_MS;
-            const stuckConnecting = ws.readyState === WebSocket.CONNECTING
-                && Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS;
-            if (openButSilent || stuckConnecting) {
-                reconnectNow();
-            }
-        }, STALE_CHECK_INTERVAL_MS);
-
-        // When the tab wakes up or the network returns, don't wait for the
-        // back-off timer or the watchdog — resync immediately.
-        const onVisible = () => {
-            if (document.visibilityState !== 'visible') return;
-            const dead = !ws || ws.readyState === WebSocket.CLOSED || ws.readyState === WebSocket.CLOSING;
-            const stuckConnecting = !!ws && ws.readyState === WebSocket.CONNECTING
-                && Date.now() - connectStartedAt > CONNECT_TIMEOUT_MS;
-            const stale = Date.now() - lastMessageAt > STALE_AFTER_MS;
-            if (dead || stuckConnecting || stale) reconnectNow();
-        };
-        const onOnline = () => reconnectNow();
-        document.addEventListener('visibilitychange', onVisible);
-        window.addEventListener('online', onOnline);
-
-        connect();
-
-        return () => {
-            unmounted = true;
-            clearInterval(staleCheck);
-            document.removeEventListener('visibilitychange', onVisible);
-            window.removeEventListener('online', onOnline);
-            if (retryTimer !== null) clearTimeout(retryTimer);
-            ws?.close();
-        };
-    }, [url, enabled]);
+        }, CONNECT_CHECK_INTERVAL_MS);
+        return () => clearInterval(check);
+    }, [enabled, getWebSocket]);
 }

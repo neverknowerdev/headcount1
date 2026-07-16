@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agent-orchestrator/db"
@@ -18,6 +19,50 @@ import (
 // Usage is re-exported from pkg/tokens so call sites in this package can
 // name the type without importing the tokens package directly.
 type Usage = tokens.Usage
+
+// runSeqCounters allocates monotonically increasing per-run sequence numbers
+// for run_log entries. One counter per run id, shared by every producer in
+// the process (session loggers, per-request gateway loggers, routing events),
+// seeded from the run's persisted entries on first use so seq keeps growing
+// across server restarts. The frontend uses seq to deduplicate and order the
+// live stream against DB snapshots, so it must never repeat within a run.
+// Entries are one int64 per run; the map is reset by process restart.
+var runSeqCounters sync.Map // int32 → *atomic.Int64
+
+// NextRunLogSeq returns the next sequence number for the run's log entries.
+func NextRunLogSeq(ctx context.Context, q *db.Queries, runID int32) int64 {
+	if c, ok := runSeqCounters.Load(runID); ok {
+		return c.(*atomic.Int64).Add(1)
+	}
+	counter := &atomic.Int64{}
+	counter.Store(highestPersistedSeq(ctx, q, runID))
+	actual, _ := runSeqCounters.LoadOrStore(runID, counter)
+	return actual.(*atomic.Int64).Add(1)
+}
+
+// highestPersistedSeq inspects the run's stored entries and returns the
+// largest seq already used. Entries persisted before seq existed count by
+// position, so restarted runs continue above them.
+func highestPersistedSeq(ctx context.Context, q *db.Queries, runID int32) int64 {
+	if q == nil {
+		return 0
+	}
+	run, err := q.GetRun(ctx, runID)
+	if err != nil || run.LogEntries == "" {
+		return 0
+	}
+	var entries []map[string]interface{}
+	if json.Unmarshal([]byte(run.LogEntries), &entries) != nil {
+		return 0
+	}
+	max := int64(len(entries))
+	for _, e := range entries {
+		if s, ok := e["seq"].(float64); ok && int64(s) > max {
+			max = int64(s)
+		}
+	}
+	return max
+}
 
 type ProxyLogger struct {
 	mu       sync.Mutex
@@ -128,6 +173,7 @@ func (l *ProxyLogger) logEvent(entryType, content string, extra map[string]inter
 		"type":    entryType,
 		"content": content,
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"seq":     NextRunLogSeq(context.Background(), l.q, l.runID),
 	}
 	for k, v := range extra {
 		entry[k] = v

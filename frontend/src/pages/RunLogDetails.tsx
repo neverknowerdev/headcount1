@@ -6,7 +6,7 @@ import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
 
-import { mergeSnapshotWithLiveTail } from '../utils/logMerge';
+import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
 
 function parseLogContent(logContent: string): any[] {
     if (!logContent) return [];
@@ -82,7 +82,7 @@ export const RunLogDetails: React.FC = () => {
 
                 let messages: any[];
                 if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
-                    messages = res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
+                    messages = sortBySeq(res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry })));
                 } else {
                     messages = parseLogContent(res.data?.log_content || '');
                 }

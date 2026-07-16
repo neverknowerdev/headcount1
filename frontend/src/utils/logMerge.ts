@@ -1,26 +1,24 @@
 export interface LogMessage {
     id: number;
-    entry: { ts?: string } & Record<string, unknown>;
+    entry: { seq?: number } & Record<string, unknown>;
 }
 
-// mergeSnapshotWithLiveTail reconciles a freshly fetched DB snapshot with the
-// entries currently on screen. Live WebSocket entries can be ahead of the
-// database (persistence is async), and more can arrive while the fetch is in
-// flight — so a plain replace would silently drop the newest lines until the
-// next event or a manual reload. Entries share one `ts` between the broadcast
-// and the persisted record, so ts is a reliable dedup key.
+// The server stamps every run_log entry with a per-run monotonic `seq`,
+// shared between the WebSocket broadcast and the persisted record. That makes
+// reconciling a fresh DB snapshot with the live stream trivial: keep the
+// on-screen entries the snapshot doesn't have yet (live delivery runs ahead
+// of persistence), drop everything else as superseded by the snapshot.
 export function mergeSnapshotWithLiveTail(snapshot: LogMessage[], prev: LogMessage[]): LogMessage[] {
     if (prev.length === 0) return snapshot;
-    const seen = new Set(snapshot.map((m) => m.entry?.ts).filter(Boolean));
-    let lastMs = 0;
-    for (const m of snapshot) {
-        const t = m.entry?.ts ? Date.parse(m.entry.ts) : NaN;
-        if (!isNaN(t) && t > lastMs) lastMs = t;
-    }
-    const tail = prev.filter((m) => {
-        if (!m.entry?.ts || seen.has(m.entry.ts)) return false;
-        const t = Date.parse(m.entry.ts);
-        return !isNaN(t) && t >= lastMs;
-    });
+    const lastSeq = Math.max(0, ...snapshot.map((m) => m.entry.seq ?? 0));
+    const tail = prev.filter((m) => (m.entry.seq ?? 0) > lastSeq);
     return [...snapshot, ...tail].map((m, i) => ({ id: i, entry: m.entry }));
+}
+
+// sortBySeq orders snapshot entries by seq. Entries can be persisted slightly
+// out of order when several producers write to one run (session logger plus
+// per-request gateway loggers); seq restores the broadcast order. Entries
+// without a seq (persisted before seq existed) keep their stored position.
+export function sortBySeq(messages: LogMessage[]): LogMessage[] {
+    return [...messages].sort((a, b) => (a.entry.seq ?? 0) - (b.entry.seq ?? 0));
 }
