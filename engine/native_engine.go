@@ -323,12 +323,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Write initial run metadata to filesystem.
 	settings := loadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteRun(run, company.ShortName); err != nil {
-		fmt.Printf("Warning: failed to write run metadata: %v\n", err)
-	}
 
 	// Session hierarchy: which run/task the log folder is grouped under.
 	rootRunID := run.ID
@@ -912,11 +907,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
-	// Update run metadata in filesystem.
-	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
-		storage.WriteRun(updatedRun, company.ShortName)
-	}
-
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
 	// Notify the parent task that this subtask has completed or failed.
@@ -1359,11 +1349,6 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 	e.hub.BroadcastEvent("task_created", newTask)
-
-	// Mirror the API endpoint's filesystem bookkeeping so the task shows up
-	// in exports/sync exactly like a human-created one.
-	fsMgr := filesystem.NewManager(loadSettings().BasePath)
-	fsMgr.SaveTask(company, newTask)
 
 	if status == "to-do" {
 		// Independent root run, same as a human moving the card to "to-do".

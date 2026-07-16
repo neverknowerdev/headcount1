@@ -2,13 +2,12 @@ package endpoints
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
-	"agent-orchestrator/pkg/filesystem"
+
 	"gorm.io/gorm"
 )
 
@@ -53,11 +52,4 @@ func (api *API) logActivity(companyID int32, action string, entityID int32, enti
 		Details:    details,
 	}
 	api.db.Create(&activityLog)
-
-	// Write activity log to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteActivityLog(activityLog); err != nil {
-		log.Printf("Warning: failed to write activity log to filesystem: %v", err)
-	}
 }
