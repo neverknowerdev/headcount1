@@ -34,9 +34,22 @@ export DATABASE_URL="postgres://username:password@localhost:5432/orchestrator?ss
 
 The server will start on port `8080`. You can access the UI at [http://localhost:8080](http://localhost:8080).
 
+## Cloud Mode: Accounts & Multi-User
+
+headcount1 runs in cloud mode: users register with email + password (open self-registration at `/register`), and everything — companies, projects, tasks, agents, LLM providers, MCP credentials, model groups — belongs to the user who created it. Sessions are httpOnly cookies backed by server-side tokens (30-day sliding expiry, instant revocation on logout/password change). WebSocket events are delivered only to the owning user's clients.
+
+- **Password reset:** configure `SMTP_HOST`, `SMTP_PORT` (587 STARTTLS default, 465 implicit TLS), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and `APP_BASE_URL` for emailed reset links. Without SMTP, the reset link is printed to the server log. Resetting a forgotten password never loses data — see below.
+- **Fresh database:** cloud mode assumes a new database; pre-auth local databases are not migrated.
+- The password authenticates only — it is never used as an encryption master key directly (see next section).
+
 ## Secrets Encryption at Rest
 
-User-supplied credentials (LLM provider API keys, MCP auth tokens) are never stored raw. Each secret is encrypted with AES-256-GCM under a random **data key**; the data key is itself stored wrapped (encrypted) by a **master key** in `~/.headcount1/keystore.json` (envelope encryption). Secrets are decrypted in memory only at the moment they are used for an outbound request, and the API never returns them to the browser — clients only see a `has_api_key` / `has_token` flag.
+User-supplied credentials (LLM provider API keys, MCP auth tokens) are never stored raw. Each user gets their own random **data key** at registration; secrets on their rows are AES-256-GCM-encrypted under it (`enc:u1:<userID>:…`). The user's data key is itself stored only wrapped — twice:
+
+1. **Server wrap** under the install's root key chain (root data key in `~/.headcount1/keystore.json`, wrapped by the master key below) — this is what lets agent runs, schedulers, and the LLM proxy decrypt with nobody logged in, and what makes password reset non-destructive: the keyring is re-wrapped under the new password, secrets intact.
+2. **Password wrap** under an Argon2id key derived from the user's password — verified at login, rotated on password change; defense-in-depth against exposure of the server key chain alone.
+
+Deleting a user's key row crypto-shreds every secret they own. Secrets are decrypted in memory only at the moment they are used for an outbound request, and the API never returns them to the browser — clients only see a `has_api_key` / `has_token` flag.
 
 The master key is taken from the first configured source:
 

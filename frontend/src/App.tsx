@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { SetupGate } from './components/SetupGate';
+import { AuthGate } from './components/AuthGate';
 import { Dashboard } from './pages/Dashboard';
 import { CompanyView } from './pages/CompanyView';
 import { ProjectBoard } from './pages/ProjectBoard';
@@ -22,7 +23,8 @@ function App() {
   return (
     <BrowserRouter>
       <SetupGate>
-        <Layout>
+        <AuthGate>
+          <Layout>
           <Routes>
             <Route path="/add-company" element={<AddCompany />} />
             <Route path="/companies/:shortName" element={<Dashboard />} />
@@ -43,7 +45,8 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </Layout>
+          </Layout>
+        </AuthGate>
       </SetupGate>
     </BrowserRouter>
   );

@@ -7,6 +7,11 @@ interface Company {
     color: string;
 }
 
+export interface AuthUser {
+    id: number;
+    email: string;
+}
+
 interface AppState {
     companies: Company[];
     selectedCompanyId: number | null;
@@ -15,6 +20,11 @@ interface AppState {
 
     isFirstOpen: boolean;
     setIsFirstOpen: (isFirstOpen: boolean) => void;
+
+    // Authenticated user (null = logged out). AuthGate sets it after probing
+    // /api/auth/me; the global 401 interceptor clears it.
+    user: AuthUser | null;
+    setUser: (user: AuthUser | null) => void;
 }
 
 export const useStore = create<AppState>((set) => ({
@@ -25,4 +35,7 @@ export const useStore = create<AppState>((set) => ({
 
     isFirstOpen: false,
     setIsFirstOpen: (isFirstOpen) => set({ isFirstOpen }),
+
+    user: null,
+    setUser: (user) => set({ user }),
 }));
