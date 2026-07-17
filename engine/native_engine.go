@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/runtokens"
 	"gorm.io/gorm"
 )
 
@@ -844,10 +845,15 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// The group router picks the real provider+model per request. X-Run-ID
 		// lets it write model_switch entries into this run's log; switches-only
 		// keeps it from double-logging requests/responses (the agent loop
-		// below already does that).
+		// below already does that). The gateway token authenticates this run
+		// to the (otherwise locked) local proxy — it is only ever sent to the
+		// in-process gateway, never to an external provider.
+		gatewayToken := runtokens.Default().Issue(run.ID)
+		defer runtokens.Default().Revoke(run.ID)
 		llmClient.ExtraHeaders = map[string]string{
-			"X-Run-ID":         fmt.Sprintf("%d", run.ID),
-			"X-Proxy-Log-Mode": "switches-only",
+			"X-Run-ID":            fmt.Sprintf("%d", run.ID),
+			"X-Proxy-Log-Mode":    "switches-only",
+			runtokens.TokenHeader: gatewayToken,
 		}
 	}
 	agentCfgObj := aicli.Config{

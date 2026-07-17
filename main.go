@@ -22,6 +22,7 @@ import (
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/mailer"
+	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -248,6 +249,9 @@ func main() {
 		// with provider headers, not a user session — user auth must not gate
 		// these routes or every agent run breaks.
 		gw := integration.NewLLMGatewayWithHub(database, hub)
+		// Per-run token enforcement: only live agent runs (engine-issued
+		// tokens) or authenticated sessions may use the proxy.
+		gw.SetRunTokenValidator(runtokens.Default().Validate)
 		gw.Mount(r)
 
 		// Everything else — the human-facing API, including /ws — requires a

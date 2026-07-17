@@ -37,6 +37,8 @@ type LLMGateway struct {
 	groupHealth *groupHealthState
 	// runCompany caches run → company for tenant-scoped run_log events.
 	runCompany sync.Map
+	// validateRunToken enables gateway auth (see gateway_auth.go); nil = open.
+	validateRunToken func(token string) (int32, bool)
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
@@ -53,14 +55,17 @@ func NewLLMGatewayWithHub(database *gorm.DB, hub GatewayHub) *LLMGateway {
 }
 
 func (g *LLMGateway) Mount(r chi.Router) {
-	r.Post("/v1/chat/completions", g.proxyChatCompletionsForProvider)
-	r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
-		r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
-		r.Get("/v1/models", g.getModelsForAgent)
-	})
-	r.Route("/proxy/group/{group_key}", func(r chi.Router) {
-		r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
-		r.Get("/v1/models", g.getModelsForGroup)
+	r.Group(func(r chi.Router) {
+		r.Use(g.requireGatewayAuth)
+		r.Post("/v1/chat/completions", g.proxyChatCompletionsForProvider)
+		r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
+			r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
+			r.Get("/v1/models", g.getModelsForAgent)
+		})
+		r.Route("/proxy/group/{group_key}", func(r chi.Router) {
+			r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
+			r.Get("/v1/models", g.getModelsForGroup)
+		})
 	})
 }
 
@@ -114,7 +119,7 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 		return
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
-	if err != nil {
+	if err != nil || !g.sessionMayUseProvider(r, provider) {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return
 	}
@@ -159,7 +164,7 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil {
+	if err != nil || !g.sessionMayUseAgent(r, agent) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return agentProxyTarget{}, false
 	}
