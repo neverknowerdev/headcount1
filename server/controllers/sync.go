@@ -10,10 +10,23 @@ import (
 	"sort"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/authctx"
 	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
+	// When the sync is user-triggered (POST /api/settings/sync), imported
+	// rows whose mirror files carry no tenancy are adopted by the caller;
+	// the startup sync has no user and leaves them unowned.
+	adoptUserID := authctx.UserID(ctx)
+	var adoptTeamID *int32
+	if adoptUserID != 0 {
+		if membership, err := api.q.GetTeamMembership(ctx, adoptUserID); err == nil {
+			teamID := membership.TeamID
+			adoptTeamID = &teamID
+		}
+	}
+
 	settings := LoadSettings()
 	log.Printf("Syncing DB with filesystem at %s", settings.BasePath)
 	fm := filesystem.NewManager(settings.BasePath)
@@ -49,12 +62,19 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 				ShortName: shortName,
 				Color:     "#4F46E5",
 			}
-			// Preserve company ID and name from settings.yml when available
+			// Preserve company ID, name, and tenancy from settings.yml when available
 			if compSettings, err := fm.ReadCompanySettings(shortName); err == nil && compSettings.CompanyID != 0 {
 				newComp.ID = compSettings.CompanyID
 				if compSettings.Name != "" {
 					newComp.Name = compSettings.Name
 				}
+				newComp.TeamID = compSettings.TeamID
+				newComp.UserID = compSettings.UserID
+			}
+			if newComp.TeamID == nil && adoptUserID != 0 {
+				uid := adoptUserID
+				newComp.UserID = &uid
+				newComp.TeamID = adoptTeamID
 			}
 
 			if err := api.db.Create(&newComp).Error; err == nil {
@@ -150,6 +170,10 @@ func (api *API) SyncDBWithFilesystem(ctx context.Context) error {
 		for _, p := range providers {
 			var existing db.LLMProvider
 			if api.db.First(&existing, p.ID).Error != nil {
+				if p.UserID == nil && adoptUserID != 0 {
+					uid := adoptUserID
+					p.UserID = &uid
+				}
 				if err := api.db.Create(&p).Error; err != nil {
 					log.Printf("Failed to create LLM provider %d: %v", p.ID, err)
 				} else {

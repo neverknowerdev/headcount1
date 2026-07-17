@@ -91,7 +91,13 @@ func (api *API) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err := backup.RestoreBackup(archivePath, basePath, api.db)
+	adopter := &backup.Adopter{UserID: api.currentUserID(r)}
+	if membership, mErr := api.requireMembership(r); mErr == nil {
+		teamID := membership.TeamID
+		adopter.TeamID = &teamID
+	}
+
+	err := backup.RestoreBackup(archivePath, basePath, api.db, adopter)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Failed to restore backup: "+err.Error())
 		return

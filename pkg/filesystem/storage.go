@@ -18,6 +18,9 @@ type CompanyMeta struct {
 	Name      string `json:"name"`
 	ShortName string `json:"short_name"`
 	Color     string `json:"color"`
+	// Tenancy — see CompanySettings; nil in files from before teams.
+	TeamID *int32 `json:"team_id,omitempty"`
+	UserID *int32 `json:"user_id,omitempty"`
 }
 
 // ProjectMeta is the filesystem representation of a project
@@ -151,6 +154,8 @@ func (s *Storage) WriteCompany(comp db.Company) error {
 		Name:      comp.Name,
 		ShortName: comp.ShortName,
 		Color:     comp.Color,
+		TeamID:    comp.TeamID,
+		UserID:    comp.UserID,
 	}
 	return writeJSON(filepath.Join(dir, "company.json"), meta)
 }

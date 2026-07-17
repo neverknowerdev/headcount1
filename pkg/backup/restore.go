@@ -16,7 +16,15 @@ import (
 	"gorm.io/gorm"
 )
 
-func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
+// Adopter identifies who triggered a restore: companies (and providers)
+// whose mirror files carry no tenancy — backups from before teams — are
+// attached to this user/team so the restored data is visible to them.
+type Adopter struct {
+	UserID int32
+	TeamID *int32
+}
+
+func RestoreBackup(archivePath, basePath string, database *gorm.DB, adopter *Adopter) error {
 	log.Printf("Starting restore from %s...", archivePath)
 
 	// Extract archive to a temp directory
@@ -36,7 +44,7 @@ func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 	}
 
 	// Rebuild DB from filesystem
-	if err := rebuildDBFromFS(basePath, database); err != nil {
+	if err := rebuildDBFromFS(basePath, database, adopter); err != nil {
 		return fmt.Errorf("failed to rebuild database: %w", err)
 	}
 
@@ -148,7 +156,7 @@ func restoreFilesystem(tempDir, basePath string) error {
 	return nil
 }
 
-func rebuildDBFromFS(basePath string, database *gorm.DB) error {
+func rebuildDBFromFS(basePath string, database *gorm.DB, adopter *Adopter) error {
 	ctx := database.Statement.Context
 	if ctx == nil {
 		ctx = database.Statement.Context
@@ -184,6 +192,10 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				DefaultModel:    p.DefaultModel,
 				SupportedModels: p.SupportedModels,
 			}
+			if adopter != nil {
+				uid := adopter.UserID
+				provider.UserID = &uid
+			}
 			if err := database.WithContext(ctx).Create(&provider).Error; err != nil {
 				log.Printf("Warning: failed to restore provider %s: %v", p.Name, err)
 				continue
@@ -210,6 +222,13 @@ func rebuildDBFromFS(basePath string, database *gorm.DB) error {
 				Name:      compMeta.Name,
 				ShortName: compMeta.ShortName,
 				Color:     compMeta.Color,
+				TeamID:    compMeta.TeamID,
+				UserID:    compMeta.UserID,
+			}
+			if company.TeamID == nil && adopter != nil {
+				uid := adopter.UserID
+				company.UserID = &uid
+				company.TeamID = adopter.TeamID
 			}
 			if err := database.WithContext(ctx).Create(&company).Error; err != nil {
 				log.Printf("Warning: failed to restore company %s: %v", shortName, err)

@@ -276,6 +276,10 @@ type CompanySettings struct {
 	CompanyID int32  `yaml:"company_id"`
 	Name      string `yaml:"name"`
 	ShortName string `yaml:"short_name"`
+	// Tenancy — restored so a company stays visible to its team after a
+	// filesystem import (nil in files written before teams existed).
+	TeamID *int32 `yaml:"team_id,omitempty"`
+	UserID *int32 `yaml:"user_id,omitempty"`
 }
 
 func (m *Manager) WriteCompanySettings(company db.Company) error {
@@ -287,6 +291,8 @@ func (m *Manager) WriteCompanySettings(company db.Company) error {
 		CompanyID: company.ID,
 		Name:      company.Name,
 		ShortName: company.ShortName,
+		TeamID:    company.TeamID,
+		UserID:    company.UserID,
 	}
 	data, err := yaml.Marshal(s)
 	if err != nil {
