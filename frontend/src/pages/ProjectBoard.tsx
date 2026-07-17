@@ -1,5 +1,4 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
@@ -8,6 +7,7 @@ import type { DropResult } from '@hello-pangea/dnd';
 import { Plus, Settings } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+import { useCoalescedCallback } from '../utils/useCoalescedCallback';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
 
@@ -60,8 +60,13 @@ export const ProjectBoard: React.FC = () => {
     }
   }, [selectedCompanyId]);
 
+  // Guards against out-of-order responses: only the latest in-flight fetch
+  // may apply its result, so a slow older response can never overwrite a
+  // newer board state.
+  const fetchSeqRef = useRef(0);
   const fetchTasks = useCallback(async () => {
     if (!selectedCompanyId) return;
+    const seq = ++fetchSeqRef.current;
     try {
       let url = `/api/tasks?company_id=${selectedCompanyId}&archived=${showArchived}`;
       if (selectedProjectIds.length > 0) {
@@ -72,11 +77,16 @@ export const ProjectBoard: React.FC = () => {
       }
 
       const res = await axios.get(url);
+      if (seq !== fetchSeqRef.current) return; // superseded by a newer fetch
       setTasks(res.data || []);
     } catch (e) {
       console.error(e);
     }
   }, [selectedCompanyId, selectedProjectIds, selectedSprintIds, showArchived]);
+
+  // Event bursts (an agent updating many tasks) coalesce into one refetch
+  // instead of firing a request per event.
+  const scheduleFetchTasks = useCoalescedCallback(fetchTasks);
 
   useEffect(() => {
     fetchFiltersData();
@@ -88,7 +98,7 @@ export const ProjectBoard: React.FC = () => {
 
   useWebSocket(wsUrl(), (msg) => {
     if (msg.type === 'task_updated' || msg.type === 'task_created') {
-      fetchTasks();
+      scheduleFetchTasks();
     }
   }, {
     // Re-fetch on every (re)connect so board state missed while offline is recovered.

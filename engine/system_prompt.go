@@ -30,18 +30,18 @@ type Settings struct {
 }
 
 // loadSettings reads the app settings from the canonical file the settings
-// API writes (PaperclipHome()/settings.yaml).
+// API writes (Headcount1Home()/settings.yaml).
 func loadSettings() Settings {
 	data, err := os.ReadFile(db.SettingsFilePath())
 	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
+		return Settings{BasePath: db.Headcount1Home()}
 	}
 	var settings Settings
 	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
+		return Settings{BasePath: db.Headcount1Home()}
 	}
 	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
+		settings.BasePath = db.Headcount1Home()
 	}
 	return settings
 }
