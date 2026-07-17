@@ -205,47 +205,18 @@ type Run struct {
 	AgentConfigName string `json:"agent_config_name" gorm:"default:''"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
-	CurrentStatus string `json:"current_status" gorm:"default:''"`
-	Status        string `json:"status" gorm:"not null"`
-	SessionID     string `json:"session_id"`
-	// LogFilePath points at the run's JSONL log file. Full log content lives
-	// ONLY in JSONL files; the run_log_entries table holds per-entry display
-	// metadata plus byte offsets into those files.
+	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
+	Status            string     `json:"status" gorm:"not null"`
+	SessionID         string     `json:"session_id"`
 	LogFilePath       string     `json:"log_file_path"`
-	ErrorMessage      string     `json:"error_message" gorm:"type:text"`      // failure detail for failed runs
+	LogContent        string     `json:"log_content"`
+	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
 	TokenStats        string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
 	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
 	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
-}
-
-// RunLogEntry is the per-entry display metadata for a run's log. The full
-// entry (including complete request/response/tool payloads) is one line in
-// the run's JSONL log file, addressed by LogFilePath + ByteOffset/ByteLen;
-// this row carries just what the Run Log list UI needs plus that pointer.
-// Entries written where no log file is available (e.g. the LLM gateway's
-// switches-only mode) have LogFilePath == "" and rely on Preview.
-type RunLogEntry struct {
-	ID    int64     `json:"id" gorm:"primaryKey"`
-	RunID int32     `json:"run_id" gorm:"uniqueIndex:idx_rle_run_seq,priority:1;not null"`
-	Seq   int32     `json:"seq" gorm:"uniqueIndex:idx_rle_run_seq,priority:2;not null"` // per-run, 1-based
-	Type  string    `json:"type" gorm:"not null"`                                       // request|response|tool_call|tool_response|error|info|status|session_started|session_ended|model_switch
-	Ts    time.Time `json:"ts" gorm:"not null"`
-	// Preview is a short prefix of the entry content for list rendering.
-	Preview      string `json:"preview" gorm:"type:text"`
-	ToolName     string `json:"tool_name"`
-	Model        string `json:"model"`
-	AgentName    string `json:"agent_name"`
-	StatusCode   int    `json:"status_code"`
-	PromptTokens int    `json:"prompt_tokens"` // patched in after the LLM responds
-	InputTokens  int    `json:"input_tokens"`
-	OutputTokens int    `json:"output_tokens"`
-	ChildRunID   *int32 `json:"child_run_id"` // session_started/session_ended
-	ByteOffset   int64  `json:"byte_offset"`
-	ByteLen      int32  `json:"byte_len"`
-	LogFilePath  string `json:"log_file_path"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to
@@ -315,7 +286,7 @@ type MCPAccount struct {
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
-// Still used for built-in (paperclip2) assignments.
+// Still used for built-in (headcount1) assignments.
 type AgentMCPServer struct {
 	AgentID     int32 `json:"agent_id" gorm:"primaryKey"`
 	MCPServerID int32 `json:"mcp_server_id" gorm:"primaryKey"`

@@ -6,6 +6,57 @@ import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
 
+import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
+
+function parseLogContent(logContent: string): any[] {
+    if (!logContent) return [];
+    const lines = logContent.split('\n').filter((l: string) => l.trim());
+    const messages: any[] = [];
+    let i = 0;
+    for (const line of lines) {
+        const trimmed = line.trim();
+        if (trimmed.startsWith('{')) {
+            try {
+                const parsed = JSON.parse(trimmed);
+                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
+                    messages.push({ id: i++, entry: { ...parsed, type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name } });
+                    continue;
+                }
+                // JSONL run log: every line is a structured entry with a type,
+                // the same shape as the DB log_entries — use it as-is.
+                if (typeof parsed.type === 'string') {
+                    messages.push({ id: i++, entry: parsed });
+                    continue;
+                }
+                // Legacy text-log heuristics: raw request/response bodies that
+                // were embedded in the old ===-delimited format.
+                if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
+                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model } });
+                    continue;
+                }
+                if (parsed.info && parsed.parts && Array.isArray(parsed.parts)) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+                if (parsed.messages && Array.isArray(parsed.messages)) {
+                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model } });
+                    continue;
+                }
+                if (parsed.choices && Array.isArray(parsed.choices)) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+                if (parsed.reasoning || parsed.tokens || parsed.raw) {
+                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
+                    continue;
+                }
+            } catch { /* treat as info */ }
+        }
+        messages.push({ id: i++, entry: { type: 'info', content: trimmed } });
+    }
+    return messages;
+}
+
 export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
     const [run, setRun] = useState<any>(null);
@@ -37,30 +88,54 @@ export const RunLogDetails: React.FC = () => {
                 setTokenStats(res.data?.token_stats || null);
                 fetchAgentStats(res.data);
 
-                // Log entries live in run_log_entries + JSONL files; fetch
-                // them from the dedicated endpoint (content hydrated from the
-                // run's JSONL log).
-                const logRes = await axios.get(`/api/runs/${id}/log`);
-                const entries: any[] = logRes.data?.entries || [];
-                let messages: any[] = entries.map((entry: any, i: number) => ({ id: i, entry }));
+                let messages: any[];
+                if (Array.isArray(res.data?.log_entries) && res.data.log_entries.length > 0) {
+                    messages = sortBySeq(res.data.log_entries.map((entry: any, i: number) => ({ id: i, entry })));
+                } else {
+                    messages = parseLogContent(res.data?.log_content || '');
+                }
 
-                // For failed runs with no error entries, surface the run's
-                // error message as an error entry.
+                // For failed runs with no error entries, extract errors from log_content
                 if (res.data?.status === 'failed') {
                     const hasError = messages.some((m: any) => m.entry.type === 'error');
-                    if (!hasError && res.data?.error_message) {
-                        messages = [...messages, {
-                            id: messages.length,
-                            entry: { type: 'error', content: res.data.error_message },
-                        }];
+                    if (!hasError) {
+                        const logContent: string = res.data?.log_content || '';
+                        if (logContent) {
+                            const lines = logContent.split('\n').filter((l: string) => l.trim());
+                            const errorLines = lines.filter((l: string) =>
+                                /\b(error|Error|FAIL|failed|panic|exception|fatal)\b/.test(l)
+                            );
+                            const contextLines = errorLines.length > 0 ? errorLines : lines.slice(-15);
+                            if (contextLines.length > 0) {
+                                messages = [...messages, {
+                                    id: messages.length,
+                                    entry: {
+                                        type: 'error',
+                                        content: errorLines.length > 0
+                                            ? contextLines.join('\n')
+                                            : `Run failed. Last log output:\n${contextLines.join('\n')}`,
+                                    },
+                                }];
+                            }
+                        }
                     }
                 }
 
-                setLogMessages(messages);
+                setLogMessages(prev => mergeSnapshotWithLiveTail(messages, prev));
             } catch (e) {
                 console.error(e);
             }
     // eslint-disable-next-line react-hooks/exhaustive-deps
+    }, [id]);
+
+    // Navigating to a different run must start from a clean slate — the
+    // snapshot merge below deliberately preserves on-screen entries, which
+    // would leak the previous run's tail into the new one.
+    useEffect(() => {
+        setLogMessages([]);
+        setRun(null);
+        setStreamStalled(null);
+        lastEventAtRef.current = Date.now();
     }, [id]);
 
     useEffect(() => {

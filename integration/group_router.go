@@ -537,11 +537,11 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 // the router only contributes routing events, which are short enough that
 // the metadata row's preview carries the whole content.
 func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map[string]interface{}) {
-	ts := time.Now().UTC()
 	entry := map[string]interface{}{
 		"type":    entryType,
 		"content": content,
-		"ts":      ts.Format(time.RFC3339Nano),
+		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+		"seq":     logging.NextRunLogSeq(context.Background(), g.q, int32(runID)),
 	}
 	for k, v := range extra {
 		entry[k] = v
@@ -552,22 +552,9 @@ func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map
 			"entry":  entry,
 		})
 	}
-
-	row := db.RunLogEntry{
-		RunID:   int32(runID),
-		Type:    entryType,
-		Ts:      ts,
-		Preview: content,
-	}
-	if name, ok := extra["tool_name"].(string); ok {
-		row.ToolName = name
-	}
-	if model, ok := extra["model"].(string); ok {
-		row.Model = model
-	}
 	go func() {
 		for i := 0; i < 3; i++ {
-			if err := g.q.CreateRunLogEntry(context.Background(), row); err == nil {
+			if err := g.q.AppendRunLogEntry(context.Background(), int32(runID), entry); err == nil {
 				return
 			}
 			time.Sleep(100 * time.Millisecond)

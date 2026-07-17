@@ -13,7 +13,7 @@ import (
 //
 //	{base}/
 //	  settings.yaml
-//	  db/paperclip.db                        shared SQLite (WAL)
+//	  db/headcount1.db                        shared SQLite (WAL)
 //	  repos/{company}/{project}/             project git clones
 //	  workspace/{company}/task-{id}/         task git worktrees
 //	  uploads/{taskID}/...                   comment attachments

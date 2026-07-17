@@ -21,7 +21,7 @@ type Manager struct {
 
 func NewManager(basePath string) *Manager {
 	if basePath == "" {
-		basePath = db.PaperclipHome()
+		basePath = db.Headcount1Home()
 	}
 	return &Manager{basePath: basePath, paths: NewPaths(basePath)}
 }

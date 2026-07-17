@@ -35,11 +35,11 @@ test.describe.serial('CEO orchestration flow', () => {
     let taskId: number;
     let providerId: number;
 
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+    const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
 
     const cleanFilesystem = () => {
         for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
-            const fullPath = path.join(paperclipBase, root, 'ceo-co');
+            const fullPath = path.join(headcount1Base, root, 'ceo-co');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
     };
@@ -250,12 +250,12 @@ test.describe.serial('CEO orchestration flow', () => {
 
         // The root run's structured log records its (single) session boundary;
         // the CTO run's log records its two.
-        const rootLog = await (await request.get(`/api/runs/${rootRun.id}/log`)).json();
-        const rootEntryTypes = (rootLog.entries as any[]).map(e => e.type);
+        const rootDetails = await (await request.get(`/api/runs/${rootRun.id}`)).json();
+        const rootEntryTypes = (rootDetails.log_entries as any[]).map(e => e.type);
         expect(rootEntryTypes.filter(t => t === 'session_started').length).toBe(1);
         expect(rootEntryTypes.filter(t => t === 'session_ended').length).toBe(1);
-        const ctoLog = await (await request.get(`/api/runs/${ctoRun.id}/log`)).json();
-        const ctoEntryTypes = (ctoLog.entries as any[]).map(e => e.type);
+        const ctoDetails = await (await request.get(`/api/runs/${ctoRun.id}`)).json();
+        const ctoEntryTypes = (ctoDetails.log_entries as any[]).map(e => e.type);
         expect(ctoEntryTypes.filter(t => t === 'session_started').length).toBe(2);
         expect(ctoEntryTypes.filter(t => t === 'session_ended').length).toBe(2);
 
@@ -342,19 +342,18 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(qaTask.agent_config_name).toBe('QA');
 
         // ── Filesystem: JSONL logs grouped by main run id, one file per session ─
-        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         const runDir = path.join(basePath, 'logs', 'ceo-co', String(taskId), `run-${rootRun.id}`);
         const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();
-        const parseJsonl = (file: string) =>
-            fs.readFileSync(file, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
-        const mainTypes = parseJsonl(mainLog).map((e: any) => e.type);
-        expect(mainTypes).toContain('session_started');
-        expect(mainTypes).toContain('session_ended');
+        const mainEntries = fs.readFileSync(mainLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(mainEntries.some(e => e.type === 'session_started')).toBeTruthy();
+        expect(mainEntries.some(e => e.type === 'session_ended')).toBeTruthy();
         for (const child of [ctoRun, ...ctoChildren]) {
             const sessionLog = path.join(runDir, `session-${child.id}.jsonl`);
             expect(fs.existsSync(sessionLog)).toBeTruthy();
-            expect(parseJsonl(sessionLog).map((e: any) => e.type)).toContain('request');
+            const sessionEntries = fs.readFileSync(sessionLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+            expect(sessionEntries.some(e => e.type === 'request')).toBeTruthy();
         }
 
         // The ask_artifact reader exchange got its own log file in the run

@@ -118,7 +118,7 @@ func PythonInterpreter() string {
 }
 
 func venvDir() string {
-	return filepath.Join(db.PaperclipHome(), "venv")
+	return filepath.Join(db.Headcount1Home(), "venv")
 }
 
 func runOnce() {
@@ -130,7 +130,7 @@ func runOnce() {
 		return
 	}
 
-	tmp, err := os.MkdirTemp("", "paperclip-setup-*")
+	tmp, err := os.MkdirTemp("", "headcount1-setup-*")
 	if err != nil {
 		store(fmt.Sprintf("failed to create temp dir for setup script: %v", err))
 		return
@@ -148,7 +148,7 @@ func runOnce() {
 		store(err.Error())
 		return
 	}
-	cmd.Env = append(os.Environ(), "PAPERCLIP_VENV_DIR="+venvDir())
+	cmd.Env = append(os.Environ(), "HEADCOUNT1_VENV_DIR="+venvDir())
 
 	var out bytes.Buffer
 	tracker := &stepTracker{}

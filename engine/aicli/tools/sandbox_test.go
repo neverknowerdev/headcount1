@@ -24,9 +24,9 @@ func TestValidateCommandPaths(t *testing.T) {
 		{"absolute outside", "ls /etc/passwd", true},
 		{"absolute tmp", "cat /tmp/secret", true},
 		// Home-dir paths (the main regression cases)
-		{"tilde home", "ls ~/Code/paperclip2", true},
-		{"tilde home in compound", "echo foo && ls -la ~/Code/paperclip2 2>/dev/null", true},
-		{"cd tilde", "cd ~/Code/paperclip2 && codegraph status", true},
+		{"tilde home", "ls ~/Code/headcount1", true},
+		{"tilde home in compound", "echo foo && ls -la ~/Code/headcount1 2>/dev/null", true},
+		{"cd tilde", "cd ~/Code/headcount1 && codegraph status", true},
 		{"bare tilde", "cd ~", true},
 		// $HOME variable references
 		{"dollar HOME", "ls $HOME/secret", true},

@@ -4,25 +4,25 @@ import * as path from 'path';
 
 /**
  * Creates a temporary home directory for E2E tests to avoid
- * interfering with the user's local paperclip2 setup.
+ * interfering with the user's local headcount1 setup.
  *
  * Returns the path to the temporary home directory.
  */
 export function createE2EHome(): string {
-    const e2eHome = path.join(os.tmpdir(), `paperclip-e2e-home-${Date.now()}`);
+    const e2eHome = path.join(os.tmpdir(), `headcount1-e2e-home-${Date.now()}`);
     fs.mkdirSync(e2eHome, { recursive: true });
 
     // The server creates the base directory tree itself on startup.
-    fs.mkdirSync(path.join(e2eHome, '.paperclip2'), { recursive: true });
+    fs.mkdirSync(path.join(e2eHome, '.headcount1'), { recursive: true });
 
     return e2eHome;
 }
 
 /**
- * Returns the paperclip2 base path within the given home directory.
+ * Returns the headcount1 base path within the given home directory.
  */
-export function getPaperclipBase(homeDir: string): string {
-    return path.join(homeDir, '.paperclip2');
+export function getHeadcount1Base(homeDir: string): string {
+    return path.join(homeDir, '.headcount1');
 }
 
 /**

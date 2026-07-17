@@ -20,11 +20,11 @@ type Settings struct {
 	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
 }
 
-// Load reads settings.yaml from its bootstrap location (db.PaperclipHome()).
+// Load reads settings.yaml from its bootstrap location (db.Headcount1Home()).
 // It never fails: a missing or unreadable file yields defaults with
-// BasePath = PaperclipHome().
+// BasePath = Headcount1Home().
 func Load() Settings {
-	defaults := Settings{BasePath: db.PaperclipHome(), WorkspaceFolders: []string{}}
+	defaults := Settings{BasePath: db.Headcount1Home(), WorkspaceFolders: []string{}}
 
 	data, err := os.ReadFile(db.SettingsFilePath())
 	if err != nil {
@@ -36,7 +36,7 @@ func Load() Settings {
 		return defaults
 	}
 	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
+		settings.BasePath = db.Headcount1Home()
 	}
 	if settings.WorkspaceFolders == nil {
 		settings.WorkspaceFolders = []string{}

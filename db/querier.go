@@ -50,7 +50,7 @@ type AttachmentQuerier interface {
 
 type RunQuerier interface {
 	CreateRun(ctx context.Context, r Run) (Run, error)
-	UpdateRunStatus(ctx context.Context, id int32, status string, errorMsg string) error
+	UpdateRunLog(ctx context.Context, id int32, content string, status string) error
 	UpdateRunSession(ctx context.Context, id int32, sessionID string) error
 	GetRun(ctx context.Context, id int32) (Run, error)
 	GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error)

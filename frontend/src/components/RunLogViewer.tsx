@@ -1016,11 +1016,8 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
     if (!runId) return;
     setLoading(true);
     try {
-      const [runRes, logRes] = await Promise.all([
-        axios.get(`/api/runs/${runId}`),
-        axios.get(`/api/runs/${runId}/log`),
-      ]);
-      setChildRun({ ...runRes.data, log_entries: logRes.data?.entries || [] });
+      const res = await axios.get(`/api/runs/${runId}`);
+      setChildRun(res.data);
     } catch (e) {
       console.error('failed to load session run', e);
     } finally {

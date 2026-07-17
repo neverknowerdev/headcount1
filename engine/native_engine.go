@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -229,7 +230,7 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 	if err != nil {
 		return
 	}
-	e.q.UpdateRunStatus(ctx, runID, "failed", "Run marked as failed: previous run no longer active")
+	e.q.UpdateRunLog(ctx, runID, "Run marked as failed: previous run no longer active", "failed")
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 	e.q.UnlockTaskRun(ctx, run.TaskID)
 }
@@ -393,7 +394,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Set up the session logger. All sessions of one main run share the
 	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
-	// session writes main.log, child sessions write session-{runID}.log.
+	// session writes main.jsonl, child sessions write session-{runID}.jsonl.
 	proxyLogger, logErr := logging.NewSessionLoggerWithHub(
 		settings.BasePath,
 		company.ShortName,
@@ -478,8 +479,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
 
-	// Track whether finish_task was called so we can force it if not.
+	// Track whether finish_task was called so we can force it if not, plus
+	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
+	var finishTaskStatus, finishSummary string
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -487,6 +490,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return err
 		}
 		taskFinished = true
+		finishTaskStatus = status
+		finishSummary = finishStatus
 		prevStatus := t.Status
 		t.Status = status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
@@ -866,7 +871,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
-			e.q.UpdateRunStatus(context.Background(), run.ID, "canceled", "")
+			if proxyLogger != nil {
+				proxyLogger.LogOutcome("canceled", "canceled", finishTaskStatus, agentDisplayName, task.ID, "Run canceled by user")
+			}
+			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
 			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
@@ -877,7 +885,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// If finish_task was not called, force a follow-up turn.
+	forcedFinish := false
 	if agentErr == nil && !taskFinished {
+		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
 			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
@@ -901,7 +911,28 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		))
 	}
 
-	e.q.UpdateRunStatus(ctx, run.ID, status, runErrMsg)
+	// Close the trajectory with an outcome entry: how the loop terminated
+	// and the agent's own verdict. Written last so it's the final line of
+	// the run's JSONL log.
+	if proxyLogger != nil {
+		endReason := "no_finish"
+		summary := finishSummary
+		switch {
+		case agentErr != nil && errors.Is(agentErr, aicli.ErrMaxTurns):
+			endReason = "max_turns"
+			summary = agentErr.Error()
+		case agentErr != nil:
+			endReason = "error"
+			summary = agentErr.Error()
+		case taskFinished && forcedFinish:
+			endReason = "finish_task_forced"
+		case taskFinished:
+			endReason = "finish_task"
+		}
+		proxyLogger.LogOutcome(status, endReason, finishTaskStatus, agentDisplayName, task.ID, summary)
+	}
+
+	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
@@ -1139,7 +1170,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			onRunCreated: func(childRun db.Run) {
 				state.childRunID = childRun.ID
 				if parentLogger != nil {
-					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.log", childRun.ID))
+					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.jsonl", childRun.ID))
 				}
 				e.hub.BroadcastEvent("session_started", map[string]interface{}{
 					"parent_run_id": parentRun.ID,
@@ -1230,7 +1261,7 @@ func (e *NativeEngine) buildSubtaskReply(
 				childDetails = "\nDetails:\n" + childRun.ResultExplanation
 			}
 			if childRun.Status == "failed" {
-				childErr = childRun.ErrorMessage
+				childErr = childRun.LogContent
 			}
 		}
 		if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
@@ -1491,7 +1522,7 @@ Question: %s`, filename, content, truncNote, question)
 }
 
 // logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.log / session-N.log), so the short
+// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
 // answer in the session log can always be traced back to the full reader
 // prompt and the exact artifact content it saw.
 func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
@@ -1604,7 +1635,7 @@ func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from,
 
 // failRun marks a run as failed and broadcasts the event.
 func (e *NativeEngine) failRun(ctx context.Context, runID int32, errMsg string) {
-	e.q.UpdateRunStatus(ctx, runID, "failed", errMsg)
+	e.q.UpdateRunLog(ctx, runID, errMsg, "failed")
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 }
 

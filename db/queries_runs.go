@@ -13,14 +13,19 @@ func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
 	return r, err
 }
 
-// UpdateRunStatus sets a run's status and (for failed runs) its error
-// message. Terminal statuses also stamp ended_at.
-func (q *Queries) UpdateRunStatus(ctx context.Context, id int32, status string, errorMsg string) error {
-	updates := map[string]interface{}{"status": status, "error_message": errorMsg}
-	if status == "completed" || status == "failed" || status == "canceled" {
-		updates["ended_at"] = gorm.Expr("CURRENT_TIMESTAMP")
+func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, status string) error {
+	var r Run
+	err := q.db.WithContext(ctx).First(&r, id).Error
+	if err != nil {
+		return err
 	}
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Updates(updates).Error
+	r.LogContent = content
+	r.Status = status
+	if status == "completed" || status == "failed" {
+		now := gorm.Expr("CURRENT_TIMESTAMP")
+		return q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
+	}
+	return q.db.WithContext(ctx).Save(&r).Error
 }
 
 // SetRunRootID sets root_run_id after creation. Root runs point at themselves
@@ -68,59 +73,57 @@ func (q *Queries) UpdateRunLogFilePath(ctx context.Context, id int32, filePath s
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("log_file_path", filePath).Error
 }
 
-// CreateRunLogEntry inserts one log-entry metadata row. Seq is assigned
-// atomically inside the INSERT (MAX(seq)+1 for the run), so concurrent
-// writers—including other processes sharing the SQLite file—never collide.
-func (q *Queries) CreateRunLogEntry(ctx context.Context, e RunLogEntry) error {
-	return q.db.WithContext(ctx).Exec(`
-		INSERT INTO run_log_entries
-			(run_id, seq, type, ts, preview, tool_name, model, agent_name,
-			 status_code, prompt_tokens, input_tokens, output_tokens,
-			 child_run_id, byte_offset, byte_len, log_file_path)
-		VALUES (?, (SELECT COALESCE(MAX(seq), 0) + 1 FROM run_log_entries WHERE run_id = ?),
-			?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		e.RunID, e.RunID, e.Type, e.Ts, e.Preview, e.ToolName, e.Model, e.AgentName,
-		e.StatusCode, e.PromptTokens, e.InputTokens, e.OutputTokens,
-		e.ChildRunID, e.ByteOffset, e.ByteLen, e.LogFilePath,
-	).Error
+func (q *Queries) AppendRunLogEntry(ctx context.Context, id int32, entry map[string]interface{}) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var r Run
+		err := tx.First(&r, id).Error
+		if err != nil {
+			return err
+		}
+
+		var entries []map[string]interface{}
+		if r.LogEntries != "" {
+			json.Unmarshal([]byte(r.LogEntries), &entries)
+		}
+
+		entries = append(entries, entry)
+		entriesJSON, _ := json.Marshal(entries)
+
+		return tx.Model(&Run{}).Where("id = ?", id).Update("log_entries", string(entriesJSON)).Error
+	})
 }
 
-// ListRunLogEntries returns every log-entry metadata row of a run in order.
-func (q *Queries) ListRunLogEntries(ctx context.Context, runID int32) ([]RunLogEntry, error) {
-	var entries []RunLogEntry
-	err := q.db.WithContext(ctx).Where("run_id = ?", runID).Order("seq asc").Find(&entries).Error
-	return entries, err
-}
-
-// GetRunLogEntry returns one entry of a run by its per-run sequence number.
-func (q *Queries) GetRunLogEntry(ctx context.Context, runID, seq int32) (RunLogEntry, error) {
-	var e RunLogEntry
-	err := q.db.WithContext(ctx).Where("run_id = ? AND seq = ?", runID, seq).First(&e).Error
-	return e, err
-}
-
-// ListRecentToolCallEntries returns the last n tool_call entries of a run,
-// most recent first. Used by the proxy to pair tool results with the tool
-// calls that produced them.
-func (q *Queries) ListRecentToolCallEntries(ctx context.Context, runID int32, n int) ([]RunLogEntry, error) {
-	var entries []RunLogEntry
-	err := q.db.WithContext(ctx).
-		Where("run_id = ? AND type = ?", runID, "tool_call").
-		Order("seq desc").Limit(n).Find(&entries).Error
-	return entries, err
-}
-
-// SetFirstRequestPromptTokens injects the actual prompt_tokens from an LLM
-// response into the run's first "request" entry. The engine logs the request
+// UpdateLastRequestEntryTokens injects the actual prompt_tokens from an LLM
+// response into the engine's "request" entry. The engine logs the request
 // BEFORE any LLM call, so the exact count is only known after the LLM
-// responds. Only the metadata row is updated — the JSONL file stays
-// append-only.
-func (q *Queries) SetFirstRequestPromptTokens(ctx context.Context, runID int32, promptTokens int) error {
-	return q.db.WithContext(ctx).Exec(`
-		UPDATE run_log_entries SET prompt_tokens = ?
-		WHERE id = (SELECT id FROM run_log_entries WHERE run_id = ? AND type = 'request' ORDER BY seq ASC LIMIT 1)`,
-		promptTokens, runID,
-	).Error
+// responds. The engine's request is the FIRST "request" entry in the run
+// (subsequent requests are LLM call logs from the proxy, which already
+// have their own token counts).
+func (q *Queries) UpdateLastRequestEntryTokens(ctx context.Context, runID int32, promptTokens int) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var r Run
+		err := tx.First(&r, runID).Error
+		if err != nil {
+			return err
+		}
+		var entries []map[string]interface{}
+		if r.LogEntries == "" {
+			return nil
+		}
+		if err := json.Unmarshal([]byte(r.LogEntries), &entries); err != nil {
+			return err
+		}
+		// Find the first "request" entry — the proxy's LLM request logs come after.
+		for i := 0; i < len(entries); i++ {
+			if entries[i]["type"] == "request" {
+				entries[i]["prompt_tokens"] = promptTokens
+				delete(entries[i], "est_prompt_tokens")
+				break
+			}
+		}
+		entriesJSON, _ := json.Marshal(entries)
+		return tx.Model(&Run{}).Where("id = ?", runID).Update("log_entries", string(entriesJSON)).Error
+	})
 }
 
 func (q *Queries) TouchRunLastMessageTime(ctx context.Context, id int32) error {

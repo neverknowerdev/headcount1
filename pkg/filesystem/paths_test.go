@@ -15,7 +15,7 @@ func TestPaths(t *testing.T) {
 	}{
 		{"SettingsFile", p.SettingsFile(), "/base/settings.yaml"},
 		{"DBDir", p.DBDir(), "/base/db"},
-		{"DBFile", p.DBFile("paperclip.db"), "/base/db/paperclip.db"},
+		{"DBFile", p.DBFile("headcount1.db"), "/base/db/headcount1.db"},
 		{"SSHDir", p.SSHDir(), "/base/ssh"},
 		{"SSHKeyFile", p.SSHKeyFile(), "/base/ssh/id_rsa"},
 		{"CredentialsDir", p.CredentialsDir(), "/base/credentials"},

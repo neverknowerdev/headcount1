@@ -65,9 +65,9 @@ func main() {
 			// The SQLite file lives under BasePath so every worktree process
 			// pointed at the same home shares one database (WAL handles the
 			// cross-process concurrency).
-			fileName := "paperclip.db"
+			fileName := "headcount1.db"
 			if utils.IsE2E() {
-				fileName = "paperclip-e2e.db"
+				fileName = "headcount1-e2e.db"
 			}
 			dbDir := filepath.Join(basePath, "db")
 			if err := os.MkdirAll(dbDir, 0755); err != nil {
@@ -105,7 +105,6 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
-		&db.RunLogEntry{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -122,7 +121,7 @@ func main() {
 
 	recoverStaleRuns(database)
 
-	// Seed predefined MCP servers (paperclip2, github, google-docs) if not present.
+	// Seed predefined MCP servers (headcount1, github, google-docs) if not present.
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
@@ -188,7 +187,7 @@ func main() {
 	go srv.InitPendingCodegraphServers(context.Background())
 
 	// Check if backup is needed on startup. Backups operate on the configured
-	// BasePath (not the raw PaperclipHome) so a custom storage location is
+	// BasePath (not the raw Headcount1Home) so a custom storage location is
 	// what actually gets backed up.
 	if backup.ShouldBackupOnStartup(basePath) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
@@ -285,7 +284,7 @@ func recoverStaleRuns(database *gorm.DB) {
 	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
 	for _, run := range staleRuns {
 		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
-		_ = q.UpdateRunStatus(ctx, run.ID, "failed", "Run marked as failed: server restarted while run was in progress")
+		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
 }

@@ -3,6 +3,7 @@ package aicli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/tokens"
 )
+
+// ErrMaxTurns is returned (wrapped) when the agent loop hits its turn cap
+// without producing a final answer. Callers can errors.Is against it to
+// distinguish a runaway loop from a hard LLM/tool failure.
+var ErrMaxTurns = errors.New("agent loop exceeded max turns without a final answer")
 
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
@@ -82,9 +88,6 @@ type RunLogger interface {
 	LogRequest(model, agentName, providerName string, body []byte)
 	LogResponse(model, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
 	LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{})
-	// AppendEntry is the generic entry sink (JSONL file + metadata row +
-	// WebSocket broadcast) used for tool_call/tool_response/error entries.
-	AppendEntry(entryType, content string, extra map[string]interface{})
 	FilePath() string
 }
 
@@ -309,7 +312,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 	}
 
-	return "", fmt.Errorf("agent loop exceeded %d turns without a final answer", maxTurns)
+	return "", fmt.Errorf("%w (%d turns)", ErrMaxTurns, maxTurns)
 }
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each
@@ -419,13 +422,27 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-// appendRunLog routes a structured log entry through the session's run
-// logger (JSONL file + run_log_entries row + WebSocket broadcast).
 func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
-	if a.logger == nil {
+	if a.q == nil || a.runID <= 0 {
 		return
 	}
-	a.logger.AppendEntry(entryType, content, extra)
+	entry := map[string]interface{}{
+		"type":    entryType,
+		"content": content,
+		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	for k, v := range extra {
+		entry[k] = v
+	}
+	runID := a.runID
+	go func() {
+		for i := 0; i < 3; i++ {
+			if err := a.q.AppendRunLogEntry(context.Background(), runID, entry); err == nil {
+				break
+			}
+			time.Sleep(100 * time.Millisecond)
+		}
+	}()
 }
 
 // pruneHistory compacts the request payload without losing the in-memory

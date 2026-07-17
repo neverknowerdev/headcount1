@@ -13,7 +13,7 @@ run: build-frontend
 	go run .
 
 run-dev:
-	@if pid=$$(lsof -ti :8080); then \
+	@if pid=$$(lsof -ti TCP:8080 -sTCP:LISTEN); then \
 		echo "Port 8080 in use by PID $$pid, killing..."; \
 		kill -9 $$pid; \
 		sleep 1; \

@@ -127,15 +127,15 @@ func CreateBackupWithContext(ctx context.Context, basePath string, database *gor
 }
 
 // addDBSnapshot writes a consistent copy of the live SQLite database into
-// the archive as db-snapshot/paperclip.db using VACUUM INTO.
+// the archive as db-snapshot/headcount1.db using VACUUM INTO.
 func addDBSnapshot(ctx context.Context, tw *tar.Writer, database *gorm.DB) error {
-	tmpDir, err := os.MkdirTemp("", "paperclip-db-snapshot-*")
+	tmpDir, err := os.MkdirTemp("", "headcount1-db-snapshot-*")
 	if err != nil {
 		return err
 	}
 	defer os.RemoveAll(tmpDir)
 
-	snapshotPath := filepath.Join(tmpDir, "paperclip.db")
+	snapshotPath := filepath.Join(tmpDir, "headcount1.db")
 	if err := database.WithContext(ctx).Exec("VACUUM INTO ?", snapshotPath).Error; err != nil {
 		return err
 	}
@@ -144,7 +144,7 @@ func addDBSnapshot(ctx context.Context, tw *tar.Writer, database *gorm.DB) error
 	if err != nil {
 		return err
 	}
-	writeTarEntry(tw, "db-snapshot/paperclip.db", data)
+	writeTarEntry(tw, "db-snapshot/headcount1.db", data)
 	return nil
 }
 

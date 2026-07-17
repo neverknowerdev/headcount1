@@ -50,7 +50,6 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
-		&db.RunLogEntry{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -242,6 +241,18 @@ func TestNativeEngineProcessTask(t *testing.T) {
 		}
 	}
 	assert.Greater(t, agentComments, 0, "agent comment should have been created")
+
+	// The run's JSONL log must close with an outcome entry labelling the
+	// trajectory: finish_task was called organically with status in-review.
+	logData, err := os.ReadFile(run.LogFilePath)
+	require.NoError(t, err)
+	lines := strings.Split(strings.TrimSpace(string(logData)), "\n")
+	var outcome map[string]interface{}
+	require.NoError(t, json.Unmarshal([]byte(lines[len(lines)-1]), &outcome))
+	assert.Equal(t, "outcome", outcome["type"])
+	assert.Equal(t, "completed", outcome["status"])
+	assert.Equal(t, "finish_task", outcome["end_reason"])
+	assert.Equal(t, "in-review", outcome["task_status"])
 }
 
 // TestNativeEngineStopRun verifies that StopRun cancels an in-progress run.
@@ -454,20 +465,12 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 	// are persisted by fire-and-forget goroutines, so poll instead of reading
 	// once — the run can complete a moment before the last entry lands.
 	require.Eventually(t, func() bool {
-		entries, err := q.ListRunLogEntries(context.Background(), runID)
+		parentRun, err := q.GetRun(context.Background(), runID)
 		if err != nil {
 			return false
 		}
-		var started, ended bool
-		for _, e := range entries {
-			switch e.Type {
-			case "session_started":
-				started = true
-			case "session_ended":
-				ended = true
-			}
-		}
-		return started && ended
+		return strings.Contains(parentRun.LogEntries, "session_started") &&
+			strings.Contains(parentRun.LogEntries, "session_ended")
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
 }
 
@@ -685,9 +688,9 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 
 	// Isolated settings/data home for this test's log-file assertions below.
 	tmpHome := t.TempDir()
-	t.Setenv("E2E_PAPERCLIP_HOME", tmpHome)
-	paperclipDir := filepath.Join(tmpHome, ".paperclip2")
-	require.NoError(t, os.MkdirAll(paperclipDir, 0755))
+	t.Setenv("E2E_HEADCOUNT1_HOME", tmpHome)
+	headcount1Dir := filepath.Join(tmpHome, ".headcount1")
+	require.NoError(t, os.MkdirAll(headcount1Dir, 0755))
 
 	// Configure the "ask_artifact" Default Model to point at a model group
 	// (any provider/model; here the same provider, cheaper model) — this is
@@ -744,7 +747,7 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 
 	// The reader exchange was persisted to its own log file in the run folder.
 	var askLogs []string
-	require.NoError(t, filepath.WalkDir(paperclipDir, func(path string, d os.DirEntry, err error) error {
+	require.NoError(t, filepath.WalkDir(headcount1Dir, func(path string, d os.DirEntry, err error) error {
 		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "ask-artifact-") && strings.HasSuffix(d.Name(), ".log") {
 			askLogs = append(askLogs, path)
 		}

@@ -181,9 +181,9 @@ test.describe.serial('Backup & Restore', () => {
     test.afterAll(async () => {
         // Remove bt's filesystem footprint so later specs start clean.
         const env = loadE2EEnv();
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
-            const fullPath = path.join(paperclipBase, root, 'bt');
+            const fullPath = path.join(headcount1Base, root, 'bt');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
     });

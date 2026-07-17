@@ -33,13 +33,13 @@ test.describe.serial('Shared database across processes', () => {
     });
 
     test('SQLite lives under {basePath}/db with WAL enabled', async () => {
-        const dbFile = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'db', 'paperclip-e2e.db');
+        const dbFile = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'db', 'headcount1-e2e.db');
         expect(fs.existsSync(dbFile)).toBe(true);
         // WAL journaling leaves a -wal sidecar next to the database while
         // connections are open.
         expect(fs.existsSync(dbFile + '-wal')).toBe(true);
         // No CWD-relative database file in the repo root anymore.
-        expect(fs.existsSync(path.join(process.cwd(), '..', 'paperclip-e2e.db'))).toBe(false);
+        expect(fs.existsSync(path.join(process.cwd(), '..', 'headcount1-e2e.db'))).toBe(false);
         expect(fs.existsSync(path.join(process.cwd(), '..', 'orchestrator.db'))).toBe(false);
     });
 
@@ -53,7 +53,7 @@ test.describe.serial('Shared database across processes', () => {
         expect(companyRes.ok()).toBeTruthy();
         const company = await companyRes.json();
 
-        // Boot a second server process against the SAME paperclip home.
+        // Boot a second server process against the SAME headcount1 home.
         const projectRoot = path.resolve(__dirname, '..', '..');
         secondServer = spawn('go', ['run', '.'], {
             cwd: projectRoot,
@@ -61,7 +61,7 @@ test.describe.serial('Shared database across processes', () => {
             env: {
                 ...process.env,
                 E2E_MODE: 'true',
-                E2E_PAPERCLIP_HOME: env.E2E_PAPERCLIP_HOME,
+                E2E_HEADCOUNT1_HOME: env.E2E_HEADCOUNT1_HOME,
                 PORT: String(secondPort),
             },
             stdio: 'ignore',
@@ -129,7 +129,7 @@ test.describe.serial('Shared database across processes', () => {
         expect(uploadRes.ok()).toBeTruthy();
         const attachment = await uploadRes.json();
 
-        const uploadsDir = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'uploads', String(task.id));
+        const uploadsDir = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'uploads', String(task.id));
         expect(fs.existsSync(uploadsDir)).toBe(true);
         expect(attachment.file_path.startsWith(uploadsDir)).toBe(true);
         expect(fs.readFileSync(attachment.file_path, 'utf8')).toBe('attachment content');

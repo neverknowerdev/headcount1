@@ -332,7 +332,7 @@ type mcpAccountInput struct {
 	CredentialsJSON string `json:"credentials_json"` // base64-encoded JSON file content for credentials-file auth
 }
 
-// saveCredentialsFile writes JSON content to ~/.paperclip2/credentials/{name}.json
+// saveCredentialsFile writes JSON content to ~/.headcount1/credentials/{name}.json
 // and returns the file path to store as the auth token.
 func saveCredentialsFile(name, jsonContent string) (string, error) {
 	dir := filesystem.NewPaths(LoadSettings().BasePath).CredentialsDir()
