@@ -15,7 +15,9 @@ const env = loadE2EEnv();
  * JSON mirror + sync mechanism.
  */
 test.describe.serial('Shared database across processes', () => {
-    const secondPort = 18099;
+    // Unique per run: a stale second server from a previous run must never
+    // be mistaken for ours.
+    const secondPort = 18000 + (process.pid % 1000);
     let secondServer: ChildProcess | null = null;
 
     test.beforeAll(async ({ request }) => {
@@ -23,7 +25,11 @@ test.describe.serial('Shared database across processes', () => {
     });
 
     test.afterAll(async () => {
-        if (secondServer) secondServer.kill('SIGKILL');
+        // `go run` wraps the compiled binary in a child process; kill the
+        // whole process group so the actual server dies too.
+        if (secondServer?.pid) {
+            try { process.kill(-secondServer.pid, 'SIGKILL'); } catch { /* already gone */ }
+        }
     });
 
     test('SQLite lives under {basePath}/db with WAL enabled', async () => {
@@ -51,6 +57,7 @@ test.describe.serial('Shared database across processes', () => {
         const projectRoot = path.resolve(__dirname, '..', '..');
         secondServer = spawn('go', ['run', '.'], {
             cwd: projectRoot,
+            detached: true, // own process group, so afterAll can kill go run's child too
             env: {
                 ...process.env,
                 E2E_MODE: 'true',
