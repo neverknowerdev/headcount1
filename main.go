@@ -81,6 +81,9 @@ func main() {
 	err = database.AutoMigrate(
 		&db.User{},
 		&db.UserKey{},
+		&db.Team{},
+		&db.TeamMember{},
+		&db.TeamInvite{},
 		&db.Session{},
 		&db.PasswordResetToken{},
 		&db.Company{},
@@ -132,6 +135,9 @@ func main() {
 		log.Printf("Warning: failed to list users for builtin seeding: %v", err)
 	} else {
 		for _, u := range users {
+			if err := db.New(database).EnsureTeamForUser(context.Background(), u); err != nil {
+				log.Printf("Warning: failed to ensure team for %s: %v", u.Email, err)
+			}
 			if err := db.New(database).EnsureBuiltinLLMProvidersForUser(context.Background(), u.ID); err != nil {
 				log.Printf("Warning: failed to seed built-in LLM providers for %s: %v", u.Email, err)
 			}
@@ -179,7 +185,7 @@ func main() {
 	endpoints.SetMailer(mailer.FromEnv())
 
 	hub := eventhub.NewHub()
-	hub.SetCompanyOwnerResolver(newCompanyOwnerResolver(database))
+	hub.SetCompanyRecipientsResolver(newCompanyRecipientsResolver(database))
 
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
@@ -307,12 +313,13 @@ func main() {
 	log.Fatal(http.ListenAndServe(":"+port, r))
 }
 
-// newCompanyOwnerResolver returns a TTL-cached company → owning-user lookup
-// for tenant-scoped WebSocket event delivery. Ownership changes only on
-// company creation, so a short TTL is plenty.
-func newCompanyOwnerResolver(database *gorm.DB) func(companyID int32) (int32, bool) {
+// newCompanyRecipientsResolver returns a TTL-cached company → member-users
+// lookup for tenant-scoped WebSocket event delivery: the owning team's
+// members (or, for team-less rows, the creating user). A short TTL keeps
+// newly invited members receiving events promptly.
+func newCompanyRecipientsResolver(database *gorm.DB) func(companyID int32) ([]int32, bool) {
 	type entry struct {
-		owner int32
+		users []int32
 		ok    bool
 		at    time.Time
 	}
@@ -320,22 +327,29 @@ func newCompanyOwnerResolver(database *gorm.DB) func(companyID int32) (int32, bo
 	cache := map[int32]entry{}
 	const ttl = 30 * time.Second
 	q := db.New(database)
-	return func(companyID int32) (int32, bool) {
+	return func(companyID int32) ([]int32, bool) {
 		mu.Lock()
 		e, hit := cache[companyID]
 		mu.Unlock()
 		if hit && time.Since(e.at) < ttl {
-			return e.owner, e.ok
+			return e.users, e.ok
 		}
-		company, err := q.GetCompany(context.Background(), companyID)
-		owner, ok := int32(0), false
-		if err == nil && company.UserID != nil {
-			owner, ok = *company.UserID, true
+		var users []int32
+		ok := false
+		if company, err := q.GetCompany(context.Background(), companyID); err == nil {
+			switch {
+			case company.TeamID != nil:
+				if ids, err := q.ListTeamUserIDs(context.Background(), *company.TeamID); err == nil && len(ids) > 0 {
+					users, ok = ids, true
+				}
+			case company.UserID != nil:
+				users, ok = []int32{*company.UserID}, true
+			}
 		}
 		mu.Lock()
-		cache[companyID] = entry{owner: owner, ok: ok, at: time.Now()}
+		cache[companyID] = entry{users: users, ok: ok, at: time.Now()}
 		mu.Unlock()
-		return owner, ok
+		return users, ok
 	}
 }
 

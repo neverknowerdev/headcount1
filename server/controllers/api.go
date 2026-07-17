@@ -41,17 +41,25 @@ func (api *API) currentUserID(r *http.Request) int32 {
 // so other tenants' IDs are indistinguishable from nonexistent ones.
 var errNotOwned = errors.New("not found")
 
-// authorizeCompany returns the company iff the authenticated user owns it.
+// authorizeCompany returns the company iff the authenticated user may work
+// with it: team-scoped companies are open to every member of the owning
+// team; rows without a team fall back to the creator-only check.
 func (api *API) authorizeCompany(r *http.Request, companyID int32) (db.Company, error) {
 	company, err := api.q.GetCompany(r.Context(), companyID)
 	if err != nil {
 		return db.Company{}, err
 	}
 	uid := api.currentUserID(r)
-	if company.UserID == nil || *company.UserID != uid {
+	if company.TeamID != nil {
+		if api.q.IsTeamMember(r.Context(), *company.TeamID, uid) {
+			return company, nil
+		}
 		return db.Company{}, errNotOwned
 	}
-	return company, nil
+	if company.UserID != nil && *company.UserID == uid {
+		return company, nil
+	}
+	return db.Company{}, errNotOwned
 }
 
 // authorizeTask returns the task iff its company is owned by the ctx user.

@@ -103,6 +103,10 @@ func (s *Server) MountPublic(r chi.Router) {
 		r.Post("/reset-confirm", api.ResetConfirm)
 	})
 
+	// Public: lets the register page show which team an invite joins (the
+	// token itself is the credential).
+	r.Get("/invite-info", api.InviteInfo)
+
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
 		pending, ok, errMsg, warning := setup.Status()
 		if pending {
@@ -133,6 +137,13 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/", api.CreateCompany)
 		r.Put("/{id}", api.UpdateCompany)
 		r.Delete("/{id}", api.DeleteCompany)
+	})
+
+	r.Route("/team", func(r chi.Router) {
+		r.Get("/", api.GetTeam)
+		r.Put("/", api.UpdateTeam)
+		r.Post("/invites", api.CreateTeamInvite)
+		r.Delete("/invites/{id}", api.DeleteTeamInvite)
 	})
 
 	r.Get("/settings", api.GetSettings)

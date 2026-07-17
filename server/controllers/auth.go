@@ -40,6 +40,9 @@ func (api *API) Register(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email    string `json:"email"`
 		Password string `json:"password"`
+		// InviteToken joins the new account to the inviting team (as a
+		// member) instead of creating its own team.
+		InviteToken string `json:"invite_token"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -55,6 +58,18 @@ func (api *API) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Validate the invite before creating anything, so a bad link fails the
+	// whole registration instead of leaving a team-less account behind.
+	var invite *db.TeamInvite
+	if req.InviteToken != "" {
+		inv, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken))
+		if err != nil {
+			api.respondError(w, http.StatusBadRequest, "invalid or expired invite link")
+			return
+		}
+		invite = &inv
+	}
+
 	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -66,6 +81,17 @@ func (api *API) Register(w http.ResponseWriter, r *http.Request) {
 		// constraint failure as "already registered".
 		api.respondError(w, http.StatusConflict, "an account with this email already exists")
 		return
+	}
+	if invite != nil {
+		if err := api.q.AcceptTeamInvite(r.Context(), *invite, user.ID); err != nil {
+			log.Printf("auth: accepting invite for %s failed: %v — creating own team", user.Email, err)
+			invite = nil
+		}
+	}
+	if invite == nil {
+		if err := api.q.EnsureTeamForUser(r.Context(), user); err != nil {
+			log.Printf("auth: creating team for %s failed: %v", user.Email, err)
+		}
 	}
 	if err := api.onUserCreated(r.Context(), user, req.Password); err != nil {
 		log.Printf("auth: post-registration setup for %s failed: %v", user.Email, err)
@@ -366,6 +392,9 @@ func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 	user, err = api.q.CreateUser(ctx, e2eUserEmail, string(hash))
 	if err != nil {
 		return db.User{}, err
+	}
+	if err := api.q.EnsureTeamForUser(ctx, user); err != nil {
+		log.Printf("auth: e2e fixture team setup failed: %v", err)
 	}
 	if err := api.onUserCreated(ctx, user, "e2e-password"); err != nil {
 		log.Printf("auth: e2e fixture user setup failed: %v", err)

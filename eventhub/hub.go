@@ -50,9 +50,10 @@ type Hub struct {
 	clients     map[*Client]struct{}
 	subscribers map[string]Subscriber
 
-	// companyOwner resolves a company to its owning user for per-tenant
-	// event delivery (installed from main.go; nil in local/legacy mode).
-	companyOwner func(companyID int32) (int32, bool)
+	// companyRecipients resolves a company to the users allowed to receive
+	// its events — the owning team's members (installed from main.go; nil in
+	// local/legacy mode).
+	companyRecipients func(companyID int32) ([]int32, bool)
 
 	done      chan struct{}
 	closeOnce sync.Once
@@ -152,36 +153,36 @@ func (h *Hub) Serve(conn *websocket.Conn, userID int32) *Client {
 	return c
 }
 
-// SetCompanyOwnerResolver installs the company → owning-user lookup used by
-// BroadcastEventForCompany. Installed once from main.go before the server
-// starts accepting connections.
-func (h *Hub) SetCompanyOwnerResolver(fn func(companyID int32) (int32, bool)) {
+// SetCompanyRecipientsResolver installs the company → member-users lookup
+// used by BroadcastEventForCompany. Installed once from main.go before the
+// server starts accepting connections.
+func (h *Hub) SetCompanyRecipientsResolver(fn func(companyID int32) ([]int32, bool)) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
-	h.companyOwner = fn
+	h.companyRecipients = fn
 }
 
 // BroadcastEventForCompany delivers the event to in-process subscribers
 // (server-internal — they always see everything) and to the WebSocket clients
-// of the company's owner only. With no resolver installed (local/legacy mode)
-// it behaves like BroadcastEvent; with a resolver installed but an unknown
-// owner it fails closed — no WS client receives the event.
+// of the owning team's members only. With no resolver installed (local/legacy
+// mode) it behaves like BroadcastEvent; with a resolver installed but an
+// unknown company it fails closed — no WS client receives the event.
 func (h *Hub) BroadcastEventForCompany(companyID int32, eventType string, payload interface{}) {
 	h.mu.RLock()
-	resolve := h.companyOwner
+	resolve := h.companyRecipients
 	h.mu.RUnlock()
 
 	if resolve == nil {
 		h.BroadcastEvent(eventType, payload)
 		return
 	}
-	owner, ok := resolve(companyID)
+	recipients, ok := resolve(companyID)
 	if !ok {
-		owner = -1 // matches no client
+		recipients = nil // matches no client
 	}
 	h.notifySubscribers(eventType, payload)
 	if data, err := marshalEvent(eventType, payload); err == nil {
-		h.broadcastRawTo(owner, data)
+		h.broadcastRawToUsers(recipients, data)
 	}
 }
 
@@ -245,19 +246,41 @@ func marshalEvent(eventType string, payload interface{}) ([]byte, error) {
 }
 
 func (h *Hub) broadcastRaw(data []byte) {
-	h.broadcastRawTo(0, data)
+	h.sendAll(data)
 }
 
-// broadcastRawTo sends to the given user's clients; userID 0 sends to all.
-func (h *Hub) broadcastRawTo(userID int32, data []byte) {
+// broadcastRawToUsers sends to the clients of the given users only.
+func (h *Hub) broadcastRawToUsers(userIDs []int32, data []byte) {
+	if len(userIDs) == 0 {
+		return
+	}
+	allowed := make(map[int32]struct{}, len(userIDs))
+	for _, id := range userIDs {
+		allowed[id] = struct{}{}
+	}
 	h.mu.RLock()
 	clients := make([]*Client, 0, len(h.clients))
 	for c := range h.clients {
-		if userID == 0 || c.userID == userID {
+		if _, ok := allowed[c.userID]; ok {
 			clients = append(clients, c)
 		}
 	}
 	h.mu.RUnlock()
+	h.deliver(clients, data)
+}
+
+// sendAll delivers to every connected client (heartbeats, legacy mode).
+func (h *Hub) sendAll(data []byte) {
+	h.mu.RLock()
+	clients := make([]*Client, 0, len(h.clients))
+	for c := range h.clients {
+		clients = append(clients, c)
+	}
+	h.mu.RUnlock()
+	h.deliver(clients, data)
+}
+
+func (h *Hub) deliver(clients []*Client, data []byte) {
 
 	for _, c := range clients {
 		select {

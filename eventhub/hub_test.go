@@ -404,11 +404,11 @@ func newTestServerForUser(t *testing.T, hub *Hub, userID int32) *httptest.Server
 func TestBroadcastEventForCompanyDeliversOnlyToOwner(t *testing.T) {
 	hub := NewHub()
 	defer hub.Close()
-	hub.SetCompanyOwnerResolver(func(companyID int32) (int32, bool) {
+	hub.SetCompanyRecipientsResolver(func(companyID int32) ([]int32, bool) {
 		if companyID == 10 {
-			return 1, true
+			return []int32{1}, true
 		}
-		return 0, false
+		return nil, false
 	})
 
 	srvOwner := newTestServerForUser(t, hub, 1)

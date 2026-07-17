@@ -74,6 +74,20 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
+      <div className="border-t px-2 py-2">
+        <Link
+          to="/team"
+          className={`${
+            location.pathname === '/team'
+              ? 'bg-indigo-50 text-indigo-600'
+              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+          } group flex items-center px-2 py-2 text-sm font-medium rounded-md`}
+        >
+          <Users className={`${location.pathname === '/team' ? 'text-indigo-600' : 'text-gray-400 group-hover:text-gray-500'} mr-3 h-5 w-5 flex-shrink-0`} />
+          Team
+        </Link>
+      </div>
+
       {user && (
         <div className="border-t px-4 py-3">
           <div className="flex items-center justify-between gap-2">

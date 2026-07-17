@@ -18,6 +18,7 @@ import { Backup } from './pages/Backup';
 import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 import { TaskPage } from './pages/TaskPage';
+import { TeamPage } from './pages/TeamPage';
 
 function App() {
   return (
@@ -27,6 +28,7 @@ function App() {
           <Layout>
           <Routes>
             <Route path="/add-company" element={<AddCompany />} />
+            <Route path="/team" element={<TeamPage />} />
             <Route path="/companies/:shortName" element={<Dashboard />} />
             <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
             <Route path="/companies/:shortName/tasks/:taskId" element={<TaskPage />} />

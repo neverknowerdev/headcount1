@@ -48,7 +48,10 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		Name:      req.Name,
 		ShortName: req.ShortName,
 		Color:     req.Color,
-		UserID:    &uid,
+		UserID:    &uid, // creator (engine resolves their Default Models)
+	}
+	if membership, err := api.requireMembership(r); err == nil {
+		comp.TeamID = &membership.TeamID
 	}
 
 	if err := api.db.Create(&comp).Error; err != nil {

@@ -56,13 +56,66 @@ type UserKey struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// Team roles. Designed for growth (admin tiers, per-role permissions) but
+// deliberately flat for now: an owner and a member can do exactly the same
+// things, with a single exception — only the owner can invite (and revoke
+// invites for) new members. Keep new permission checks role-based so future
+// roles slot in without schema changes.
+const (
+	TeamRoleOwner  = "owner"
+	TeamRoleMember = "member"
+)
+
+// Team is the top of the tenancy hierarchy: companies (and everything under
+// them) belong to a team, and every member of the team can work with them.
+// Each user gets a team at registration (as its owner) unless they signed up
+// through an invite, in which case they join the inviting team instead.
+type Team struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	Name      string    `json:"name" gorm:"not null"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TeamMember links a user to a team with a role. The schema allows multiple
+// memberships per user; current product behavior keeps it at exactly one.
+type TeamMember struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	TeamID    int32     `json:"team_id" gorm:"not null;uniqueIndex:idx_team_member"`
+	Team      Team      `json:"-" gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE;"`
+	UserID    int32     `json:"user_id" gorm:"not null;uniqueIndex:idx_team_member"`
+	User      User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	Role      string    `json:"role" gorm:"not null;default:'member'"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TeamInvite is an owner-issued, emailed invitation. Only the SHA-256 of the
+// token is stored (same discipline as sessions and reset tokens); accepting
+// happens by registering with the raw token, which joins the new account to
+// the team instead of creating a fresh one.
+type TeamInvite struct {
+	ID         int32      `json:"id" gorm:"primaryKey"`
+	TeamID     int32      `json:"team_id" gorm:"not null;index"`
+	Team       Team       `json:"-" gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE;"`
+	Email      string     `json:"email" gorm:"not null"` // normalized; informational + pre-fill
+	Role       string     `json:"role" gorm:"not null;default:'member'"`
+	TokenHash  string     `json:"-" gorm:"uniqueIndex;not null"`
+	InvitedBy  int32      `json:"invited_by" gorm:"not null"`
+	ExpiresAt  time.Time  `json:"expires_at" gorm:"not null"`
+	AcceptedAt *time.Time `json:"accepted_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
 type Company struct {
 	ID        int32  `json:"id" gorm:"primaryKey"`
 	Name      string `json:"name" gorm:"not null"`
 	ShortName string `json:"short_name" gorm:"not null"`
 	Color     string `json:"color"`
-	// UserID is the owning user (owner-only tenancy): everything scoped to a
-	// company — projects, agents, tasks, runs — is visible only to its owner.
+	// TeamID is the owning team: everything scoped to a company — projects,
+	// agents, tasks, runs — is visible to every member of that team. UserID
+	// records the member who created the company (and whose per-user Default
+	// Models the engine resolves for its background LLM calls).
+	TeamID    *int32    `json:"team_id" gorm:"index"`
 	UserID    *int32    `json:"user_id" gorm:"index"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`

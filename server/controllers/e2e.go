@@ -18,6 +18,9 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tables := []string{
+		"team_invites",
+		"team_members",
+		"teams",
 		"sessions",
 		"password_reset_tokens",
 		"users",
