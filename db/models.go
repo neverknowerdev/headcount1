@@ -286,7 +286,7 @@ type MCPAccount struct {
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
-// Still used for built-in (paperclip2) assignments.
+// Still used for built-in (headcount1) assignments.
 type AgentMCPServer struct {
 	AgentID     int32 `json:"agent_id" gorm:"primaryKey"`
 	MCPServerID int32 `json:"mcp_server_id" gorm:"primaryKey"`

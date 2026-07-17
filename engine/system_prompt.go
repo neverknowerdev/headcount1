@@ -31,16 +31,16 @@ type Settings struct {
 }
 
 // loadSettings reads the app settings. The canonical file is the one the
-// settings API writes (PaperclipHome()/settings.yaml); the legacy
-// ~/.paperclip2_settings.yaml location is kept as a fallback. The fallback is
-// skipped when E2E_PAPERCLIP_HOME is set: that variable requests an isolated
+// settings API writes (Headcount1Home()/settings.yaml); the legacy
+// ~/.headcount1_settings.yaml location is kept as a fallback. The fallback is
+// skipped when E2E_HEADCOUNT1_HOME is set: that variable requests an isolated
 // data home (E2E runs and engine tests), and a developer's real settings file
 // must not leak the engine's logs and workspaces out of it.
 func loadSettings() Settings {
 	paths := []string{db.SettingsFilePath()}
-	if os.Getenv("E2E_PAPERCLIP_HOME") == "" {
+	if os.Getenv("E2E_HEADCOUNT1_HOME") == "" {
 		if homeDir, err := os.UserHomeDir(); err == nil {
-			paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
+			paths = append(paths, filepath.Join(homeDir, ".headcount1_settings.yaml"))
 		}
 	}
 	for _, settingsPath := range paths {
@@ -53,11 +53,11 @@ func loadSettings() Settings {
 			continue
 		}
 		if settings.BasePath == "" {
-			settings.BasePath = db.PaperclipHome()
+			settings.BasePath = db.Headcount1Home()
 		}
 		return settings
 	}
-	return Settings{BasePath: db.PaperclipHome()}
+	return Settings{BasePath: db.Headcount1Home()}
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.

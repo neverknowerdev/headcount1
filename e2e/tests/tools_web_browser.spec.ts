@@ -665,7 +665,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 tool_call: {
                     id: 'bu7',
                     name: 'browser_use',
-                    arguments: { action: 'navigate', url: 'http://this-host-does-not-exist-paperclip.internal/page' },
+                    arguments: { action: 'navigate', url: 'http://this-host-does-not-exist-headcount1.internal/page' },
                 },
             },
             {

@@ -308,9 +308,9 @@ export const AgentDetails: React.FC = () => {
                                 <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Tools & MCPs</Link>
                             </div>
 
-                            {/* Paperclip2 — always on */}
+                            {/* Headcount1 — always on */}
                             {(() => {
-                                const p2 = mcpServers.find((s: any) => s.name === 'paperclip2');
+                                const p2 = mcpServers.find((s: any) => s.name === 'headcount1');
                                 if (!p2) return null;
                                 return (
                                     <div className="flex items-center gap-3 p-3 bg-indigo-50 rounded-lg border border-indigo-100">
@@ -326,8 +326,8 @@ export const AgentDetails: React.FC = () => {
 
                             {/* Optional connected MCPs — grouped by server, per-account checkboxes + per-tool filters */}
                             {(() => {
-                                const optional = mcpServers.filter((s: any) => s.name !== 'paperclip2' && !s.builtin && !s.project_id);
-                                const builtin = mcpServers.filter((s: any) => s.name !== 'paperclip2' && s.builtin && !s.project_id);
+                                const optional = mcpServers.filter((s: any) => s.name !== 'headcount1' && !s.builtin && !s.project_id);
+                                const builtin = mcpServers.filter((s: any) => s.name !== 'headcount1' && s.builtin && !s.project_id);
                                 const allExternal = [...builtin, ...optional];
                                 if (allExternal.length === 0) return (
                                     <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>

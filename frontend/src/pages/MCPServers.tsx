@@ -45,7 +45,7 @@ interface MCPTool {
     inputSchema?: any;
 }
 
-const PAPERCLIP2_TOOLS: MCPTool[] = [
+const HEADCOUNT1_TOOLS: MCPTool[] = [
     { name: 'update_task_status', description: 'Update the status of the current task (to-do, in-progress, in-review, done, blocked, cancelled).' },
     { name: 'create_subtask', description: 'Create a new subtask and assign it to a sub-agent for execution.' },
 ];
@@ -59,7 +59,7 @@ const transportIcon = (t: string) => {
 const serverIcon = (name: string) => {
     if (name === 'github') return <GitBranch size={20} />;
     if (name === 'google-docs') return <FileText size={20} />;
-    if (name === 'paperclip2') return <Cpu size={20} />;
+    if (name === 'headcount1') return <Cpu size={20} />;
     if (name === 'postiz') return <Share2 size={20} />;
     if (name === 'brave-search') return <SearchIcon size={20} />;
     return <Globe size={20} />;
@@ -135,8 +135,8 @@ export const MCPServers: React.FC = () => {
             setServers(data);
             const cached: Record<number, MCPTool[]> = {};
             for (const s of data) {
-                if (s.name === 'paperclip2') {
-                    cached[s.id] = PAPERCLIP2_TOOLS;
+                if (s.name === 'headcount1') {
+                    cached[s.id] = HEADCOUNT1_TOOLS;
                 } else if (s.tools_cache) {
                     try { cached[s.id] = JSON.parse(s.tools_cache); } catch {}
                 }
@@ -332,9 +332,9 @@ export const MCPServers: React.FC = () => {
         }, 2000);
     }, [fetchServers, handleDiscoverServer]); // eslint-disable-line react-hooks/exhaustive-deps
 
-    // Split servers: paperclip2 first, then other predefined, then custom
-    const paperclip2 = servers.find(s => s.name === 'paperclip2');
-    const predefined = servers.filter(s => s.builtin && s.name !== 'paperclip2');
+    // Split servers: headcount1 first, then other predefined, then custom
+    const headcount1 = servers.find(s => s.name === 'headcount1');
+    const predefined = servers.filter(s => s.builtin && s.name !== 'headcount1');
     const custom = servers.filter(s => !s.builtin);
 
     return (
@@ -352,25 +352,25 @@ export const MCPServers: React.FC = () => {
                 </button>
             </div>
 
-            {/* Built-in paperclip2 — always on */}
-            {paperclip2 && (
+            {/* Built-in headcount1 — always on */}
+            {headcount1 && (
                 <section>
                     <h2 className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">Built-in</h2>
                     <div className="bg-white rounded-lg border border-indigo-100 shadow-sm p-5">
                         <div className="flex items-start gap-3">
                             <div className="p-2 bg-indigo-50 rounded-lg text-indigo-600 flex-shrink-0">
-                                {serverIcon(paperclip2.name)}
+                                {serverIcon(headcount1.name)}
                             </div>
                             <div className="flex-1 min-w-0">
                                 <div className="flex items-center gap-2 mb-1">
-                                    <h3 className="text-base font-semibold text-gray-900">{paperclip2.display_name}</h3>
+                                    <h3 className="text-base font-semibold text-gray-900">{headcount1.display_name}</h3>
                                     <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-indigo-100 text-indigo-700">
                                         <Shield size={10} className="mr-1" /> Always On
                                     </span>
                                 </div>
-                                <p className="text-sm text-gray-600 mb-3">{paperclip2.description}</p>
+                                <p className="text-sm text-gray-600 mb-3">{headcount1.description}</p>
                                 <div className="grid grid-cols-1 sm:grid-cols-2 gap-1.5">
-                                    {PAPERCLIP2_TOOLS.map(tool => (
+                                    {HEADCOUNT1_TOOLS.map(tool => (
                                         <div key={tool.name} className="bg-indigo-50 rounded p-2">
                                             <p className="text-xs font-mono font-semibold text-indigo-800">{tool.name}</p>
                                             <p className="text-xs text-gray-500 mt-0.5">{tool.description}</p>
