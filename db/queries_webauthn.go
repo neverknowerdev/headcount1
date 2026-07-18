@@ -3,6 +3,8 @@ package db
 import (
 	"context"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // WebAuthnChallengeLifetime bounds an in-flight ceremony (begin → finish).
@@ -81,4 +83,25 @@ func (q *Queries) ConsumeWebAuthnSession(ctx context.Context, id int32, purpose 
 
 func (q *Queries) DeleteExpiredWebAuthnSessions(ctx context.Context) error {
 	return q.db.WithContext(ctx).Where("expires_at <= ?", time.Now()).Delete(&WebAuthnSession{}).Error
+}
+
+// CryptoShredUser implements account recovery: it deletes the user's passkeys
+// (making the DEK unrecoverable) and nulls every secret column they own, so
+// the now-undecryptable "enc:u1:" ciphertext is cleared rather than left as
+// dead weight. The user row, team memberships, companies, and tasks are all
+// preserved — the account survives; only the stored secrets are wiped and must
+// be re-entered after enrolling a fresh passkey.
+func (q *Queries) CryptoShredUser(ctx context.Context, userID int32) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", userID).Delete(&WebAuthnCredential{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&LLMProvider{}).Where("user_id = ?", userID).Update("api_key", "").Error; err != nil {
+			return err
+		}
+		if err := tx.Model(&MCPAccount{}).Where("user_id = ?", userID).Update("auth_token", "").Error; err != nil {
+			return err
+		}
+		return nil
+	})
 }
