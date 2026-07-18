@@ -61,6 +61,10 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 		defer cleanup()
 	}
 	cmd.Dir = t.workspacePath
+	// Never hand the agent the server's secrets via the environment. The
+	// Landlock re-exec child inherits this scrubbed set, so `env` /
+	// /proc/self/environ can't leak the boot key, Vault token, etc.
+	cmd.Env = scrubbedEnv()
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	if len(result) > 50_000 {

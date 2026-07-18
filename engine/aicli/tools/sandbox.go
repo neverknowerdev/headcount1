@@ -10,6 +10,41 @@ import (
 	"syscall"
 )
 
+// scrubbedEnv returns the process environment with the server's secrets
+// removed, for handing to the agent's shell. The agent keeps a normal working
+// environment (PATH, tool caches, project vars) but never sees the master/boot
+// key, Vault/cloud credentials, the database URL, or SMTP secrets — so `env`
+// and /proc/self/environ can't leak them.
+func scrubbedEnv() []string {
+	all := os.Environ()
+	out := make([]string, 0, len(all))
+	for _, kv := range all {
+		eq := strings.IndexByte(kv, '=')
+		if eq <= 0 {
+			continue
+		}
+		if isServerSecretEnv(kv[:eq]) {
+			continue
+		}
+		out = append(out, kv)
+	}
+	return out
+}
+
+func isServerSecretEnv(key string) bool {
+	up := strings.ToUpper(key)
+	for _, p := range []string{"HEADCOUNT1_", "VAULT_", "AWS_", "AZURE_", "GCP_", "GOOGLE_"} {
+		if strings.HasPrefix(up, p) {
+			return true
+		}
+	}
+	switch up {
+	case "DATABASE_URL", "SMTP_PASSWORD", "SMTP_USERNAME", "SMTP_HOST":
+		return true
+	}
+	return false
+}
+
 // resolvePath resolves path relative to workspacePath and verifies the result
 // stays inside the workspace. Returns an error if the path escapes.
 func resolvePath(workspacePath, path string) (string, error) {
