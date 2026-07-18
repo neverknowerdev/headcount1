@@ -15,6 +15,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 
 	"github.com/go-chi/chi/v5"
@@ -221,6 +222,12 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 	}
 	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
+	}
+	// A locked owner (logged out, or cold after a crash) can't decrypt their
+	// provider key — surface that clearly instead of sending an empty Bearer
+	// and getting an opaque upstream 401.
+	if provider.UserID != nil && !secrets.IsUnlocked(*provider.UserID) {
+		return nil, fmt.Errorf("vault locked: this provider's owner is logged out — re-authenticate to run")
 	}
 	req.Header.Set("Authorization", "Bearer "+provider.ApiKey)
 	return providerHTTPClient.Do(req)
