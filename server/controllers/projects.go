@@ -14,8 +14,6 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
@@ -152,26 +150,10 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	project, err := api.authorizeProject(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-	api.respondJSON(w, http.StatusOK, project)
+	api.respondJSON(w, http.StatusOK, api.projectFromCtx(r)) // loaded + authorized by LoadProject
 }
 
 func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name            string `json:"name"`
 		Description     string `json:"description"`
@@ -183,11 +165,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := api.authorizeProject(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
 
 	if req.Name != "" {
 		project.Name = req.Name
@@ -250,29 +228,21 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	project, err = api.q.UpdateProject(r.Context(), project)
+	saved, err := api.q.UpdateProject(r.Context(), project)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.logActivity(project.CompanyID, "project_updated", int32(project.ID), "project", "")
-	api.respondJSON(w, http.StatusOK, project)
+	api.logActivity(saved.CompanyID, "project_updated", int32(saved.ID), "project", "")
+	api.respondJSON(w, http.StatusOK, saved)
 }
 
 // GetProjectCodegraph returns the codegraph MCP server record for a project,
 // including its init_status so the frontend can poll for readiness.
 func (api *API) GetProjectCodegraph(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if _, err := api.authorizeProject(r, int32(id)); err != nil {
-		api.respondError(w, http.StatusNotFound, "project not found")
-		return
-	}
-	srv, err := api.q.GetCodegraphServerForProject(r.Context(), int32(id))
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
+	srv, err := api.q.GetCodegraphServerForProject(r.Context(), project.ID)
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "no codegraph server for this project")
 		return

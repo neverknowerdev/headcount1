@@ -13,8 +13,6 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -163,25 +161,10 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	task, err := api.authorizeTask(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "task not found")
-		return
-	}
-	api.respondJSON(w, http.StatusOK, task)
+	api.respondJSON(w, http.StatusOK, api.taskFromCtx(r)) // loaded + authorized by LoadTask
 }
 
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
 	var req struct {
 		ProjectID       *int32  `json:"project_id"`
 		AgentID         *int32  `json:"agent_id"`
@@ -201,11 +184,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := api.authorizeTask(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Task not found")
-		return
-	}
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 
 	statusChanged := false
 	prevStatus := task.Status
@@ -251,11 +230,12 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.DueDate = &t
 	}
 
-	task, err = api.q.UpdateTask(r.Context(), task)
+	updatedTask, err := api.q.UpdateTask(r.Context(), task)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	task = updatedTask
 	api.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", task)
 
 	if statusChanged {
@@ -284,24 +264,16 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	// take minutes. The agent updates task status via tool calls, and tests
 	// poll for status changes.
 	if statusChanged {
-		go api.engine.ProcessTask(context.Background(), int32(id))
+		go api.engine.ProcessTask(context.Background(), task.ID)
 	}
 
 	api.respondJSON(w, http.StatusOK, task)
 }
 
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if _, err := api.authorizeTask(r, int32(id)); err != nil {
-		api.respondError(w, http.StatusNotFound, "task not found")
-		return
-	}
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	var runs []db.Run
-	if err := api.db.Where("task_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

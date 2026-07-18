@@ -41,11 +41,17 @@ func setupMCPRouter(t *testing.T, database *gorm.DB) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/mcp-servers", api.ListMCPServers)
 	r.Post("/mcp-servers", api.CreateMCPServer)
-	r.Get("/mcp-servers/{id}", api.GetMCPServer)
-	r.Put("/mcp-servers/{id}", api.UpdateMCPServer)
-	r.Delete("/mcp-servers/{id}", api.DeleteMCPServer)
-	r.Get("/agents/{id}/mcp-servers", api.GetAgentMCPServers)
-	r.Put("/agents/{id}/mcp-servers", api.SetAgentMCPServers)
+	r.Route("/mcp-servers/{id}", func(r chi.Router) {
+		r.Use(api.LoadMCPServer)
+		r.Get("/", api.GetMCPServer)
+		r.Put("/", api.UpdateMCPServer)
+		r.Delete("/", api.DeleteMCPServer)
+	})
+	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
+		r.Use(api.LoadAgent)
+		r.Get("/", api.GetAgentMCPServers)
+		r.Put("/", api.SetAgentMCPServers)
+	})
 	return withTestUser(t, database, r)
 }
 

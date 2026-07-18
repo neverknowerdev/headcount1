@@ -233,26 +233,10 @@ func (api *API) LoadMCPAccount(next http.Handler) http.Handler {
 	})
 }
 
-// requireCompanyAccessFromQuery gates list endpoints that scope by a
-// ?company_id= query param: it verifies membership before the handler runs.
-// When company_id is absent it lets the handler decide (some lists are
-// user-scoped and read no company).
-func (api *API) RequireCompanyAccessFromQuery(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if v := r.URL.Query().Get("company_id"); v != "" {
-			id, err := strconv.Atoi(v)
-			if err != nil {
-				api.respondError(w, http.StatusBadRequest, "invalid company_id")
-				return
-			}
-			if _, err := api.authorizeCompany(r, int32(id)); err != nil {
-				api.respondError(w, http.StatusNotFound, "company not found")
-				return
-			}
-		}
-		next.ServeHTTP(w, r)
-	})
-}
+// Note: list endpoints keep their one-line api.authorizeCompany(query) check
+// in-handler because they read company_id from the query and also need it for
+// filtering — that shared helper is already the single authorization point, not
+// the duplicated per-resource logic this file replaces.
 
 // ── context getters ───────────────────────────────────────────────────────────
 

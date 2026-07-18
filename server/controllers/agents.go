@@ -6,8 +6,6 @@ import (
 	"strconv"
 
 	"agent-orchestrator/db"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
@@ -29,29 +27,10 @@ func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	agent, err := api.authorizeAgent(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
-	api.respondJSON(w, http.StatusOK, agent)
+	api.respondJSON(w, http.StatusOK, api.agentFromCtx(r)) // loaded + authorized by LoadAgent
 }
 
 func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name         string `json:"name"`
 		Description  string `json:"description"`
@@ -67,11 +46,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := api.authorizeAgent(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 
 	if req.Name != "" {
 		agent.Name = req.Name
@@ -92,27 +67,17 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	agent.ProviderID = req.ProviderID
 	agent.ModelGroupID = req.ModelGroupID
 
-	agent, err = api.q.UpdateAgent(r.Context(), agent)
+	updated, err := api.q.UpdateAgent(r.Context(), agent)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.respondJSON(w, http.StatusOK, agent)
+	api.respondJSON(w, http.StatusOK, updated)
 }
 
 func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	if _, err := api.authorizeAgent(r, int32(id)); err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 
 	var stats struct {
 		TotalRequests    int `json:"total_requests"`
@@ -122,7 +87,7 @@ func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	api.db.Model(&db.ProxyRequestLog{}).
-		Where("agent_id = ?", id).
+		Where("agent_id = ?", agent.ID).
 		Select("count(*) as total_requests, sum(total_tokens) as total_tokens, sum(prompt_tokens) as prompt_tokens, sum(completion_tokens) as completion_tokens").
 		Scan(&stats)
 
@@ -173,17 +138,9 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if _, err := api.authorizeAgent(r, int32(id)); err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 	var runs []db.Run
-	if err := api.db.Where("agent_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Where("agent_id = ?", agent.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

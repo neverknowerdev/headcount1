@@ -10,8 +10,6 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListSkills(w http.ResponseWriter, r *http.Request) {
@@ -74,17 +72,7 @@ func (api *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) ListSkillFiles(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	skill, err := api.authorizeSkill(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	files := make([]string, 0)
 	if _, err := os.Stat(skill.LocalPath); !os.IsNotExist(err) {
@@ -108,23 +96,13 @@ func (api *API) ListSkillFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetSkillFileContent(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	filePath := r.URL.Query().Get("path")
 	if filePath == "" {
 		api.respondError(w, http.StatusBadRequest, "path is required")
 		return
 	}
 
-	skill, err := api.authorizeSkill(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	fullPath := filepath.Join(skill.LocalPath, filePath)
 	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(skill.LocalPath)) {
@@ -143,12 +121,6 @@ func (api *API) GetSkillFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateSkillFileContent(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -158,11 +130,7 @@ func (api *API) UpdateSkillFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	skill, err := api.authorizeSkill(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	fullPath := filepath.Join(skill.LocalPath, req.Path)
 	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(skill.LocalPath)) {
