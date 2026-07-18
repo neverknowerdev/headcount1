@@ -13,6 +13,13 @@ export interface AuthUser {
     // locked = authenticated but the encryption vault is not unlocked (e.g.
     // after a server crash); the UI prompts for a passkey re-tap.
     locked?: boolean;
+    // session_expires_at = when this login hits its hard ceiling (RFC3339). At
+    // that point refresh fails and the keyring lapses, so agents stop; the UI
+    // gates on it before it happens. reauth_at = when to start nudging a
+    // passkey re-auth (ceiling − safety gap). Absent for cookieless/E2E.
+    session_expires_at?: string;
+    reauth_at?: string;
+    reauth_required?: boolean;
 }
 
 interface AppState {

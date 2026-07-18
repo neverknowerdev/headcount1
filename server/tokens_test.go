@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -171,4 +172,55 @@ func TestCSRFDoubleSubmit(t *testing.T) {
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
+}
+
+func TestMeReportsSessionTiming(t *testing.T) {
+	database := setupTokenTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+	api := endpoints.NewAPI(database, nil, nil)
+
+	user, err := q.CreateUser(ctx, "timing@test.local")
+	require.NoError(t, err)
+
+	// A live access session + a refresh family whose ceiling is a full cap out.
+	raw, _ := authctx.NewToken()
+	_, err = q.CreateSession(ctx, user.ID, authctx.HashToken(raw))
+	require.NoError(t, err)
+	rraw, _ := authctx.NewToken()
+	ceiling := time.Now().Add(db.SessionAbsoluteCap())
+	_, err = q.CreateRefreshToken(ctx, user.ID, "fam-1", authctx.HashToken(rraw), ceiling)
+	require.NoError(t, err)
+
+	r := chi.NewRouter()
+	r.Get("/auth/me", api.Me)
+
+	call := func() map[string]any {
+		req := httptest.NewRequest(http.MethodGet, "/auth/me", nil)
+		req.AddCookie(&http.Cookie{Name: authctx.CookieName, Value: raw})
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+		var body map[string]any
+		require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+		return body
+	}
+
+	// Fresh login: timing is reported and re-auth is not yet due.
+	body := call()
+	require.Contains(t, body, "session_expires_at")
+	require.Contains(t, body, "reauth_at")
+	require.Equal(t, false, body["reauth_required"])
+	exp, err := time.Parse(time.RFC3339, body["session_expires_at"].(string))
+	require.NoError(t, err)
+	reauthAt, err := time.Parse(time.RFC3339, body["reauth_at"].(string))
+	require.NoError(t, err)
+	require.WithinDuration(t, ceiling, exp, 2*time.Second)
+	require.Equal(t, db.SessionReauthGap(), exp.Sub(reauthAt), "reauth deadline is exactly gap before the ceiling")
+
+	// Move the ceiling into the re-auth window (< gap remaining) → required flips.
+	near := time.Now().Add(db.SessionReauthGap() / 2)
+	require.NoError(t, database.Model(&db.RefreshToken{}).
+		Where("family_id = ?", "fam-1").Update("absolute_expires_at", near).Error)
+	require.Equal(t, true, call()["reauth_required"])
 }

@@ -339,6 +339,33 @@ func (api *API) UnlockFinish(w http.ResponseWriter, r *http.Request) {
 	api.finishAssertion(w, r, "unlock", false)
 }
 
+// ReauthBegin / ReauthFinish refresh an already-authenticated user's login
+// before the absolute session cap is reached. Unlike unlock (which only
+// re-warms the keyring), re-auth issues a fresh token pair, so the hard ceiling
+// resets to now + SessionAbsoluteCap and the keyring TTL is renewed — the app
+// and its background agents keep running instead of hitting a silent forced
+// logout. It's the same passkey assertion as unlock, mounted behind RequireAuth.
+func (api *API) ReauthBegin(w http.ResponseWriter, r *http.Request) {
+	user, ok := authctx.UserFrom(r.Context())
+	if !ok {
+		api.respondError(w, http.StatusUnauthorized, "not authenticated")
+		return
+	}
+	wa, _ := webauthnRP()
+	wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
+	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to start re-auth")
+		return
+	}
+	uid := user.ID
+	api.stashChallenge(w, r, &uid, "reauth", sessionData, map[string]any{"options": options})
+}
+
+func (api *API) ReauthFinish(w http.ResponseWriter, r *http.Request) {
+	api.finishAssertion(w, r, "reauth", true)
+}
+
 // finishAssertion validates a login/unlock assertion, updates the sign
 // counter, unwraps the DEK with the PRF output, and warms the keyring. When
 // issueSession is true a session cookie is also set (login); otherwise only

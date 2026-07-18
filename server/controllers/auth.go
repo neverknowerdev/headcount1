@@ -75,18 +75,35 @@ func (api *API) Logout(w http.ResponseWriter, r *http.Request) {
 
 // Me is the frontend AuthGate's probe: 200 + user (+ whether the vault is
 // unlocked) when authenticated, 401 otherwise. The `locked` flag drives the
-// AuthGate's re-tap unlock prompt after a crash.
+// AuthGate's re-tap unlock prompt after a crash; the session-timing fields
+// drive the proactive re-auth banner and the pre-expiry hard gate.
 func (api *API) Me(w http.ResponseWriter, r *http.Request) {
 	user, ok := api.authenticate(r)
 	if !ok {
 		api.respondError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]any{
+	api.respondJSON(w, http.StatusOK, api.authStateResponse(r.Context(), user))
+}
+
+// authStateResponse is the shared /auth/me and /auth/refresh body: identity,
+// vault lock state, and — when the user has an active login — when that login's
+// hard ceiling falls (session_expires_at) and when the UI should start nudging
+// a passkey re-auth (reauth_at = ceiling − SessionReauthGap). Both are RFC3339
+// UTC; the frontend drives everything off a local clock, so no polling.
+func (api *API) authStateResponse(ctx context.Context, user db.User) map[string]any {
+	resp := map[string]any{
 		"id":     user.ID,
 		"email":  user.Email,
 		"locked": !secrets.IsUnlocked(user.ID),
-	})
+	}
+	if exp, err := api.q.GetSessionAbsoluteExpiry(ctx, user.ID); err == nil && !exp.IsZero() {
+		reauthAt := exp.Add(-db.SessionReauthGap())
+		resp["session_expires_at"] = exp.UTC().Format(time.RFC3339)
+		resp["reauth_at"] = reauthAt.UTC().Format(time.RFC3339)
+		resp["reauth_required"] = !time.Now().Before(reauthAt)
+	}
+	return resp
 }
 
 // ── middleware ───────────────────────────────────────────────────────────────
@@ -244,11 +261,7 @@ func (api *API) Refresh(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "user lookup failed")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]any{
-		"id":     user.ID,
-		"email":  user.Email,
-		"locked": !secrets.IsUnlocked(user.ID),
-	})
+	api.respondJSON(w, http.StatusOK, api.authStateResponse(r.Context(), user))
 }
 
 func setAccessCookie(w http.ResponseWriter, r *http.Request, token string) {

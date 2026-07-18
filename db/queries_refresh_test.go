@@ -158,3 +158,57 @@ func TestDeleteExpiredRefreshTokens(t *testing.T) {
 	database.Model(&db.RefreshToken{}).Count(&remaining)
 	require.Equal(t, int64(1), remaining, "only the live token should survive GC")
 }
+
+func TestSessionReauthGapClampedInsideCap(t *testing.T) {
+	// Default: 4-day gap, well inside the default 14-day cap.
+	t.Setenv("SESSION_ABSOLUTE_CAP", "")
+	t.Setenv("SESSION_REAUTH_GAP", "")
+	require.Equal(t, 4*24*time.Hour, db.SessionReauthGap())
+
+	// An oversized gap is clamped to cap-1 so the soft deadline stays strictly
+	// inside the session (a 7-day cap can never carry a 10-day gap).
+	t.Setenv("SESSION_ABSOLUTE_CAP", "7")
+	t.Setenv("SESSION_REAUTH_GAP", "10")
+	require.Equal(t, 6*24*time.Hour, db.SessionReauthGap())
+
+	// A custom, valid gap is honoured.
+	t.Setenv("SESSION_ABSOLUTE_CAP", "14")
+	t.Setenv("SESSION_REAUTH_GAP", "3")
+	require.Equal(t, 3*24*time.Hour, db.SessionReauthGap())
+
+	// The reauth deadline (cap − gap) always precedes the hard cap.
+	require.Less(t, db.SessionReauthGap(), db.SessionAbsoluteCap())
+}
+
+func TestGetSessionAbsoluteExpiry(t *testing.T) {
+	q, database, ctx, userID := setupRefreshTestDB(t)
+
+	// No refresh session yet → zero time (nothing to report).
+	exp, err := q.GetSessionAbsoluteExpiry(ctx, userID)
+	require.NoError(t, err)
+	require.True(t, exp.IsZero())
+
+	// Two live families: the later ceiling (the most recent login) wins.
+	early := time.Now().Add(48 * time.Hour)
+	late := time.Now().Add(240 * time.Hour)
+	require.NoError(t, database.Create(&db.RefreshToken{
+		FamilyID: "early", TokenHash: "h-early", UserID: userID,
+		ExpiresAt: time.Now().Add(time.Hour), AbsoluteExpiresAt: early,
+	}).Error)
+	require.NoError(t, database.Create(&db.RefreshToken{
+		FamilyID: "late", TokenHash: "h-late", UserID: userID,
+		ExpiresAt: time.Now().Add(time.Hour), AbsoluteExpiresAt: late,
+	}).Error)
+
+	exp, err = q.GetSessionAbsoluteExpiry(ctx, userID)
+	require.NoError(t, err)
+	require.WithinDuration(t, late, exp, time.Second)
+
+	// Revoked and already-expired tokens are ignored.
+	revoked := time.Now()
+	require.NoError(t, database.Model(&db.RefreshToken{}).
+		Where("family_id = ?", "late").Update("revoked_at", revoked).Error)
+	exp, err = q.GetSessionAbsoluteExpiry(ctx, userID)
+	require.NoError(t, err)
+	require.WithinDuration(t, early, exp, time.Second, "revoked family must be skipped")
+}

@@ -147,6 +147,10 @@ func (s *Server) Mount(r chi.Router) {
 	// "/auth" routes.
 	r.Post("/auth/unlock/begin", api.UnlockBegin)
 	r.Post("/auth/unlock/finish", api.UnlockFinish)
+	// Proactive re-auth before the absolute session cap (resets the ceiling +
+	// re-warms the keyring) so long-lived logins never lapse mid-run.
+	r.Post("/auth/reauth/begin", api.ReauthBegin)
+	r.Post("/auth/reauth/finish", api.ReauthFinish)
 	r.Get("/auth/credentials", api.ListCredentials)
 	r.Post("/auth/credentials/begin", api.AddCredentialBegin)
 	r.Post("/auth/credentials/finish", api.AddCredentialFinish)

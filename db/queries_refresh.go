@@ -41,6 +41,52 @@ func SessionAbsoluteCap() time.Duration {
 	return time.Duration(days) * 24 * time.Hour
 }
 
+// SessionReauthGap is the safety buffer before the absolute session cap during
+// which the UI proactively asks the user to re-authenticate. Re-auth resets the
+// cap (a fresh token family), so a long-lived login never lapses mid-run
+// without warning — the whole point is that background agents keep decrypting
+// secrets and never hit an abrupt, silent forced-logout wall.
+//
+// Configurable via SESSION_REAUTH_GAP (days); clamped to [1, cap-1] so the soft
+// re-auth deadline (cap − gap) always falls strictly inside the session, before
+// the hard ceiling.
+func SessionReauthGap() time.Duration {
+	capDays := int(SessionAbsoluteCap() / (24 * time.Hour))
+	gap := 4
+	if v := os.Getenv("SESSION_REAUTH_GAP"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 1 {
+			gap = n
+		}
+	}
+	if gap > capDays-1 {
+		gap = capDays - 1
+	}
+	if gap < 1 {
+		gap = 1
+	}
+	return time.Duration(gap) * 24 * time.Hour
+}
+
+// GetSessionAbsoluteExpiry returns the latest absolute expiry among the user's
+// live (non-revoked, unexpired) refresh tokens — i.e. when the current login's
+// hard ceiling falls. Returns the zero time when the user has no active refresh
+// session (e.g. the E2E fixture or a cookieless client), which callers treat as
+// "nothing to report".
+func (q *Queries) GetSessionAbsoluteExpiry(ctx context.Context, userID int32) (time.Time, error) {
+	var rt RefreshToken
+	err := q.db.WithContext(ctx).
+		Where("user_id = ? AND revoked_at IS NULL AND absolute_expires_at > ?", userID, time.Now()).
+		Order("absolute_expires_at DESC").
+		First(&rt).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return time.Time{}, nil
+	}
+	if err != nil {
+		return time.Time{}, err
+	}
+	return rt.AbsoluteExpiresAt, nil
+}
+
 // CreateRefreshToken mints the first token of a new family (fresh login).
 func (q *Queries) CreateRefreshToken(ctx context.Context, userID int32, familyID, tokenHash string, absoluteExpiry time.Time) (RefreshToken, error) {
 	rt := RefreshToken{

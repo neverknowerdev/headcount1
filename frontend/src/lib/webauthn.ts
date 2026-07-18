@@ -110,6 +110,13 @@ export function unlock() {
     return runCeremony('/api/auth/unlock/begin', '/api/auth/unlock/finish', {}, 'get');
 }
 
+// reauth refreshes a still-valid login before the absolute session cap: it mints
+// a fresh token pair (resetting the hard ceiling) and re-warms the keyring, so
+// the user and their agents keep running instead of being force-logged-out.
+export function reauth() {
+    return runCeremony('/api/auth/reauth/begin', '/api/auth/reauth/finish', {}, 'get');
+}
+
 // addDevice enrolls another passkey for the signed-in (and unlocked) user.
 export function addDevice() {
     return runCeremony('/api/auth/credentials/begin', '/api/auth/credentials/finish', {}, 'create');

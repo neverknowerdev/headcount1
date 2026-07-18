@@ -7,6 +7,7 @@ import { LoginPage } from '../pages/LoginPage';
 import { RegisterPage } from '../pages/RegisterPage';
 import { RecoverPage } from '../pages/RecoverPage';
 import { unlock } from '../lib/webauthn';
+import { SessionGuard } from './SessionGuard';
 
 // AuthGate probes the session once and renders either the unauthenticated
 // mini-router (login/register/recover), a re-tap "unlock" screen when the
@@ -49,7 +50,7 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
         return <UnlockGate />;
     }
 
-    return <>{children}</>;
+    return <SessionGuard>{children}</SessionGuard>;
 }
 
 // UnlockGate re-warms the vault with a passkey tap without logging out.
