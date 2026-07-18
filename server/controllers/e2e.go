@@ -129,16 +129,12 @@ func (api *API) E2ERegister(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "create failed")
 		return
 	}
-	if req.InviteToken != "" {
-		inv, _ := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken))
-		if err := api.q.AcceptTeamInvite(r.Context(), inv, user.ID); err != nil {
-			api.respondError(w, http.StatusBadRequest, "invite could not be accepted")
-			return
-		}
-	} else {
+	// Email-bound invite acceptance (same rule as RegisterFinish); fall back to
+	// a personal team on mismatch/no-invite.
+	if !api.acceptTeamInviteFor(r.Context(), req.InviteToken, user) {
 		_ = api.q.EnsureTeamForUser(r.Context(), user)
 	}
-	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL)
+	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL())
 	api.seedNewUser(r.Context(), user.ID)
 	// A distinct session cookie for this user (the fixture bypass only applies
 	// to requests without a cookie).

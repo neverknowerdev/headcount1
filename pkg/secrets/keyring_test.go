@@ -45,6 +45,24 @@ func TestKeyringTTLExpiry(t *testing.T) {
 	}
 }
 
+func TestKeyringEvictExpired(t *testing.T) {
+	k := NewKeyring()
+	var dek [32]byte
+	k.Put(1, dek, time.Hour)    // live
+	k.Put(2, dek, -time.Second) // expired
+	k.Put(3, dek, -time.Minute) // expired
+
+	if n := k.EvictExpired(); n != 2 {
+		t.Fatalf("expected 2 evictions, got %d", n)
+	}
+	if _, ok := k.Get(1); !ok {
+		t.Fatal("live entry must survive EvictExpired")
+	}
+	if k.Len() != 1 {
+		t.Fatalf("only the live entry should remain; Len = %d", k.Len())
+	}
+}
+
 func TestKeyringSnapshotRestore(t *testing.T) {
 	k := NewKeyring()
 	var a, b, expired [32]byte

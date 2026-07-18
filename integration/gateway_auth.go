@@ -65,6 +65,13 @@ func (g *LLMGateway) requireGatewayAuth(next http.Handler) http.Handler {
 
 		if c, err := r.Cookie(authctx.CookieName); err == nil && c.Value != "" {
 			if user, err := g.q.GetSessionUser(r.Context(), authctx.HashToken(c.Value)); err == nil {
+				// A session user may name a run via X-Run-ID (logging/accounting),
+				// so it must belong to their tenant — otherwise B could inject into
+				// A's run log. Mirrors the run-token X-Run-ID guard above.
+				if claimed := parseRunID(r); claimed != 0 && !g.userMayUseRun(r.Context(), user.ID, int32(claimed)) {
+					http.Error(w, "X-Run-ID does not belong to you", http.StatusForbidden)
+					return
+				}
 				ctx := context.WithValue(r.Context(), principalCtxKey{}, gatewayPrincipal{userID: user.ID})
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -76,40 +83,86 @@ func (g *LLMGateway) requireGatewayAuth(next http.Handler) http.Handler {
 	})
 }
 
-// ── per-resource checks for session principals ───────────────────────────────
+// ── per-resource authorization ───────────────────────────────────────────────
 //
-// Run-token principals skip these: the engine resolved the target through
-// tenant-scoped data before issuing the token. Session principals address
-// resources by client-supplied IDs, so ownership must be verified. A zero
-// principal means enforcement is off.
+// Every gateway request is bound to a tenant, whether it authenticated with a
+// session cookie (a user) or a run token (an agent run owned by a company). The
+// addressed resource is resolved from a client-supplied, globally-unique id/slug
+// (`X-Provider-ID`, `/proxy/group/{slug}`, `/proxy/agent/{id}`), so it must be
+// re-checked against the principal's tenant here — an issuer-time check is not
+// enough because the target is chosen by the client at request time. A zero
+// principal (no field set) means enforcement is off (local/test).
 
-func (g *LLMGateway) sessionMayUseProvider(r *http.Request, provider db.LLMProvider) bool {
-	p := principalFrom(r.Context())
-	if p.userID == 0 {
-		return true // run token or enforcement off
-	}
-	return provider.UserID != nil && *provider.UserID == p.userID
-}
-
-func (g *LLMGateway) sessionMayUseGroup(r *http.Request, group db.ModelGroup) bool {
-	p := principalFrom(r.Context())
-	if p.userID == 0 {
-		return true
-	}
-	return group.UserID != nil && *group.UserID == p.userID
-}
-
-func (g *LLMGateway) sessionMayUseAgent(r *http.Request, agent db.Agent) bool {
-	p := principalFrom(r.Context())
-	if p.userID == 0 {
-		return true
-	}
-	company, err := g.q.GetCompany(r.Context(), agent.CompanyID)
-	if err != nil {
-		return false
-	}
+// companyGrantsUser reports whether userID is within a company's tenant: a
+// member of its owning team, or the creator of a team-less company.
+func (g *LLMGateway) companyGrantsUser(ctx context.Context, company db.Company, userID int32) bool {
 	if company.TeamID != nil {
-		return g.q.IsTeamMember(r.Context(), *company.TeamID, p.userID)
+		return g.q.IsTeamMember(ctx, *company.TeamID, userID)
 	}
-	return company.UserID != nil && *company.UserID == p.userID
+	return company.UserID != nil && *company.UserID == userID
+}
+
+// companyOfRun resolves the company that owns a run.
+func (g *LLMGateway) companyOfRun(ctx context.Context, runID int32) (db.Company, bool) {
+	_, task, err := g.q.GetRunWithTask(ctx, runID)
+	if err != nil {
+		return db.Company{}, false
+	}
+	company, err := g.q.GetCompany(ctx, task.CompanyID)
+	if err != nil {
+		return db.Company{}, false
+	}
+	return company, true
+}
+
+// userMayUseRun reports whether a run belongs to the user's tenant.
+func (g *LLMGateway) userMayUseRun(ctx context.Context, userID, runID int32) bool {
+	company, ok := g.companyOfRun(ctx, runID)
+	return ok && g.companyGrantsUser(ctx, company, userID)
+}
+
+// userOwnedResourceAllowed authorizes a user-owned resource (provider/group,
+// which carry a single owner UserID) for the current principal: the session
+// user must own it; a run token's owning company/team must include that owner.
+func (g *LLMGateway) userOwnedResourceAllowed(r *http.Request, ownerUserID *int32) bool {
+	p := principalFrom(r.Context())
+	switch {
+	case p.userID != 0:
+		return ownerUserID != nil && *ownerUserID == p.userID
+	case p.runID != 0:
+		// Ownerless (shared/builtin/local) resources are not tenant-scoped, so a
+		// run may use them. A user-owned resource is only allowed when its owner
+		// belongs to the run's company/team — this is what stops run A from
+		// spending run B's owner's key via a client-supplied slug.
+		if ownerUserID == nil {
+			return true
+		}
+		company, ok := g.companyOfRun(r.Context(), p.runID)
+		return ok && g.companyGrantsUser(r.Context(), company, *ownerUserID)
+	default:
+		return true // enforcement off
+	}
+}
+
+func (g *LLMGateway) mayUseProvider(r *http.Request, provider db.LLMProvider) bool {
+	return g.userOwnedResourceAllowed(r, provider.UserID)
+}
+
+func (g *LLMGateway) mayUseGroup(r *http.Request, group db.ModelGroup) bool {
+	return g.userOwnedResourceAllowed(r, group.UserID)
+}
+
+func (g *LLMGateway) mayUseAgent(r *http.Request, agent db.Agent) bool {
+	p := principalFrom(r.Context())
+	switch {
+	case p.userID != 0:
+		company, err := g.q.GetCompany(r.Context(), agent.CompanyID)
+		return err == nil && g.companyGrantsUser(r.Context(), company, p.userID)
+	case p.runID != 0:
+		// The addressed agent must belong to the same company as the run.
+		company, ok := g.companyOfRun(r.Context(), p.runID)
+		return ok && company.ID == agent.CompanyID
+	default:
+		return true // enforcement off
+	}
 }

@@ -241,7 +241,7 @@ var providerHTTPClient = &http.Client{}
 func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http.Request) {
 	groupKey := chi.URLParam(r, "group_key")
 	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
-	if err != nil || !g.sessionMayUseGroup(r, group) {
+	if err != nil || !g.mayUseGroup(r, group) {
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
@@ -675,7 +675,7 @@ func parseNonStreamUsage(respBody []byte) (normalizedUsage, string) {
 func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 	groupKey := chi.URLParam(r, "group_key")
 	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
-	if err != nil || !g.sessionMayUseGroup(r, group) {
+	if err != nil || !g.mayUseGroup(r, group) {
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}

@@ -59,6 +59,24 @@ func (k *Keyring) Evict(userID int32) {
 	delete(k.deks, userID)
 }
 
+// EvictExpired proactively drops every entry whose TTL has lapsed. Get already
+// evicts lazily on access, but a user who stops making requests would otherwise
+// keep their DEK resident until the next touch; a periodic sweep bounds how long
+// a dead session's key lingers in memory. Returns the number evicted.
+func (k *Keyring) EvictExpired() int {
+	k.mu.Lock()
+	defer k.mu.Unlock()
+	now := time.Now()
+	n := 0
+	for id, e := range k.deks {
+		if now.After(e.expiresAt) {
+			delete(k.deks, id)
+			n++
+		}
+	}
+	return n
+}
+
 // Len reports how many users are currently unlocked (unexpired entries may be
 // counted until their lazy eviction; used for diagnostics only).
 func (k *Keyring) Len() int {

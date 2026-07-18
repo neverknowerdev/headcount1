@@ -48,7 +48,7 @@ func TestRotateRefreshTokenHappyPath(t *testing.T) {
 }
 
 func TestRotateRefreshTokenReuseRevokesFamily(t *testing.T) {
-	q, _, ctx, userID := setupRefreshTestDB(t)
+	q, database, ctx, userID := setupRefreshTestDB(t)
 
 	_, err := q.CreateRefreshToken(ctx, userID, "fam-1", "hash-1", absExpiry())
 	require.NoError(t, err)
@@ -56,6 +56,11 @@ func TestRotateRefreshTokenReuseRevokesFamily(t *testing.T) {
 	// Legit rotation: hash-1 → hash-2.
 	_, err = q.RotateRefreshToken(ctx, "hash-1", "hash-2")
 	require.NoError(t, err)
+
+	// Age hash-1's used_at past the concurrency grace window so replaying it
+	// reads as genuine theft rather than a benign race.
+	require.NoError(t, database.Model(&db.RefreshToken{}).Where("token_hash = ?", "hash-1").
+		Update("used_at", time.Now().Add(-time.Hour)).Error)
 
 	// An attacker replays the already-spent hash-1 → reuse detected.
 	_, err = q.RotateRefreshToken(ctx, "hash-1", "hash-attacker")
@@ -65,6 +70,29 @@ func TestRotateRefreshTokenReuseRevokesFamily(t *testing.T) {
 	// (rejected — the endpoint maps any rotation failure to a forced re-login).
 	_, err = q.RotateRefreshToken(ctx, "hash-2", "hash-3")
 	require.Error(t, err, "family revocation must kill the victim's live token")
+}
+
+func TestRotateRefreshTokenConcurrentGrace(t *testing.T) {
+	q, _, ctx, userID := setupRefreshTestDB(t)
+
+	_, err := q.CreateRefreshToken(ctx, userID, "fam-1", "hash-1", absExpiry())
+	require.NoError(t, err)
+
+	// Tab A rotates hash-1 → hash-2.
+	_, err = q.RotateRefreshToken(ctx, "hash-1", "hash-2")
+	require.NoError(t, err)
+
+	// Tab B, racing, replays hash-1 immediately (within the grace window). It
+	// must NOT burn the family — it gets a fresh successor instead.
+	nextB, err := q.RotateRefreshToken(ctx, "hash-1", "hash-2b")
+	require.NoError(t, err, "a concurrent refresh within grace must not trip reuse")
+	require.Equal(t, "fam-1", nextB.FamilyID)
+
+	// Both successors remain live (family not revoked): each can rotate on.
+	_, err = q.RotateRefreshToken(ctx, "hash-2", "hash-3")
+	require.NoError(t, err)
+	_, err = q.RotateRefreshToken(ctx, "hash-2b", "hash-3b")
+	require.NoError(t, err)
 }
 
 func TestRotateRefreshTokenAbsoluteCap(t *testing.T) {

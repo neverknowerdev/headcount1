@@ -63,7 +63,16 @@ func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
 }
 
 func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
-	err := q.db.WithContext(ctx).Save(&p).Error
+	// Never overwrite the stored api_key with an empty value. A locked vault
+	// scans the ciphertext to "" (the serializer degrades locked reads), so a
+	// metadata-only edit would otherwise reseal "" over the real secret and
+	// destroy it permanently. Only write api_key when a fresh plaintext was
+	// actually supplied; otherwise omit the column and keep the ciphertext.
+	tx := q.db.WithContext(ctx)
+	if p.ApiKey == "" {
+		tx = tx.Omit("ApiKey")
+	}
+	err := tx.Save(&p).Error
 	p.HasApiKey = p.ApiKey != ""
 	return p, err
 }

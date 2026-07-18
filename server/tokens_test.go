@@ -75,6 +75,11 @@ func TestRefreshRotatesTokenPair(t *testing.T) {
 	_, err = q.GetSessionUser(ctx, authctx.HashToken(access.Value))
 	require.NoError(t, err)
 
+	// Age the original token past the concurrency grace window so replaying it
+	// reads as theft, not a benign race.
+	require.NoError(t, database.Model(&db.RefreshToken{}).Where("token_hash = ?", authctx.HashToken(raw)).
+		Update("used_at", time.Now().Add(-time.Hour)).Error)
+
 	// Replaying the ORIGINAL refresh token now trips reuse-detection → 401.
 	req2 := httptest.NewRequest(http.MethodPost, "/auth/refresh", nil)
 	req2.AddCookie(&http.Cookie{Name: authctx.RefreshCookieName, Value: raw})

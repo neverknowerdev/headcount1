@@ -151,7 +151,7 @@ func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 		return db.User{}, err
 	}
 	// Always (re-)unlock so every E2E request can decrypt this user's secrets.
-	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL)
+	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL())
 	return user, nil
 }
 

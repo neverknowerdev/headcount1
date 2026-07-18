@@ -218,7 +218,15 @@ func (q *Queries) GetMCPAccount(ctx context.Context, id int32) (MCPAccount, erro
 }
 
 func (q *Queries) UpdateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
-	err := q.db.WithContext(ctx).Save(&a).Error
+	// Never overwrite the stored auth_token with an empty value: a locked vault
+	// scans the ciphertext to "" (serializer degrades locked reads), so a
+	// metadata-only edit would reseal "" over the real secret and destroy it.
+	// Only write auth_token when a fresh plaintext was supplied.
+	tx := q.db.WithContext(ctx)
+	if a.AuthToken == "" {
+		tx = tx.Omit("AuthToken")
+	}
+	err := tx.Save(&a).Error
 	a.HasToken = a.AuthToken != ""
 	return a, err
 }

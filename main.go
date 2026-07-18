@@ -301,6 +301,10 @@ func main() {
 			if err := q.DeleteExpiredRefreshTokens(context.Background()); err != nil {
 				log.Printf("refresh token GC failed: %v", err)
 			}
+			// Proactively drop unlocked DEKs whose TTL (the absolute session cap)
+			// has lapsed, so a dead session's key never lingers in memory beyond
+			// the point the user could still authenticate.
+			secrets.DefaultKeyring().EvictExpired()
 		}
 	}()
 

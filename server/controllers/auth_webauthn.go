@@ -32,9 +32,12 @@ import (
 // distinct secret, so a shared salt yields distinct per-credential wraps.
 var prfSalt = []byte("headcount1-prf-salt-v1-do-not-change-me!")
 
-// keyringTTL is how long an unlocked DEK stays warm. Matches the session
-// window so background runs work for as long as the user is logged in.
-const keyringTTL = db.SessionLifetime
+// keyringTTL is how long an unlocked DEK stays warm in memory. Bounded by the
+// absolute session cap — past that ceiling the refresh family can no longer be
+// rotated (refresh tokens carry no PRF, so the session can't be re-warmed), so
+// keeping the DEK resident any longer would leave a "logged-out" user's secrets
+// decryptable in RAM, breaking the zero-knowledge invariant.
+func keyringTTL() time.Duration { return db.SessionAbsoluteCap() }
 
 var (
 	webauthnOnce sync.Once
@@ -121,6 +124,22 @@ func (u webauthnUser) loadCredsFor(ctx context.Context, q *db.Queries) webauthnU
 	return u
 }
 
+// acceptTeamInviteFor joins the user to an invite's team, but ONLY when the
+// invite's email matches the account's email. Invites are email-bound: the
+// address is fixed when the invite is issued, so a leaked/forwarded link must
+// not let someone join under an arbitrary email. Returns true iff the user
+// joined a team via the invite.
+func (api *API) acceptTeamInviteFor(ctx context.Context, inviteToken string, user db.User) bool {
+	if inviteToken == "" {
+		return false
+	}
+	inv, err := api.q.GetTeamInviteByTokenHash(ctx, authctx.HashToken(inviteToken))
+	if err != nil || db.NormalizeEmail(inv.Email) != user.Email {
+		return false
+	}
+	return api.q.AcceptTeamInvite(ctx, inv, user.ID) == nil
+}
+
 // ── registration (new account) ───────────────────────────────────────────────
 
 // RegisterBegin creates the account (passwordless) and returns credential
@@ -144,23 +163,34 @@ func (api *API) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "webauthn not configured: "+err.Error())
 		return
 	}
-	if _, err := api.q.GetUserByEmail(r.Context(), email); err == nil {
-		api.respondError(w, http.StatusConflict, "an account with this email already exists")
-		return
-	}
-	// Validate an invite up front (before creating anything) so a bad token
-	// doesn't leave an orphan account.
-	if req.InviteToken != "" {
-		if _, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken)); err != nil {
-			api.respondError(w, http.StatusBadRequest, "invalid or expired invite")
+	// If the account already exists, only allow (re-)enrollment when it has ZERO
+	// credentials — a crypto-shredded account after recovery, or an abandoned
+	// registration where the browser cancelled the passkey dialog. Any account
+	// that still holds a passkey is a genuine duplicate → 409. Guarding on the
+	// credential count keeps this from ever hijacking an active account.
+	var user db.User
+	if existing, err := api.q.GetUserByEmail(r.Context(), email); err == nil {
+		creds, _ := api.q.ListCredentialsForUser(r.Context(), existing.ID)
+		if len(creds) > 0 {
+			api.respondError(w, http.StatusConflict, "an account with this email already exists")
 			return
 		}
-	}
-
-	user, err := api.q.CreateUser(r.Context(), email)
-	if err != nil {
-		api.respondError(w, http.StatusInternalServerError, "failed to create account")
-		return
+		user = existing // re-enroll onto the existing (credential-less) account
+	} else {
+		// Validate an invite up front (before creating anything) so a bad token
+		// doesn't leave an orphan account.
+		if req.InviteToken != "" {
+			if _, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken)); err != nil {
+				api.respondError(w, http.StatusBadRequest, "invalid or expired invite")
+				return
+			}
+		}
+		created, err := api.q.CreateUser(r.Context(), email)
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, "failed to create account")
+			return
+		}
+		user = created
 	}
 	wu := webauthnUser{user: user}
 	options, sessionData, err := wa.BeginRegistration(wu, webauthn.WithExtensions(prfExtension()))
@@ -236,15 +266,11 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Join or create a team, then seed the per-user builtins.
-	if inviteToken != "" {
-		if inv, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(inviteToken)); err == nil {
-			_ = api.q.AcceptTeamInvite(r.Context(), inv, user.ID)
-		}
-	} else {
+	// Join via the invite (email-bound) or fall back to a fresh personal team.
+	if !api.acceptTeamInviteFor(r.Context(), inviteToken, user) {
 		_ = api.q.EnsureTeamForUser(r.Context(), user)
 	}
-	secrets.UnlockUser(user.ID, dek, keyringTTL)
+	secrets.UnlockUser(user.ID, dek, keyringTTL())
 	api.seedNewUser(r.Context(), user.ID)
 
 	api.issueTokenPair(w, r, user)
@@ -364,7 +390,7 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 	unlocked := false
 	if len(prf) >= 16 {
 		if dek, err := secrets.UnwrapDEKWithPRF(dbCred.WrappedDEK, prf); err == nil {
-			secrets.UnlockUser(user.ID, dek, keyringTTL)
+			secrets.UnlockUser(user.ID, dek, keyringTTL())
 			unlocked = true
 		}
 	}
@@ -504,6 +530,9 @@ func (api *API) RecoverConfirm(w http.ResponseWriter, r *http.Request) {
 	}
 	secrets.LockUser(user.ID)
 	_ = api.q.DeleteSessionsForUser(r.Context(), user.ID)
+	// Also revoke refresh tokens: recovery is a full reset, and a stolen refresh
+	// token would otherwise survive it and mint fresh access sessions.
+	_ = api.q.RevokeRefreshTokensForUser(r.Context(), user.ID)
 	api.respondJSON(w, http.StatusOK, map[string]any{"email": user.Email})
 }
 

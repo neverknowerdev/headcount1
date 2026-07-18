@@ -120,7 +120,7 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 		return
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
-	if err != nil || !g.sessionMayUseProvider(r, provider) {
+	if err != nil || !g.mayUseProvider(r, provider) {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return
 	}
@@ -165,7 +165,7 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil || !g.sessionMayUseAgent(r, agent) {
+	if err != nil || !g.mayUseAgent(r, agent) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return agentProxyTarget{}, false
 	}

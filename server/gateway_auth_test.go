@@ -58,6 +58,20 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	require.NoError(t, database.Create(&group).Error)
 	require.NoError(t, database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: provider.ID, Model: "m", IsFree: true}).Error)
 
+	// Run 42 belongs to owner's company, so a run token for it may use owner's
+	// (user-owned) group/provider. Run 77 belongs to another tenant.
+	ownerCompany := db.Company{Name: "Acme", ShortName: "acme", UserID: &owner.ID}
+	require.NoError(t, database.Create(&ownerCompany).Error)
+	ownerTask := db.Task{Title: "t", CompanyID: ownerCompany.ID}
+	require.NoError(t, database.Create(&ownerTask).Error)
+	require.NoError(t, database.Create(&db.Run{ID: 42, TaskID: ownerTask.ID}).Error)
+
+	otherCompany := db.Company{Name: "Other", ShortName: "oth", UserID: &other.ID}
+	require.NoError(t, database.Create(&otherCompany).Error)
+	otherTask := db.Task{Title: "t2", CompanyID: otherCompany.ID}
+	require.NoError(t, database.Create(&otherTask).Error)
+	require.NoError(t, database.Create(&db.Run{ID: 77, TaskID: otherTask.ID}).Error)
+
 	registry := runtokens.NewRegistry()
 	gw := integration.NewLLMGateway(database)
 	gw.SetRunTokenValidator(registry.Validate)
@@ -96,6 +110,16 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	})
 	require.Equal(t, http.StatusForbidden, w.Code)
 
+	// 3b. A run token from another tenant cannot reach owner's user-owned group,
+	// even though the slug is globally unique (the A2 cross-tenant fix).
+	otherToken := registry.Issue(77)
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.Header.Set(runtokens.TokenHeader, otherToken)
+		r.Header.Set("X-Run-ID", "77")
+	})
+	require.Equal(t, http.StatusNotFound, w.Code, "a run token from another tenant must not reach owner's group")
+	registry.Revoke(77)
+
 	// 4. A revoked token stops working (the run ended).
 	registry.Revoke(42)
 	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
@@ -118,6 +142,19 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
 	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) { r.AddCookie(otherCookie) })
 	require.Equal(t, http.StatusNotFound, w.Code, "another tenant's group must look nonexistent")
+
+	// A session user may name their own run via X-Run-ID, but not another
+	// tenant's run — the A3 cross-tenant run-log-injection fix.
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.AddCookie(ownerCookie)
+		r.Header.Set("X-Run-ID", "42")
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.AddCookie(ownerCookie)
+		r.Header.Set("X-Run-ID", "77") // another tenant's run
+	})
+	require.Equal(t, http.StatusForbidden, w.Code, "a session user must not target another tenant's run")
 
 	w = post("/v1/chat/completions", chatBody, func(r *http.Request) {
 		r.AddCookie(otherCookie)

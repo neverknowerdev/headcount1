@@ -9,6 +9,8 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/user"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -86,9 +88,18 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 	h := loadSandboxHardening()
 	if h.active() {
 		// Compute the grant lists here (as the server uid) and hand them to the
-		// child, which may run under a different uid with a different home.
+		// child. When a dedicated sandbox uid is used, the toolchain caches must
+		// resolve against THAT uid's home — the server's ~/.cache etc. are owned
+		// by the server uid and unwritable by the sandbox uid, so `go build` /
+		// `npm install` would fail without this.
+		writable := extraWritableDirs()
+		if h.uid > 0 {
+			if u, err := user.LookupId(strconv.Itoa(h.uid)); err == nil && u.HomeDir != "" {
+				writable = extraWritableDirsForHome(u.HomeDir)
+			}
+		}
 		cfg := childConfig{
-			WritableDirs: extraWritableDirs(),
+			WritableDirs: writable,
 			ReadOnlyDirs: readOnlyDirs,
 			ReadScoping:  h.readScoping,
 		}

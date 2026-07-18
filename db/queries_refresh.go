@@ -21,6 +21,14 @@ const refreshTokenLifetime = 24 * time.Hour
 // is presented — a theft signal. The caller revokes the family and rejects.
 var ErrRefreshReuse = errors.New("refresh token reuse detected")
 
+// refreshReuseGracePeriod tolerates concurrent legitimate refreshes: two tabs
+// or two devices sharing a refresh cookie can each fire /auth/refresh with the
+// same old token at nearly the same instant. Within this window, replaying a
+// just-used (not revoked) token mints a fresh successor instead of tripping
+// theft detection — so a routine race doesn't force-log-out the user. A genuine
+// stolen-token replay lands far outside this window and still burns the family.
+const refreshReuseGracePeriod = 30 * time.Second
+
 // SessionAbsoluteCap is the hard ceiling on a refresh-token family, after which
 // the user must re-authenticate. Configurable via SESSION_ABSOLUTE_CAP (days).
 func SessionAbsoluteCap() time.Duration {
@@ -57,20 +65,41 @@ func (q *Queries) RotateRefreshToken(ctx context.Context, oldHash, newHash strin
 		if err := tx.Where("token_hash = ?", oldHash).First(&cur).Error; err != nil {
 			return err
 		}
-		if cur.UsedAt != nil || cur.RevokedAt != nil {
-			// Replay of a spent (or already-revoked) token → burn the whole
-			// family. Commit the revocation (return nil, not the sentinel, so the
-			// transaction is NOT rolled back) and signal reuse to the caller
-			// afterwards.
+		now := time.Now()
+		if cur.RevokedAt != nil {
+			// A revoked token means the family was already burned (theft, logout,
+			// or a prior reuse). Reject; do not resurrect it.
 			reuse = true
-			now := time.Now()
 			return tx.Model(&RefreshToken{}).Where("family_id = ? AND revoked_at IS NULL", cur.FamilyID).
 				Update("revoked_at", now).Error
 		}
-		if time.Now().After(cur.ExpiresAt) || time.Now().After(cur.AbsoluteExpiresAt) {
+		if cur.UsedAt != nil {
+			if now.Sub(*cur.UsedAt) > refreshReuseGracePeriod {
+				// Replay of a long-spent token → theft. Burn the whole family.
+				// Commit the revocation (return nil, not the sentinel, so the
+				// transaction is NOT rolled back) and signal reuse afterwards.
+				reuse = true
+				return tx.Model(&RefreshToken{}).Where("family_id = ? AND revoked_at IS NULL", cur.FamilyID).
+					Update("revoked_at", now).Error
+			}
+			// Within the grace window: a concurrent legitimate refresh. Mint a
+			// fresh successor in the same family without burning it, still
+			// respecting the absolute cap.
+			if now.After(cur.AbsoluteExpiresAt) {
+				return gorm.ErrRecordNotFound
+			}
+			next = RefreshToken{
+				FamilyID:          cur.FamilyID,
+				TokenHash:         newHash,
+				UserID:            cur.UserID,
+				ExpiresAt:         now.Add(refreshTokenLifetime),
+				AbsoluteExpiresAt: cur.AbsoluteExpiresAt,
+			}
+			return tx.Create(&next).Error
+		}
+		if now.After(cur.ExpiresAt) || now.After(cur.AbsoluteExpiresAt) {
 			return gorm.ErrRecordNotFound
 		}
-		now := time.Now()
 		if err := tx.Model(&cur).Update("used_at", now).Error; err != nil {
 			return err
 		}

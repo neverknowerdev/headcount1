@@ -112,6 +112,66 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	assert.Empty(t, locked.ApiKey, "locked user's secret must not decrypt")
 }
 
+// TestLockedMetadataEditPreservesSecret guards the critical data-loss bug: a
+// metadata-only update (e.g. renaming a provider) while the owner's vault is
+// LOCKED must not overwrite the stored ciphertext. A locked read degrades the
+// secret to "", so a naive full-struct Save would reseal "" over the real key
+// and destroy it permanently once the user re-unlocks.
+func TestLockedMetadataEditPreservesSecret(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}))
+	q := db.New(database)
+	ctx := context.Background()
+
+	user, err := q.CreateUser(ctx, "locked-edit@example.com")
+	require.NoError(t, err)
+	dek, _ := secrets.NewUserDEK()
+	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
+
+	prov, err := q.CreateLLMProvider(ctx, db.LLMProvider{
+		Name: "orig", BaseUrl: "https://u", ApiKey: "sk-must-survive", UserID: &user.ID,
+	})
+	require.NoError(t, err)
+	acct, err := q.CreateMCPAccount(ctx, db.MCPAccount{
+		MCPServerID: 1, Name: "orig", AuthToken: "tok-must-survive", UserID: &user.ID,
+	})
+	require.NoError(t, err)
+
+	// Simulate the vulnerable flow: lock, load (ApiKey/AuthToken scan to ""),
+	// change only a metadata field, and Save the full struct back.
+	secrets.Default().LockUser(user.ID)
+
+	lockedProv, err := q.GetLLMProvider(ctx, prov.ID)
+	require.NoError(t, err)
+	require.Empty(t, lockedProv.ApiKey) // degraded by the locked read
+	lockedProv.Name = "renamed"
+	_, err = q.UpdateLLMProvider(ctx, lockedProv)
+	require.NoError(t, err)
+
+	lockedAcct, err := q.GetMCPAccount(ctx, acct.ID)
+	require.NoError(t, err)
+	require.Empty(t, lockedAcct.AuthToken)
+	lockedAcct.Name = "renamed"
+	_, err = q.UpdateMCPAccount(ctx, lockedAcct)
+	require.NoError(t, err)
+
+	// Re-unlock: the secrets must still be intact (not blanked by the edits).
+	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
+
+	gotProv, err := q.GetLLMProvider(ctx, prov.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", gotProv.Name, "metadata edit should persist")
+	assert.Equal(t, "sk-must-survive", gotProv.ApiKey, "secret must survive a locked metadata edit")
+
+	gotAcct, err := q.GetMCPAccount(ctx, acct.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "renamed", gotAcct.Name)
+	assert.Equal(t, "tok-must-survive", gotAcct.AuthToken, "token must survive a locked metadata edit")
+}
+
 // TestEncryptPlaintextSecretsSweep verifies the startup migration seals rows
 // written before encryption existed, and is idempotent.
 func TestEncryptPlaintextSecretsSweep(t *testing.T) {
