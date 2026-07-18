@@ -73,16 +73,15 @@ type AgentMeta struct {
 	ProviderID   *int32 `json:"provider_id,omitempty"`
 }
 
-// ProviderMeta is the filesystem representation of an LLM provider. New
-// files carry the API key only encrypted (api_key_enc); the plaintext
-// api_key field remains so files written before encryption still restore.
-// ReadProviders resolves whichever is present into ApiKey (plaintext, in
-// memory only).
+// ProviderMeta is the filesystem representation of an LLM provider. Files
+// carry the API key only encrypted (api_key_enc) and never in plaintext.
+// ReadProviders decrypts it into ApiKey, which is in-memory only (json:"-")
+// and never written to or read from disk.
 type ProviderMeta struct {
 	ID              int32  `json:"id"`
 	Name            string `json:"name"`
 	BaseUrl         string `json:"base_url"`
-	ApiKey          string `json:"api_key,omitempty"`
+	ApiKey          string `json:"-"`
 	ApiKeyEnc       string `json:"api_key_enc,omitempty"`
 	ProviderType    string `json:"provider_type"`
 	DefaultModel    string `json:"default_model"`
@@ -361,11 +360,7 @@ func (s *Storage) ReadProviders() ([]ProviderMeta, error) {
 	dir := filepath.Join(s.basePath, "data", "llm-providers")
 	metas, err := readJSONDir[ProviderMeta](dir)
 	for i := range metas {
-		stored := metas[i].ApiKeyEnc
-		if stored == "" {
-			stored = metas[i].ApiKey // pre-encryption file
-		}
-		key, openErr := secrets.Default().Open(stored)
+		key, openErr := secrets.Default().Open(metas[i].ApiKeyEnc)
 		if openErr != nil {
 			log.Printf("Skipping api key of provider %d (cannot decrypt): %v", metas[i].ID, openErr)
 			key = ""

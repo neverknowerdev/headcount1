@@ -244,10 +244,6 @@ func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	req.ID = existing.ID
 	req.Builtin = existing.Builtin
 	req.OwnerUserID = existing.OwnerUserID
-	// Don't clear an existing auth token if the request sends an empty one.
-	if req.AuthToken == "" {
-		req.AuthToken = existing.AuthToken
-	}
 	// Predefined (builtin) servers have immutable transport config.
 	if existing.Builtin {
 		req.Name = existing.Name

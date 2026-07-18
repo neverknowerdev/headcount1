@@ -371,8 +371,8 @@ type MCPServer struct {
 	Args          string       `json:"args" gorm:"type:text"`
 	URL           string       `json:"url"`
 	Headers       string       `json:"headers" gorm:"type:text"`
-	AuthType      string       `json:"auth_type"`                                              // "none", "bearer", "credentials-file"
-	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text;serializer:secret"` // legacy; migrated to MCPAccount on startup
+	AuthType      string       `json:"auth_type"`  // "none", "bearer", "credentials-file"
+	AuthToken     string       `json:"-" gorm:"-"` // runtime-only carrier: filled from the per-account token when building a transport client (see engine synthetic servers); tokens live in MCPAccount
 	AuthEnvVar    string       `json:"auth_env_var"`
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`

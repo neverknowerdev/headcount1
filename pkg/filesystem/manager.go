@@ -315,13 +315,10 @@ func (m *Manager) ReadCompanySettings(shortName string) (*CompanySettings, error
 
 // providerFile is the on-disk shape of an LLM provider. The API key is only
 // ever written encrypted (api_key_enc) so the mirror files — which are
-// world-readable and included in backups — never contain a raw secret. The
-// legacy plaintext api_key field is still read for files written by older
-// versions.
+// world-readable and included in backups — never contain a raw secret.
 type providerFile struct {
 	db.LLMProvider
-	ApiKeyEnc    string `json:"api_key_enc,omitempty"`
-	LegacyApiKey string `json:"api_key,omitempty"`
+	ApiKeyEnc string `json:"api_key_enc,omitempty"`
 }
 
 func (m *Manager) SaveLLMProvider(provider db.LLMProvider) error {
@@ -365,11 +362,7 @@ func (m *Manager) ListLLMProvidersFromDisk() ([]db.LLMProvider, error) {
 			continue
 		}
 		p := pf.LLMProvider
-		stored := pf.ApiKeyEnc
-		if stored == "" {
-			stored = pf.LegacyApiKey // pre-encryption file
-		}
-		key, err := secrets.Default().Open(stored)
+		key, err := secrets.Default().Open(pf.ApiKeyEnc)
 		if err != nil {
 			log.Printf("Skipping api key of provider file %s (cannot decrypt): %v", e.Name(), err)
 			key = ""

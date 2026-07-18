@@ -167,11 +167,6 @@ func main() {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
-	// Migrate any legacy auth_token fields from MCPServer → MCPAccount.
-	if err := db.New(database).MigrateServerTokensToAccounts(context.Background()); err != nil {
-		log.Printf("Warning: MCP account migration failed: %v", err)
-	}
-
 	// Secrets (provider API keys, MCP tokens) are encrypted at rest; seal any
 	// rows written before encryption was introduced. On failure the server
 	// still starts — reads of already-sealed secrets keep working or fail

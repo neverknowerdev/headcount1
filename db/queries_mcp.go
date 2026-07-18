@@ -355,49 +355,6 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 	})
 }
 
-// MigrateServerTokensToAccounts converts any legacy auth_token on MCPServer rows
-// into MCPAccount("Default") records, and migrates AgentMCPServer → AgentMCPAccount.
-// Safe to run on every startup (idempotent).
-func (q *Queries) MigrateServerTokensToAccounts(ctx context.Context) error {
-	// Find servers that still have a legacy auth_token.
-	type serverRow struct {
-		ID        int32
-		AuthToken string
-	}
-	var rows []serverRow
-	if err := q.db.WithContext(ctx).Raw("SELECT id, auth_token FROM mcp_servers WHERE auth_token != ''").Scan(&rows).Error; err != nil {
-		return err
-	}
-
-	for _, row := range rows {
-		// Skip if already migrated.
-		var count int64
-		q.db.WithContext(ctx).Model(&MCPAccount{}).Where("mcp_server_id = ?", row.ID).Count(&count)
-		if count > 0 {
-			q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '' WHERE id = ?", row.ID)
-			continue
-		}
-
-		acc := MCPAccount{MCPServerID: row.ID, Name: "Default", AuthToken: row.AuthToken}
-		if err := q.db.WithContext(ctx).Create(&acc).Error; err != nil {
-			log.Printf("MCP migration: failed to create account for server %d: %v", row.ID, err)
-			continue
-		}
-		// Clear the legacy token.
-		q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '', enabled = true WHERE id = ?", row.ID)
-
-		// Migrate AgentMCPServer → AgentMCPAccount for this server.
-		var agentAssigns []AgentMCPServer
-		q.db.WithContext(ctx).Where("mcp_server_id = ?", row.ID).Find(&agentAssigns)
-		for _, a := range agentAssigns {
-			ama := AgentMCPAccount{AgentID: a.AgentID, MCPAccountID: acc.ID, Enabled: a.Enabled}
-			q.db.WithContext(ctx).Create(&ama)
-		}
-		log.Printf("MCP migration: migrated server %d auth_token → account %d", row.ID, acc.ID)
-	}
-	return nil
-}
-
 // EnsureBuiltinMCPServers creates all predefined MCP servers if they don't
 // already exist. Safe to call on every startup.
 func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
