@@ -30,6 +30,7 @@ export const Backup: React.FC = () => {
     const [selectedArchive, setSelectedArchive] = useState('');
     const [restoreResult, setRestoreResult] = useState<RestoreResult | null>(null);
     const [loading, setLoading] = useState(true);
+    const [gated, setGated] = useState(false);
 
     const currentCompany = companies.find(c => c.id === selectedCompanyId);
     const shortName = currentCompany?.short_name || '';
@@ -42,8 +43,14 @@ export const Backup: React.FC = () => {
         try {
             const res = await axios.get('/api/backup/status');
             setBackupStatus(res.data);
-        } catch (e) {
-            console.error(e);
+        } catch (e: any) {
+            // Server-wide backup/restore is operator-gated (off by default in a
+            // shared instance). A 404 means the HTTP surface is disabled here.
+            if (e?.response?.status === 404) {
+                setGated(true);
+            } else {
+                console.error(e);
+            }
         } finally {
             setLoading(false);
         }
@@ -95,6 +102,28 @@ export const Backup: React.FC = () => {
                 <h1 className="text-2xl font-bold mb-6">Backup & Restore</h1>
                 <div className="bg-white p-6 rounded-lg shadow-sm border">
                     <p className="text-gray-500">Loading...</p>
+                </div>
+            </div>
+        );
+    }
+
+    if (gated) {
+        return (
+            <div className="max-w-2xl">
+                <div className="flex items-center gap-3 mb-6">
+                    <button
+                        onClick={() => navigate(`/companies/${shortName}/settings`)}
+                        className="text-gray-500 hover:text-gray-700"
+                    >
+                        ← Back to Settings
+                    </button>
+                    <h1 className="text-2xl font-bold">Backup & Restore</h1>
+                </div>
+                <div className="bg-white p-6 rounded-lg shadow-sm border">
+                    <p className="text-sm text-gray-600">
+                        Server-wide backup and restore is managed by the instance operator and
+                        isn't available here. Scheduled backups continue to run in the background.
+                    </p>
                 </div>
             </div>
         );

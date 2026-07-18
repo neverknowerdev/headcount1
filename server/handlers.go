@@ -166,7 +166,12 @@ func (s *Server) Mount(r chi.Router) {
 	})
 
 	r.Get("/settings", api.GetSettings)
-	r.Post("/settings", api.UpdateSettings)
+	// UpdateSettings mutates the instance-global config (base path, workspace
+	// layout) — operator-only. UploadSSHKey is per-user (see settings.go).
+	r.Group(func(r chi.Router) {
+		r.Use(api.RequireGlobalAdminAPI)
+		r.Post("/settings", api.UpdateSettings)
+	})
 	r.Post("/settings/ssh", api.UploadSSHKey)
 	r.Get("/activities", api.ListActivities)
 
@@ -257,7 +262,11 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{purpose}", api.UpdateDefaultModelSetting)
 	})
 
+	// Backup/restore act on the WHOLE multi-tenant instance (a restore wipes and
+	// replaces every tenant), so the HTTP surface is operator-gated. Off by
+	// default; scheduled server-side backups still run regardless.
 	r.Route("/backup", func(r chi.Router) {
+		r.Use(api.RequireGlobalAdminAPI)
 		r.Post("/", api.CreateBackup)
 		r.Get("/status", api.GetBackupStatus)
 		r.Get("/list", api.ListBackups)
