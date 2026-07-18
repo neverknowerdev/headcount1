@@ -14,9 +14,24 @@ import (
 	"agent-orchestrator/db"
 )
 
-// CookieName is the session cookie. httpOnly + SameSite=Lax; the value is an
-// opaque random token whose SHA-256 is stored in the sessions table.
+// CookieName is the short-lived access-session cookie. httpOnly + SameSite=Lax;
+// the value is an opaque random token whose SHA-256 is stored in the sessions
+// table.
 const CookieName = "hc1_session"
+
+// RefreshCookieName is the rotating refresh-token cookie. httpOnly and scoped to
+// RefreshCookiePath so it is only ever sent to the refresh endpoint, shrinking
+// its exposure. Its SHA-256 is stored in the refresh_tokens table.
+const RefreshCookieName = "hc1_refresh"
+
+// RefreshCookiePath narrows the refresh cookie to the one endpoint that needs
+// it. Kept in sync with the route mounted under /api.
+const RefreshCookiePath = "/api/auth/refresh"
+
+// CSRFCookieName is the double-submit CSRF token. Deliberately NOT httpOnly so
+// the frontend can read it and echo it back in the X-CSRF-Token header on
+// mutating requests; a cross-site page can send the cookie but cannot read it.
+const CSRFCookieName = "hc1_csrf"
 
 type ctxKey struct{}
 

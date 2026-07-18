@@ -61,9 +61,11 @@ func (api *API) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(authctx.CookieName); err == nil && c.Value != "" {
 		hash := authctx.HashToken(c.Value)
 		// Evict the user's DEK so their secrets are undecryptable once logged
-		// out (resolve the user from the cookie — this is a public route).
+		// out (resolve the user from the cookie — this is a public route), and
+		// revoke every refresh token so the lineage cannot be resumed.
 		if user, err := api.q.GetSessionUser(r.Context(), hash); err == nil {
 			secrets.LockUser(user.ID)
+			_ = api.q.RevokeRefreshTokensForUser(r.Context(), user.ID)
 		}
 		_ = api.q.DeleteSessionByTokenHash(r.Context(), hash)
 	}
@@ -153,16 +155,103 @@ func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 	return user, nil
 }
 
-// ── session cookie plumbing ──────────────────────────────────────────────────
+// ── access/refresh token plumbing ────────────────────────────────────────────
 
-func (api *API) startSession(w http.ResponseWriter, r *http.Request, user db.User) error {
-	token, err := authctx.NewToken()
+// issueTokenPair establishes a fresh login: a short-lived access session, a
+// rotating refresh token (new family), and a double-submit CSRF token. Called
+// on register/login finish and by the E2E register bypass.
+func (api *API) issueTokenPair(w http.ResponseWriter, r *http.Request, user db.User) error {
+	// Access session (short; slides while active).
+	access, err := authctx.NewToken()
 	if err != nil {
 		return err
 	}
-	if _, err := api.q.CreateSession(r.Context(), user.ID, authctx.HashToken(token)); err != nil {
+	if _, err := api.q.CreateSession(r.Context(), user.ID, authctx.HashToken(access)); err != nil {
 		return err
 	}
+	setAccessCookie(w, r, access)
+
+	// Refresh token: first member of a new family, capped by the absolute
+	// session ceiling.
+	if err := api.issueRefreshToken(w, r, user.ID, ""); err != nil {
+		return err
+	}
+	setCSRFCookie(w, r)
+	return nil
+}
+
+// issueRefreshToken mints a refresh token and sets its cookie. familyID=="" starts
+// a new family (fresh login); a non-empty familyID continues an existing lineage
+// (rotation) — but rotation goes through RotateRefreshToken, so callers here pass
+// "" and let CreateRefreshToken assign a fresh family.
+func (api *API) issueRefreshToken(w http.ResponseWriter, r *http.Request, userID int32, familyID string) error {
+	refresh, err := authctx.NewToken()
+	if err != nil {
+		return err
+	}
+	if familyID == "" {
+		familyID, err = authctx.NewToken()
+		if err != nil {
+			return err
+		}
+	}
+	absExpiry := time.Now().Add(db.SessionAbsoluteCap())
+	if _, err := api.q.CreateRefreshToken(r.Context(), userID, familyID, authctx.HashToken(refresh), absExpiry); err != nil {
+		return err
+	}
+	setRefreshCookie(w, r, refresh)
+	return nil
+}
+
+// Refresh exchanges a valid refresh token for a new access+refresh pair,
+// rotating the refresh token. Replaying a spent token trips reuse-detection,
+// which revokes the whole family and forces a re-login. Path-scoped cookie +
+// rotation keep a stolen token containable.
+func (api *API) Refresh(w http.ResponseWriter, r *http.Request) {
+	c, err := r.Cookie(authctx.RefreshCookieName)
+	if err != nil || c.Value == "" {
+		api.respondError(w, http.StatusUnauthorized, "no refresh token")
+		return
+	}
+	newRefresh, err := authctx.NewToken()
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "token generation failed")
+		return
+	}
+	next, err := api.q.RotateRefreshToken(r.Context(), authctx.HashToken(c.Value), authctx.HashToken(newRefresh))
+	if err != nil {
+		// Reuse detected or token invalid/expired — clear everything and 401.
+		api.clearAuthCookies(w, r)
+		api.respondError(w, http.StatusUnauthorized, "refresh rejected")
+		return
+	}
+	// Mint a new access session and set the rotated refresh + CSRF cookies.
+	access, err := authctx.NewToken()
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "token generation failed")
+		return
+	}
+	if _, err := api.q.CreateSession(r.Context(), next.UserID, authctx.HashToken(access)); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "session creation failed")
+		return
+	}
+	setAccessCookie(w, r, access)
+	setRefreshCookie(w, r, newRefresh)
+	setCSRFCookie(w, r)
+
+	user, err := api.q.GetUser(r.Context(), next.UserID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "user lookup failed")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]any{
+		"id":     user.ID,
+		"email":  user.Email,
+		"locked": !secrets.IsUnlocked(user.ID),
+	})
+}
+
+func setAccessCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
 		Name:     authctx.CookieName,
 		Value:    token,
@@ -170,20 +259,58 @@ func (api *API) startSession(w http.ResponseWriter, r *http.Request, user db.Use
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestIsTLS(r),
-		MaxAge:   int(db.SessionLifetime / time.Second),
+		MaxAge:   int(db.AccessTokenLifetime / time.Second),
 	})
-	return nil
 }
 
-func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+func setRefreshCookie(w http.ResponseWriter, r *http.Request, token string) {
 	http.SetCookie(w, &http.Cookie{
-		Name:     authctx.CookieName,
-		Value:    "",
-		Path:     "/",
+		Name:     authctx.RefreshCookieName,
+		Value:    token,
+		Path:     authctx.RefreshCookiePath,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
 		Secure:   requestIsTLS(r),
-		MaxAge:   -1,
+		MaxAge:   int(db.SessionAbsoluteCap() / time.Second),
+	})
+}
+
+// setCSRFCookie sets the double-submit token. Not httpOnly by design: the SPA
+// reads it and echoes it in X-CSRF-Token on mutations.
+func setCSRFCookie(w http.ResponseWriter, r *http.Request) {
+	token, err := authctx.NewToken()
+	if err != nil {
+		return
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name:     authctx.CSRFCookieName,
+		Value:    token,
+		Path:     "/",
+		HttpOnly: false,
+		SameSite: http.SameSiteLaxMode,
+		Secure:   requestIsTLS(r),
+		MaxAge:   int(db.SessionAbsoluteCap() / time.Second),
+	})
+}
+
+// clearAuthCookies expires the access, refresh, and CSRF cookies.
+func (api *API) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
+	clearSessionCookie(w, r)
+}
+
+func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
+	secure := requestIsTLS(r)
+	http.SetCookie(w, &http.Cookie{
+		Name: authctx.CookieName, Value: "", Path: "/",
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name: authctx.RefreshCookieName, Value: "", Path: authctx.RefreshCookiePath,
+		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: -1,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name: authctx.CSRFCookieName, Value: "", Path: "/",
+		HttpOnly: false, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: -1,
 	})
 }
 

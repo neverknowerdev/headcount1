@@ -98,6 +98,10 @@ func (s *Server) MountPublic(r chi.Router) {
 	r.Post("/auth/login/finish", api.LoginFinish)
 	r.Post("/auth/logout", api.Logout)
 	r.Get("/auth/me", api.Me)
+	// Rotating access/refresh: the browser exchanges its refresh token for a
+	// new pair here. Public (the refresh cookie is the credential); the cookie
+	// is path-scoped to exactly this route.
+	r.Post("/auth/refresh", api.Refresh)
 	// Email-based passkey recovery (wipes secrets, preserves the account).
 	r.Post("/auth/recover/request", api.RecoverRequest)
 	r.Post("/auth/recover/confirm", api.RecoverConfirm)
@@ -121,6 +125,12 @@ func (s *Server) MountPublic(r chi.Router) {
 // AuthMiddleware returns the session middleware used to gate Mount's routes.
 func (s *Server) AuthMiddleware() func(http.Handler) http.Handler {
 	return endpoints.NewAPI(s.db, s.engine, s.hub).RequireAuth
+}
+
+// CSRFMiddleware returns the double-submit CSRF guard for the authenticated
+// human-facing API. Mounted alongside AuthMiddleware in the authed group.
+func (s *Server) CSRFMiddleware() func(http.Handler) http.Handler {
+	return endpoints.NewAPI(s.db, s.engine, s.hub).CSRF
 }
 
 func (s *Server) Mount(r chi.Router) {

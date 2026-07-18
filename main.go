@@ -104,6 +104,7 @@ func main() {
 		&db.TeamMember{},
 		&db.TeamInvite{},
 		&db.Session{},
+		&db.RefreshToken{},
 		&db.PasswordResetToken{},
 		&db.Company{},
 		&db.Project{},
@@ -282,17 +283,22 @@ func main() {
 		// logged-in user.
 		r.Group(func(r chi.Router) {
 			r.Use(srv.AuthMiddleware())
+			r.Use(srv.CSRFMiddleware())
 			srv.Mount(r)
 		})
 	})
 
-	// Expired sessions accumulate silently; sweep them hourly.
+	// Expired access sessions and spent/expired refresh tokens accumulate
+	// silently; sweep them hourly.
 	go func() {
 		q := db.New(database)
 		for {
 			time.Sleep(time.Hour)
 			if err := q.DeleteExpiredSessions(context.Background()); err != nil {
 				log.Printf("session GC failed: %v", err)
+			}
+			if err := q.DeleteExpiredRefreshTokens(context.Background()); err != nil {
+				log.Printf("refresh token GC failed: %v", err)
 			}
 		}
 	}()

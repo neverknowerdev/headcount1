@@ -137,7 +137,7 @@ func (api *API) E2ERegister(w http.ResponseWriter, r *http.Request) {
 	api.seedNewUser(r.Context(), user.ID)
 	// A distinct session cookie for this user (the fixture bypass only applies
 	// to requests without a cookie).
-	if err := api.startSession(w, r, user); err != nil {
+	if err := api.issueTokenPair(w, r, user); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

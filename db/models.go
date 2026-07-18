@@ -27,6 +27,24 @@ type Session struct {
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
+// RefreshToken is the long-lived half of the access/refresh pair. Access
+// sessions are short (~1h); the browser exchanges a refresh token for a new
+// pair at /auth/refresh. Tokens rotate on every use and belong to a family:
+// replaying an already-used token signals theft and revokes the whole family.
+// Only the SHA-256 is stored. Auth only — never carries the encryption DEK.
+type RefreshToken struct {
+	ID                int32      `json:"-" gorm:"primaryKey"`
+	FamilyID          string     `json:"-" gorm:"index;not null"`
+	TokenHash         string     `json:"-" gorm:"uniqueIndex;not null"`
+	UserID            int32      `json:"-" gorm:"not null;index"`
+	User              User       `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt         time.Time  `json:"-" gorm:"not null"`
+	AbsoluteExpiresAt time.Time  `json:"-" gorm:"not null"` // hard cap for the whole family
+	UsedAt            *time.Time `json:"-"`
+	RevokedAt         *time.Time `json:"-"`
+	CreatedAt         time.Time  `json:"-"`
+}
+
 // PasswordResetToken is a single-use, short-lived token mailed to a user for
 // the forgot-password flow. Like sessions, only the SHA-256 is stored.
 type PasswordResetToken struct {

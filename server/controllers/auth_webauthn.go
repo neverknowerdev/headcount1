@@ -247,7 +247,7 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 	secrets.UnlockUser(user.ID, dek, keyringTTL)
 	api.seedNewUser(r.Context(), user.ID)
 
-	api.startSession(w, r, user)
+	api.issueTokenPair(w, r, user)
 	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email}, "unlocked": true})
 }
 
@@ -355,7 +355,7 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 	_ = api.q.UpdateCredentialUsage(r.Context(), dbCred.ID, validated.Authenticator.SignCount)
 
 	if issueSession {
-		api.startSession(w, r, user)
+		api.issueTokenPair(w, r, user)
 	}
 
 	// Unlock: unwrap this credential's DEK with the PRF output. Absent PRF
