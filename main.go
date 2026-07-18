@@ -7,9 +7,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,10 +24,12 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/bootkey"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/runtokens"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -186,8 +190,25 @@ func main() {
 		log.Printf("Warning: failed to encrypt pre-existing plaintext secrets: %v", err)
 	}
 
-	// Transactional mail (password resets): SMTP_* env vars, or a logging
-	// no-op mailer that prints the reset link to the server log.
+	// Restore the graceful-exit keyring snapshot, if a boot key is configured
+	// and a snapshot from a planned shutdown exists — so a deploy re-warms
+	// active users' vaults without a passkey re-tap. The blob is deleted after
+	// loading so an unexpected crash can never replay a stale keyring.
+	bootKey := bootkey.FromEnv()
+	keyringBlobPath := filepath.Join(basePath, "keyring.sealed")
+	if bootKey != nil {
+		if blob, err := os.ReadFile(keyringBlobPath); err == nil {
+			if err := secrets.Default().UnsealKeyring(bootKey, blob, db.SessionLifetime); err != nil {
+				log.Printf("Warning: could not restore sealed keyring: %v", err)
+			} else {
+				log.Printf("Restored %d unlocked vault(s) from graceful-exit snapshot (boot key: %s)", secrets.DefaultKeyring().Len(), bootKey.Name())
+			}
+			os.Remove(keyringBlobPath)
+		}
+	}
+
+	// Transactional mail (passkey recovery): SMTP_* env vars, or a logging
+	// no-op mailer that prints the link to the server log.
 	endpoints.SetMailer(mailer.FromEnv())
 
 	hub := eventhub.NewHub()
@@ -314,8 +335,34 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Starting server on port %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	httpServer := &http.Server{Addr: ":" + port, Handler: r}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("Starting server on port %s", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutting down…")
+	// Seal the in-memory keyring under the boot key so this planned restart
+	// re-warms without a passkey re-tap. Only written on a graceful exit — an
+	// unexpected crash leaves nothing behind (strict zero-knowledge).
+	if bootKey != nil {
+		if blob, err := secrets.Default().SealKeyring(bootKey); err != nil {
+			log.Printf("Warning: could not seal keyring on shutdown: %v", err)
+		} else if len(blob) > 0 {
+			if err := os.WriteFile(keyringBlobPath, blob, 0600); err != nil {
+				log.Printf("Warning: could not persist sealed keyring: %v", err)
+			}
+		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = httpServer.Shutdown(shutdownCtx)
 }
 
 // newCompanyRecipientsResolver returns a TTL-cached company → member-users

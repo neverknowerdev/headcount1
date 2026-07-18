@@ -89,18 +89,18 @@ func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
 func (s *Server) MountPublic(r chi.Router) {
 	api := endpoints.NewAPI(s.db, s.engine, s.hub)
 
-	r.Route("/auth", func(r chi.Router) {
-		// Passwordless passkey ceremonies (challenge round-trip is the guard).
-		r.Post("/register/begin", api.RegisterBegin)
-		r.Post("/register/finish", api.RegisterFinish)
-		r.Post("/login/begin", api.LoginBegin)
-		r.Post("/login/finish", api.LoginFinish)
-		r.Post("/logout", api.Logout)
-		r.Get("/me", api.Me)
-		// Email-based passkey recovery (wipes secrets, preserves the account).
-		r.Post("/recover/request", api.RecoverRequest)
-		r.Post("/recover/confirm", api.RecoverConfirm)
-	})
+	// Passwordless passkey ceremonies (challenge round-trip is the guard).
+	// Registered flat (not via r.Route) so the authenticated /auth routes in
+	// Mount can share the same "/auth" prefix without a chi subrouter clash.
+	r.Post("/auth/register/begin", api.RegisterBegin)
+	r.Post("/auth/register/finish", api.RegisterFinish)
+	r.Post("/auth/login/begin", api.LoginBegin)
+	r.Post("/auth/login/finish", api.LoginFinish)
+	r.Post("/auth/logout", api.Logout)
+	r.Get("/auth/me", api.Me)
+	// Email-based passkey recovery (wipes secrets, preserves the account).
+	r.Post("/auth/recover/request", api.RecoverRequest)
+	r.Post("/auth/recover/confirm", api.RecoverConfirm)
 
 	// Public: lets the register page show which team an invite joins (the
 	// token itself is the credential).
@@ -133,13 +133,13 @@ func (s *Server) Mount(r chi.Router) {
 
 	// Authenticated passkey operations: crash re-tap unlock (session present,
 	// keyring cold) and managing enrolled credentials (must be unlocked).
-	r.Route("/auth", func(r chi.Router) {
-		r.Post("/unlock/begin", api.UnlockBegin)
-		r.Post("/unlock/finish", api.UnlockFinish)
-		r.Get("/credentials", api.ListCredentials)
-		r.Post("/credentials/begin", api.AddCredentialBegin)
-		r.Post("/credentials/finish", api.AddCredentialFinish)
-	})
+	// Flat routes (not r.Route) to avoid a subrouter clash with MountPublic's
+	// "/auth" routes.
+	r.Post("/auth/unlock/begin", api.UnlockBegin)
+	r.Post("/auth/unlock/finish", api.UnlockFinish)
+	r.Get("/auth/credentials", api.ListCredentials)
+	r.Post("/auth/credentials/begin", api.AddCredentialBegin)
+	r.Post("/auth/credentials/finish", api.AddCredentialFinish)
 
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)
