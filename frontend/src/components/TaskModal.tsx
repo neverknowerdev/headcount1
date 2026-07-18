@@ -202,8 +202,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if (msg.type === 'run_log') {
             if (msg.payload.entry) {
                 setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_entries: [...(r.log_entries || []), msg.payload.entry] } : r));
-            } else if (msg.payload.line) {
-                setRuns(prev => prev.map((r: any) => r.id === msg.payload.run_id ? { ...r, log_content: (r.log_content || '') + msg.payload.line + '\n' } : r));
             }
         }
     }, { enabled: !!taskId, onConnect: resyncAfterReconnect });

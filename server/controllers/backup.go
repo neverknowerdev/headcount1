@@ -26,7 +26,7 @@ func (api *API) CreateBackup(w http.ResponseWriter, r *http.Request) {
 		basePath = db.Headcount1Home()
 	}
 
-	archivePath, err := backup.CreateBackup(basePath)
+	archivePath, err := backup.CreateBackup(basePath, api.db)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Failed to create backup: "+err.Error())
 		return
@@ -91,13 +91,11 @@ func (api *API) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	adopter := &backup.Adopter{UserID: api.currentUserID(r)}
-	if membership, mErr := api.requireMembership(r); mErr == nil {
-		teamID := membership.TeamID
-		adopter.TeamID = &teamID
-	}
-
-	err := backup.RestoreBackup(archivePath, basePath, api.db, adopter)
+	// A restore is a full-fidelity, server-wide snapshot swap: the archive
+	// carries every tenant (users, teams, memberships, per-user keys) with
+	// original IDs, so it is replayed verbatim rather than re-stamped onto
+	// the requesting user.
+	err := backup.RestoreBackup(archivePath, basePath, api.db)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Failed to restore backup: "+err.Error())
 		return

@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -12,7 +11,6 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) ListComments(w http.ResponseWriter, r *http.Request) {
@@ -64,17 +62,6 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
 
-	var task db.Task
-	if api.db.First(&task, req.TaskID).Error == nil {
-		var comp db.Company
-		if api.db.First(&comp, task.CompanyID).Error == nil {
-			var allComments []db.Comment
-			api.db.Where("task_id = ?", req.TaskID).Order("created_at asc").Find(&allComments)
-			settings := LoadSettings()
-			filesystem.NewManager(settings.BasePath).SaveTaskComments(comp, req.TaskID, allComments)
-		}
-	}
-
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
 		if err == nil && task.Status != "backlog" {
@@ -110,13 +97,14 @@ func (api *API) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	}
 	defer file.Close()
 
-	uploadDir := "./uploads"
-	if err := os.MkdirAll(uploadDir, os.ModePerm); err != nil {
+	settings := LoadSettings()
+	uploadDir := filepath.Join(settings.BasePath, "uploads", strconv.Itoa(taskID))
+	if err := os.MkdirAll(uploadDir, 0755); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Unable to create upload directory")
 		return
 	}
 
-	filePath := filepath.Join(uploadDir, strconv.FormatInt(time.Now().UnixNano(), 10)+"_"+handler.Filename)
+	filePath := filepath.Join(uploadDir, strconv.FormatInt(time.Now().UnixNano(), 10)+"_"+filepath.Base(handler.Filename))
 	dst, err := os.Create(filePath)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Unable to save file")
@@ -142,16 +130,6 @@ func (api *API) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	// Write attachment metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	companyShortName, err := storage.GetCompanyShortNameForTask(int32(taskID))
-	if err == nil {
-		if err := storage.WriteAttachment(attachment, companyShortName); err != nil {
-			log.Printf("Warning: failed to write attachment metadata: %v", err)
-		}
 	}
 
 	api.respondJSON(w, http.StatusCreated, attachment)

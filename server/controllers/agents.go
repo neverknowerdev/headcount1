@@ -2,12 +2,11 @@ package endpoints
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -99,14 +98,6 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	var comp db.Company
-	api.db.First(&comp, agent.CompanyID)
-	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write agent metadata: %v", err)
-	}
-
 	api.respondJSON(w, http.StatusOK, agent)
 }
 
@@ -174,15 +165,6 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	// Write agent metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	var comp db.Company
-	api.db.First(&comp, req.CompanyID)
-	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write agent metadata: %v", err)
 	}
 
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")

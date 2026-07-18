@@ -15,6 +15,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -63,7 +64,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
+		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
@@ -114,12 +115,6 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
-
-	// Write project metadata to filesystem
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteProject(comp, proj); err != nil {
-		log.Printf("Warning: failed to write project metadata: %v", err)
-	}
 
 	if req.RepositoryUrl != "" {
 		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {
@@ -207,7 +202,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
+		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())

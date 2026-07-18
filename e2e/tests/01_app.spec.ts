@@ -15,8 +15,8 @@ test.describe.serial('Headcount1 App', () => {
         // onboarding and redirect to an existing company on the retry run.
         const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         for (const shortName of ['pw-inc', 'nw', 'second-co']) {
-            for (const subDir of [`data/${shortName}`, `companies/${shortName}`]) {
-                const fullPath = path.join(headcount1Base, subDir);
+            for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+                const fullPath = path.join(headcount1Base, root, shortName);
                 if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
@@ -129,9 +129,10 @@ test.describe.serial('Headcount1 App', () => {
         expect(runs.length).toBeGreaterThan(0);
         const run = runs[0];
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
-        // Session-based layout: logs are grouped per main run in run-{id}/, with
-        // the root session writing main.jsonl (one structured entry per line).
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}`, 'main.jsonl');
+        // Session-based JSONL layout: logs are grouped per main run in
+        // logs/{company}/{taskId}/run-{id}/, the root session writing
+        // main.jsonl (one JSON object per line).
+        const logFile = path.join(basePath, 'logs', 'pw-inc', String(taskId), `run-${run.id}`, 'main.jsonl');
         expect(fs.existsSync(logFile)).toBeTruthy();
         const logEntries = fs.readFileSync(logFile, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
         expect(logEntries.some(e => e.type === 'request')).toBeTruthy();

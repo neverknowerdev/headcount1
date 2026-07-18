@@ -38,15 +38,9 @@ test.describe.serial('CEO orchestration flow', () => {
     const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
 
     const cleanFilesystem = () => {
-        for (const subDir of ['data/ceo-co', 'companies/ceo-co', 'workspace/ceo-co', 'data/runs/ceo-co']) {
-            const fullPath = path.join(headcount1Base, subDir);
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'ceo-co');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
-        }
-        // Remove the provider file too: leftover entity files get re-imported by
-        // the filesystem sync tests and collide with their freshly created ids.
-        if (providerId) {
-            const providerFile = path.join(headcount1Base, 'data', 'llm-providers', `${providerId}.json`);
-            if (fs.existsSync(providerFile)) fs.rmSync(providerFile, { force: true });
         }
     };
 
@@ -347,9 +341,9 @@ test.describe.serial('CEO orchestration flow', () => {
         const qaTask = (ctoSubtasks as any[]).find(t => t.title === 'Verify greeting');
         expect(qaTask.agent_config_name).toBe('QA');
 
-        // ── Filesystem: logs grouped by main run id, one file per session ────
+        // ── Filesystem: JSONL logs grouped by main run id, one file per session ─
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
-        const runDir = path.join(basePath, 'data', 'ceo-co', 'logs', String(taskId), `run-${rootRun.id}`);
+        const runDir = path.join(basePath, 'logs', 'ceo-co', String(taskId), `run-${rootRun.id}`);
         const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();
         const mainEntries = fs.readFileSync(mainLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
