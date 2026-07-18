@@ -261,6 +261,8 @@ func main() {
 			r.Route("/e2e", func(r chi.Router) {
 				api := endpoints.NewAPI(database, eng, hub)
 				r.Post("/wipe-db", api.WipeDB)
+				r.Post("/register", api.E2ERegister)
+				r.Post("/lock", api.E2ELock)
 			})
 		}
 

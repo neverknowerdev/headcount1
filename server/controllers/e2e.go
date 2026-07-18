@@ -6,6 +6,8 @@ import (
 	"net/http"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 )
 
@@ -87,6 +89,72 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// E2ERegister creates an account without a WebAuthn ceremony, for E2E tests
+// that need a second real user (e.g. invite-join flows). It mirrors the passkey
+// RegisterFinish account setup — create user, accept invite or make a team,
+// seed builtins, unlock deterministically — and issues a session cookie.
+func (api *API) E2ERegister(w http.ResponseWriter, r *http.Request) {
+	if !utils.IsE2E() {
+		http.Error(w, "not available", http.StatusForbidden)
+		return
+	}
+	var req struct {
+		Email       string `json:"email"`
+		InviteToken string `json:"invite_token"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	email := db.NormalizeEmail(req.Email)
+	if _, err := api.q.GetUserByEmail(r.Context(), email); err == nil {
+		api.respondError(w, http.StatusConflict, "already exists")
+		return
+	}
+	if req.InviteToken != "" {
+		if _, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken)); err != nil {
+			api.respondError(w, http.StatusBadRequest, "invalid or expired invite")
+			return
+		}
+	}
+	user, err := api.q.CreateUser(r.Context(), email)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "create failed")
+		return
+	}
+	if req.InviteToken != "" {
+		inv, _ := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken))
+		if err := api.q.AcceptTeamInvite(r.Context(), inv, user.ID); err != nil {
+			api.respondError(w, http.StatusBadRequest, "invite could not be accepted")
+			return
+		}
+	} else {
+		_ = api.q.EnsureTeamForUser(r.Context(), user)
+	}
+	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL)
+	api.seedNewUser(r.Context(), user.ID)
+	// A distinct session cookie for this user (the fixture bypass only applies
+	// to requests without a cookie).
+	if err := api.startSession(w, r, user); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email}})
+}
+
+// E2ELock evicts the fixture user's DEK so tests can exercise the locked
+// vault state (crash re-tap). E2E-only.
+func (api *API) E2ELock(w http.ResponseWriter, r *http.Request) {
+	if !utils.IsE2E() {
+		http.Error(w, "not available", http.StatusForbidden)
+		return
+	}
+	if u, err := api.q.GetUserByEmail(r.Context(), e2eUserEmail); err == nil {
+		secrets.LockUser(u.ID)
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "locked"})
 }
 
 // seedPlaceholderModelCatalog gives freshly re-seeded builtin providers a

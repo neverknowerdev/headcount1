@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
@@ -81,6 +82,54 @@ func TestDeleteCredentialsForUserCryptoShred(t *testing.T) {
 	require.NoError(t, q.DeleteCredentialsForUser(ctx, user.ID))
 	list, _ := q.ListCredentialsForUser(ctx, user.ID)
 	require.Empty(t, list, "recovery must remove all passkeys")
+}
+
+func TestCryptoShredUserWipesSecretsKeepsAccount(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	sqlDB, _ := database.DB()
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, database.AutoMigrate(
+		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
+		&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{},
+	))
+	q := db.New(database)
+	ctx := context.Background()
+
+	user, _ := q.CreateUser(ctx, "recover@test.local")
+	require.NoError(t, q.EnsureTeamForUser(ctx, user))
+
+	// Unlock + a stored per-user secret + an enrolled passkey.
+	var dek [32]byte
+	dek[0] = 7
+	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
+	prov, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "p", BaseUrl: "u", ApiKey: "sk-secret", UserID: &user.ID})
+	require.NoError(t, err)
+	_, err = q.CreateWebAuthnCredential(ctx, db.WebAuthnCredential{
+		UserID: user.ID, CredentialID: []byte("c1"), PublicKey: []byte("p"), WrappedDEK: "w", PRFSalt: []byte("s"),
+	})
+	require.NoError(t, err)
+
+	// Recovery: crypto-shred.
+	require.NoError(t, q.CryptoShredUser(ctx, user.ID))
+
+	// Account, team membership survive.
+	_, err = q.GetUser(ctx, user.ID)
+	require.NoError(t, err, "the account must survive recovery")
+	require.True(t, q.IsTeamMember(ctx, teamIDOf(t, database, user.ID), user.ID))
+
+	// Passkeys gone, secret column nulled.
+	creds, _ := q.ListCredentialsForUser(ctx, user.ID)
+	require.Empty(t, creds, "passkeys must be removed")
+	var rawKey string
+	database.Raw("SELECT api_key FROM llm_providers WHERE id = ?", prov.ID).Scan(&rawKey)
+	require.Empty(t, rawKey, "the stored secret must be wiped (crypto-shred)")
+}
+
+func teamIDOf(t *testing.T, database *gorm.DB, userID int32) int32 {
+	var tm db.TeamMember
+	require.NoError(t, database.Where("user_id = ?", userID).First(&tm).Error)
+	return tm.TeamID
 }
 
 func TestWebAuthnSessionSingleUseAndExpiry(t *testing.T) {
