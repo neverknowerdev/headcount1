@@ -265,6 +265,12 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		ApiKey       string `json:"api_key"`
 		Model        string `json:"model"`
 		ProviderType string `json:"provider_type"`
+		// Exact tests only the requested model, with no fallback to other
+		// catalog models on a rate-limit. Used when the user has explicitly
+		// picked a specific default model and wants to know whether *that* one
+		// works right now (vs. the initial connection test, which falls back
+		// to get past a throttled default).
+		Exact bool `json:"exact"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -274,8 +280,11 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	apiKey := req.ApiKey
 	baseUrl := req.BaseUrl
 	providerType := req.ProviderType
+	// Other models to fall back to if the requested one is rate-limited
+	// upstream (a per-model condition on gateways like OpenRouter's free tier).
+	var catalogModels []string
 
-	if req.ProviderID != nil && (apiKey == "" || baseUrl == "" || providerType == "") {
+	if req.ProviderID != nil {
 		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
 		if err == nil && ownedByUser(r, provider.UserID) {
 			if apiKey == "" {
@@ -289,6 +298,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			if providerType == "" {
 				providerType = provider.ProviderType
 			}
+			if provider.SupportedModels != "" {
+				catalogModels = strings.Split(provider.SupportedModels, ",")
+			}
 		}
 	}
 
@@ -300,30 +312,19 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	url := strings.TrimSpace(baseUrl)
 
 	// Helper to make request
-	makeRequest := func(reqUrl string, isAnthropic bool) (int, string, string, error) {
+	makeRequest := func(reqUrl string, isAnthropic bool, model string) (int, string, string, error) {
 		var payload []byte
 		var clientReq *http.Request
 		var err error
 
-		if isAnthropic {
-			p := map[string]interface{}{
-				"model": req.Model,
-				"messages": []map[string]string{
-					{"role": "user", "content": "Say 'hello world'"},
-				},
-				"max_tokens": 10,
-			}
-			payload, _ = json.Marshal(p)
-		} else {
-			p := map[string]interface{}{
-				"model": req.Model,
-				"messages": []map[string]string{
-					{"role": "user", "content": "Say 'hello world'"},
-				},
-				"max_tokens": 10,
-			}
-			payload, _ = json.Marshal(p)
+		p := map[string]interface{}{
+			"model": model,
+			"messages": []map[string]string{
+				{"role": "user", "content": "Say 'hello world'"},
+			},
+			"max_tokens": 10,
 		}
+		payload, _ = json.Marshal(p)
 
 		clientReq, err = http.NewRequest("POST", reqUrl, bytes.NewBuffer(payload))
 		if err != nil {
@@ -387,11 +388,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		return resp.StatusCode, logMsg, parsedErr, nil
 	}
 
-	var openAiUrls []string
-	var anthropicUrls []string
-
-	openAiUrls = append(openAiUrls, utils.BuildProviderURL(url, "/chat/completions"))
-	anthropicUrls = append(anthropicUrls, utils.BuildProviderURL(url, "/messages"))
+	openAiUrls := []string{utils.BuildProviderURL(url, "/chat/completions")}
+	anthropicUrls := []string{utils.BuildProviderURL(url, "/messages")}
 
 	// Channel to receive the first successful result
 	type TestResult struct {
@@ -404,66 +402,148 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		providerType string
 	}
 
-	resultCh := make(chan TestResult, len(openAiUrls)+len(anthropicUrls))
+	// modelOutcome probes a single model against both the OpenAI- and
+	// Anthropic-shaped endpoints and reports the first success (or the last
+	// error). rateLimited/authFailed drive the fallback decision below.
+	type modelOutcome struct {
+		success      bool
+		providerType string
+		testUrl      string
+		log          string
+		parsedErr    string
+		rateLimited  bool
+		authFailed   bool
+	}
+	testModel := func(model string) modelOutcome {
+		resultCh := make(chan TestResult, len(openAiUrls)+len(anthropicUrls))
+		for _, testUrl := range openAiUrls {
+			go func(u string) {
+				status, logMsg, parsedErr, err := makeRequest(u, false, model)
+				res := TestResult{
+					isSuccess:    err == nil && status >= 200 && status < 300,
+					status:       status,
+					logMsg:       "--- OpenAI Format Attempt (" + u + ") ---\n" + logMsg,
+					parsedErr:    parsedErr,
+					err:          err,
+					testUrl:      u,
+					providerType: "openai",
+				}
+				if err != nil {
+					res.logMsg = "--- OpenAI Format Attempt (" + u + ") ---\nError: " + err.Error()
+				}
+				resultCh <- res
+			}(testUrl)
+		}
+		for _, testUrl := range anthropicUrls {
+			go func(u string) {
+				status, logMsg, parsedErr, err := makeRequest(u, true, model)
+				res := TestResult{
+					isSuccess:    err == nil && status >= 200 && status < 300,
+					status:       status,
+					logMsg:       "--- Anthropic Format Attempt (" + u + ") ---\n" + logMsg,
+					parsedErr:    parsedErr,
+					err:          err,
+					testUrl:      u,
+					providerType: "anthropic",
+				}
+				if err != nil {
+					res.logMsg = "--- Anthropic Format Attempt (" + u + ") ---\nError: " + err.Error()
+				}
+				resultCh <- res
+			}(testUrl)
+		}
 
-	for _, testUrl := range openAiUrls {
-		go func(u string) {
-			status, logMsg, parsedErr, err := makeRequest(u, false)
-			res := TestResult{
-				isSuccess:    err == nil && status >= 200 && status < 300,
-				status:       status,
-				logMsg:       "--- OpenAI Format Attempt (" + u + ") ---\n" + logMsg,
-				parsedErr:    parsedErr,
-				err:          err,
-				testUrl:      u,
-				providerType: "openai",
+		out := modelOutcome{}
+		// Endpoint-shape attempts complete in a non-deterministic order, so
+		// bucket errors by kind and pick the most meaningful one at the end
+		// (auth > rate-limit > other) rather than letting a stray 404 from the
+		// unused shape overwrite the real reason.
+		var authErr, rateErr, otherErr string
+		for i := 0; i < len(openAiUrls)+len(anthropicUrls); i++ {
+			res := <-resultCh
+			out.log += res.logMsg + "\n\n"
+			if res.isSuccess && !out.success {
+				out.success = true
+				out.providerType = res.providerType
+				out.testUrl = res.testUrl
 			}
-			if err != nil {
-				res.logMsg = "--- OpenAI Format Attempt (" + u + ") ---\nError: " + err.Error()
+			switch {
+			case res.status == http.StatusTooManyRequests:
+				out.rateLimited = true
+				if res.parsedErr != "" {
+					rateErr = res.parsedErr
+				}
+			case res.status == http.StatusUnauthorized || res.status == http.StatusForbidden:
+				out.authFailed = true
+				if res.parsedErr != "" {
+					authErr = res.parsedErr
+				}
+			default:
+				if res.parsedErr != "" {
+					otherErr = res.parsedErr
+				}
 			}
-			resultCh <- res
-		}(testUrl)
+		}
+		switch {
+		case authErr != "":
+			out.parsedErr = authErr
+		case rateErr != "":
+			out.parsedErr = rateErr
+		default:
+			out.parsedErr = otherErr
+		}
+		return out
 	}
 
-	for _, testUrl := range anthropicUrls {
-		go func(u string) {
-			status, logMsg, parsedErr, err := makeRequest(u, true)
-			res := TestResult{
-				isSuccess:    err == nil && status >= 200 && status < 300,
-				status:       status,
-				logMsg:       "--- Anthropic Format Attempt (" + u + ") ---\n" + logMsg,
-				parsedErr:    parsedErr,
-				err:          err,
-				testUrl:      u,
-				providerType: "anthropic",
-			}
-			if err != nil {
-				res.logMsg = "--- Anthropic Format Attempt (" + u + ") ---\nError: " + err.Error()
-			}
-			resultCh <- res
-		}(testUrl)
+	// Candidate models: the requested one first, then the rest of the
+	// provider's catalog as fallbacks. A free gateway rate-limits per model,
+	// so if the default is throttled another free model often works — try a
+	// bounded few rather than failing the whole setup. In Exact mode the user
+	// wants a verdict on one specific model, so we skip the catalog fallbacks.
+	fallbackModels := catalogModels
+	if req.Exact {
+		fallbackModels = nil
+	}
+	const maxModelsToTry = 6
+	candidates := []string{}
+	seen := map[string]bool{}
+	for _, m := range append([]string{req.Model}, fallbackModels...) {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		candidates = append(candidates, m)
+	}
+	if len(candidates) == 0 {
+		candidates = []string{req.Model} // no model + no catalog: preserve prior behavior
 	}
 
-	totalRequests := len(openAiUrls) + len(anthropicUrls)
 	var combinedLog string
 	var lastParsedErr string
-
-	for i := 0; i < totalRequests; i++ {
-		res := <-resultCh
-		combinedLog += res.logMsg + "\n\n"
-
-		if res.isSuccess {
-			// Short circuit on first success
+	for i, model := range candidates {
+		if i >= maxModelsToTry {
+			break
+		}
+		out := testModel(model)
+		combinedLog += "=== Model: " + model + " ===\n" + out.log
+		if out.success {
 			api.respondJSON(w, http.StatusOK, map[string]interface{}{
 				"status":        "ok",
-				"provider_type": res.providerType,
-				"url":           res.testUrl,
+				"provider_type": out.providerType,
+				"url":           out.testUrl,
+				"model":         model,
 				"log":           combinedLog,
 			})
 			return
 		}
-		if res.parsedErr != "" {
-			lastParsedErr = res.parsedErr
+		if out.parsedErr != "" {
+			lastParsedErr = out.parsedErr
+		}
+		// A bad key or a non-rate-limit error won't be fixed by another model —
+		// stop and report. Only a rate-limit is worth falling back over.
+		if out.authFailed || !out.rateLimited {
+			break
 		}
 	}
 

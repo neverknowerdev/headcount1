@@ -17,6 +17,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/secrets"
 
 	"github.com/go-webauthn/webauthn/protocol"
@@ -680,6 +681,16 @@ func clearReenrollCookie(w http.ResponseWriter, r *http.Request) {
 func (api *API) seedNewUser(ctx context.Context, userID int32) {
 	_ = api.q.EnsureBuiltinLLMProvidersForUser(ctx, userID)
 	_ = api.q.EnsureDefaultModelSettingsForUser(ctx, userID)
+	// Populate the just-seeded builtin providers' model catalogs now, so the
+	// user's first visit to the "Setup LLM Provider" screen sees a real default
+	// model instead of an empty one. Bounded and non-fatal: a slow or
+	// unreachable gateway must not block registration — the daily refresh will
+	// fill the catalog on the next tick.
+	refreshCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	if err := llmdiscovery.RefreshBuiltinProviderModelsForUser(refreshCtx, api.q, &http.Client{Timeout: 10 * time.Second}, userID); err != nil {
+		log.Printf("auth: initial model-catalog refresh for user %d failed (non-fatal): %v", userID, err)
+	}
 }
 
 // stashChallenge stores the ceremony session data + options and returns the
