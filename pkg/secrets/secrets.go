@@ -27,6 +27,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // Prefix marks a value as sealed by this package. Values without it are
@@ -78,6 +79,31 @@ func (s *Store) Keyring() *Keyring { return s.keyring }
 func (s *Store) userDEKFromKeyring(userID int32) ([32]byte, bool) {
 	return s.keyring.Get(userID)
 }
+
+// UnlockUser places a user's DEK in the keyring for ttl. Called after a
+// successful passkey PRF ceremony (login / unlock / registration).
+func (s *Store) UnlockUser(userID int32, dek [32]byte, ttl time.Duration) {
+	s.keyring.Put(userID, dek, ttl)
+}
+
+// LockUser evicts a user's DEK — their secrets become undecryptable until the
+// next unlock. Called on logout.
+func (s *Store) LockUser(userID int32) { s.keyring.Evict(userID) }
+
+// IsUnlocked reports whether a user's DEK is currently available. Points of
+// use (the LLM proxy, provider test) check this before consuming a secret and
+// return a clear "locked — re-authenticate" error instead of a decrypt failure.
+func (s *Store) IsUnlocked(userID int32) bool {
+	_, ok := s.keyring.Get(userID)
+	return ok
+}
+
+// Package-level convenience wrappers over the default store's keyring.
+func UnlockUser(userID int32, dek [32]byte, ttl time.Duration) {
+	Default().UnlockUser(userID, dek, ttl)
+}
+func LockUser(userID int32)        { Default().LockUser(userID) }
+func IsUnlocked(userID int32) bool { return Default().IsUnlocked(userID) }
 
 // SourceName names the active master-key source, for startup logging.
 func (s *Store) SourceName() string { return s.source.Name() }
