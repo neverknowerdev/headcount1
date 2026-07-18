@@ -53,7 +53,7 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 
 	// Kernel-level write sandbox (Landlock on Linux, Seatbelt on macOS);
 	// see sandbox_exec.go.
-	cmd, cleanup, err := sandboxedCommand(cmdCtx, t.workspacePath, p.Command)
+	cmd, cleanup, err := sandboxedCommand(cmdCtx, t.workspacePath, p.Command, t.readOnlyDirs)
 	if err != nil {
 		return "", err
 	}

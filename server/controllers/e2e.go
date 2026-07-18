@@ -4,11 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"net/http"
+	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
+
+	"github.com/go-chi/chi/v5"
 )
 
 // WipeDB clears all data from the database. Only available when E2E_MODE=true.
@@ -52,7 +55,9 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"team_invites",
 		"password_reset_tokens",
 		"sessions",
-		"user_keys",
+		"refresh_tokens",
+		"web_authn_sessions",
+		"web_authn_credentials",
 		"team_members",
 		"teams",
 		"users",
@@ -155,6 +160,37 @@ func (api *API) E2ELock(w http.ResponseWriter, r *http.Request) {
 		secrets.LockUser(u.ID)
 	}
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "locked"})
+}
+
+// E2ERevealProviderSecret returns the DECRYPTED api_key of an LLM provider.
+// E2E-only: the real API never exposes raw secrets (only has_api_key). This
+// exists so the backup/restore e2e can prove a secret round-trips through the
+// zero-knowledge pipeline — sealed as enc:u1 under the (deterministic, in E2E)
+// user DEK, carried through backup + restore, then decrypted again after the
+// fixture user is re-unlocked. A successful reveal is end-to-end proof the
+// ciphertext survived and is still openable with the restored keyring.
+func (api *API) E2ERevealProviderSecret(w http.ResponseWriter, r *http.Request) {
+	if !utils.IsE2E() {
+		http.Error(w, "not available", http.StatusForbidden)
+		return
+	}
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "bad id")
+		return
+	}
+	// Ensure the fixture user is unlocked (deterministic DEK) so the serializer
+	// can decrypt on read.
+	if _, err := api.e2eUser(r.Context()); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "unlock failed")
+		return
+	}
+	p, err := api.q.GetLLMProvider(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "provider not found")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"api_key": p.ApiKey})
 }
 
 // seedPlaceholderModelCatalog gives freshly re-seeded builtin providers a

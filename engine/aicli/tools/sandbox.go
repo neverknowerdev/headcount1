@@ -6,9 +6,54 @@ import (
 	"io/fs"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 )
+
+// sandboxHardening holds the optional, config-gated extra restrictions layered
+// on top of the always-on write sandbox. Everything here is OFF by default, so
+// an unconfigured single-uid dev/CI box behaves exactly as before — these only
+// engage when an operator opts in via env, on a deployment set up for them.
+type sandboxHardening struct {
+	// uid/gid > 0 → run the agent's shell as this dedicated, unprivileged user
+	// instead of the server's uid. The server's secret files (SQLite DB,
+	// keystore, the graceful-exit keyring snapshot, SSH keys) are 0600-owned by
+	// the server uid, so a different sandbox uid cannot read them — and cannot
+	// read the server's /proc/<pid>/environ either (the kernel restricts that
+	// to the owning uid). Requires the server to hold CAP_SETUID.
+	uid, gid int
+	// readScoping → replace Landlock's "read everything" rule with an explicit
+	// allowlist of system roots that OMITS the server's home directory, so the
+	// agent cannot read ~/.headcount1 secrets even when it shares the server's
+	// uid. Defense-in-depth alongside (or instead of) a dedicated uid.
+	readScoping bool
+}
+
+// active reports whether any hardening is configured (so the sandbox re-exec
+// needs to carry the extra child config).
+func (h sandboxHardening) active() bool { return h.uid > 0 || h.readScoping }
+
+func loadSandboxHardening() sandboxHardening {
+	h := sandboxHardening{uid: envInt("HEADCOUNT1_SANDBOX_UID"), gid: envInt("HEADCOUNT1_SANDBOX_GID")}
+	if h.gid == 0 {
+		h.gid = h.uid // default the group to the dedicated uid's value
+	}
+	switch strings.ToLower(os.Getenv("HEADCOUNT1_SANDBOX_READ_SCOPING")) {
+	case "1", "true", "yes", "on":
+		h.readScoping = true
+	}
+	return h
+}
+
+func envInt(key string) int {
+	if v := os.Getenv(key); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			return n
+		}
+	}
+	return 0
+}
 
 // scrubbedEnv returns the process environment with the server's secrets
 // removed, for handing to the agent's shell. The agent keeps a normal working

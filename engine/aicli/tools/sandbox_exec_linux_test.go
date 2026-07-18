@@ -148,6 +148,42 @@ func TestLandlockInheritedByChildProcesses(t *testing.T) {
 	}
 }
 
+// TestLandlockReadScopingHidesHome proves the opt-in read-scoping mode denies
+// the agent read access to files under the server's home (where ~/.headcount1
+// secrets live), while normal workspace and system-toolchain access still work.
+func TestLandlockReadScopingHidesHome(t *testing.T) {
+	if landlockABI() == 0 {
+		t.Skip("kernel lacks Landlock support")
+	}
+	workspace := t.TempDir()
+	// A planted "secret" directly under the home dir — like the DB, keystore, or
+	// keyring snapshot under ~/.headcount1 — outside every granted root.
+	secretDir := outsideDir(t)
+	secretFile := filepath.Join(secretDir, "master.key")
+	if err := os.WriteFile(secretFile, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline: reads are open by default, so the secret is readable.
+	out := execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, secretFile))
+	if !strings.Contains(out, "TOPSECRET") {
+		t.Fatalf("baseline (no read-scoping) should read the file, got: %q", out)
+	}
+
+	// With read-scoping the home is not in the allowlist → the read is denied.
+	t.Setenv("HEADCOUNT1_SANDBOX_READ_SCOPING", "1")
+	out = execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null && echo LEAKED || echo BLOCKED`, secretFile))
+	if strings.Contains(out, "TOPSECRET") || strings.Contains(out, "LEAKED") || !strings.Contains(out, "BLOCKED") {
+		t.Errorf("read-scoping must hide the home secret, got: %q", out)
+	}
+
+	// Sanity: the agent can still work in its workspace and read the toolchain.
+	out = execBash(t, workspace, `echo hi > f.txt && cat f.txt && cat /etc/hostname >/dev/null 2>&1 && echo OK`)
+	if !strings.Contains(out, "hi") || !strings.Contains(out, "OK") {
+		t.Errorf("read-scoping broke normal workspace/system access, got: %q", out)
+	}
+}
+
 // TestSandboxReexecChild exercises the re-exec plumbing itself (marker arg →
 // MaybeRunSandboxChild → landlock BestEffort → exec sh) regardless of kernel
 // Landlock support, since BestEffort degrades to a no-op on old kernels.
@@ -169,7 +205,7 @@ func TestSandboxReexecChild(t *testing.T) {
 func TestSandboxedCommandFallsBackWithoutLandlock(t *testing.T) {
 	// Sanity-check the plumbing: sandboxedCommand never fails hard on a
 	// supported kernel, and produces a runnable command.
-	cmd, cleanup, err := sandboxedCommand(context.Background(), t.TempDir(), "echo ok")
+	cmd, cleanup, err := sandboxedCommand(context.Background(), t.TempDir(), "echo ok", nil)
 	if err != nil {
 		t.Fatalf("sandboxedCommand: %v", err)
 	}

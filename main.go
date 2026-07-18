@@ -264,6 +264,7 @@ func main() {
 				r.Post("/wipe-db", api.WipeDB)
 				r.Post("/register", api.E2ERegister)
 				r.Post("/lock", api.E2ELock)
+				r.Get("/reveal-provider/{id}", api.E2ERevealProviderSecret)
 			})
 		}
 

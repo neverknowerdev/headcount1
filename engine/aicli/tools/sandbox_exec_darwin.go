@@ -22,7 +22,7 @@ func sandboxDescription() string {
 // with a generated profile that denies file writes outside the workspace,
 // temp dirs, and toolchain caches. The profile is written to a temp file; the
 // returned cleanup func removes it.
-func sandboxedCommand(ctx context.Context, workspacePath, command string) (*exec.Cmd, func(), error) {
+func sandboxedCommand(ctx context.Context, workspacePath, command string, readOnlyDirs []string) (*exec.Cmd, func(), error) {
 	sbExec, err := exec.LookPath("sandbox-exec")
 	if err != nil {
 		// No sandbox-exec available: run unsandboxed, same as the historical behavior.
