@@ -17,13 +17,11 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Order matters: foreign keys are enforced, so every child is deleted
+	// before its parent. The identity graph (sessions, keys, memberships,
+	// teams, users) is wiped LAST — companies, providers, model groups and
+	// default-model settings all reference users/teams and must go first.
 	tables := []string{
-		"team_invites",
-		"team_members",
-		"teams",
-		"sessions",
-		"password_reset_tokens",
-		"users",
 		"run_log_entries",
 		"activity_logs",
 		"proxy_request_logs",
@@ -48,6 +46,14 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"agent_mcp_servers",
 		"mcp_accounts",
 		"mcp_servers",
+		// Identity graph last (everything above may reference users/teams).
+		"team_invites",
+		"password_reset_tokens",
+		"sessions",
+		"user_keys",
+		"team_members",
+		"teams",
+		"users",
 	}
 	for _, table := range tables {
 		api.db.Exec("DELETE FROM " + table)
