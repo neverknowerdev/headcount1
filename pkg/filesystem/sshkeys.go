@@ -41,9 +41,13 @@ func (p Paths) writeUserSSHKey(userID int32, key string) (string, error) {
 func ResolveSSHKeyPath(ctx context.Context, q *db.Queries, base string, userID int32) string {
 	paths := NewPaths(base)
 	if userID != 0 && secrets.IsUnlocked(userID) {
-		if cred, err := q.GetUserGitCredential(ctx, userID); err == nil && cred.SSHPrivateKey != "" {
-			if path, err := paths.writeUserSSHKey(userID, cred.SSHPrivateKey); err == nil {
-				return path
+		if cred, err := q.GetUserGitCredential(ctx, userID); err == nil && cred.SSHPrivateKeyEncrypted != "" {
+			// Decrypt at the point of use — the plaintext lives only long enough
+			// to be written to the 0600 key file.
+			if key, err := cred.DecryptSSHKey(); err == nil && key != "" {
+				if path, err := paths.writeUserSSHKey(userID, key); err == nil {
+					return path
+				}
 			}
 		}
 	}

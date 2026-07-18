@@ -778,8 +778,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 					continue
 				}
 			}
+			// Decrypt the account's auth token at the point of use. If the owner's
+			// vault is locked we can't recover it — skip the account rather than
+			// wire up a server that would fail every call with an empty token.
+			authToken, decErr := acc.DecryptAuthToken()
+			if decErr != nil {
+				e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping MCP account %q: %v", acc.Name, decErr))
+				continue
+			}
 			synthetic := srv
-			synthetic.AuthToken = acc.AuthToken
+			synthetic.AuthToken = authToken
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
 			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
@@ -832,7 +840,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentCfg != nil && agentCfg.Name != "" {
 		agentDisplayName = agentCfg.Name
 	}
-	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	// Decrypt the provider key at the point of use. A locked owner surfaces as a
+	// clear provider-auth failure downstream rather than a silent empty key.
+	apiKey, keyErr := provider.DecryptAPIKey()
+	if keyErr != nil {
+		e.logInfo(proxyLogger, fmt.Sprintf("Warning: could not decrypt provider key: %v", keyErr))
+	}
+	llmClient := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	if groupMode {
 		// The group router picks the real provider+model per request. X-Run-ID
 		// lets it write model_switch entries into this run's log; switches-only
@@ -1519,7 +1533,11 @@ Document %q:
 
 Question: %s`, filename, content, truncNote, question)
 
-	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	apiKey, err := provider.DecryptAPIKey()
+	if err != nil {
+		return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
+	}
+	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 500,
@@ -1761,7 +1779,11 @@ Task: %s
 Changes:
 %s`, task.Title, diff)
 
-	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	apiKey, err := provider.DecryptAPIKey()
+	if err != nil {
+		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
+	}
+	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 200,

@@ -161,7 +161,7 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	// A per-user provider whose api_key column holds enc:u1 ciphertext. Set
 	// the raw column directly so the round-trip is tested independently of the
 	// secrets subsystem (which the pkg/secrets tests cover).
-	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", ApiKey: "", UserID: &user.ID}
+	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", ApiKeyEncrypted: "", UserID: &user.ID}
 	database.Create(&prov)
 	sealed := "enc:u1:" + itoa(user.ID) + ":Y2lwaGVydGV4dA=="
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)

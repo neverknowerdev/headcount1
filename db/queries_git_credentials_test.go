@@ -36,19 +36,26 @@ func TestUserGitCredentialEncryptedPerUser(t *testing.T) {
 	require.True(t, secrets.IsSealed(raw), "ssh key must be sealed: %q", raw)
 	require.NotContains(t, raw, "secret")
 
-	// Decrypts while unlocked.
+	// The loaded row holds ciphertext; DecryptSSHKey yields plaintext while unlocked.
 	got, err := q.GetUserGitCredential(ctx, user.ID)
 	require.NoError(t, err)
-	require.Equal(t, key, got.SSHPrivateKey)
+	require.True(t, secrets.IsSealed(got.SSHPrivateKeyEncrypted))
+	plain, err := got.DecryptSSHKey()
+	require.NoError(t, err)
+	require.Equal(t, key, plain)
 
 	// Upsert replaces the key (and never blanks it).
 	require.NoError(t, q.UpsertUserSSHKey(ctx, user.ID, "new-key"))
 	got, _ = q.GetUserGitCredential(ctx, user.ID)
-	require.Equal(t, "new-key", got.SSHPrivateKey)
+	plain, err = got.DecryptSSHKey()
+	require.NoError(t, err)
+	require.Equal(t, "new-key", plain)
 
-	// Locked → the key reads back empty (undecryptable), not plaintext.
+	// Locked → the key is undecryptable (ErrLocked), never plaintext.
 	secrets.Default().LockUser(user.ID)
 	locked, err := q.GetUserGitCredential(ctx, user.ID)
 	require.NoError(t, err)
-	require.Empty(t, locked.SSHPrivateKey)
+	require.True(t, secrets.IsSealed(locked.SSHPrivateKeyEncrypted))
+	_, err = locked.DecryptSSHKey()
+	require.ErrorIs(t, err, secrets.ErrLocked)
 }

@@ -17,6 +17,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 )
 
@@ -95,7 +96,11 @@ func discoverServerTools(ctx context.Context, s db.MCPServer) (string, error) {
 
 // discoverServerToolsWithAccount connects using a specific account's credentials.
 func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account db.MCPAccount) (string, error) {
-	s.AuthToken = account.AuthToken
+	authToken, err := account.DecryptAuthToken()
+	if err != nil {
+		return "", fmt.Errorf("decrypt account token: %w", err)
+	}
+	s.AuthToken = authToken
 	return discoverServerTools(ctx, s)
 }
 
@@ -342,11 +347,16 @@ func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 		authToken = path
 	}
 	uid := api.currentUserID(r)
+	sealedToken, err := secrets.Default().SealForUser(uid, authToken)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save credentials")
+		return
+	}
 	acc, err := api.q.CreateMCPAccount(r.Context(), db.MCPAccount{
-		MCPServerID: int32(serverID),
-		Name:        input.Name,
-		AuthToken:   authToken,
-		UserID:      &uid,
+		MCPServerID:        int32(serverID),
+		Name:               input.Name,
+		AuthTokenEncrypted: sealedToken,
+		UserID:             &uid,
 	})
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -364,16 +374,28 @@ func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	existing.Name = input.Name
+	// A new secret (credentials file path or raw token) must be sealed before it
+	// reaches the model's *Encrypted field — the DB layer refuses to store an
+	// unsealed value. When neither is supplied the existing ciphertext round-trips.
+	var newSecret string
 	if input.CredentialsJSON != "" {
 		path, err := saveCredentialsFile(input.Name, input.CredentialsJSON)
 		if err != nil {
 			api.respondError(w, http.StatusInternalServerError, "failed to save credentials: "+err.Error())
 			return
 		}
-		existing.AuthToken = path
-		existing.LastError = ""
+		newSecret = path
 	} else if input.AuthToken != "" {
-		existing.AuthToken = input.AuthToken
+		newSecret = input.AuthToken
+	}
+	if newSecret != "" {
+		uid := api.currentUserID(r)
+		sealedToken, err := secrets.Default().SealForUser(uid, newSecret)
+		if err != nil {
+			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to change credentials")
+			return
+		}
+		existing.AuthTokenEncrypted = sealedToken
 		existing.LastError = ""
 	}
 	acc, err := api.q.UpdateMCPAccount(r.Context(), existing)
@@ -499,15 +521,23 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 
 	accountID, _ := strconv.Atoi(accountIDStr)
 
+	// The OAuth token file path is itself the secret carried on the account —
+	// seal it before it reaches the model's AuthTokenEncrypted field.
+	uid := api.currentUserID(r)
+	sealedPath, err := secrets.Default().SealForUser(uid, tokenPath)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to finish authorizing")
+		return
+	}
+
 	var acc db.MCPAccount
-	var err error
 	if accountID > 0 {
 		existing, err := api.q.GetMCPAccount(r.Context(), int32(accountID))
 		if err != nil || !ownedByUser(r, existing.UserID) {
 			api.respondError(w, http.StatusNotFound, "account not found")
 			return
 		}
-		existing.AuthToken = tokenPath
+		existing.AuthTokenEncrypted = sealedPath
 		existing.LastError = ""
 		acc, err = api.q.UpdateMCPAccount(r.Context(), existing)
 		if err != nil {
@@ -515,12 +545,11 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	} else {
-		uid := api.currentUserID(r)
 		acc, err = api.q.CreateMCPAccount(r.Context(), db.MCPAccount{
-			MCPServerID: int32(serverID),
-			Name:        accountName,
-			AuthToken:   tokenPath,
-			UserID:      &uid,
+			MCPServerID:        int32(serverID),
+			Name:               accountName,
+			AuthTokenEncrypted: sealedPath,
+			UserID:             &uid,
 		})
 		if err != nil {
 			api.respondError(w, http.StatusInternalServerError, err.Error())

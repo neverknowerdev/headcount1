@@ -22,38 +22,58 @@ func setupSecretsTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}))
+	require.NoError(t, database.AutoMigrate(
+		&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{},
+	))
 	return database
 }
 
-// TestSecretsEncryptedAtRest verifies the full contract of secret storage:
-// ciphertext in the DB column, plaintext in memory, and no secret in the
-// JSON the API would send to a client.
-func TestSecretsEncryptedAtRest(t *testing.T) {
+// TestSecretsStoredAsCiphertext verifies the full contract of secret storage:
+// ciphertext in the DB column, ciphertext (never plaintext) on the loaded
+// struct, plaintext only via an explicit point-of-use Decrypt*, and no secret
+// in the JSON the API would send to a client.
+func TestSecretsStoredAsCiphertext(t *testing.T) {
 	database := setupSecretsTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
 
+	user, err := q.CreateUser(ctx, "atrest@example.com")
+	require.NoError(t, err)
+	dek, _ := secrets.NewUserDEK()
+	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
+	defer secrets.Default().LockUser(user.ID)
+
+	// The caller (a controller) seals before the value ever lands on the model.
+	sealed, err := secrets.Default().SealForUser(user.ID, "sk-raw-secret")
+	require.NoError(t, err)
+
 	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
-		Name: "test", BaseUrl: "https://api.example.com", ApiKey: "sk-raw-secret",
+		Name: "test", BaseUrl: "https://api.example.com",
+		ApiKeyEncrypted: sealed, UserID: &user.ID,
 	})
 	require.NoError(t, err)
 	assert.True(t, created.HasApiKey)
 
-	// The column must hold ciphertext, never the raw key.
+	// The column holds ciphertext, never the raw key.
 	var raw string
 	require.NoError(t, database.Raw("SELECT api_key FROM llm_providers WHERE id = ?", created.ID).Scan(&raw).Error)
 	assert.True(t, secrets.IsSealed(raw), "api_key column not sealed: %q", raw)
 	assert.NotContains(t, raw, "sk-raw-secret")
 
-	// Reads through GORM transparently decrypt.
+	// A read leaves the field as ciphertext — no transparent decrypt on load.
 	got, err := q.GetLLMProvider(ctx, created.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "sk-raw-secret", got.ApiKey)
+	assert.True(t, secrets.IsSealed(got.ApiKeyEncrypted), "loaded struct must hold ciphertext")
+	assert.NotContains(t, got.ApiKeyEncrypted, "sk-raw-secret")
 	assert.True(t, got.HasApiKey)
 
-	// The API serialization (respondJSON marshals this struct) must expose
-	// only the presence flag, never the key itself.
+	// Only DecryptAPIKey, at the point of use, yields the plaintext.
+	plain, err := got.DecryptAPIKey()
+	require.NoError(t, err)
+	assert.Equal(t, "sk-raw-secret", plain)
+
+	// The API serialization (respondJSON marshals this struct) must expose only
+	// the presence flag, never the key itself.
 	body, err := json.Marshal(got)
 	require.NoError(t, err)
 	assert.NotContains(t, string(body), "sk-raw-secret")
@@ -61,19 +81,41 @@ func TestSecretsEncryptedAtRest(t *testing.T) {
 	assert.Contains(t, string(body), `"has_api_key":true`)
 
 	// Same contract for MCP account tokens.
-	acc, err := q.CreateMCPAccount(ctx, db.MCPAccount{MCPServerID: 1, Name: "Default", AuthToken: "ghp_raw_token"})
+	sealedTok, err := secrets.Default().SealForUser(user.ID, "ghp_raw_token")
+	require.NoError(t, err)
+	acc, err := q.CreateMCPAccount(ctx, db.MCPAccount{
+		MCPServerID: 1, Name: "Default", AuthTokenEncrypted: sealedTok, UserID: &user.ID,
+	})
 	require.NoError(t, err)
 	require.NoError(t, database.Raw("SELECT auth_token FROM mcp_accounts WHERE id = ?", acc.ID).Scan(&raw).Error)
 	assert.True(t, secrets.IsSealed(raw))
 	gotAcc, err := q.GetMCPAccount(ctx, acc.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "ghp_raw_token", gotAcc.AuthToken)
+	assert.True(t, secrets.IsSealed(gotAcc.AuthTokenEncrypted))
+	tok, err := gotAcc.DecryptAuthToken()
+	require.NoError(t, err)
+	assert.Equal(t, "ghp_raw_token", tok)
 	assert.True(t, gotAcc.HasToken)
 }
 
-// TestUserOwnedSecretsSealedWithUserDEK verifies the serializer routes secrets
-// on user-owned rows to the owner's DEK ("enc:u1:<id>:"), that they decrypt
-// transparently, and that deleting the user's key crypto-shreds them.
+// TestWriteGuardRejectsUnsealedSecret verifies the serializer refuses to persist
+// a plaintext value in a sealed column — a forgotten SealForUser fails loudly
+// instead of silently writing a secret in the clear.
+func TestWriteGuardRejectsUnsealedSecret(t *testing.T) {
+	database := setupSecretsTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	_, err := q.CreateLLMProvider(ctx, db.LLMProvider{
+		Name: "oops", BaseUrl: "https://u", ApiKeyEncrypted: "sk-plaintext-leak",
+	})
+	require.Error(t, err, "storing an unsealed secret must be rejected")
+	assert.Contains(t, err.Error(), "unsealed")
+}
+
+// TestUserOwnedSecretsSealedWithUserDEK verifies a user-owned secret is sealed
+// under the owner's DEK ("enc:u1:<id>:"), decrypts only for that unlocked user,
+// and becomes undecryptable (ErrLocked) once the user is locked.
 func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
@@ -90,8 +132,10 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	dek, _ := secrets.NewUserDEK()
 	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
 
+	sealed, err := secrets.Default().SealForUser(user.ID, "sk-user-owned")
+	require.NoError(t, err)
 	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
-		Name: "mine", BaseUrl: "https://u", ApiKey: "sk-user-owned", UserID: &user.ID,
+		Name: "mine", BaseUrl: "https://u", ApiKeyEncrypted: sealed, UserID: &user.ID,
 	})
 	require.NoError(t, err)
 
@@ -102,21 +146,26 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 
 	got, err := q.GetLLMProvider(ctx, created.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "sk-user-owned", got.ApiKey)
+	plain, err := got.DecryptAPIKey()
+	require.NoError(t, err)
+	assert.Equal(t, "sk-user-owned", plain)
 
-	// Locking the user (logout / crash) makes the secret undecryptable: the
-	// row still loads, but the key comes back empty rather than plaintext.
+	// Locking the user (logout / crash) makes the secret undecryptable: the row
+	// still loads and holds ciphertext, but decrypting returns ErrLocked rather
+	// than leaking or blanking the value.
 	secrets.Default().LockUser(user.ID)
 	locked, err := q.GetLLMProvider(ctx, created.ID)
 	require.NoError(t, err)
-	assert.Empty(t, locked.ApiKey, "locked user's secret must not decrypt")
+	assert.True(t, secrets.IsSealed(locked.ApiKeyEncrypted))
+	_, err = locked.DecryptAPIKey()
+	assert.ErrorIs(t, err, secrets.ErrLocked, "locked user's secret must not decrypt")
 }
 
-// TestLockedMetadataEditPreservesSecret guards the critical data-loss bug: a
-// metadata-only update (e.g. renaming a provider) while the owner's vault is
-// LOCKED must not overwrite the stored ciphertext. A locked read degrades the
-// secret to "", so a naive full-struct Save would reseal "" over the real key
-// and destroy it permanently once the user re-unlocks.
+// TestLockedMetadataEditPreservesSecret guards the data-loss bug that motivated
+// storing ciphertext on the struct: a metadata-only update (e.g. renaming a
+// provider) while the owner's vault is LOCKED must not disturb the stored
+// secret. Because the field now carries the ciphertext verbatim (a locked read
+// no longer blanks it), a full-struct Save round-trips the sealed value.
 func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
@@ -131,29 +180,33 @@ func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	dek, _ := secrets.NewUserDEK()
 	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
 
+	sealedKey, err := secrets.Default().SealForUser(user.ID, "sk-must-survive")
+	require.NoError(t, err)
 	prov, err := q.CreateLLMProvider(ctx, db.LLMProvider{
-		Name: "orig", BaseUrl: "https://u", ApiKey: "sk-must-survive", UserID: &user.ID,
+		Name: "orig", BaseUrl: "https://u", ApiKeyEncrypted: sealedKey, UserID: &user.ID,
 	})
 	require.NoError(t, err)
+	sealedTok, err := secrets.Default().SealForUser(user.ID, "tok-must-survive")
+	require.NoError(t, err)
 	acct, err := q.CreateMCPAccount(ctx, db.MCPAccount{
-		MCPServerID: 1, Name: "orig", AuthToken: "tok-must-survive", UserID: &user.ID,
+		MCPServerID: 1, Name: "orig", AuthTokenEncrypted: sealedTok, UserID: &user.ID,
 	})
 	require.NoError(t, err)
 
-	// Simulate the vulnerable flow: lock, load (ApiKey/AuthToken scan to ""),
-	// change only a metadata field, and Save the full struct back.
+	// Lock, load (the field holds ciphertext, NOT ""), change only a metadata
+	// field, and Save the full struct back.
 	secrets.Default().LockUser(user.ID)
 
 	lockedProv, err := q.GetLLMProvider(ctx, prov.ID)
 	require.NoError(t, err)
-	require.Empty(t, lockedProv.ApiKey) // degraded by the locked read
+	require.True(t, secrets.IsSealed(lockedProv.ApiKeyEncrypted)) // held, not blanked
 	lockedProv.Name = "renamed"
 	_, err = q.UpdateLLMProvider(ctx, lockedProv)
 	require.NoError(t, err)
 
 	lockedAcct, err := q.GetMCPAccount(ctx, acct.ID)
 	require.NoError(t, err)
-	require.Empty(t, lockedAcct.AuthToken)
+	require.True(t, secrets.IsSealed(lockedAcct.AuthTokenEncrypted))
 	lockedAcct.Name = "renamed"
 	_, err = q.UpdateMCPAccount(ctx, lockedAcct)
 	require.NoError(t, err)
@@ -164,53 +217,14 @@ func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	gotProv, err := q.GetLLMProvider(ctx, prov.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "renamed", gotProv.Name, "metadata edit should persist")
-	assert.Equal(t, "sk-must-survive", gotProv.ApiKey, "secret must survive a locked metadata edit")
+	provKey, err := gotProv.DecryptAPIKey()
+	require.NoError(t, err)
+	assert.Equal(t, "sk-must-survive", provKey, "secret must survive a locked metadata edit")
 
 	gotAcct, err := q.GetMCPAccount(ctx, acct.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "renamed", gotAcct.Name)
-	assert.Equal(t, "tok-must-survive", gotAcct.AuthToken, "token must survive a locked metadata edit")
-}
-
-// TestEncryptPlaintextSecretsSweep verifies the startup migration seals rows
-// written before encryption existed, and is idempotent.
-func TestEncryptPlaintextSecretsSweep(t *testing.T) {
-	database := setupSecretsTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-
-	// Simulate a pre-encryption install: raw values inserted outside GORM.
-	require.NoError(t, database.Exec(
-		"INSERT INTO llm_providers (name, base_url, api_key) VALUES ('legacy', 'https://u', 'sk-legacy')",
-	).Error)
-	require.NoError(t, database.Exec(
-		"INSERT INTO mcp_accounts (mcp_server_id, name, auth_token) VALUES (1, 'Default', 'tok-legacy')",
-	).Error)
-
-	require.NoError(t, q.EncryptPlaintextSecrets(ctx))
-
-	var rawKey, rawTok string
-	require.NoError(t, database.Raw("SELECT api_key FROM llm_providers WHERE name = 'legacy'").Scan(&rawKey).Error)
-	require.NoError(t, database.Raw("SELECT auth_token FROM mcp_accounts WHERE name = 'Default'").Scan(&rawTok).Error)
-	assert.True(t, secrets.IsSealed(rawKey), "sweep left provider key raw: %q", rawKey)
-	assert.True(t, secrets.IsSealed(rawTok), "sweep left mcp token raw: %q", rawTok)
-
-	// Values still round-trip after the sweep, and a second run is a no-op.
-	require.NoError(t, q.EncryptPlaintextSecrets(ctx))
-	var p db.LLMProvider
-	require.NoError(t, database.Where("name = 'legacy'").First(&p).Error)
-	assert.Equal(t, "sk-legacy", p.ApiKey)
-	var a db.MCPAccount
-	require.NoError(t, database.Where("name = 'Default'").First(&a).Error)
-	assert.Equal(t, "tok-legacy", a.AuthToken)
-
-	// Providers seeded with an empty key (builtin free providers) are left
-	// untouched — empty must stay empty, not become ciphertext.
-	require.NoError(t, database.Exec(
-		"INSERT INTO llm_providers (name, base_url, api_key) VALUES ('blank', 'https://u', '')",
-	).Error)
-	require.NoError(t, q.EncryptPlaintextSecrets(ctx))
-	var rawBlank string
-	require.NoError(t, database.Raw("SELECT api_key FROM llm_providers WHERE name = 'blank'").Scan(&rawBlank).Error)
-	assert.Equal(t, "", rawBlank)
+	acctTok, err := gotAcct.DecryptAuthToken()
+	require.NoError(t, err)
+	assert.Equal(t, "tok-must-survive", acctTok, "token must survive a locked metadata edit")
 }

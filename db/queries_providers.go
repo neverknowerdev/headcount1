@@ -27,14 +27,14 @@ const (
 
 func (q *Queries) CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	err := q.db.WithContext(ctx).Create(&p).Error
-	p.HasApiKey = p.ApiKey != ""
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 
 func (q *Queries) GetLLMProvider(ctx context.Context, id int32) (LLMProvider, error) {
 	var p LLMProvider
 	err := q.db.WithContext(ctx).First(&p, id).Error
-	p.HasApiKey = p.ApiKey != ""
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 
@@ -42,7 +42,7 @@ func (q *Queries) ListLLMProviders(ctx context.Context) ([]LLMProvider, error) {
 	var p []LLMProvider
 	err := q.db.WithContext(ctx).Order("id").Find(&p).Error
 	for i := range p {
-		p[i].HasApiKey = p[i].ApiKey != ""
+		p[i].HasApiKey = p[i].ApiKeyEncrypted != ""
 	}
 	return p, err
 }
@@ -53,7 +53,7 @@ func (q *Queries) ListLLMProvidersForUser(ctx context.Context, userID int32) ([]
 	var p []LLMProvider
 	err := q.db.WithContext(ctx).Where("user_id = ?", userID).Order("id").Find(&p).Error
 	for i := range p {
-		p[i].HasApiKey = p[i].ApiKey != ""
+		p[i].HasApiKey = p[i].ApiKeyEncrypted != ""
 	}
 	return p, err
 }
@@ -63,17 +63,11 @@ func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
 }
 
 func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
-	// Never overwrite the stored api_key with an empty value. A locked vault
-	// scans the ciphertext to "" (the serializer degrades locked reads), so a
-	// metadata-only edit would otherwise reseal "" over the real secret and
-	// destroy it permanently. Only write api_key when a fresh plaintext was
-	// actually supplied; otherwise omit the column and keep the ciphertext.
-	tx := q.db.WithContext(ctx)
-	if p.ApiKey == "" {
-		tx = tx.Omit("ApiKey")
-	}
-	err := tx.Save(&p).Error
-	p.HasApiKey = p.ApiKey != ""
+	// ApiKeyEncrypted is ciphertext: a metadata-only edit round-trips the sealed
+	// value verbatim (a locked read no longer blanks it), and a key change was
+	// re-sealed by the caller. So a plain Save can never destroy the secret.
+	err := q.db.WithContext(ctx).Save(&p).Error
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 

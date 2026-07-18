@@ -187,7 +187,12 @@ func (api *API) E2ERevealProviderSecret(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"api_key": p.ApiKey})
+	apiKey, err := p.DecryptAPIKey()
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "decrypt failed")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"api_key": apiKey})
 }
 
 // seedPlaceholderModelCatalog gives freshly re-seeded builtin providers a

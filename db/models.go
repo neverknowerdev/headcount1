@@ -188,10 +188,11 @@ type LLMProvider struct {
 	ID      int32  `json:"id" gorm:"primaryKey"`
 	Name    string `json:"name" gorm:"not null"`
 	BaseUrl string `json:"base_url" gorm:"not null"`
-	// ApiKey is encrypted at rest (see pkg/secrets) and never serialized to
-	// clients — the frontend only sees HasApiKey. In memory it's plaintext.
-	ApiKey    string `json:"-" gorm:"not null;serializer:secret"`
-	HasApiKey bool   `json:"has_api_key" gorm:"-"` // computed: ApiKey != ""
+	// ApiKeyEncrypted holds the SEALED api key (ciphertext) — both at rest and in
+	// memory. It is never serialized to clients (the frontend only sees
+	// HasApiKey). Decrypt it at the point of use via DecryptAPIKey().
+	ApiKeyEncrypted string `json:"-" gorm:"column:api_key;not null;serializer:sealed"`
+	HasApiKey       bool   `json:"has_api_key" gorm:"-"` // computed: ApiKeyEncrypted != ""
 	// UserID is the owning user; secrets on owned rows are sealed with that
 	// user's DEK ("enc:u1:"). Nil = ownerless (sealed with the root DEK).
 	UserID          *int32 `json:"user_id" gorm:"index"`
@@ -431,15 +432,15 @@ type MCPServer struct {
 // MCPAccount holds credentials for one identity on an MCPServer.
 // A server can have multiple accounts (e.g., personal + work GitHub tokens).
 type MCPAccount struct {
-	ID          int32     `json:"id" gorm:"primaryKey"`
-	MCPServerID int32     `json:"mcp_server_id" gorm:"not null;index"`
-	Name        string    `json:"name" gorm:"not null"`                 // user label: "Personal", "Work"
-	AuthToken   string    `json:"-" gorm:"type:text;serializer:secret"` // credential; never sent to clients; encrypted at rest
-	HasToken    bool      `json:"has_token" gorm:"-"`                   // computed: AuthToken != ""
-	UserID      *int32    `json:"user_id" gorm:"index"`                 // owning user; their DEK seals AuthToken
-	LastError   string    `json:"last_error" gorm:"type:text"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                 int32     `json:"id" gorm:"primaryKey"`
+	MCPServerID        int32     `json:"mcp_server_id" gorm:"not null;index"`
+	Name               string    `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
+	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via DecryptAuthToken()
+	HasToken           bool      `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
+	UserID             *int32    `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
+	LastError          string    `json:"last_error" gorm:"type:text"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
@@ -590,16 +591,15 @@ type DefaultModelSetting struct {
 // UserGitCredential holds a user's own git credentials, encrypted at rest under
 // their per-user DEK (same as provider keys). Each user has their own SSH key so
 // the agent pushes under that user's identity — replacing the single shared key
-// that any account could previously overwrite. SSHPrivateKey is only decryptable
+// that any account could previously overwrite. SSHPrivateKeyEncrypted is only decryptable
 // while the owner's vault is unlocked.
 type UserGitCredential struct {
-	ID            int32     `json:"id" gorm:"primaryKey"`
-	UserID        *int32    `json:"user_id" gorm:"uniqueIndex;not null"`
-	User          *User     `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
-	SSHPrivateKey string    `json:"-" gorm:"type:text;serializer:secret"` // PEM; encrypted at rest
-	GitHubPAT     string    `json:"-" gorm:"type:text;serializer:secret"` // optional; encrypted at rest
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	ID                     int32     `json:"id" gorm:"primaryKey"`
+	UserID                 *int32    `json:"user_id" gorm:"uniqueIndex;not null"`
+	User                   *User     `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	SSHPrivateKeyEncrypted string    `json:"-" gorm:"column:ssh_private_key;type:text;serializer:sealed"` // SEALED PEM; decrypt at use via DecryptSSHKey()
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 type ProxyRequestLog struct {

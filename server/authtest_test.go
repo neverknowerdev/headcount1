@@ -27,6 +27,26 @@ func unlockForTest(uid int32) {
 	secrets.Default().UnlockUser(uid, dek, time.Hour)
 }
 
+// sealForUserTest seals a secret under an (already unlocked) user's DEK — the
+// sealed column refuses raw plaintext, so fixtures must pre-seal exactly as the
+// controllers do.
+func sealForUserTest(uid int32, plaintext string) string {
+	v, err := secrets.Default().SealForUser(uid, plaintext)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
+// sealTest seals an ownerless secret under the root DEK for fixtures.
+func sealTest(plaintext string) string {
+	v, err := secrets.Default().Seal(plaintext)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
+
 // postJSON POSTs a JSON body to the router, optionally with a session cookie.
 func postJSON(t *testing.T, r chi.Router, path string, body any, cookies ...*http.Cookie) *httptest.ResponseRecorder {
 	t.Helper()

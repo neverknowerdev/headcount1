@@ -52,7 +52,7 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	other, err := q.CreateUser(t.Context(), "other@x.io")
 	require.NoError(t, err)
 	unlockForTest(owner.ID)
-	provider := db.LLMProvider{Name: "P", BaseUrl: upstream.URL, ApiKey: "k", UserID: &owner.ID}
+	provider := db.LLMProvider{Name: "P", BaseUrl: upstream.URL, ApiKeyEncrypted: sealForUserTest(owner.ID, "k"), UserID: &owner.ID}
 	require.NoError(t, database.Create(&provider).Error)
 	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &owner.ID}
 	require.NoError(t, database.Create(&group).Error)
@@ -173,7 +173,7 @@ func TestGatewayOpenWithoutValidator(t *testing.T) {
 		w.Write([]byte(`{"choices":[{"message":{"content":"ok"}}]}`))
 	}))
 	defer upstream.Close()
-	provider := db.LLMProvider{Name: "P", BaseUrl: upstream.URL, ApiKey: "k"}
+	provider := db.LLMProvider{Name: "P", BaseUrl: upstream.URL, ApiKeyEncrypted: sealTest("k")}
 	require.NoError(t, database.Create(&provider).Error)
 	group := db.ModelGroup{Name: "G", Slug: "g"}
 	require.NoError(t, database.Create(&group).Error)

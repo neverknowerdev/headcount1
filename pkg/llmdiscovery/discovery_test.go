@@ -425,7 +425,7 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	for _, p := range providers {
 		names[p.Name] = true
 		assert.True(t, p.Builtin)
-		assert.Empty(t, p.ApiKey, "builtin providers must not ship with a baked-in API key")
+		assert.Empty(t, p.ApiKeyEncrypted, "builtin providers must not ship with a baked-in API key")
 	}
 	assert.True(t, names[db.ProviderNameOpenRouter])
 	assert.True(t, names[db.ProviderNameOpenCodeZen])
@@ -436,7 +436,9 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	if openRouter.Name != db.ProviderNameOpenRouter {
 		openRouter = providers[1]
 	}
-	openRouter.ApiKey = "user-key"
+	sealedKey, err := secrets.Default().SealForUser(*openRouter.UserID, "user-key")
+	require.NoError(t, err)
+	openRouter.ApiKeyEncrypted = sealedKey
 	openRouter.BaseUrl = "https://custom.example.com/v1"
 	_, err = q.UpdateLLMProvider(ctx, openRouter)
 	require.NoError(t, err)
@@ -444,7 +446,9 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 	after, err := q.GetLLMProvider(ctx, openRouter.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "user-key", after.ApiKey)
+	afterKey, err := after.DecryptAPIKey()
+	require.NoError(t, err)
+	assert.Equal(t, "user-key", afterKey)
 	assert.Equal(t, "https://custom.example.com/v1", after.BaseUrl)
 
 	providersAfter, err := q.ListLLMProviders(ctx)

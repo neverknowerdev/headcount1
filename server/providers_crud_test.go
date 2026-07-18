@@ -244,7 +244,7 @@ func TestRediscoverProviderModels_PresetProviderUsesSavedApiKey(t *testing.T) {
 	q := db.New(database)
 	uid := testSeedUserID(t, q)
 	provider, err := q.CreateLLMProvider(context.Background(), db.LLMProvider{
-		Name: "Test Preset", BaseUrl: mock.URL, ApiKey: "sk-saved-key",
+		Name: "Test Preset", BaseUrl: mock.URL, ApiKeyEncrypted: sealForUserTest(uid, "sk-saved-key"),
 		ProviderType: "openai", PresetKey: "test-preset", Enabled: true, UserID: &uid,
 	})
 	require.NoError(t, err)

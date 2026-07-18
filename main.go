@@ -183,14 +183,9 @@ func main() {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
-	// Secrets (provider API keys, MCP tokens) are encrypted at rest; seal any
-	// rows written before encryption was introduced. On failure the server
-	// still starts — reads of already-sealed secrets keep working or fail
-	// loudly at the point of use, never silently downgrade to plaintext.
+	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user and
+	// stored as ciphertext; the app decrypts only at the point of use.
 	log.Printf("Secrets encrypted at rest; master key source: %s", db.SecretsBackend())
-	if err := db.New(database).EncryptPlaintextSecrets(context.Background()); err != nil {
-		log.Printf("Warning: failed to encrypt pre-existing plaintext secrets: %v", err)
-	}
 
 	// Restore the graceful-exit keyring snapshot, if a boot key is configured
 	// and a snapshot from a planned shutdown exists — so a deploy re-warms

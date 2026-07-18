@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -89,12 +90,14 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&sprint, "company_id = ?", company.ID).Error)
 
 	var provider db.LLMProvider
+	sealedKey, err := secrets.Default().Seal("test-key")
+	require.NoError(t, err)
 	require.NoError(t, database.Create(&db.LLMProvider{
-		Name:         "mock-provider",
-		BaseUrl:      mockProviderURL,
-		ApiKey:       "test-key",
-		ProviderType: "openai",
-		DefaultModel: "test-model",
+		Name:            "mock-provider",
+		BaseUrl:         mockProviderURL,
+		ApiKeyEncrypted: sealedKey,
+		ProviderType:    "openai",
+		DefaultModel:    "test-model",
 	}).Error)
 	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
 

@@ -10,6 +10,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/llmdiscovery"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 )
 
@@ -71,10 +72,15 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 	}
 
 	uid := api.currentUserID(r)
+	sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
+		return
+	}
 	p := db.LLMProvider{
 		Name:            preset.Name,
 		BaseUrl:         preset.BaseUrl,
-		ApiKey:          req.ApiKey,
+		ApiKeyEncrypted: sealedKey,
 		UserID:          &uid,
 		ProviderType:    preset.ProviderType,
 		DefaultModel:    models[0],
@@ -86,7 +92,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	p.HasApiKey = p.ApiKey != ""
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -133,7 +139,13 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
-		provider.ApiKey = req.ApiKey
+		uid := api.currentUserID(r)
+		sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+		if err != nil {
+			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to change the API key")
+			return
+		}
+		provider.ApiKeyEncrypted = sealedKey
 	}
 	if req.Enabled != nil {
 		provider.Enabled = *req.Enabled
@@ -173,11 +185,16 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	case provider.PresetKey != "":
-		if provider.ApiKey == "" {
+		if provider.ApiKeyEncrypted == "" {
 			api.respondError(w, http.StatusBadRequest, "add an API key before re-discovering models")
 			return
 		}
-		models, err = llmdiscovery.FetchModelsForPreset(r.Context(), client, provider.PresetKey, provider.BaseUrl, provider.ApiKey)
+		apiKey, decErr := provider.DecryptAPIKey()
+		if decErr != nil {
+			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to re-discover models")
+			return
+		}
+		models, err = llmdiscovery.FetchModelsForPreset(r.Context(), client, provider.PresetKey, provider.BaseUrl, apiKey)
 	default:
 		api.respondError(w, http.StatusBadRequest, "only built-in or preset-based providers support model re-discovery")
 		return
@@ -218,10 +235,15 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := api.currentUserID(r)
+	sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
+		return
+	}
 	p := db.LLMProvider{
 		Name:            req.Name,
 		BaseUrl:         req.BaseUrl,
-		ApiKey:          req.ApiKey,
+		ApiKeyEncrypted: sealedKey,
 		UserID:          &uid,
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
@@ -232,7 +254,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	p.HasApiKey = p.ApiKey != ""
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -257,7 +279,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
 		if err == nil && ownedByUser(r, provider.UserID) {
 			if apiKey == "" {
-				apiKey = provider.ApiKey
+				// Decrypt the saved key at the point of use; a locked vault
+				// simply leaves apiKey empty and the 400 below asks for one.
+				apiKey, _ = provider.DecryptAPIKey()
 			}
 			if baseUrl == "" {
 				baseUrl = provider.BaseUrl

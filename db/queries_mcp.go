@@ -44,7 +44,7 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID, userID int32) (
 	}
 	for i := range servers {
 		for j := range servers[i].Accounts {
-			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
+			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthTokenEncrypted != ""
 		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
 		// for codegraph servers (ProjectID set) which are managed by init_status,
@@ -206,28 +206,23 @@ func (q *Queries) GetMCPToolCallCounts(ctx context.Context, serverID int32) (map
 
 func (q *Queries) CreateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
 	err := q.db.WithContext(ctx).Create(&a).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) GetMCPAccount(ctx context.Context, id int32) (MCPAccount, error) {
 	var a MCPAccount
 	err := q.db.WithContext(ctx).First(&a, id).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) UpdateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
-	// Never overwrite the stored auth_token with an empty value: a locked vault
-	// scans the ciphertext to "" (serializer degrades locked reads), so a
-	// metadata-only edit would reseal "" over the real secret and destroy it.
-	// Only write auth_token when a fresh plaintext was supplied.
-	tx := q.db.WithContext(ctx)
-	if a.AuthToken == "" {
-		tx = tx.Omit("AuthToken")
-	}
-	err := tx.Save(&a).Error
-	a.HasToken = a.AuthToken != ""
+	// AuthTokenEncrypted is ciphertext: a metadata-only edit round-trips the
+	// sealed value verbatim, and a token change was re-sealed by the caller, so
+	// a plain Save can never destroy the secret.
+	err := q.db.WithContext(ctx).Save(&a).Error
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
@@ -248,7 +243,7 @@ func (q *Queries) ListMCPAccountsForServer(ctx context.Context, serverID int32) 
 	var accounts []MCPAccount
 	err := q.db.WithContext(ctx).Where("mcp_server_id = ?", serverID).Find(&accounts).Error
 	for i := range accounts {
-		accounts[i].HasToken = accounts[i].AuthToken != ""
+		accounts[i].HasToken = accounts[i].AuthTokenEncrypted != ""
 	}
 	return accounts, err
 }
