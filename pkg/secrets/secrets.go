@@ -59,10 +59,24 @@ type Store struct {
 	// records only, same revocation reasoning as wrappedDEK.
 	userKeys     UserKeyStorage
 	userKeyCache map[int32]UserKeyRecord
+
+	// keyring holds unlocked per-user DEKs in memory (see keyring.go). It is
+	// the sole place a user's DEK exists in plaintext, and only while that
+	// user has an active session.
+	keyring *Keyring
 }
 
 func NewStore(source KeySource, keystorePath string) *Store {
-	return &Store{source: source, keystorePath: keystorePath}
+	return &Store{source: source, keystorePath: keystorePath, keyring: NewKeyring()}
+}
+
+// Keyring returns the store's in-memory unlocked-DEK keyring.
+func (s *Store) Keyring() *Keyring { return s.keyring }
+
+// userDEKFromKeyring returns a user's unlocked DEK from the keyring, or false
+// when the user is locked (logged out, TTL lapsed, or never unlocked).
+func (s *Store) userDEKFromKeyring(userID int32) ([32]byte, bool) {
+	return s.keyring.Get(userID)
 }
 
 // SourceName names the active master-key source, for startup logging.
@@ -295,3 +309,8 @@ func Default() *Store {
 	})
 	return defaultStore
 }
+
+// DefaultKeyring returns the process-wide store's keyring, so auth handlers
+// (unlock/lock) and the GORM serializer (which uses Default()) share one
+// keyring instance.
+func DefaultKeyring() *Keyring { return Default().Keyring() }

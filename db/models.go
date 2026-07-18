@@ -56,6 +56,43 @@ type UserKey struct {
 	UpdatedAt          time.Time `json:"updated_at"`
 }
 
+// WebAuthnCredential is one enrolled passkey. Login is passwordless: the
+// credential authenticates the user (assertion), and its WebAuthn PRF output
+// unlocks the user's data-encryption key. The DEK is wrapped once per
+// credential (each passkey's PRF value differs), so WrappedDEK holds this
+// credential's copy; PRFSalt is the constant, non-secret PRF eval input we
+// replay at every login to get a stable PRF output. Deleting a user's
+// credentials (recovery) crypto-shreds their secrets — the DEK is
+// unrecoverable and their "enc:u1:" values become permanently dead.
+type WebAuthnCredential struct {
+	ID           int32     `json:"id" gorm:"primaryKey"`
+	UserID       int32     `json:"user_id" gorm:"index;not null"`
+	User         User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	CredentialID []byte    `json:"-" gorm:"uniqueIndex;not null"` // raw WebAuthn credential id
+	PublicKey    []byte    `json:"-" gorm:"not null"`             // COSE public key
+	SignCount    uint32    `json:"-"`
+	Transports   string    `json:"transports" gorm:"type:text"` // JSON array of authenticator transports
+	AAGUID       []byte    `json:"-"`
+	Nickname     string    `json:"nickname"`
+	WrappedDEK   string    `json:"-" gorm:"not null"` // DEK sealed under this credential's PRF-derived key
+	PRFSalt      []byte    `json:"-" gorm:"not null"` // constant PRF eval input for this credential
+	LastUsedAt   time.Time `json:"last_used_at"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
+}
+
+// WebAuthnSession stores an in-flight ceremony challenge (registration or
+// login) for the short round-trip between begin and finish. Single-use and
+// short-lived; only the challenge is kept.
+type WebAuthnSession struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	UserID    *int32    `json:"user_id" gorm:"index"`        // nil until the user is known (registration)
+	Purpose   string    `json:"purpose" gorm:"not null"`     // "register" | "login" | "add-credential" | "unlock"
+	Data      string    `json:"-" gorm:"type:text;not null"` // serialized webauthn.SessionData
+	ExpiresAt time.Time `json:"expires_at" gorm:"not null;index"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
 // Team roles. Designed for growth (admin tiers, per-role permissions) but
 // deliberately flat for now: an owner and a member can do exactly the same
 // things, with a single exception — only the owner can invite (and revoke

@@ -96,6 +96,8 @@ func main() {
 	err = database.AutoMigrate(
 		&db.User{},
 		&db.UserKey{},
+		&db.WebAuthnCredential{},
+		&db.WebAuthnSession{},
 		&db.Team{},
 		&db.TeamMember{},
 		&db.TeamInvite{},
