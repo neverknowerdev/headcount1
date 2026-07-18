@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -64,8 +63,8 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
+		keyPath := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -117,7 +116,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager.CreateProjectDirectories(comp, proj)
 
 	if req.RepositoryUrl != "" {
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -202,8 +201,8 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
+		keyPath := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -213,7 +212,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
 		fsManager := filesystem.NewManager(settings.BasePath)
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project); err != nil {
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -391,17 +390,16 @@ func validateGitURL(url string) error {
 
 // validateAndConnectRepo normalizes the URL, validates its format, then tests
 // remote connectivity. Returns the normalized URL on success.
-func validateAndConnectRepo(ctx context.Context, rawURL, sshDir string) (string, error) {
+func validateAndConnectRepo(ctx context.Context, rawURL, sshKeyPath string) (string, error) {
 	normalized := normalizeGitURL(rawURL)
 	if err := validateGitURL(normalized); err != nil {
 		return "", err
 	}
 
-	sshKeyPath := filepath.Join(sshDir, "id_rsa")
 	_, sshKeyStatErr := os.Stat(sshKeyPath)
 	sshKeyExists := sshKeyStatErr == nil
 
-	gitMgr := git.NewGitManager("", sshDir)
+	gitMgr := git.NewGitManager("", sshKeyPath)
 	if err := gitMgr.ValidateRemote(ctx, normalized); err != nil {
 		if strings.HasPrefix(err.Error(), "[auth]") {
 			if !sshKeyExists {

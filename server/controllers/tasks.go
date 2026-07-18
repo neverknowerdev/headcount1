@@ -329,8 +329,8 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
 	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
-	sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
-	gitMgr := git.NewGitManager(repoDir, sshDir)
+	keyPath := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
+	gitMgr := git.NewGitManager(repoDir, keyPath)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)
 

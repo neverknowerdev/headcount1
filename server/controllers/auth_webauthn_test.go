@@ -28,6 +28,7 @@ func setupAuthTestDB(t *testing.T) (*gorm.DB, *API) {
 		&db.Team{}, &db.TeamMember{}, &db.TeamInvite{},
 		&db.LLMProvider{}, &db.DefaultModelSetting{},
 		&db.PasswordResetToken{}, &db.RefreshToken{}, &db.MCPServer{}, &db.MCPAccount{},
+		&db.UserGitCredential{},
 	))
 	return database, NewAPI(database, nil, nil)
 }

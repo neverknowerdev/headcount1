@@ -587,6 +587,21 @@ type DefaultModelSetting struct {
 	UpdatedAt    time.Time    `json:"updated_at"`
 }
 
+// UserGitCredential holds a user's own git credentials, encrypted at rest under
+// their per-user DEK (same as provider keys). Each user has their own SSH key so
+// the agent pushes under that user's identity — replacing the single shared key
+// that any account could previously overwrite. SSHPrivateKey is only decryptable
+// while the owner's vault is unlocked.
+type UserGitCredential struct {
+	ID            int32     `json:"id" gorm:"primaryKey"`
+	UserID        *int32    `json:"user_id" gorm:"uniqueIndex;not null"`
+	User          *User     `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	SSHPrivateKey string    `json:"-" gorm:"type:text;serializer:secret"` // PEM; encrypted at rest
+	GitHubPAT     string    `json:"-" gorm:"type:text;serializer:secret"` // optional; encrypted at rest
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
+}
+
 type ProxyRequestLog struct {
 	ID               int32       `json:"id" gorm:"primaryKey"`
 	AgentID          int32       `json:"agent_id" gorm:"not null"`

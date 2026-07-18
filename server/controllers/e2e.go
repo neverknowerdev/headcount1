@@ -56,6 +56,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"password_reset_tokens",
 		"sessions",
 		"refresh_tokens",
+		"user_git_credentials",
 		"web_authn_sessions",
 		"web_authn_credentials",
 		"team_members",

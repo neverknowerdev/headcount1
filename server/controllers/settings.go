@@ -3,11 +3,10 @@ package endpoints
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
+	"strings"
 
 	"agent-orchestrator/pkg/appsettings"
-	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/secrets"
 )
 
 type Settings = appsettings.Settings
@@ -46,25 +45,28 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(settings)
 }
 
+// UploadSSHKey stores the caller's own git SSH private key, encrypted at rest
+// under their per-user DEK (like provider keys). It is per-user: one account can
+// no longer overwrite a shared identity. Requires the vault to be unlocked so
+// the key can be sealed.
 func (api *API) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
 	var payload SSHKeyPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	settings := LoadSettings()
-	sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
+	if strings.TrimSpace(payload.Key) == "" {
+		api.respondError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	uid := api.currentUserID(r)
+	if !secrets.IsUnlocked(uid) {
+		api.respondError(w, http.StatusConflict, "vault locked — unlock with your passkey before saving a key")
+		return
+	}
+	if err := api.q.UpsertUserSSHKey(r.Context(), uid, payload.Key); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	keyPath := filepath.Join(sshDir, "id_rsa")
-	if err := os.WriteFile(keyPath, []byte(payload.Key), 0600); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.WriteHeader(http.StatusOK)
 }

@@ -105,6 +105,7 @@ func main() {
 		&db.TeamInvite{},
 		&db.Session{},
 		&db.RefreshToken{},
+		&db.UserGitCredential{},
 		&db.PasswordResetToken{},
 		&db.Company{},
 		&db.Project{},

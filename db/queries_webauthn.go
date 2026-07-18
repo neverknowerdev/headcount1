@@ -102,6 +102,11 @@ func (q *Queries) CryptoShredUser(ctx context.Context, userID int32) error {
 		if err := tx.Model(&MCPAccount{}).Where("user_id = ?", userID).Update("auth_token", "").Error; err != nil {
 			return err
 		}
+		// The user's git credentials are sealed under the now-shredded DEK; drop
+		// the row so no dead ciphertext lingers.
+		if err := tx.Where("user_id = ?", userID).Delete(&UserGitCredential{}).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 }

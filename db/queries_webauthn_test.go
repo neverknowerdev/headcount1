@@ -91,7 +91,7 @@ func TestCryptoShredUserWipesSecretsKeepsAccount(t *testing.T) {
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, database.AutoMigrate(
 		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
-		&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{},
+		&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}, &db.UserGitCredential{},
 	))
 	q := db.New(database)
 	ctx := context.Background()

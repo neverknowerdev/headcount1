@@ -422,7 +422,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
-			gitMgr = git.NewGitManager(projectRepoDir, fsMgr.Paths().SSHDir())
+			keyPath := filesystem.ResolveSSHKeyPathForCompany(ctx, e.q, settings.BasePath, company)
+			gitMgr = git.NewGitManager(projectRepoDir, keyPath)
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())
 			}
