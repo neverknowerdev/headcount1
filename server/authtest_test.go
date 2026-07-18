@@ -31,7 +31,7 @@ func unlockForTest(uid int32) {
 // sealed column refuses raw plaintext, so fixtures must pre-seal exactly as the
 // controllers do.
 func sealForUserTest(uid int32, plaintext string) string {
-	v, err := secrets.Default().SealForUser(uid, plaintext)
+	v, err := secrets.Default().EncryptForUser(uid, plaintext)
 	if err != nil {
 		panic(err)
 	}
@@ -40,7 +40,7 @@ func sealForUserTest(uid int32, plaintext string) string {
 
 // sealTest seals an ownerless secret under the root DEK for fixtures.
 func sealTest(plaintext string) string {
-	v, err := secrets.Default().Seal(plaintext)
+	v, err := secrets.Default().Encrypt(plaintext)
 	if err != nil {
 		panic(err)
 	}

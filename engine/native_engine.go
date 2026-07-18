@@ -21,6 +21,7 @@ import (
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/runtokens"
+	"agent-orchestrator/pkg/secrets"
 
 	"gorm.io/gorm"
 )
@@ -781,7 +782,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			// Decrypt the account's auth token at the point of use. If the owner's
 			// vault is locked we can't recover it — skip the account rather than
 			// wire up a server that would fail every call with an empty token.
-			authToken, decErr := acc.DecryptAuthToken()
+			authToken, decErr := secrets.Default().Decrypt(acc.AuthTokenEncrypted)
 			if decErr != nil {
 				e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping MCP account %q: %v", acc.Name, decErr))
 				continue
@@ -842,7 +843,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	// Decrypt the provider key at the point of use. A locked owner surfaces as a
 	// clear provider-auth failure downstream rather than a silent empty key.
-	apiKey, keyErr := provider.DecryptAPIKey()
+	apiKey, keyErr := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	if keyErr != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: could not decrypt provider key: %v", keyErr))
 	}
@@ -1533,7 +1534,7 @@ Document %q:
 
 Question: %s`, filename, content, truncNote, question)
 
-	apiKey, err := provider.DecryptAPIKey()
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	if err != nil {
 		return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
 	}
@@ -1779,7 +1780,7 @@ Task: %s
 Changes:
 %s`, task.Title, diff)
 
-	apiKey, err := provider.DecryptAPIKey()
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	if err != nil {
 		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
 	}

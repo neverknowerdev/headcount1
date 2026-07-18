@@ -187,7 +187,7 @@ func (api *API) E2ERevealProviderSecret(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusNotFound, "provider not found")
 		return
 	}
-	apiKey, err := p.DecryptAPIKey()
+	apiKey, err := secrets.Default().Decrypt(p.ApiKeyEncrypted)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "decrypt failed")
 		return

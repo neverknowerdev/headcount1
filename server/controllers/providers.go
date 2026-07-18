@@ -72,7 +72,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 	}
 
 	uid := api.currentUserID(r)
-	sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+	sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
 	if err != nil {
 		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
 		return
@@ -140,7 +140,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
 		uid := api.currentUserID(r)
-		sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+		sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
 		if err != nil {
 			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to change the API key")
 			return
@@ -189,7 +189,7 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 			api.respondError(w, http.StatusBadRequest, "add an API key before re-discovering models")
 			return
 		}
-		apiKey, decErr := provider.DecryptAPIKey()
+		apiKey, decErr := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 		if decErr != nil {
 			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to re-discover models")
 			return
@@ -235,7 +235,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	uid := api.currentUserID(r)
-	sealedKey, err := secrets.Default().SealForUser(uid, req.ApiKey)
+	sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
 	if err != nil {
 		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
 		return
@@ -281,7 +281,7 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			if apiKey == "" {
 				// Decrypt the saved key at the point of use; a locked vault
 				// simply leaves apiKey empty and the 400 below asks for one.
-				apiKey, _ = provider.DecryptAPIKey()
+				apiKey, _ = secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 			}
 			if baseUrl == "" {
 				baseUrl = provider.BaseUrl

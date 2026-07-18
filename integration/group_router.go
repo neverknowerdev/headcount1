@@ -229,7 +229,7 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 	if provider.UserID != nil && !secrets.IsUnlocked(*provider.UserID) {
 		return nil, fmt.Errorf("vault locked: this provider's owner is logged out — re-authenticate to run")
 	}
-	apiKey, err := provider.DecryptAPIKey()
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	if err != nil {
 		return nil, fmt.Errorf("decrypt provider key: %w", err)
 	}

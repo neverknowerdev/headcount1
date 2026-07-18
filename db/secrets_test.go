@@ -44,7 +44,7 @@ func TestSecretsStoredAsCiphertext(t *testing.T) {
 	defer secrets.Default().LockUser(user.ID)
 
 	// The caller (a controller) seals before the value ever lands on the model.
-	sealed, err := secrets.Default().SealForUser(user.ID, "sk-raw-secret")
+	sealed, err := secrets.Default().EncryptForUser(user.ID, "sk-raw-secret")
 	require.NoError(t, err)
 
 	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
@@ -67,8 +67,8 @@ func TestSecretsStoredAsCiphertext(t *testing.T) {
 	assert.NotContains(t, got.ApiKeyEncrypted, "sk-raw-secret")
 	assert.True(t, got.HasApiKey)
 
-	// Only DecryptAPIKey, at the point of use, yields the plaintext.
-	plain, err := got.DecryptAPIKey()
+	// Only an explicit manager Decrypt, at the point of use, yields the plaintext.
+	plain, err := secrets.Default().Decrypt(got.ApiKeyEncrypted)
 	require.NoError(t, err)
 	assert.Equal(t, "sk-raw-secret", plain)
 
@@ -81,7 +81,7 @@ func TestSecretsStoredAsCiphertext(t *testing.T) {
 	assert.Contains(t, string(body), `"has_api_key":true`)
 
 	// Same contract for MCP account tokens.
-	sealedTok, err := secrets.Default().SealForUser(user.ID, "ghp_raw_token")
+	sealedTok, err := secrets.Default().EncryptForUser(user.ID, "ghp_raw_token")
 	require.NoError(t, err)
 	acc, err := q.CreateMCPAccount(ctx, db.MCPAccount{
 		MCPServerID: 1, Name: "Default", AuthTokenEncrypted: sealedTok, UserID: &user.ID,
@@ -92,14 +92,14 @@ func TestSecretsStoredAsCiphertext(t *testing.T) {
 	gotAcc, err := q.GetMCPAccount(ctx, acc.ID)
 	require.NoError(t, err)
 	assert.True(t, secrets.IsSealed(gotAcc.AuthTokenEncrypted))
-	tok, err := gotAcc.DecryptAuthToken()
+	tok, err := secrets.Default().Decrypt(gotAcc.AuthTokenEncrypted)
 	require.NoError(t, err)
 	assert.Equal(t, "ghp_raw_token", tok)
 	assert.True(t, gotAcc.HasToken)
 }
 
 // TestWriteGuardRejectsUnsealedSecret verifies the serializer refuses to persist
-// a plaintext value in a sealed column — a forgotten SealForUser fails loudly
+// a plaintext value in a sealed column — a forgotten EncryptForUser fails loudly
 // instead of silently writing a secret in the clear.
 func TestWriteGuardRejectsUnsealedSecret(t *testing.T) {
 	database := setupSecretsTestDB(t)
@@ -132,7 +132,7 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	dek, _ := secrets.NewUserDEK()
 	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
 
-	sealed, err := secrets.Default().SealForUser(user.ID, "sk-user-owned")
+	sealed, err := secrets.Default().EncryptForUser(user.ID, "sk-user-owned")
 	require.NoError(t, err)
 	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
 		Name: "mine", BaseUrl: "https://u", ApiKeyEncrypted: sealed, UserID: &user.ID,
@@ -146,7 +146,7 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 
 	got, err := q.GetLLMProvider(ctx, created.ID)
 	require.NoError(t, err)
-	plain, err := got.DecryptAPIKey()
+	plain, err := secrets.Default().Decrypt(got.ApiKeyEncrypted)
 	require.NoError(t, err)
 	assert.Equal(t, "sk-user-owned", plain)
 
@@ -157,7 +157,7 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	locked, err := q.GetLLMProvider(ctx, created.ID)
 	require.NoError(t, err)
 	assert.True(t, secrets.IsSealed(locked.ApiKeyEncrypted))
-	_, err = locked.DecryptAPIKey()
+	_, err = secrets.Default().Decrypt(locked.ApiKeyEncrypted)
 	assert.ErrorIs(t, err, secrets.ErrLocked, "locked user's secret must not decrypt")
 }
 
@@ -180,13 +180,13 @@ func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	dek, _ := secrets.NewUserDEK()
 	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
 
-	sealedKey, err := secrets.Default().SealForUser(user.ID, "sk-must-survive")
+	sealedKey, err := secrets.Default().EncryptForUser(user.ID, "sk-must-survive")
 	require.NoError(t, err)
 	prov, err := q.CreateLLMProvider(ctx, db.LLMProvider{
 		Name: "orig", BaseUrl: "https://u", ApiKeyEncrypted: sealedKey, UserID: &user.ID,
 	})
 	require.NoError(t, err)
-	sealedTok, err := secrets.Default().SealForUser(user.ID, "tok-must-survive")
+	sealedTok, err := secrets.Default().EncryptForUser(user.ID, "tok-must-survive")
 	require.NoError(t, err)
 	acct, err := q.CreateMCPAccount(ctx, db.MCPAccount{
 		MCPServerID: 1, Name: "orig", AuthTokenEncrypted: sealedTok, UserID: &user.ID,
@@ -217,14 +217,14 @@ func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	gotProv, err := q.GetLLMProvider(ctx, prov.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "renamed", gotProv.Name, "metadata edit should persist")
-	provKey, err := gotProv.DecryptAPIKey()
+	provKey, err := secrets.Default().Decrypt(gotProv.ApiKeyEncrypted)
 	require.NoError(t, err)
 	assert.Equal(t, "sk-must-survive", provKey, "secret must survive a locked metadata edit")
 
 	gotAcct, err := q.GetMCPAccount(ctx, acct.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "renamed", gotAcct.Name)
-	acctTok, err := gotAcct.DecryptAuthToken()
+	acctTok, err := secrets.Default().Decrypt(gotAcct.AuthTokenEncrypted)
 	require.NoError(t, err)
 	assert.Equal(t, "tok-must-survive", acctTok, "token must survive a locked metadata edit")
 }

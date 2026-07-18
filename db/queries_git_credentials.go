@@ -10,7 +10,7 @@ import (
 
 // GetUserGitCredential returns a user's git credentials. SSHPrivateKeyEncrypted
 // holds the sealed ciphertext verbatim (the serializer no longer decrypts on
-// read); call UserGitCredential.DecryptSSHKey at the point of use to get the
+// read); decrypt at the point of use via secrets.Default().Decrypt() to get the
 // plaintext, which returns secrets.ErrLocked when the user's vault is locked.
 func (q *Queries) GetUserGitCredential(ctx context.Context, userID int32) (UserGitCredential, error) {
 	var c UserGitCredential
@@ -23,7 +23,7 @@ func (q *Queries) GetUserGitCredential(ctx context.Context, userID int32) (UserG
 // downstream ever holds it. Returns secrets.ErrLocked if the user's vault is
 // locked (nothing to seal against). Empty keys are rejected by the caller.
 func (q *Queries) UpsertUserSSHKey(ctx context.Context, userID int32, sshKey string) error {
-	sealed, err := secrets.Default().SealForUser(userID, sshKey)
+	sealed, err := secrets.Default().EncryptForUser(userID, sshKey)
 	if err != nil {
 		return err
 	}

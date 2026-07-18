@@ -23,7 +23,7 @@ import (
 // sealed column refuses raw plaintext). Decryption at the point of use routes
 // back through the root DEK.
 func sealKey(s string) string {
-	v, err := secrets.Default().Seal(s)
+	v, err := secrets.Default().Encrypt(s)
 	if err != nil {
 		panic(err)
 	}

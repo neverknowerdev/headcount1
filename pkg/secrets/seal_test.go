@@ -35,7 +35,7 @@ func (f *fakeUnwrapper) Unseal(c []byte) ([]byte, error) {
 }
 
 func TestSealUnsealKeyringRoundTrip(t *testing.T) {
-	s := NewStore(&fileKeySource{path: t.TempDir() + "/m.key"}, t.TempDir()+"/ks.json")
+	s := NewManager(&fileKeySource{path: t.TempDir() + "/m.key"}, t.TempDir()+"/ks.json")
 	var d1, d2 [32]byte
 	d1[0], d2[0] = 1, 2
 	s.UnlockUser(1, d1, time.Minute)
@@ -51,7 +51,7 @@ func TestSealUnsealKeyringRoundTrip(t *testing.T) {
 	}
 
 	// Restart simulation: fresh store, restore from the sealed blob.
-	s2 := NewStore(&fileKeySource{path: t.TempDir() + "/m2.key"}, t.TempDir()+"/ks2.json")
+	s2 := NewManager(&fileKeySource{path: t.TempDir() + "/m2.key"}, t.TempDir()+"/ks2.json")
 	if s2.IsUnlocked(1) {
 		t.Fatal("fresh store must start locked")
 	}
@@ -67,7 +67,7 @@ func TestSealUnsealKeyringRoundTrip(t *testing.T) {
 }
 
 func TestSealEmptyKeyringIsNoop(t *testing.T) {
-	s := NewStore(&fileKeySource{path: t.TempDir() + "/m.key"}, t.TempDir()+"/ks.json")
+	s := NewManager(&fileKeySource{path: t.TempDir() + "/m.key"}, t.TempDir()+"/ks.json")
 	blob, err := s.SealKeyring(newFakeUnwrapper())
 	if err != nil {
 		t.Fatal(err)

@@ -96,7 +96,7 @@ func discoverServerTools(ctx context.Context, s db.MCPServer) (string, error) {
 
 // discoverServerToolsWithAccount connects using a specific account's credentials.
 func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account db.MCPAccount) (string, error) {
-	authToken, err := account.DecryptAuthToken()
+	authToken, err := secrets.Default().Decrypt(account.AuthTokenEncrypted)
 	if err != nil {
 		return "", fmt.Errorf("decrypt account token: %w", err)
 	}
@@ -347,7 +347,7 @@ func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 		authToken = path
 	}
 	uid := api.currentUserID(r)
-	sealedToken, err := secrets.Default().SealForUser(uid, authToken)
+	sealedToken, err := secrets.Default().EncryptForUser(uid, authToken)
 	if err != nil {
 		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save credentials")
 		return
@@ -390,7 +390,7 @@ func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 	}
 	if newSecret != "" {
 		uid := api.currentUserID(r)
-		sealedToken, err := secrets.Default().SealForUser(uid, newSecret)
+		sealedToken, err := secrets.Default().EncryptForUser(uid, newSecret)
 		if err != nil {
 			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to change credentials")
 			return
@@ -524,7 +524,7 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	// The OAuth token file path is itself the secret carried on the account —
 	// seal it before it reaches the model's AuthTokenEncrypted field.
 	uid := api.currentUserID(r)
-	sealedPath, err := secrets.Default().SealForUser(uid, tokenPath)
+	sealedPath, err := secrets.Default().EncryptForUser(uid, tokenPath)
 	if err != nil {
 		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to finish authorizing")
 		return

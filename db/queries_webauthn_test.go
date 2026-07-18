@@ -103,7 +103,7 @@ func TestCryptoShredUserWipesSecretsKeepsAccount(t *testing.T) {
 	var dek [32]byte
 	dek[0] = 7
 	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
-	sealedKey, err := secrets.Default().SealForUser(user.ID, "sk-secret")
+	sealedKey, err := secrets.Default().EncryptForUser(user.ID, "sk-secret")
 	require.NoError(t, err)
 	prov, err := q.CreateLLMProvider(ctx, db.LLMProvider{Name: "p", BaseUrl: "u", ApiKeyEncrypted: sealedKey, UserID: &user.ID})
 	require.NoError(t, err)

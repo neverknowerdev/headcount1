@@ -190,7 +190,7 @@ type LLMProvider struct {
 	BaseUrl string `json:"base_url" gorm:"not null"`
 	// ApiKeyEncrypted holds the SEALED api key (ciphertext) — both at rest and in
 	// memory. It is never serialized to clients (the frontend only sees
-	// HasApiKey). Decrypt it at the point of use via DecryptAPIKey().
+	// HasApiKey). Decrypt at the point of use via secrets.Default().Decrypt().
 	ApiKeyEncrypted string `json:"-" gorm:"column:api_key;not null;serializer:sealed"`
 	HasApiKey       bool   `json:"has_api_key" gorm:"-"` // computed: ApiKeyEncrypted != ""
 	// UserID is the owning user; secrets on owned rows are sealed with that
@@ -435,7 +435,7 @@ type MCPAccount struct {
 	ID                 int32     `json:"id" gorm:"primaryKey"`
 	MCPServerID        int32     `json:"mcp_server_id" gorm:"not null;index"`
 	Name               string    `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
-	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via DecryptAuthToken()
+	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
 	HasToken           bool      `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
 	UserID             *int32    `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
 	LastError          string    `json:"last_error" gorm:"type:text"`
@@ -597,7 +597,7 @@ type UserGitCredential struct {
 	ID                     int32     `json:"id" gorm:"primaryKey"`
 	UserID                 *int32    `json:"user_id" gorm:"uniqueIndex;not null"`
 	User                   *User     `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
-	SSHPrivateKeyEncrypted string    `json:"-" gorm:"column:ssh_private_key;type:text;serializer:sealed"` // SEALED PEM; decrypt at use via DecryptSSHKey()
+	SSHPrivateKeyEncrypted string    `json:"-" gorm:"column:ssh_private_key;type:text;serializer:sealed"` // SEALED PEM; decrypt at use via secrets.Default().Decrypt()
 	CreatedAt              time.Time `json:"created_at"`
 	UpdatedAt              time.Time `json:"updated_at"`
 }

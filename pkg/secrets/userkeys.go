@@ -21,11 +21,12 @@ const PrefixUser = "enc:u1:"
 // serializer degrades a locked read to an empty value rather than erroring.
 var ErrLocked = errors.New("secrets: user vault is locked")
 
-// SealForUser encrypts a secret under the user's in-memory DEK. Returns
-// ErrLocked when the user is not unlocked — a write must NEVER silently fall
-// back to another key, which would produce a value the user could not decrypt
-// after re-login. Empty stays empty and already-sealed values pass through.
-func (s *Store) SealForUser(userID int32, plaintext string) (string, error) {
+// EncryptForUser seals a secret under the user's in-memory DEK — the primary
+// write path for user-owned secrets. Returns ErrLocked when the user is not
+// unlocked: a write must NEVER silently fall back to another key, which would
+// produce a value the user could not decrypt after re-login. Empty stays empty
+// and already-sealed values pass through.
+func (s *SecretManager) EncryptForUser(userID int32, plaintext string) (string, error) {
 	if plaintext == "" || IsSealed(plaintext) {
 		return plaintext, nil
 	}
@@ -44,7 +45,7 @@ func (s *Store) SealForUser(userID int32, plaintext string) (string, error) {
 // DEK. Returns ErrLocked when that user is currently locked. This is a pure
 // in-memory keyring read — safe inside a GORM row Scan holding the (single,
 // SQLite) DB connection.
-func (s *Store) openUser(stored string) (string, error) {
+func (s *SecretManager) openUser(stored string) (string, error) {
 	rest := strings.TrimPrefix(stored, PrefixUser)
 	idStr, b64, ok := strings.Cut(rest, ":")
 	if !ok {

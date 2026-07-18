@@ -42,9 +42,13 @@ func IsSealed(v string) bool {
 	return strings.HasPrefix(v, Prefix) || strings.HasPrefix(v, PrefixUser)
 }
 
-// Store seals and opens secret values using a DEK wrapped by the KeySource's
-// master key. Safe for concurrent use.
-type Store struct {
+// SecretManager encrypts and decrypts secret values using a DEK wrapped by the
+// KeySource's master key. It is the single component that turns plaintext into
+// stored ciphertext and back — callers hold it (via Default) and invoke
+// Encrypt/EncryptForUser/Decrypt only at the exact point a secret is written or
+// used, so plaintext never lives on a long-lived struct or in the DB layer.
+// Safe for concurrent use.
+type SecretManager struct {
 	source       KeySource
 	keystorePath string
 
@@ -62,33 +66,33 @@ type Store struct {
 	keyring *Keyring
 }
 
-func NewStore(source KeySource, keystorePath string) *Store {
-	return &Store{source: source, keystorePath: keystorePath, keyring: NewKeyring()}
+func NewManager(source KeySource, keystorePath string) *SecretManager {
+	return &SecretManager{source: source, keystorePath: keystorePath, keyring: NewKeyring()}
 }
 
 // Keyring returns the store's in-memory unlocked-DEK keyring.
-func (s *Store) Keyring() *Keyring { return s.keyring }
+func (s *SecretManager) Keyring() *Keyring { return s.keyring }
 
 // userDEKFromKeyring returns a user's unlocked DEK from the keyring, or false
 // when the user is locked (logged out, TTL lapsed, or never unlocked).
-func (s *Store) userDEKFromKeyring(userID int32) ([32]byte, bool) {
+func (s *SecretManager) userDEKFromKeyring(userID int32) ([32]byte, bool) {
 	return s.keyring.Get(userID)
 }
 
 // UnlockUser places a user's DEK in the keyring for ttl. Called after a
 // successful passkey PRF ceremony (login / unlock / registration).
-func (s *Store) UnlockUser(userID int32, dek [32]byte, ttl time.Duration) {
+func (s *SecretManager) UnlockUser(userID int32, dek [32]byte, ttl time.Duration) {
 	s.keyring.Put(userID, dek, ttl)
 }
 
 // LockUser evicts a user's DEK — their secrets become undecryptable until the
 // next unlock. Called on logout.
-func (s *Store) LockUser(userID int32) { s.keyring.Evict(userID) }
+func (s *SecretManager) LockUser(userID int32) { s.keyring.Evict(userID) }
 
 // IsUnlocked reports whether a user's DEK is currently available. Points of
 // use (the LLM proxy, provider test) check this before consuming a secret and
 // return a clear "locked — re-authenticate" error instead of a decrypt failure.
-func (s *Store) IsUnlocked(userID int32) bool {
+func (s *SecretManager) IsUnlocked(userID int32) bool {
 	_, ok := s.keyring.Get(userID)
 	return ok
 }
@@ -101,12 +105,13 @@ func LockUser(userID int32)        { Default().LockUser(userID) }
 func IsUnlocked(userID int32) bool { return Default().IsUnlocked(userID) }
 
 // SourceName names the active master-key source, for startup logging.
-func (s *Store) SourceName() string { return s.source.Name() }
+func (s *SecretManager) SourceName() string { return s.source.Name() }
 
-// Seal encrypts a plaintext secret for storage. Empty stays empty so
-// presence checks (HasToken etc.) keep working, and already-sealed values
-// pass through unchanged so a value can never be double-encrypted.
-func (s *Store) Seal(plaintext string) (string, error) {
+// Encrypt seals a plaintext secret under the root DEK (ownerless "enc:v1:"
+// values). Most secrets are user-owned — prefer EncryptForUser. Empty stays
+// empty so presence checks (HasToken etc.) keep working, and already-sealed
+// values pass through unchanged so a value can never be double-encrypted.
+func (s *SecretManager) Encrypt(plaintext string) (string, error) {
 	if plaintext == "" || IsSealed(plaintext) {
 		return plaintext, nil
 	}
@@ -121,10 +126,12 @@ func (s *Store) Seal(plaintext string) (string, error) {
 	return Prefix + base64.StdEncoding.EncodeToString(blob), nil
 }
 
-// Open decrypts a stored value, routing by its self-describing prefix:
-// "enc:u1:" uses the embedded owner's DEK, "enc:v1:" the root DEK, and
-// anything else is legacy plaintext returned as-is.
-func (s *Store) Open(stored string) (string, error) {
+// Decrypt turns a stored value back into plaintext, routing by its
+// self-describing prefix: "enc:u1:" uses the embedded owner's DEK, "enc:v1:"
+// the root DEK, and anything else is legacy plaintext returned as-is. Returns
+// ErrLocked when a user-owned value's owner is currently locked. Call it at the
+// point of use and use the result immediately — never stash it.
+func (s *SecretManager) Decrypt(stored string) (string, error) {
 	if !IsSealed(stored) {
 		return stored, nil
 	}
@@ -161,7 +168,7 @@ type keystoreFile struct {
 // dek returns the unwrapped data key. The wrapped blob is cached in memory;
 // the master key is fetched from the source on every call (the Vault source
 // applies its own TTL cache internally).
-func (s *Store) dek() ([32]byte, error) {
+func (s *SecretManager) dek() ([32]byte, error) {
 	var zero [32]byte
 	kek, err := s.source.MasterKey()
 	if err != nil {
@@ -191,7 +198,7 @@ func (s *Store) dek() ([32]byte, error) {
 	return dek, nil
 }
 
-func (s *Store) loadOrCreateKeystoreLocked(kek [32]byte) error {
+func (s *SecretManager) loadOrCreateKeystoreLocked(kek [32]byte) error {
 	data, err := os.ReadFile(s.keystorePath)
 	if os.IsNotExist(err) {
 		return s.createKeystoreLocked(kek)
@@ -212,7 +219,7 @@ func (s *Store) loadOrCreateKeystoreLocked(kek [32]byte) error {
 	return nil
 }
 
-func (s *Store) createKeystoreLocked(kek [32]byte) error {
+func (s *SecretManager) createKeystoreLocked(kek [32]byte) error {
 	var dek [32]byte
 	if _, err := rand.Read(dek[:]); err != nil {
 		return err
@@ -285,8 +292,8 @@ func gcmOpen(key [32]byte, blob []byte) ([]byte, error) {
 // ── process-wide default store ───────────────────────────────────────────────
 
 var (
-	defaultOnce  sync.Once
-	defaultStore *Store
+	defaultOnce    sync.Once
+	defaultManager *SecretManager
 
 	baseDirMu       sync.Mutex
 	baseDirResolver func() string
@@ -323,12 +330,12 @@ func baseDir() string {
 
 // Default returns the process-wide store, configured from the environment on
 // first use (see keySourceFromEnv for the source selection rules).
-func Default() *Store {
+func Default() *SecretManager {
 	defaultOnce.Do(func() {
 		dir := baseDir()
-		defaultStore = NewStore(keySourceFromEnv(dir), filepath.Join(dir, "keystore.json"))
+		defaultManager = NewManager(keySourceFromEnv(dir), filepath.Join(dir, "keystore.json"))
 	})
-	return defaultStore
+	return defaultManager
 }
 
 // DefaultKeyring returns the process-wide store's keyring, so auth handlers

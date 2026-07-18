@@ -13,16 +13,16 @@ import (
 	"time"
 )
 
-func testStore(t *testing.T) (*Store, string) {
+func testStore(t *testing.T) (*SecretManager, string) {
 	t.Helper()
 	dir := t.TempDir()
 	src := &fileKeySource{path: filepath.Join(dir, "master.key")}
-	return NewStore(src, filepath.Join(dir, "keystore.json")), dir
+	return NewManager(src, filepath.Join(dir, "keystore.json")), dir
 }
 
 func TestSealOpenRoundtrip(t *testing.T) {
 	s, _ := testStore(t)
-	sealed, err := s.Seal("sk-super-secret")
+	sealed, err := s.Encrypt("sk-super-secret")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -32,7 +32,7 @@ func TestSealOpenRoundtrip(t *testing.T) {
 	if strings.Contains(sealed, "super-secret") {
 		t.Fatal("plaintext leaked into sealed value")
 	}
-	plain, err := s.Open(sealed)
+	plain, err := s.Decrypt(sealed)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -43,11 +43,11 @@ func TestSealOpenRoundtrip(t *testing.T) {
 
 func TestSealEmptyAndDoubleSeal(t *testing.T) {
 	s, _ := testStore(t)
-	if v, err := s.Seal(""); err != nil || v != "" {
+	if v, err := s.Encrypt(""); err != nil || v != "" {
 		t.Fatalf("empty must stay empty, got %q, %v", v, err)
 	}
-	sealed, _ := s.Seal("value")
-	again, err := s.Seal(sealed)
+	sealed, _ := s.Encrypt("value")
+	again, err := s.Encrypt(sealed)
 	if err != nil || again != sealed {
 		t.Fatalf("sealing a sealed value must be a no-op, got %q, %v", again, err)
 	}
@@ -55,7 +55,7 @@ func TestSealEmptyAndDoubleSeal(t *testing.T) {
 
 func TestOpenLegacyPlaintextPassthrough(t *testing.T) {
 	s, _ := testStore(t)
-	plain, err := s.Open("legacy-plaintext-key")
+	plain, err := s.Decrypt("legacy-plaintext-key")
 	if err != nil || plain != "legacy-plaintext-key" {
 		t.Fatalf("legacy passthrough failed: %q, %v", plain, err)
 	}
@@ -66,15 +66,15 @@ func TestKeystorePersistsAcrossStores(t *testing.T) {
 	keyPath := filepath.Join(dir, "master.key")
 	ksPath := filepath.Join(dir, "keystore.json")
 
-	s1 := NewStore(&fileKeySource{path: keyPath}, ksPath)
-	sealed, err := s1.Seal("persist-me")
+	s1 := NewManager(&fileKeySource{path: keyPath}, ksPath)
+	sealed, err := s1.Encrypt("persist-me")
 	if err != nil {
 		t.Fatal(err)
 	}
 
 	// A fresh store (fresh process) with the same key + keystore must decrypt.
-	s2 := NewStore(&fileKeySource{path: keyPath}, ksPath)
-	plain, err := s2.Open(sealed)
+	s2 := NewManager(&fileKeySource{path: keyPath}, ksPath)
+	plain, err := s2.Decrypt(sealed)
 	if err != nil || plain != "persist-me" {
 		t.Fatalf("cross-store open failed: %q, %v", plain, err)
 	}
@@ -84,14 +84,14 @@ func TestWrongMasterKeyFailsClearly(t *testing.T) {
 	dir := t.TempDir()
 	ksPath := filepath.Join(dir, "keystore.json")
 
-	s1 := NewStore(&fileKeySource{path: filepath.Join(dir, "a.key")}, ksPath)
-	sealed, err := s1.Seal("secret")
+	s1 := NewManager(&fileKeySource{path: filepath.Join(dir, "a.key")}, ksPath)
+	sealed, err := s1.Encrypt("secret")
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	s2 := NewStore(&fileKeySource{path: filepath.Join(dir, "b.key")}, ksPath)
-	if _, err := s2.Open(sealed); err == nil || !strings.Contains(err.Error(), "does not match") {
+	s2 := NewManager(&fileKeySource{path: filepath.Join(dir, "b.key")}, ksPath)
+	if _, err := s2.Decrypt(sealed); err == nil || !strings.Contains(err.Error(), "does not match") {
 		t.Fatalf("expected fingerprint-mismatch error, got %v", err)
 	}
 }
@@ -140,12 +140,12 @@ func TestParseMasterKeyFormats(t *testing.T) {
 
 func TestEnvKeySource(t *testing.T) {
 	t.Setenv(EnvMasterKey, "some-passphrase")
-	s := NewStore(envKeySource{}, filepath.Join(t.TempDir(), "keystore.json"))
-	sealed, err := s.Seal("v")
+	s := NewManager(envKeySource{}, filepath.Join(t.TempDir(), "keystore.json"))
+	sealed, err := s.Encrypt("v")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if plain, err := s.Open(sealed); err != nil || plain != "v" {
+	if plain, err := s.Decrypt(sealed); err != nil || plain != "v" {
 		t.Fatalf("env source roundtrip failed: %q, %v", plain, err)
 	}
 }
@@ -220,8 +220,8 @@ func TestVaultErrorsSurface(t *testing.T) {
 	}))
 	defer srv.Close()
 	src := &vaultKeySource{addr: srv.URL, token: "t", path: "secret/data/x", field: "master_key", client: srv.Client()}
-	s := NewStore(src, filepath.Join(t.TempDir(), "keystore.json"))
-	if _, err := s.Seal("v"); err == nil || !strings.Contains(err.Error(), "vault returned") {
+	s := NewManager(src, filepath.Join(t.TempDir(), "keystore.json"))
+	if _, err := s.Encrypt("v"); err == nil || !strings.Contains(err.Error(), "vault returned") {
 		t.Fatalf("expected vault error to surface, got %v", err)
 	}
 }

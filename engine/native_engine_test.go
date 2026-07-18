@@ -90,7 +90,7 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&sprint, "company_id = ?", company.ID).Error)
 
 	var provider db.LLMProvider
-	sealedKey, err := secrets.Default().Seal("test-key")
+	sealedKey, err := secrets.Default().Encrypt("test-key")
 	require.NoError(t, err)
 	require.NoError(t, database.Create(&db.LLMProvider{
 		Name:            "mock-provider",

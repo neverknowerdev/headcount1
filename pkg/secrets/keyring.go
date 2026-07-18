@@ -10,7 +10,7 @@ import (
 // logout or when its TTL lapses. In the steady state nothing here is ever
 // written to disk — that is what makes the encryption zero-knowledge: with no
 // user logged in, no key on the box can open their secrets. The graceful-exit
-// path (Store.SealKeyring) is the only time a snapshot leaves memory, and then
+// path (SecretManager.SealKeyring) is the only time a snapshot leaves memory, and then
 // only wrapped by the boot key so an unexpected crash leaves nothing behind.
 type Keyring struct {
 	mu   sync.RWMutex

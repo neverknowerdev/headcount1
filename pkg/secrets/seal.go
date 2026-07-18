@@ -22,7 +22,7 @@ type KeyUnwrapper interface {
 // SealKeyring serializes the live keyring (userID → DEK) and seals it under
 // the boot key, for writing to disk on a graceful shutdown. Returns an empty
 // blob (and nil error) when no user is unlocked, so callers can skip the write.
-func (s *Store) SealKeyring(u KeyUnwrapper) ([]byte, error) {
+func (s *SecretManager) SealKeyring(u KeyUnwrapper) ([]byte, error) {
 	snap := s.keyring.Snapshot()
 	if len(snap) == 0 {
 		return nil, nil
@@ -41,7 +41,7 @@ func (s *Store) SealKeyring(u KeyUnwrapper) ([]byte, error) {
 // UnsealKeyring restores a sealed keyring snapshot on startup, giving each
 // entry a fresh ttl. The caller deletes the on-disk blob afterwards so an
 // unexpected crash can't replay a stale keyring.
-func (s *Store) UnsealKeyring(u KeyUnwrapper, blob []byte, ttl time.Duration) error {
+func (s *SecretManager) UnsealKeyring(u KeyUnwrapper, blob []byte, ttl time.Duration) error {
 	data, err := u.Unseal(blob)
 	if err != nil {
 		return err
