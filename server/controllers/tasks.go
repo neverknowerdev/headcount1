@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,6 +13,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+
 	"github.com/go-chi/chi/v5"
 )
 
@@ -143,22 +142,12 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
 
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-
 	if req.ProjectID != nil {
+		settings := LoadSettings()
 		var proj db.Project
 		api.db.First(&proj, *req.ProjectID)
-		fsManager.CreateTaskWorkspace(comp, proj, task)
-
-		// Write task metadata to filesystem
-		storage := filesystem.NewStorage(settings.BasePath)
-		if err := storage.WriteTask(task, comp.ShortName); err != nil {
-			log.Printf("Warning: failed to write task metadata: %v", err)
-		}
+		filesystem.NewManager(settings.BasePath).CreateTaskWorkspace(comp, proj, task)
 	}
-
-	fsManager.SaveTask(comp, task)
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
@@ -186,14 +175,14 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		ProjectID   *int32  `json:"project_id"`
-		AgentID     *int32  `json:"agent_id"`
-		SprintID    *int32  `json:"sprint_id"`
-		ParentID    *int32  `json:"parent_id"`
-		Title       string  `json:"title"`
-		TaskType    string  `json:"task_type"`
-		Description string  `json:"description"`
-		Priority    string  `json:"priority"`
+		ProjectID       *int32  `json:"project_id"`
+		AgentID         *int32  `json:"agent_id"`
+		SprintID        *int32  `json:"sprint_id"`
+		ParentID        *int32  `json:"parent_id"`
+		Title           string  `json:"title"`
+		TaskType        string  `json:"task_type"`
+		Description     string  `json:"description"`
+		Priority        string  `json:"priority"`
 		DueDate         *string `json:"due_date"`
 		Status          string  `json:"status"`
 		IsArchived      *bool   `json:"is_archived"`
@@ -273,12 +262,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	var taskComp db.Company
-	if api.db.First(&taskComp, task.CompanyID).Error == nil {
-		taskSettings := LoadSettings()
-		filesystem.NewManager(taskSettings.BasePath).SaveTask(taskComp, task)
-	}
-
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 
 	// Git lifecycle: handle worktree merge/reopen on status change
@@ -334,7 +317,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
 	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
-	sshDir := filepath.Join(settings.BasePath, ".ssh")
+	sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 	gitMgr := git.NewGitManager(repoDir, sshDir)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)

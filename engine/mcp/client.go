@@ -9,8 +9,6 @@ import (
 	"agent-orchestrator/db"
 )
 
-
-
 // Client is the interface all MCP transport implementations must satisfy.
 type Client interface {
 	// Initialize performs the MCP handshake. Must be called before any other method.
