@@ -7,6 +7,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -18,7 +19,9 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -39,6 +42,15 @@ func main() {
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
 
+	settings := appsettings.Load()
+	basePath := settings.BasePath
+
+	// Create the base directory tree (db/, ssh/, uploads/, repos/, ...) so
+	// every subsystem can rely on its root existing.
+	if err := filesystem.NewManager(basePath).SetupBaseDirectories(); err != nil {
+		log.Printf("Warning: failed to create base directories: %v", err)
+	}
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
@@ -50,29 +62,31 @@ func main() {
 	} else {
 		log.Println("Connecting to SQLite database")
 		if dbConnStr == "" {
+			// The SQLite file lives under BasePath so every worktree process
+			// pointed at the same home shares one database (WAL handles the
+			// cross-process concurrency).
+			fileName := "headcount1.db"
 			if utils.IsE2E() {
-				dbConnStr = "headcount1-e2e.db"
-			} else {
-				dbConnStr = "orchestrator.db"
+				fileName = "headcount1-e2e.db"
 			}
+			dbDir := filepath.Join(basePath, "db")
+			if err := os.MkdirAll(dbDir, 0755); err != nil {
+				log.Fatalf("Failed to create database directory %s: %v", dbDir, err)
+			}
+			dbConnStr = filepath.Join(dbDir, fileName)
 		}
-		database, err = gorm.Open(sqlite.Open(dbConnStr), &gorm.Config{})
+		dsn := dbConnStr + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(10000)&_pragma=foreign_keys(1)&_pragma=synchronous(NORMAL)"
+		database, err = gorm.Open(sqlite.Open(dsn), &gorm.Config{})
 	}
 
 	if err != nil {
 		log.Fatalf("Failed to connect to database: %v", err)
 	}
 
-	// SQLite needs single connection to avoid WAL visibility issues
+	// Single in-process connection avoids GORM+SQLite lock churn; WAL covers
+	// concurrency between processes.
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-
-	// Enable FK enforcement for SQLite (disabled by default; must be set per-connection).
-	if database.Dialector.Name() == "sqlite" {
-		if err := database.Exec("PRAGMA foreign_keys = ON").Error; err != nil {
-			log.Printf("Warning: failed to enable SQLite foreign keys: %v", err)
-		}
-	}
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
@@ -159,11 +173,6 @@ func main() {
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
-	// Sync database with filesystem on startup
-	if err := srv.Sync(context.Background()); err != nil {
-		log.Printf("Warning: Initial filesystem sync failed: %v", err)
-	}
-
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
@@ -177,18 +186,19 @@ func main() {
 	// Resume codegraph init for any project whose knowledge graph isn't ready yet.
 	go srv.InitPendingCodegraphServers(context.Background())
 
-	// Check if backup is needed on startup
-	headcount1Home := db.Headcount1Home()
-	if backup.ShouldBackupOnStartup(headcount1Home) {
+	// Check if backup is needed on startup. Backups operate on the configured
+	// BasePath (not the raw Headcount1Home) so a custom storage location is
+	// what actually gets backed up.
+	if backup.ShouldBackupOnStartup(basePath) {
 		log.Println("Latest backup is older than 24h, running backup on startup...")
 		go func() {
-			_, err := backup.CreateBackup(headcount1Home)
+			_, err := backup.CreateBackup(basePath, database)
 			if err != nil {
 				log.Printf("Startup backup failed: %v", err)
 			}
 		}()
 	}
-	go backup.StartDailyScheduler(headcount1Home)
+	go backup.StartDailyScheduler(basePath, database)
 
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)

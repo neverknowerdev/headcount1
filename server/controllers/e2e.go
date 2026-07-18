@@ -18,6 +18,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	}
 
 	tables := []string{
+		"run_log_entries",
 		"activity_logs",
 		"proxy_request_logs",
 		"model_request_stats",

@@ -151,5 +151,5 @@ func TestSessionLoggerFileNames(t *testing.T) {
 	require.NoError(t, err)
 	defer logger.Close()
 	assert.Equal(t, "session-11.jsonl", filepath.Base(logger.FilePath()))
-	assert.Contains(t, logger.FilePath(), filepath.Join("logs", "7", "run-10"))
+	assert.Contains(t, logger.FilePath(), filepath.Join("logs", "test-co", "7", "run-10"))
 }

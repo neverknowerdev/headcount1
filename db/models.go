@@ -221,7 +221,7 @@ type Run struct {
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to
 // Run.TokenStats as JSON so the Run Logs UI can render an overall
-// breakdown without re-iterating LogEntries on every read.
+// breakdown without re-reading the JSONL log on every request.
 type RunTokenStats struct {
 	PromptTokens     int            `json:"prompt_tokens"`               // sum of all LLM request input tokens (provider-reported)
 	CompletionTokens int            `json:"completion_tokens"`           // sum of all LLM response output tokens (provider-reported)

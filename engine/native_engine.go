@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/logging"
+
 	"gorm.io/gorm"
 )
 
@@ -324,12 +325,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Write initial run metadata to filesystem.
 	settings := loadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteRun(run, company.ShortName); err != nil {
-		fmt.Printf("Warning: failed to write run metadata: %v\n", err)
-	}
 
 	// Session hierarchy: which run/task the log folder is grouped under.
 	rootRunID := run.ID
@@ -425,8 +421,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
-			sshDir := filepath.Join(settings.BasePath, ".ssh")
-			gitMgr = git.NewGitManager(projectRepoDir, sshDir)
+			gitMgr = git.NewGitManager(projectRepoDir, fsMgr.Paths().SSHDir())
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())
 			}
@@ -450,14 +445,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
 	}
 
-	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
-	artifactDir := func() string {
-		base := settings.BasePath
-		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
-			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
-		}
-		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
-	}()
+	// Artifact (deliverable) directory: {basePath}/artifacts/{company}/{rootTaskID}.
+	// Always keyed by the root task so it matches ListArtifactsByTaskTree —
+	// every session of one execution tree shares the same deliverables dir.
+	artifactDir := fsMgr.Paths().TaskArtifactsDir(company.ShortName, rootTaskID)
 	// Artifact files are readable by every session's file tools (the CEO has
 	// no file tools, so it only ever sees the metadata list below).
 	readOnlyDirs = append(readOnlyDirs, artifactDir)
@@ -943,11 +934,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
-	// Update run metadata in filesystem.
-	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
-		storage.WriteRun(updatedRun, company.ShortName)
-	}
-
 	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
 	// Notify the parent task that this subtask has completed or failed.
@@ -1390,11 +1376,6 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
 	e.hub.BroadcastEvent("task_created", newTask)
-
-	// Mirror the API endpoint's filesystem bookkeeping so the task shows up
-	// in exports/sync exactly like a human-created one.
-	fsMgr := filesystem.NewManager(loadSettings().BasePath)
-	fsMgr.SaveTask(company, newTask)
 
 	if status == "to-do" {
 		// Independent root run, same as a human moving the card to "to-do".

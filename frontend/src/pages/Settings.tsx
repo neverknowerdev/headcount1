@@ -23,7 +23,6 @@ export const Settings: React.FC = () => {
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
     const [githubPat, setGithubPat] = useState('');
     const [saving, setSaving] = useState(false);
-    const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
     const sshFileInputRef = useRef<HTMLInputElement>(null);
@@ -86,19 +85,6 @@ export const Settings: React.FC = () => {
         const reader = new FileReader();
         reader.onload = ev => setSshKey((ev.target?.result as string) || '');
         reader.readAsText(file);
-    };
-
-    const handleSync = async () => {
-        setSyncing(true);
-        try {
-            await axios.post('/api/settings/sync');
-            alert('Sync completed successfully!');
-        } catch (e) {
-            console.error(e);
-            alert('Failed to sync settings from filesystem');
-        } finally {
-            setSyncing(false);
-        }
     };
 
     const handleDeleteCompany = async () => {
@@ -235,15 +221,6 @@ export const Settings: React.FC = () => {
                             className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
                         >
                             {saving ? 'Saving...' : 'Save Settings'}
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={handleSync}
-                            disabled={syncing}
-                            className="bg-green-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-green-700 disabled:bg-green-400"
-                        >
-                            {syncing ? 'Syncing...' : 'Sync from Filesystem'}
                         </button>
 
                         <button

@@ -11,6 +11,8 @@ import (
 	"os"
 	"path/filepath"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 type BackupManifest struct {
@@ -19,11 +21,18 @@ type BackupManifest struct {
 	Items     int       `json:"items"`
 }
 
-func CreateBackup(basePath string) (string, error) {
-	return CreateBackupWithContext(context.Background(), basePath)
+// fileDirs are the real-file directories included in a backup (under the
+// files/ prefix), mirroring the runtime layout so a restore is
+// ready-to-work. credentials/ is deliberately excluded (raw secrets),
+// venv/ is machine-specific and rebuilt by setup, backups/ would recurse,
+// and the live db/ ships as db-snapshot/ + the entities/ tree instead.
+var fileDirs = []string{"repos", "workspace", "uploads", "artifacts", "logs", "skills", "ssh"}
+
+func CreateBackup(basePath string, database *gorm.DB) (string, error) {
+	return CreateBackupWithContext(context.Background(), basePath, database)
 }
 
-func CreateBackupWithContext(ctx context.Context, basePath string) (string, error) {
+func CreateBackupWithContext(ctx context.Context, basePath string, database *gorm.DB) (string, error) {
 	log.Println("Starting backup...")
 
 	backupDir := filepath.Join(basePath, "backups")
@@ -71,7 +80,7 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 
 	// Write manifest
 	manifest := BackupManifest{
-		Version:   "1.0",
+		Version:   "2",
 		Timestamp: time.Now(),
 	}
 	manifestBytes, _ := json.MarshalIndent(manifest, "", "  ")
@@ -84,30 +93,59 @@ func CreateBackupWithContext(ctx context.Context, basePath string) (string, erro
 		itemCount++
 	}
 
-	// Backup filesystem data (companies, projects, skills, logs, etc.)
-	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "data"), "data", &itemCount); err != nil {
-		log.Printf("Warning: failed to backup data directory: %v", err)
+	// Entity JSON tree, generated from the database — the restore source.
+	if database != nil {
+		n, err := exportEntities(tarWriter, database)
+		itemCount += n
+		if err != nil {
+			return "", fmt.Errorf("failed to export entities: %w", err)
+		}
 	}
 
-	// Backup workspace directory (task workspaces, memory, metadata)
-	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "workspace"), "workspace", &itemCount); err != nil {
-		log.Printf("Warning: failed to backup workspace directory: %v", err)
+	// SQLite snapshot (VACUUM INTO) — a disaster-recovery artifact only;
+	// restore reads the entities/ tree, never this file.
+	if database != nil && database.Dialector.Name() == "sqlite" {
+		if err := addDBSnapshot(ctx, tarWriter, database); err != nil {
+			log.Printf("Warning: failed to snapshot database: %v", err)
+		} else {
+			itemCount++
+		}
 	}
 
-	// Backup companies directory (Manager format: settings, sprints, tasks, comments)
-	if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, "companies"), "companies", &itemCount); err != nil {
-		log.Printf("Warning: failed to backup companies directory: %v", err)
+	// Real-file directories, under the files/ prefix.
+	for _, dir := range fileDirs {
+		if err := addDirectoryToTar(tarWriter, filepath.Join(basePath, dir), filepath.Join("files", dir), &itemCount); err != nil {
+			log.Printf("Warning: failed to backup %s directory: %v", dir, err)
+		}
 	}
-
-	// Update manifest with item count
-	manifest.Items = itemCount
-	manifestBytes, _ = json.MarshalIndent(manifest, "", "  ")
 
 	// Clean up old backups (keep last 7)
 	cleanupOldBackups(backupDir, 7)
 
 	log.Printf("Backup completed: %s (%d items)", archivePath, itemCount)
 	return archivePath, nil
+}
+
+// addDBSnapshot writes a consistent copy of the live SQLite database into
+// the archive as db-snapshot/headcount1.db using VACUUM INTO.
+func addDBSnapshot(ctx context.Context, tw *tar.Writer, database *gorm.DB) error {
+	tmpDir, err := os.MkdirTemp("", "headcount1-db-snapshot-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmpDir)
+
+	snapshotPath := filepath.Join(tmpDir, "headcount1.db")
+	if err := database.WithContext(ctx).Exec("VACUUM INTO ?", snapshotPath).Error; err != nil {
+		return err
+	}
+
+	data, err := os.ReadFile(snapshotPath)
+	if err != nil {
+		return err
+	}
+	writeTarEntry(tw, "db-snapshot/headcount1.db", data)
+	return nil
 }
 
 func writeTarEntry(tw *tar.Writer, name string, data []byte) {

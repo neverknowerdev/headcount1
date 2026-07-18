@@ -422,9 +422,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-// appendRunLog persists a structured log entry to the run's log_entries column
-// and broadcasts it over WebSocket via db.Queries. It is a fire-and-forget
-// goroutine so it never blocks the agent loop.
 func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
 	if a.q == nil || a.runID <= 0 {
 		return

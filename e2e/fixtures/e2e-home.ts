@@ -12,14 +12,8 @@ export function createE2EHome(): string {
     const e2eHome = path.join(os.tmpdir(), `headcount1-e2e-home-${Date.now()}`);
     fs.mkdirSync(e2eHome, { recursive: true });
 
-    // Create necessary subdirectories
-    const dirs = [
-        path.join(e2eHome, '.headcount1', 'data'),
-        path.join(e2eHome, '.headcount1', 'companies'),
-    ];
-    for (const dir of dirs) {
-        fs.mkdirSync(dir, { recursive: true });
-    }
+    // The server creates the base directory tree itself on startup.
+    fs.mkdirSync(path.join(e2eHome, '.headcount1'), { recursive: true });
 
     return e2eHome;
 }

@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func GetLatestBackup(basePath string) (*time.Time, error) {
@@ -57,13 +59,13 @@ func ShouldBackupOnStartup(basePath string) bool {
 	return time.Since(*latest) > 24*time.Hour
 }
 
-func StartDailyScheduler(basePath string) {
+func StartDailyScheduler(basePath string, database *gorm.DB) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		log.Println("Running scheduled backup...")
-		_, err := CreateBackup(basePath)
+		_, err := CreateBackup(basePath, database)
 		if err != nil {
 			log.Printf("Scheduled backup failed: %v", err)
 		}

@@ -11,7 +11,8 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/setup"
-	"agent-orchestrator/server/controllers"
+	endpoints "agent-orchestrator/server/controllers"
+
 	"github.com/go-chi/chi/v5"
 	"github.com/gorilla/websocket"
 	"gorm.io/gorm"
@@ -33,11 +34,6 @@ func NewServer(database *gorm.DB, eng engine.Engine) *Server {
 }
 
 func (s *Server) SetHub(h *eventhub.Hub) { s.hub = h }
-
-func (s *Server) Sync(ctx context.Context) error {
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
-	return api.SyncDBWithFilesystem(ctx)
-}
 
 func (s *Server) CacheMCPTools(ctx context.Context) {
 	api := endpoints.NewAPI(s.db, s.engine, s.hub)
@@ -103,7 +99,6 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/settings", api.GetSettings)
 	r.Post("/settings", api.UpdateSettings)
 	r.Post("/settings/ssh", api.UploadSSHKey)
-	r.Post("/settings/sync", api.SyncSettings)
 	r.Get("/activities", api.ListActivities)
 
 	r.Route("/skills", func(r chi.Router) {

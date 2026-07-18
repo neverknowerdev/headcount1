@@ -179,13 +179,11 @@ test.describe.serial('Backup & Restore', () => {
     });
 
     test.afterAll(async () => {
-        // Remove bt's filesystem data so its comment IDs (written before the roundtrip
-        // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
-        // when sync_filesystem.spec.ts calls POST /api/settings/sync.
+        // Remove bt's filesystem footprint so later specs start clean.
         const env = loadE2EEnv();
         const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
-        for (const subDir of ['data/bt', 'companies/bt']) {
-            const fullPath = path.join(headcount1Base, subDir);
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'bt');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
     });

@@ -4,12 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"os"
 	"text/template"
 	"time"
 
 	"agent-orchestrator/db"
-	"gopkg.in/yaml.v3"
+	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 type SystemPromptBuilder interface {
@@ -24,26 +24,9 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 	return &defaultSystemPromptBuilder{q: q}
 }
 
-type Settings struct {
-	BasePath         string   `yaml:"base_path"`
-	WorkspaceFolders []string `yaml:"workspace_folders"`
-}
-
-// loadSettings reads the app settings from the canonical file the settings
-// API writes (Headcount1Home()/settings.yaml).
-func loadSettings() Settings {
-	data, err := os.ReadFile(db.SettingsFilePath())
-	if err != nil {
-		return Settings{BasePath: db.Headcount1Home()}
-	}
-	var settings Settings
-	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.Headcount1Home()}
-	}
-	if settings.BasePath == "" {
-		settings.BasePath = db.Headcount1Home()
-	}
-	return settings
+// loadSettings reads the app settings through the shared appsettings loader.
+func loadSettings() appsettings.Settings {
+	return appsettings.Load()
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
@@ -138,8 +121,10 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		data.ProjectDescription = task.Project.Description
 
 		settings := loadSettings()
-		if task.Company.ShortName != "" && task.Project.WorkspaceFolder != "" {
-			data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		if task.Company.ShortName != "" {
+			// The agent's actual working directory is the task's git worktree.
+			fsMgr := filesystem.NewManager(settings.BasePath)
+			data.WorkingDirectory = fsMgr.GetTaskWorktreePath(task.Company, task)
 		}
 	}
 
