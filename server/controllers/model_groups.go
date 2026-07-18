@@ -4,13 +4,10 @@ import (
 	"encoding/json"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
-
-	"github.com/go-chi/chi/v5"
 )
 
 type modelGroupMemberReq struct {
@@ -78,22 +75,13 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
 	var req modelGroupReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil || !ownedByUser(r, group.UserID) {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
 	if strings.TrimSpace(req.Name) != "" {
 		group.Name = req.Name
 	}
@@ -111,16 +99,8 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if group, err := api.q.GetModelGroup(r.Context(), int32(id)); err != nil || !ownedByUser(r, group.UserID) {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
-	if err := api.q.DeleteModelGroup(r.Context(), int32(id)); err != nil {
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
+	if err := api.q.DeleteModelGroup(r.Context(), group.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -181,21 +161,12 @@ type statsBucket struct {
 // an hourly time series over the last 3 days for the charts. Bucketing is
 // done in Go so the query stays portable across SQLite and Postgres.
 func (api *API) GetModelGroupStats(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil || !ownedByUser(r, group.UserID) {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
 
 	now := time.Now()
 	since3d := now.Add(-72 * time.Hour)
 	since5h := now.Add(-5 * time.Hour)
-	groupID := int32(id)
+	groupID := group.ID
 	stats, err := api.q.ListModelRequestStatsSince(r.Context(), &groupID, since3d)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

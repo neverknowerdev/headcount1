@@ -31,9 +31,12 @@ func setupModelGroupsRouter(database *gorm.DB) chi.Router {
 	r := chi.NewRouter()
 	r.Get("/model-groups", api.ListModelGroups)
 	r.Post("/model-groups", api.CreateModelGroup)
-	r.Put("/model-groups/{id}", api.UpdateModelGroup)
-	r.Delete("/model-groups/{id}", api.DeleteModelGroup)
-	r.Get("/model-groups/{id}/stats", api.GetModelGroupStats)
+	r.Route("/model-groups/{id}", func(r chi.Router) {
+		r.Use(api.LoadModelGroup)
+		r.Put("/", api.UpdateModelGroup)
+		r.Delete("/", api.DeleteModelGroup)
+		r.Get("/stats", api.GetModelGroupStats)
+	})
 	return r
 }
 

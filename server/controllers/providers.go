@@ -5,15 +5,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/utils"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
@@ -94,18 +91,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 }
 
 func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil || !ownedByUser(r, provider.UserID) {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 	if provider.Builtin {
 		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProvidersForUser
 		// just recreates it (blank) on the next startup. Disable it instead.
@@ -113,7 +99,7 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	err = api.q.DeleteLLMProvider(r.Context(), int32(id))
+	err := api.q.DeleteLLMProvider(r.Context(), provider.ID)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -122,13 +108,6 @@ func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name            string `json:"name"`
 		BaseUrl         string `json:"base_url"`
@@ -146,11 +125,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil || !ownedByUser(r, provider.UserID) {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 
 	provider.Name = req.Name
 	provider.BaseUrl = req.BaseUrl
@@ -164,13 +139,13 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		provider.Enabled = *req.Enabled
 	}
 
-	provider, err = api.q.UpdateLLMProvider(r.Context(), provider)
+	updated, err := api.q.UpdateLLMProvider(r.Context(), provider)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.respondJSON(w, http.StatusOK, provider)
+	api.respondJSON(w, http.StatusOK, updated)
 }
 
 // RediscoverProviderModels re-fetches a provider's model catalog on demand —
@@ -181,21 +156,11 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 // the freshly fetched list — the whole point of a user explicitly asking
 // to re-discover models is to get the current best/full pick.
 func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil || !ownedByUser(r, provider.UserID) {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	var models []string
+	var err error
 	switch {
 	case provider.Builtin:
 		switch provider.ProviderName {

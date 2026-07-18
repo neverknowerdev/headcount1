@@ -34,9 +34,12 @@ func setupProvidersRouter(t *testing.T, database *gorm.DB) chi.Router {
 	r.Get("/providers/presets", api.ListProviderPresets)
 	r.Post("/providers", api.CreateProvider)
 	r.Post("/providers/from-preset", api.CreateProviderFromPreset)
-	r.Put("/providers/{id}", api.UpdateProvider)
-	r.Delete("/providers/{id}", api.DeleteProvider)
-	r.Post("/providers/{id}/rediscover", api.RediscoverProviderModels)
+	r.Route("/providers/{id}", func(r chi.Router) {
+		r.Use(api.LoadProvider)
+		r.Put("/", api.UpdateProvider)
+		r.Delete("/", api.DeleteProvider)
+		r.Post("/rediscover", api.RediscoverProviderModels)
+	})
 	return withTestUser(t, database, r)
 }
 

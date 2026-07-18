@@ -154,8 +154,11 @@ func (s *Server) Mount(r chi.Router) {
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)
 		r.Post("/", api.CreateCompany)
-		r.Put("/{id}", api.UpdateCompany)
-		r.Delete("/{id}", api.DeleteCompany)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Use(api.LoadCompany)
+			r.Put("/", api.UpdateCompany)
+			r.Delete("/", api.DeleteCompany)
+		})
 	})
 
 	r.Route("/team", func(r chi.Router) {
@@ -243,18 +246,24 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/presets", api.ListProviderPresets)
 		r.Post("/", api.CreateProvider)
 		r.Post("/from-preset", api.CreateProviderFromPreset)
-		r.Put("/{id}", api.UpdateProvider)
-		r.Delete("/{id}", api.DeleteProvider)
 		r.Post("/test", api.TestProvider)
-		r.Post("/{id}/rediscover", api.RediscoverProviderModels)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Use(api.LoadProvider)
+			r.Put("/", api.UpdateProvider)
+			r.Delete("/", api.DeleteProvider)
+			r.Post("/rediscover", api.RediscoverProviderModels)
+		})
 	})
 
 	r.Route("/model-groups", func(r chi.Router) {
 		r.Get("/", api.ListModelGroups)
 		r.Post("/", api.CreateModelGroup)
-		r.Put("/{id}", api.UpdateModelGroup)
-		r.Delete("/{id}", api.DeleteModelGroup)
-		r.Get("/{id}/stats", api.GetModelGroupStats)
+		r.Route("/{id}", func(r chi.Router) {
+			r.Use(api.LoadModelGroup)
+			r.Put("/", api.UpdateModelGroup)
+			r.Delete("/", api.DeleteModelGroup)
+			r.Get("/stats", api.GetModelGroupStats)
+		})
 	})
 
 	r.Route("/default-model-settings", func(r chi.Router) {

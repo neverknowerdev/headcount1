@@ -5,12 +5,9 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
@@ -63,12 +60,6 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
 	var req struct {
 		ShortName string `json:"short_name"`
 	}
@@ -77,11 +68,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	comp, err := api.authorizeCompany(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
@@ -110,17 +97,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	comp, err := api.authorizeCompany(r, int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	settings := LoadSettings()
 	fsManager := filesystem.NewManager(settings.BasePath)
