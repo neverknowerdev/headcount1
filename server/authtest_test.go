@@ -1,17 +1,58 @@
 package server
 
 import (
+	"bytes"
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
+
+// unlockForTest puts a deterministic DEK in the keyring so a fixture user can
+// seal/open their own secrets (the passkey-unlock a real login would perform).
+func unlockForTest(uid int32) {
+	var dek [32]byte
+	dek[0], dek[1] = byte(uid), 0x5e
+	secrets.Default().UnlockUser(uid, dek, time.Hour)
+}
+
+// postJSON POSTs a JSON body to the router, optionally with a session cookie.
+func postJSON(t *testing.T, r chi.Router, path string, body any, cookies ...*http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	b, _ := json.Marshal(body)
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(b))
+	req.Header.Set("Content-Type", "application/json")
+	for _, c := range cookies {
+		req.AddCookie(c)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
+}
+
+// recordingMailer captures the emails a flow would send, for assertions.
+type recordingMailer struct {
+	mu   sync.Mutex
+	sent []struct{ To, Subject, Body string }
+}
+
+func (m *recordingMailer) Send(to, subject, textBody string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.sent = append(m.sent, struct{ To, Subject, Body string }{to, subject, textBody})
+	return nil
+}
 
 const testSeedUserEmail = "seed@test.local"
 
@@ -21,9 +62,10 @@ func testSeedUserID(t *testing.T, q *db.Queries) int32 {
 	t.Helper()
 	u, err := q.GetUserByEmail(context.Background(), testSeedUserEmail)
 	if err != nil {
-		u, err = q.CreateUser(context.Background(), testSeedUserEmail, "not-a-real-hash")
+		u, err = q.CreateUser(context.Background(), testSeedUserEmail)
 		require.NoError(t, err)
 	}
+	unlockForTest(u.ID)
 	return u.ID
 }
 

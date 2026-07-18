@@ -56,11 +56,6 @@ type Store struct {
 	wrappedDEK []byte
 	kekFP      string
 
-	// Per-user key material (see userkeys.go). userKeyCache holds wrapped
-	// records only, same revocation reasoning as wrappedDEK.
-	userKeys     UserKeyStorage
-	userKeyCache map[int32]UserKeyRecord
-
 	// keyring holds unlocked per-user DEKs in memory (see keyring.go). It is
 	// the sole place a user's DEK exists in plaintext, and only while that
 	// user has an active session.

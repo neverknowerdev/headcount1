@@ -2,9 +2,8 @@ package endpoints
 
 import (
 	"context"
-	"encoding/json"
+	"crypto/sha256"
 	"errors"
-	"fmt"
 	"log"
 	"net/http"
 	"os"
@@ -18,202 +17,22 @@ import (
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 
-	"golang.org/x/crypto/bcrypt"
 	"gorm.io/gorm"
 )
 
-const bcryptCost = 12
-
-// dummyHash is compared against when a login email doesn't exist, so the
-// request takes the same time as a real bcrypt check (no user enumeration
-// via timing).
-var dummyHash, _ = bcrypt.GenerateFromPassword([]byte("headcount1-dummy-password"), bcryptCost)
+// Authentication is passwordless — see auth_webauthn.go for the passkey
+// ceremonies. This file holds the session-cookie plumbing, the RequireAuth
+// middleware, logout/me, the E2E bypass, and the mailer used by recovery.
 
 type userResponse struct {
 	ID    int32  `json:"id"`
 	Email string `json:"email"`
 }
 
-// ── register / login / logout / me ──────────────────────────────────────────
+// ── mailer (used by passkey recovery) ────────────────────────────────────────
 
-func (api *API) Register(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-		// InviteToken joins the new account to the inviting team (as a
-		// member) instead of creating its own team.
-		InviteToken string `json:"invite_token"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	email := db.NormalizeEmail(req.Email)
-	if !looksLikeEmail(email) {
-		api.respondError(w, http.StatusBadRequest, "a valid email address is required")
-		return
-	}
-	if len(req.Password) < 8 {
-		api.respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-
-	// Validate the invite before creating anything, so a bad link fails the
-	// whole registration instead of leaving a team-less account behind.
-	var invite *db.TeamInvite
-	if req.InviteToken != "" {
-		inv, err := api.q.GetTeamInviteByTokenHash(r.Context(), authctx.HashToken(req.InviteToken))
-		if err != nil {
-			api.respondError(w, http.StatusBadRequest, "invalid or expired invite link")
-			return
-		}
-		invite = &inv
-	}
-
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcryptCost)
-	if err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	user, err := api.q.CreateUser(r.Context(), email, string(hash))
-	if err != nil {
-		// The unique index on email is the source of truth; treat any
-		// constraint failure as "already registered".
-		api.respondError(w, http.StatusConflict, "an account with this email already exists")
-		return
-	}
-	if invite != nil {
-		if err := api.q.AcceptTeamInvite(r.Context(), *invite, user.ID); err != nil {
-			log.Printf("auth: accepting invite for %s failed: %v — creating own team", user.Email, err)
-			invite = nil
-		}
-	}
-	if invite == nil {
-		if err := api.q.EnsureTeamForUser(r.Context(), user); err != nil {
-			log.Printf("auth: creating team for %s failed: %v", user.Email, err)
-		}
-	}
-	if err := api.onUserCreated(r.Context(), user, req.Password); err != nil {
-		log.Printf("auth: post-registration setup for %s failed: %v", user.Email, err)
-	}
-	if err := api.startSession(w, r, user); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	api.respondJSON(w, http.StatusCreated, userResponse{ID: user.ID, Email: user.Email})
-}
-
-// onUserCreated runs per-user provisioning after an account is created
-// (per-user encryption keys, builtin provider seeding). Failures are logged,
-// not fatal — the account itself is already usable.
-func (api *API) onUserCreated(ctx context.Context, user db.User, password string) error {
-	if err := api.q.EnsureBuiltinLLMProvidersForUser(ctx, user.ID); err != nil {
-		log.Printf("auth: seeding builtin providers for %s failed: %v", user.Email, err)
-	}
-	if err := api.q.EnsureDefaultModelSettingsForUser(ctx, user.ID); err != nil {
-		log.Printf("auth: seeding default model settings for %s failed: %v", user.Email, err)
-	}
-	return secrets.Default().EnsureUserKey(user.ID, password)
-}
-
-func (api *API) Login(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email    string `json:"email"`
-		Password string `json:"password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	user, err := api.q.GetUserByEmail(r.Context(), req.Email)
-	storedHash := string(dummyHash)
-	if err == nil {
-		storedHash = user.PasswordHash
-	}
-	compareErr := bcrypt.CompareHashAndPassword([]byte(storedHash), []byte(req.Password))
-	if err != nil || compareErr != nil {
-		api.respondError(w, http.StatusUnauthorized, "invalid email or password")
-		return
-	}
-	api.syncUserKeyOnLogin(user, req.Password)
-	if err := api.startSession(w, r, user); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	api.respondJSON(w, http.StatusOK, userResponse{ID: user.ID, Email: user.Email})
-}
-
-// syncUserKeyOnLogin keeps the user's encryption keyring consistent with the
-// password that just authenticated: creates the key for accounts that predate
-// per-user keys, and re-wraps a stale password wrap (possible after a crash
-// between password update and re-wrap). Best-effort — login never fails on it.
-func (api *API) syncUserKeyOnLogin(user db.User, password string) {
-	store := secrets.Default()
-	if err := store.EnsureUserKey(user.ID, password); err != nil {
-		log.Printf("auth: ensuring encryption key for %s failed: %v", user.Email, err)
-		return
-	}
-	if !store.VerifyUserPassword(user.ID, password) {
-		log.Printf("auth: password wrap for %s is stale, re-wrapping", user.Email)
-		if err := store.RewrapUserPassword(user.ID, password); err != nil {
-			log.Printf("auth: re-wrap for %s failed: %v", user.Email, err)
-		}
-	}
-}
-
-// ChangePassword lets an authenticated user rotate their password. The
-// encryption keyring's password wrap is re-created and every session is
-// revoked (a fresh one is issued to this client).
-func (api *API) ChangePassword(w http.ResponseWriter, r *http.Request) {
-	user, ok := api.authenticate(r)
-	if !ok {
-		api.respondError(w, http.StatusUnauthorized, "unauthenticated")
-		return
-	}
-	var req struct {
-		OldPassword string `json:"old_password"`
-		NewPassword string `json:"new_password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	if bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.OldPassword)) != nil {
-		api.respondError(w, http.StatusUnauthorized, "current password is incorrect")
-		return
-	}
-	if len(req.NewPassword) < 8 {
-		api.respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
-	if err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := api.q.UpdateUserPassword(r.Context(), user.ID, string(hash)); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := secrets.Default().RewrapUserPassword(user.ID, req.NewPassword); err != nil {
-		// The bcrypt hash is already rotated; the wrap heals on next login.
-		log.Printf("auth: password-wrap rotation for %s failed: %v", user.Email, err)
-	}
-	if err := api.q.DeleteSessionsForUser(r.Context(), user.ID); err != nil {
-		log.Printf("auth: session revocation for %s failed: %v", user.Email, err)
-	}
-	if err := api.startSession(w, r, user); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// ── forgot-password flow ─────────────────────────────────────────────────────
-
-// apiMailer sends the reset emails. Package-level (with a logging fallback)
-// so main.go can inject the SMTP configuration without threading it through
-// every NewAPI call site.
+// apiMailer sends recovery emails. Package-level (with a logging fallback) so
+// main.go injects the SMTP configuration without threading it through NewAPI.
 var apiMailer mailer.Mailer = mailer.NopMailer{}
 
 // SetMailer installs the transactional mailer (called once from main).
@@ -223,87 +42,7 @@ func SetMailer(m mailer.Mailer) {
 	}
 }
 
-// ResetRequest starts the forgot-password flow. It always answers 200 with
-// the same body — whether or not the email exists — so the endpoint can't be
-// used to enumerate accounts. The emailed link works once, for one hour.
-func (api *API) ResetRequest(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	if user, err := api.q.GetUserByEmail(r.Context(), req.Email); err == nil {
-		token, tokenErr := authctx.NewToken()
-		if tokenErr == nil {
-			_, tokenErr = api.q.CreatePasswordResetToken(r.Context(), user.ID, authctx.HashToken(token))
-		}
-		if tokenErr != nil {
-			log.Printf("auth: creating reset token for %s failed: %v", user.Email, tokenErr)
-		} else {
-			resetURL := fmt.Sprintf("%s/reset-password?token=%s", appBaseURL(r), token)
-			body := fmt.Sprintf(
-				"Someone requested a password reset for your headcount1 account.\n\n"+
-					"Reset your password within one hour:\n%s\n\n"+
-					"If this wasn't you, ignore this email — your password is unchanged.",
-				resetURL)
-			// Send off the request path: mail relays can be slow, and send
-			// duration must not become an account-existence oracle.
-			go func(email string) {
-				if err := apiMailer.Send(email, "Reset your headcount1 password", body); err != nil {
-					log.Printf("auth: sending reset email to %s failed: %v", email, err)
-				}
-			}(user.Email)
-		}
-	}
-	api.respondJSON(w, http.StatusOK, map[string]string{
-		"status": "ok",
-		"detail": "If that email has an account, a reset link is on its way.",
-	})
-}
-
-// ResetConfirm completes the forgot-password flow: burns the token, sets the
-// new password, re-wraps the user's encryption keyring (recovered via the
-// server wrap — no stored secret is lost), and revokes every session.
-func (api *API) ResetConfirm(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Token       string `json:"token"`
-		NewPassword string `json:"new_password"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid payload")
-		return
-	}
-	if len(req.NewPassword) < 8 {
-		api.respondError(w, http.StatusBadRequest, "password must be at least 8 characters")
-		return
-	}
-	user, err := api.q.ConsumePasswordResetToken(r.Context(), authctx.HashToken(req.Token))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid or expired reset link — request a new one")
-		return
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(req.NewPassword), bcryptCost)
-	if err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := api.q.UpdateUserPassword(r.Context(), user.ID, string(hash)); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
-		return
-	}
-	if err := secrets.Default().RewrapUserPassword(user.ID, req.NewPassword); err != nil {
-		// bcrypt hash is rotated; the wrap self-heals on next login.
-		log.Printf("auth: password-wrap rotation on reset for %s failed: %v", user.Email, err)
-	}
-	if err := api.q.DeleteSessionsForUser(r.Context(), user.ID); err != nil {
-		log.Printf("auth: session revocation on reset for %s failed: %v", user.Email, err)
-	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
-}
-
-// appBaseURL is the public URL reset links point at: APP_BASE_URL when set
+// appBaseURL is the public URL recovery links point at: APP_BASE_URL when set
 // (cloud, behind a proxy), otherwise reconstructed from the request.
 func appBaseURL(r *http.Request) string {
 	if base := os.Getenv("APP_BASE_URL"); base != "" {
@@ -316,23 +55,36 @@ func appBaseURL(r *http.Request) string {
 	return scheme + "://" + r.Host
 }
 
+// ── logout / me ──────────────────────────────────────────────────────────────
+
 func (api *API) Logout(w http.ResponseWriter, r *http.Request) {
 	if c, err := r.Cookie(authctx.CookieName); err == nil && c.Value != "" {
-		_ = api.q.DeleteSessionByTokenHash(r.Context(), authctx.HashToken(c.Value))
+		hash := authctx.HashToken(c.Value)
+		// Evict the user's DEK so their secrets are undecryptable once logged
+		// out (resolve the user from the cookie — this is a public route).
+		if user, err := api.q.GetSessionUser(r.Context(), hash); err == nil {
+			secrets.LockUser(user.ID)
+		}
+		_ = api.q.DeleteSessionByTokenHash(r.Context(), hash)
 	}
 	clearSessionCookie(w, r)
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-// Me is the frontend AuthGate's probe: 200 + user when a session (or the E2E
-// bypass) authenticates the request, 401 otherwise.
+// Me is the frontend AuthGate's probe: 200 + user (+ whether the vault is
+// unlocked) when authenticated, 401 otherwise. The `locked` flag drives the
+// AuthGate's re-tap unlock prompt after a crash.
 func (api *API) Me(w http.ResponseWriter, r *http.Request) {
 	user, ok := api.authenticate(r)
 	if !ok {
 		api.respondError(w, http.StatusUnauthorized, "unauthenticated")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, userResponse{ID: user.ID, Email: user.Email})
+	api.respondJSON(w, http.StatusOK, map[string]any{
+		"id":     user.ID,
+		"email":  user.Email,
+		"locked": !secrets.IsUnlocked(user.ID),
+	})
 }
 
 // ── middleware ───────────────────────────────────────────────────────────────
@@ -353,8 +105,9 @@ func (api *API) RequireAuth(next http.Handler) http.Handler {
 }
 
 // authenticate resolves the request to a user via the session cookie, with an
-// E2E fallback: test builds (utils.IsE2E) auto-login a fixture user so the
-// browser e2e suite and local integration flows need no auth plumbing.
+// E2E fallback: test builds (utils.IsE2E) auto-login and auto-unlock a fixture
+// user so the browser e2e suite and local integration flows need no auth or
+// passkey plumbing.
 func (api *API) authenticate(r *http.Request) (db.User, bool) {
 	if c, err := r.Cookie(authctx.CookieName); err == nil && c.Value != "" {
 		if user, err := api.q.GetSessionUser(r.Context(), authctx.HashToken(c.Value)); err == nil {
@@ -375,30 +128,28 @@ const e2eUserEmail = "e2e@local"
 // requests at a fresh DB, and SQLite reports races as constraint errors.
 var e2eUserMu sync.Mutex
 
+// e2eDEK derives a deterministic data key for the fixture user, so E2E can
+// seal/open secrets without a real passkey ceremony. Never used outside E2E.
+func e2eDEK() [32]byte { return sha256.Sum256([]byte("headcount1-e2e-dek-v1")) }
+
 func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 	e2eUserMu.Lock()
 	defer e2eUserMu.Unlock()
 	user, err := api.q.GetUserByEmail(ctx, e2eUserEmail)
-	if err == nil {
-		return user, nil
-	}
-	if !errors.Is(err, gorm.ErrRecordNotFound) {
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		user, err = api.q.CreateUser(ctx, e2eUserEmail)
+		if err != nil {
+			return db.User{}, err
+		}
+		if err := api.q.EnsureTeamForUser(ctx, user); err != nil {
+			log.Printf("auth: e2e fixture team setup failed: %v", err)
+		}
+		api.seedNewUser(ctx, user.ID)
+	} else if err != nil {
 		return db.User{}, err
 	}
-	hash, err := bcrypt.GenerateFromPassword([]byte("e2e-password"), bcrypt.MinCost)
-	if err != nil {
-		return db.User{}, err
-	}
-	user, err = api.q.CreateUser(ctx, e2eUserEmail, string(hash))
-	if err != nil {
-		return db.User{}, err
-	}
-	if err := api.q.EnsureTeamForUser(ctx, user); err != nil {
-		log.Printf("auth: e2e fixture team setup failed: %v", err)
-	}
-	if err := api.onUserCreated(ctx, user, "e2e-password"); err != nil {
-		log.Printf("auth: e2e fixture user setup failed: %v", err)
-	}
+	// Always (re-)unlock so every E2E request can decrypt this user's secrets.
+	secrets.UnlockUser(user.ID, e2eDEK(), keyringTTL)
 	return user, nil
 }
 

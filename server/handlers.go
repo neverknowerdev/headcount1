@@ -90,13 +90,16 @@ func (s *Server) MountPublic(r chi.Router) {
 	api := endpoints.NewAPI(s.db, s.engine, s.hub)
 
 	r.Route("/auth", func(r chi.Router) {
-		r.Post("/register", api.Register)
-		r.Post("/login", api.Login)
+		// Passwordless passkey ceremonies (challenge round-trip is the guard).
+		r.Post("/register/begin", api.RegisterBegin)
+		r.Post("/register/finish", api.RegisterFinish)
+		r.Post("/login/begin", api.LoginBegin)
+		r.Post("/login/finish", api.LoginFinish)
 		r.Post("/logout", api.Logout)
 		r.Get("/me", api.Me)
-		r.Post("/change-password", api.ChangePassword)
-		r.Post("/reset-request", api.ResetRequest)
-		r.Post("/reset-confirm", api.ResetConfirm)
+		// Email-based passkey recovery (wipes secrets, preserves the account).
+		r.Post("/recover/request", api.RecoverRequest)
+		r.Post("/recover/confirm", api.RecoverConfirm)
 	})
 
 	// Public: lets the register page show which team an invite joins (the
@@ -127,6 +130,16 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/ws", s.serveWs)
 
 	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+
+	// Authenticated passkey operations: crash re-tap unlock (session present,
+	// keyring cold) and managing enrolled credentials (must be unlocked).
+	r.Route("/auth", func(r chi.Router) {
+		r.Post("/unlock/begin", api.UnlockBegin)
+		r.Post("/unlock/finish", api.UnlockFinish)
+		r.Get("/credentials", api.ListCredentials)
+		r.Post("/credentials/begin", api.AddCredentialBegin)
+		r.Post("/credentials/finish", api.AddCredentialFinish)
+	})
 
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)

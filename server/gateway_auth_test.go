@@ -47,10 +47,11 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	defer upstream.Close()
 
 	// Provider owned by user 1; a model group owned by user 1 as well.
-	owner, err := q.CreateUser(t.Context(), "owner@x.io", "hash")
+	owner, err := q.CreateUser(t.Context(), "owner@x.io")
 	require.NoError(t, err)
-	other, err := q.CreateUser(t.Context(), "other@x.io", "hash")
+	other, err := q.CreateUser(t.Context(), "other@x.io")
 	require.NoError(t, err)
+	unlockForTest(owner.ID)
 	provider := db.LLMProvider{Name: "P", BaseUrl: upstream.URL, ApiKey: "k", UserID: &owner.ID}
 	require.NoError(t, database.Create(&provider).Error)
 	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &owner.ID}

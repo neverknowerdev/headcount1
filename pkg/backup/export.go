@@ -94,19 +94,19 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 
 	// Global (non-company-scoped) tables, one JSON array per file.
 	//
-	// The identity graph (users, teams, memberships, per-user wrapped keys)
-	// is exported so a restore reproduces the full multi-tenant database:
-	// companies reference team_id/user_id, and per-user secrets are sealed
-	// as "enc:u1:<userID>:…" — both dangle without their owning rows, and
-	// the wrapped DEKs in user_keys are what make those secrets decryptable
-	// again (together with the keystore, archived separately). Ephemeral,
-	// security-sensitive tables (sessions, password_reset_tokens,
-	// team_invites) are deliberately not exported — users re-authenticate.
+	// The identity graph (users, teams, memberships, enrolled passkeys) is
+	// exported so a restore reproduces the full multi-tenant database:
+	// companies reference team_id/user_id, and per-user secrets are sealed as
+	// "enc:u1:<userID>:…" — both dangle without their owning rows. Passkeys
+	// carry each credential's PRF-wrapped DEK, so a same-deployment restore can
+	// unlock those secrets again. Ephemeral/security-sensitive tables
+	// (sessions, refresh tokens, reset tokens, webauthn challenges, invites)
+	// are deliberately not exported — users re-authenticate.
 	globals := []struct{ table, file string }{
 		{"users", "users.json"},
 		{"teams", "teams.json"},
 		{"team_members", "team-members.json"},
-		{"user_keys", "user-keys.json"},
+		{"web_authn_credentials", "webauthn-credentials.json"},
 		{"llm_providers", "llm-providers.json"},
 		{"model_groups", "model-groups.json"},
 		{"model_group_members", "model-group-members.json"},

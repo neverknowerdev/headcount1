@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -38,9 +39,12 @@ func testSeedUserID(t *testing.T, q *db.Queries) int32 {
 	t.Helper()
 	u, err := q.GetUserByEmail(context.Background(), "seed@test.local")
 	if err != nil {
-		u, err = q.CreateUser(context.Background(), "seed@test.local", "not-a-real-hash")
+		u, err = q.CreateUser(context.Background(), "seed@test.local")
 		require.NoError(t, err)
 	}
+	var dek [32]byte
+	dek[0], dek[1] = byte(u.ID), 0x5e
+	secrets.Default().UnlockUser(u.ID, dek, time.Hour)
 	return u.ID
 }
 

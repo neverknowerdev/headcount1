@@ -2,6 +2,7 @@ package secrets
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"reflect"
 
@@ -30,11 +31,17 @@ func (GormSerializer) Scan(ctx context.Context, field *schema.Field, dst reflect
 	default:
 		return fmt.Errorf("secrets: field %s has unsupported db type %T", field.Name, dbValue)
 	}
-	// Open passes non-sealed values through, so rows written before
-	// encryption was introduced keep loading; they are re-sealed on the next
-	// write (see db.EncryptPlaintextSecrets for the startup sweep).
+	// Open passes non-sealed values through. A locked owner (ErrLocked) is not
+	// an error here: the row simply can't be decrypted right now, so the field
+	// loads empty (HasApiKey/HasToken compute false, the UI shows "locked").
+	// Points of use that actually need the plaintext check secrets.IsUnlocked
+	// first and return a clear "vault locked" error.
 	plain, err := Default().Open(stored)
 	if err != nil {
+		if errors.Is(err, ErrLocked) {
+			field.ReflectValueOf(ctx, dst).SetString("")
+			return nil
+		}
 		return err
 	}
 	field.ReflectValueOf(ctx, dst).SetString(plain)

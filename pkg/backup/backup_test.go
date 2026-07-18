@@ -21,7 +21,7 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 	if err := database.AutoMigrate(
-		&db.User{}, &db.UserKey{}, &db.Team{}, &db.TeamMember{},
+		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
 		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},
 		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
@@ -143,16 +143,16 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	basePath := t.TempDir()
 	database := openTestDB(t, t.TempDir())
 
-	user := db.User{Email: "owner@acme.io", PasswordHash: "x"}
+	user := db.User{Email: "owner@acme.io"}
 	if err := database.Create(&user).Error; err != nil {
 		t.Fatal(err)
 	}
 	team := db.Team{Name: "Acme Team"}
 	database.Create(&team)
 	database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner})
-	database.Create(&db.UserKey{
-		UserID: user.ID, WrappedDEKServer: "wrapped-server",
-		WrappedDEKPassword: "wrapped-pw", PwSalt: "salt", PwParams: "argon2id",
+	database.Create(&db.WebAuthnCredential{
+		UserID: user.ID, CredentialID: []byte("cred-abc"), PublicKey: []byte("pub"),
+		WrappedDEK: "prf1:wrapped-dek", PRFSalt: []byte("salt"), Nickname: "Laptop",
 	})
 
 	comp := db.Company{Name: "Acme", ShortName: "acme", TeamID: &team.ID, UserID: &user.ID}
@@ -161,7 +161,7 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	// A per-user provider whose api_key column holds enc:u1 ciphertext. Set
 	// the raw column directly so the round-trip is tested independently of the
 	// secrets subsystem (which the pkg/secrets tests cover).
-	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", ApiKey: "placeholder", UserID: &user.ID}
+	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", ApiKey: "", UserID: &user.ID}
 	database.Create(&prov)
 	sealed := "enc:u1:" + itoa(user.ID) + ":Y2lwaGVydGV4dA=="
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
@@ -180,7 +180,7 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	// Wipe the identity graph and tenant data, restore into a fresh base.
 	newBase := t.TempDir()
 	for _, table := range []string{
-		"llm_providers", "companies", "user_keys", "team_members", "teams", "users",
+		"llm_providers", "companies", "web_authn_credentials", "team_members", "teams", "users",
 	} {
 		database.Exec("DELETE FROM " + table)
 	}
@@ -196,12 +196,12 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	if gotUser.Email != "owner@acme.io" {
 		t.Errorf("user email = %q", gotUser.Email)
 	}
-	var gotKey db.UserKey
-	if err := database.First(&gotKey, "user_id = ?", user.ID).Error; err != nil {
-		t.Fatalf("user key not restored (secrets would be unrecoverable): %v", err)
+	var gotCred db.WebAuthnCredential
+	if err := database.First(&gotCred, "user_id = ?", user.ID).Error; err != nil {
+		t.Fatalf("passkey not restored (secrets would be unrecoverable): %v", err)
 	}
-	if gotKey.WrappedDEKServer != "wrapped-server" {
-		t.Errorf("wrapped server DEK = %q", gotKey.WrappedDEKServer)
+	if gotCred.WrappedDEK != "prf1:wrapped-dek" {
+		t.Errorf("wrapped DEK = %q", gotCred.WrappedDEK)
 	}
 	var memberCount int64
 	database.Model(&db.TeamMember{}).Where("team_id = ? AND user_id = ?", team.ID, user.ID).Count(&memberCount)

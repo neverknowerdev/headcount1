@@ -27,7 +27,7 @@ func TestWebAuthnCredentialCRUD(t *testing.T) {
 	q := db.New(database)
 	ctx := context.Background()
 
-	user, err := q.CreateUser(ctx, "cred@test.local", "x")
+	user, err := q.CreateUser(ctx, "cred@test.local")
 	require.NoError(t, err)
 
 	c, err := q.CreateWebAuthnCredential(ctx, db.WebAuthnCredential{
@@ -71,7 +71,7 @@ func TestDeleteCredentialsForUserCryptoShred(t *testing.T) {
 	q := db.New(database)
 	ctx := context.Background()
 
-	user, _ := q.CreateUser(ctx, "shred@test.local", "x")
+	user, _ := q.CreateUser(ctx, "shred@test.local")
 	for i := 0; i < 3; i++ {
 		_, err := q.CreateWebAuthnCredential(ctx, db.WebAuthnCredential{
 			UserID: user.ID, CredentialID: []byte{byte(i)}, PublicKey: []byte("p"), WrappedDEK: "w", PRFSalt: []byte("s"),

@@ -157,7 +157,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		"model_group_members", "model_groups", "default_model_settings",
 		"llm_providers", "sprints", "projects", "companies",
 		"team_invites", "password_reset_tokens", "sessions",
-		"user_keys", "team_members", "teams", "users",
+		"web_authn_sessions", "web_authn_credentials", "team_members", "teams", "users",
 	}
 	for _, table := range tables {
 		database.Exec("DELETE FROM " + table)
@@ -174,7 +174,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		{"users.json", "users"},
 		{"teams.json", "teams"},
 		{"team-members.json", "team_members"},
-		{"user-keys.json", "user_keys"},
+		{"webauthn-credentials.json", "web_authn_credentials"},
 		{"llm-providers.json", "llm_providers"},
 		{"model-groups.json", "model_groups"},
 		{"model-group-members.json", "model_group_members"},
@@ -254,7 +254,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	// Insert in dependency order, each table's rows sorted by id so
 	// self-references (task parent_id) resolve before their children.
 	insertOrder := []string{
-		"users", "teams", "team_members", "user_keys",
+		"users", "teams", "team_members", "web_authn_credentials",
 		"companies", "llm_providers", "model_groups", "model_group_members",
 		"default_model_settings", "sprints", "projects", "agents", "skills",
 		"tasks", "comments", "attachments", "artifacts", "runs",

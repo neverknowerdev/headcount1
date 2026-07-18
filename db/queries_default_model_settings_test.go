@@ -20,7 +20,7 @@ func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) 
 	q := db.New(database)
 	ctx := context.Background()
 
-	user, err := q.CreateUser(ctx, "seed@test.local", "not-a-real-hash")
+	user, err := q.CreateUser(ctx, "seed@test.local")
 	require.NoError(t, err)
 	uid := user.ID
 

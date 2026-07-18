@@ -2,7 +2,9 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"regexp"
@@ -16,6 +18,7 @@ import (
 	"gorm.io/gorm"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/authctx"
 	endpoints "agent-orchestrator/server/controllers"
 )
 
@@ -26,7 +29,7 @@ func setupTeamTestDB(t *testing.T) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.Session{}, &db.PasswordResetToken{},
+		&db.User{}, &db.Session{},
 		&db.Team{}, &db.TeamMember{}, &db.TeamInvite{},
 		&db.Company{},
 	))
@@ -36,7 +39,6 @@ func setupTeamTestDB(t *testing.T) *gorm.DB {
 func setupTeamRouter(database *gorm.DB) chi.Router {
 	api := endpoints.NewAPI(database, nil, nil)
 	r := chi.NewRouter()
-	r.Post("/auth/register", api.Register)
 	r.Get("/invite-info", api.InviteInfo)
 	r.Group(func(r chi.Router) {
 		r.Use(api.RequireAuth)
@@ -48,6 +50,53 @@ func setupTeamRouter(database *gorm.DB) chi.Router {
 		r.Post("/companies", api.CreateCompany)
 	})
 	return r
+}
+
+// tryRegister mirrors the passkey RegisterFinish account setup (validate
+// invite → create user → accept invite or create team) without the WebAuthn
+// ceremony, and returns a session cookie. Used by the team tests, which
+// exercise team logic rather than the auth mechanism.
+func tryRegister(database *gorm.DB, email, inviteToken string) (*http.Cookie, error) {
+	q := db.New(database)
+	ctx := context.Background()
+	if _, err := q.GetUserByEmail(ctx, email); err == nil {
+		return nil, fmt.Errorf("an account with this email already exists")
+	}
+	if inviteToken != "" {
+		inv, err := q.GetTeamInviteByTokenHash(ctx, authctx.HashToken(inviteToken))
+		if err != nil {
+			return nil, err
+		}
+		user, err := q.CreateUser(ctx, email)
+		if err != nil {
+			return nil, err
+		}
+		if err := q.AcceptTeamInvite(ctx, inv, user.ID); err != nil {
+			return nil, err
+		}
+		return sessionCookieForUser(database, user.ID), nil
+	}
+	user, err := q.CreateUser(ctx, email)
+	if err != nil {
+		return nil, err
+	}
+	if err := q.EnsureTeamForUser(ctx, user); err != nil {
+		return nil, err
+	}
+	return sessionCookieForUser(database, user.ID), nil
+}
+
+func registerHelper(t *testing.T, database *gorm.DB, email, inviteToken string) *http.Cookie {
+	t.Helper()
+	c, err := tryRegister(database, email, inviteToken)
+	require.NoError(t, err)
+	return c
+}
+
+func sessionCookieForUser(database *gorm.DB, userID int32) *http.Cookie {
+	raw, _ := authctx.NewToken()
+	_, _ = db.New(database).CreateSession(context.Background(), userID, authctx.HashToken(raw))
+	return &http.Cookie{Name: authctx.CookieName, Value: raw}
 }
 
 func getJSON(t *testing.T, r chi.Router, path string, cookie *http.Cookie) (*httptest.ResponseRecorder, map[string]any) {
@@ -69,9 +118,7 @@ func TestTeamCreatedAtRegistrationWithOwner(t *testing.T) {
 	database := setupTeamTestDB(t)
 	r := setupTeamRouter(database)
 
-	w := postJSON(t, r, "/auth/register", map[string]string{"email": "boss@corp.io", "password": "password-boss"})
-	require.Equal(t, http.StatusCreated, w.Code, w.Body.String())
-	cookie := sessionCookie(t, w)
+	cookie := registerHelper(t, database, "boss@corp.io", "")
 
 	tw, team := getJSON(t, r, "/team", cookie)
 	require.Equal(t, http.StatusOK, tw.Code, tw.Body.String())
@@ -90,10 +137,7 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 	rec := &recordingMailer{}
 	endpoints.SetMailer(rec)
 
-	// Owner registers and invites a teammate.
-	w := postJSON(t, r, "/auth/register", map[string]string{"email": "boss@corp.io", "password": "password-boss"})
-	require.Equal(t, http.StatusCreated, w.Code)
-	ownerCookie := sessionCookie(t, w)
+	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
 
 	iw := postJSON(t, r, "/team/invites", map[string]string{"email": "dev@corp.io"}, ownerCookie)
 	require.Equal(t, http.StatusCreated, iw.Code, iw.Body.String())
@@ -116,11 +160,7 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 	require.Equal(t, http.StatusCreated, cw.Code)
 
 	// Teammate registers through the invite → member of the same team.
-	mw := postJSON(t, r, "/auth/register", map[string]string{
-		"email": "dev@corp.io", "password": "password-dev", "invite_token": token,
-	})
-	require.Equal(t, http.StatusCreated, mw.Code, mw.Body.String())
-	memberCookie := sessionCookie(t, mw)
+	memberCookie := registerHelper(t, database, "dev@corp.io", token)
 
 	tw, team := getJSON(t, r, "/team", memberCookie)
 	require.Equal(t, http.StatusOK, tw.Code)
@@ -131,10 +171,8 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 	assert.False(t, hasInvites, "members don't see the invites list")
 
 	// The token is single-use.
-	rw := postJSON(t, r, "/auth/register", map[string]string{
-		"email": "other@corp.io", "password": "password-oth", "invite_token": token,
-	})
-	require.Equal(t, http.StatusBadRequest, rw.Code)
+	_, err := tryRegister(database, "other@corp.io", token)
+	require.Error(t, err, "a used invite token must not work again")
 }
 
 func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {
@@ -143,23 +181,16 @@ func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {
 	rec := &recordingMailer{}
 	endpoints.SetMailer(rec)
 
-	w := postJSON(t, r, "/auth/register", map[string]string{"email": "boss@corp.io", "password": "password-boss"})
-	ownerCookie := sessionCookie(t, w)
+	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
 	iw := postJSON(t, r, "/team/invites", map[string]string{"email": "dev@corp.io"}, ownerCookie)
 	require.Equal(t, http.StatusCreated, iw.Code)
 	var created struct {
 		InviteURL string `json:"invite_url"`
-		Invite    struct {
-			ID int32 `json:"id"`
-		} `json:"invite"`
 	}
 	require.NoError(t, json.Unmarshal(iw.Body.Bytes(), &created))
 	token := inviteURLRe.FindStringSubmatch(created.InviteURL)[1]
 
-	mw := postJSON(t, r, "/auth/register", map[string]string{
-		"email": "dev@corp.io", "password": "password-dev", "invite_token": token,
-	})
-	memberCookie := sessionCookie(t, mw)
+	memberCookie := registerHelper(t, database, "dev@corp.io", token)
 
 	// A member cannot invite, revoke, or rename.
 	fw := postJSON(t, r, "/team/invites", map[string]string{"email": "third@corp.io"}, memberCookie)
@@ -196,10 +227,8 @@ func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {
 	r.ServeHTTP(rw, req)
 	require.Equal(t, http.StatusOK, rw.Code)
 	token2 := inviteURLRe.FindStringSubmatch(created2.InviteURL)[1]
-	xw := postJSON(t, r, "/auth/register", map[string]string{
-		"email": "late@corp.io", "password": "password-late", "invite_token": token2,
-	})
-	require.Equal(t, http.StatusBadRequest, xw.Code, "revoked invite must not work")
+	_, err := tryRegister(database, "late@corp.io", token2)
+	require.Error(t, err, "revoked invite must not work")
 }
 
 func TestTeamMembersShareCompanies(t *testing.T) {
@@ -209,8 +238,7 @@ func TestTeamMembersShareCompanies(t *testing.T) {
 	rec := &recordingMailer{}
 	endpoints.SetMailer(rec)
 
-	w := postJSON(t, r, "/auth/register", map[string]string{"email": "boss@corp.io", "password": "password-boss"})
-	ownerCookie := sessionCookie(t, w)
+	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
 	cw := postJSON(t, r, "/companies", map[string]string{"name": "Acme", "short_name": "acme"}, ownerCookie)
 	require.Equal(t, http.StatusCreated, cw.Code)
 
@@ -220,10 +248,7 @@ func TestTeamMembersShareCompanies(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(iw.Body.Bytes(), &created))
 	token := inviteURLRe.FindStringSubmatch(created.InviteURL)[1]
-	mw := postJSON(t, r, "/auth/register", map[string]string{
-		"email": "dev@corp.io", "password": "password-dev", "invite_token": token,
-	})
-	memberCookie := sessionCookie(t, mw)
+	memberCookie := registerHelper(t, database, "dev@corp.io", token)
 
 	// The member sees the team's company (created before they joined)...
 	req := httptest.NewRequest(http.MethodGet, "/companies", nil)
@@ -237,8 +262,7 @@ func TestTeamMembersShareCompanies(t *testing.T) {
 	assert.Equal(t, "Acme", companies[0].Name)
 
 	// ...while an unrelated user does not.
-	ow := postJSON(t, r, "/auth/register", map[string]string{"email": "rival@else.io", "password": "password-rival"})
-	rivalCookie := sessionCookie(t, ow)
+	rivalCookie := registerHelper(t, database, "rival@else.io", "")
 	req = httptest.NewRequest(http.MethodGet, "/companies", nil)
 	req.AddCookie(rivalCookie)
 	rw := httptest.NewRecorder()

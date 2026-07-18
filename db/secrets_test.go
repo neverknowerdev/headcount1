@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/secrets"
@@ -78,14 +79,16 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.UserKey{}, &db.LLMProvider{}))
-	secrets.SetUserKeyStorage(db.NewUserKeyStorage(database))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}))
 	q := db.New(database)
 	ctx := context.Background()
 
-	user, err := q.CreateUser(ctx, "owner@example.com", "irrelevant-hash")
+	user, err := q.CreateUser(ctx, "owner@example.com")
 	require.NoError(t, err)
-	require.NoError(t, secrets.Default().CreateUserKey(user.ID, "owner-password"))
+
+	// Unlock the user (as a passkey login would) so their secrets seal/open.
+	dek, _ := secrets.NewUserDEK()
+	secrets.Default().UnlockUser(user.ID, dek, time.Minute)
 
 	created, err := q.CreateLLMProvider(ctx, db.LLMProvider{
 		Name: "mine", BaseUrl: "https://u", ApiKey: "sk-user-owned", UserID: &user.ID,
@@ -101,11 +104,12 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "sk-user-owned", got.ApiKey)
 
-	// Crypto-shredding: dropping the user's key makes the row unreadable.
-	require.NoError(t, q.DeleteUserKey(ctx, user.ID))
-	secrets.SetUserKeyStorage(db.NewUserKeyStorage(database)) // reset the wrapped-key cache
-	_, err = q.GetLLMProvider(ctx, created.ID)
-	require.Error(t, err)
+	// Locking the user (logout / crash) makes the secret undecryptable: the
+	// row still loads, but the key comes back empty rather than plaintext.
+	secrets.Default().LockUser(user.ID)
+	locked, err := q.GetLLMProvider(ctx, created.ID)
+	require.NoError(t, err)
+	assert.Empty(t, locked.ApiKey, "locked user's secret must not decrypt")
 }
 
 // TestEncryptPlaintextSecretsSweep verifies the startup migration seals rows

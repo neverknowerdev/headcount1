@@ -157,7 +157,7 @@ func (api *API) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	user, err := api.q.CreateUser(r.Context(), email, "")
+	user, err := api.q.CreateUser(r.Context(), email)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to create account")
 		return

@@ -707,7 +707,7 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	}))
 	// Default Models are per-user: give the task's company an owner and
 	// register the setting under that owner.
-	owner, err := q.CreateUser(context.Background(), "owner@test.local", "not-a-real-hash")
+	owner, err := q.CreateUser(context.Background(), "owner@test.local")
 	require.NoError(t, err)
 	var comp db.Company
 	require.NoError(t, database.First(&comp, task.CompanyID).Error)

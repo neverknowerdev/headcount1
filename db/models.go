@@ -4,15 +4,15 @@ import (
 	"time"
 )
 
-// User is an account in cloud multi-user mode. The password is used for
-// authentication only (bcrypt hash) — it is never an encryption key; see
-// pkg/secrets for how stored credentials are protected.
+// User is an account in cloud multi-user mode. Authentication is passwordless
+// (WebAuthn passkeys — see WebAuthnCredential); the email identifies the
+// account for login and for passkey recovery. Secrets are protected per-user
+// via the passkey PRF-derived key, never a password (see pkg/secrets).
 type User struct {
-	ID           int32     `json:"id" gorm:"primaryKey"`
-	Email        string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
-	PasswordHash string    `json:"-" gorm:"not null"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	Email     string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
 }
 
 // Session is a server-side login session. The cookie carries an opaque random
@@ -37,23 +37,6 @@ type PasswordResetToken struct {
 	ExpiresAt time.Time  `json:"expires_at" gorm:"not null"`
 	UsedAt    *time.Time `json:"used_at"`
 	CreatedAt time.Time  `json:"created_at"`
-}
-
-// UserKey holds a user's data-encryption key (DEK) — never in plain form.
-// The same DEK is wrapped twice: by the server's root key chain (so agent
-// runs and schedulers can decrypt with nobody logged in, and so a password
-// reset can re-wrap without data loss) and by an Argon2id key derived from
-// the user's password (defense-in-depth, verified at login). Deleting this
-// row crypto-shreds every "enc:u1:" secret the user owns. See pkg/secrets.
-type UserKey struct {
-	UserID             int32     `json:"user_id" gorm:"primaryKey"`
-	User               User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
-	WrappedDEKServer   string    `json:"-" gorm:"not null"`
-	WrappedDEKPassword string    `json:"-" gorm:"not null"`
-	PwSalt             string    `json:"-" gorm:"not null"`
-	PwParams           string    `json:"-" gorm:"not null"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // WebAuthnCredential is one enrolled passkey. Login is passwordless: the
