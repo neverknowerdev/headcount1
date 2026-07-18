@@ -10,6 +10,9 @@ interface Company {
 export interface AuthUser {
     id: number;
     email: string;
+    // locked = authenticated but the encryption vault is not unlocked (e.g.
+    // after a server crash); the UI prompts for a passkey re-tap.
+    locked?: boolean;
 }
 
 interface AppState {

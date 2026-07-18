@@ -1,3 +1,4 @@
+import { SecretLockBadge } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useStore } from '../store';
@@ -165,7 +166,7 @@ export const Settings: React.FC = () => {
                     </div>
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
-                            GitHub PAT (Personal Access Token)
+                            GitHub PAT (Personal Access Token) <SecretLockBadge />
                         </label>
                         <input
                             type="password"

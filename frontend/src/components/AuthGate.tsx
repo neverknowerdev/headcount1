@@ -1,17 +1,17 @@
 import { useEffect, useState } from 'react';
 import axios from 'axios';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Lock } from 'lucide-react';
 import { Routes, Route, Navigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { LoginPage } from '../pages/LoginPage';
 import { RegisterPage } from '../pages/RegisterPage';
-import { ForgotPasswordPage } from '../pages/ForgotPasswordPage';
-import { ResetPasswordPage } from '../pages/ResetPasswordPage';
+import { RecoverPage } from '../pages/RecoverPage';
+import { unlock } from '../lib/webauthn';
 
-// AuthGate mirrors SetupGate: it probes the session once and renders either
-// the unauthenticated mini-router (login/register/reset pages) or the app.
-// The global 401 interceptor (main.tsx) clears the user, flipping the gate
-// back to the login screen without a reload.
+// AuthGate probes the session once and renders either the unauthenticated
+// mini-router (login/register/recover), a re-tap "unlock" screen when the
+// session is valid but the encryption vault is locked (e.g. after a server
+// crash), or the app. The global 401 interceptor (main.tsx) clears the user.
 export function AuthGate({ children }: { children: React.ReactNode }) {
     const { user, setUser } = useStore();
     const [checked, setChecked] = useState(false);
@@ -39,12 +39,57 @@ export function AuthGate({ children }: { children: React.ReactNode }) {
             <Routes>
                 <Route path="/login" element={<LoginPage />} />
                 <Route path="/register" element={<RegisterPage />} />
-                <Route path="/forgot-password" element={<ForgotPasswordPage />} />
-                <Route path="/reset-password" element={<ResetPasswordPage />} />
+                <Route path="/recover" element={<RecoverPage />} />
                 <Route path="*" element={<Navigate to="/login" replace />} />
             </Routes>
         );
     }
 
+    if (user.locked) {
+        return <UnlockGate />;
+    }
+
     return <>{children}</>;
+}
+
+// UnlockGate re-warms the vault with a passkey tap without logging out.
+function UnlockGate() {
+    const { user, setUser } = useStore();
+    const [error, setError] = useState('');
+    const [busy, setBusy] = useState(false);
+
+    const doUnlock = async () => {
+        setBusy(true);
+        setError('');
+        try {
+            const data = await unlock();
+            if (data.unlocked) setUser({ ...user!, locked: false });
+            else setError('This device can’t decrypt your data. Use your enrolled device.');
+        } catch (err: any) {
+            setError(err?.response?.data?.error || err?.message || 'Unlock failed — try again.');
+        } finally {
+            setBusy(false);
+        }
+    };
+
+    return (
+        <div className="flex min-h-screen flex-col items-center justify-center gap-4 bg-gray-50 p-6 text-center">
+            <Lock size={32} className="text-gray-400" />
+            <div>
+                <h2 className="text-lg font-semibold text-gray-900">Unlock your vault</h2>
+                <p className="mt-1 max-w-sm text-sm text-gray-500">
+                    You’re signed in, but your encrypted secrets are locked. Tap your passkey to
+                    unlock decryption for this session.
+                </p>
+            </div>
+            {error && <p className="max-w-sm text-sm text-red-600">{error}</p>}
+            <button
+                onClick={doUnlock}
+                disabled={busy}
+                className="rounded-md bg-indigo-600 py-2 px-4 font-semibold text-white shadow-sm hover:bg-indigo-700 disabled:opacity-50"
+            >
+                {busy ? 'Please wait…' : 'Unlock with passkey'}
+            </button>
+        </div>
+    );
 }

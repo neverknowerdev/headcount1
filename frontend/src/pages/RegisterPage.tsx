@@ -3,6 +3,7 @@ import axios from 'axios';
 import { Link, useNavigate, useSearchParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { AuthShell, AuthError, AuthField, AuthSubmit } from './AuthShell';
+import { register, passkeysSupported } from '../lib/webauthn';
 
 export function RegisterPage() {
     const setUser = useStore((s) => s.setUser);
@@ -11,8 +12,6 @@ export function RegisterPage() {
     const inviteToken = params.get('invite') || '';
     const [inviteTeam, setInviteTeam] = useState('');
     const [email, setEmail] = useState('');
-    const [password, setPassword] = useState('');
-    const [confirm, setConfirm] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
 
@@ -35,22 +34,18 @@ export function RegisterPage() {
 
     const submit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (password !== confirm) {
-            setError('Passwords do not match.');
+        if (!passkeysSupported()) {
+            setError('This browser does not support passkeys. Use a modern browser or device.');
             return;
         }
         setBusy(true);
         setError('');
         try {
-            const res = await axios.post('/api/auth/register', {
-                email,
-                password,
-                ...(inviteToken ? { invite_token: inviteToken } : {}),
-            });
-            setUser(res.data);
+            const data = await register(email, inviteToken);
+            setUser({ ...data.user, locked: !data.unlocked });
             navigate('/', { replace: true });
         } catch (err: any) {
-            setError(err.response?.data?.error || 'Registration failed — try again.');
+            setError(err?.response?.data?.error || err?.message || 'Registration failed — try again.');
         } finally {
             setBusy(false);
         }
@@ -60,15 +55,17 @@ export function RegisterPage() {
         <AuthShell
             title={inviteTeam ? `Join ${inviteTeam}` : 'Create your account'}
             subtitle={inviteTeam
-                ? `You've been invited to the team "${inviteTeam}" — create your account to join.`
-                : 'Free to set up — bring your own LLM API keys.'}
+                ? `You've been invited to the team "${inviteTeam}" — create your account with a passkey to join.`
+                : 'Passwordless — you’ll create a passkey. Bring your own LLM API keys.'}
         >
             <AuthError message={error} />
             <form onSubmit={submit}>
                 <AuthField label="Email" type="email" value={email} onChange={setEmail} autoFocus />
-                <AuthField label="Password" type="password" value={password} onChange={setPassword} placeholder="At least 8 characters" />
-                <AuthField label="Confirm password" type="password" value={confirm} onChange={setConfirm} />
-                <AuthSubmit busy={busy}>Create account</AuthSubmit>
+                <p className="mb-4 text-xs text-gray-500">
+                    We’ll create a passkey on this device. Your passkey also unlocks your
+                    encrypted secrets — no password is ever stored.
+                </p>
+                <AuthSubmit busy={busy}>Create account with passkey</AuthSubmit>
             </form>
             <div className="mt-4 text-center text-sm">
                 <span className="text-gray-500">Already have an account? </span>

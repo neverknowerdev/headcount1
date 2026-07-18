@@ -1,3 +1,4 @@
+import { SecretLockBadge } from '../components/SecretField';
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React, { useState, useEffect } from 'react';
 import axios from 'axios';
@@ -424,7 +425,7 @@ export const AddCompany: React.FC = () => {
                                         <input required type="text" value={providerUrl} onChange={e => setProviderUrl(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                                     </div>
                                     <div>
-                                        <label className="text-sm font-medium text-gray-700">API Key</label>
+                                        <label className="text-sm font-medium text-gray-700">API Key <SecretLockBadge /></label>
                                         <input required type="password" value={providerKey} onChange={e => setProviderKey(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
                                     </div>
                                     <div>
