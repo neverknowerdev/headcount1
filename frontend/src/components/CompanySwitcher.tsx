@@ -1,11 +1,12 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 import React from 'react';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { Plus } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 
 export const CompanySwitcher: React.FC = () => {
     const { companies, selectedCompanyId, setSelectedCompanyId } = useStore();
+    const isOwner = useIsOwner();
     const navigate = useNavigate();
 
     const getInitials = (company: any) => {
@@ -32,15 +33,19 @@ export const CompanySwitcher: React.FC = () => {
                 </button>
             ))}
 
-            <div className="w-8 border-t border-gray-700 my-2"></div>
+            {isOwner && (
+                <>
+                    <div className="w-8 border-t border-gray-700 my-2"></div>
 
-            <button
-                onClick={() => navigate('/add-company')}
-                className="w-12 h-12 rounded-full bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 flex items-center justify-center transition-colors"
-                title="Add Workspace"
-            >
-                <Plus size={24} />
-            </button>
+                    <button
+                        onClick={() => navigate('/add-company')}
+                        className="w-12 h-12 rounded-full bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 flex items-center justify-center transition-colors"
+                        title="Add Workspace"
+                    >
+                        <Plus size={24} />
+                    </button>
+                </>
+            )}
         </div>
     );
 };

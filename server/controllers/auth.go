@@ -96,6 +96,10 @@ func (api *API) authStateResponse(ctx context.Context, user db.User) map[string]
 		"id":     user.ID,
 		"email":  user.Email,
 		"locked": !secrets.IsUnlocked(user.ID),
+		// role drives the frontend hiding of owner-only actions (create/delete
+		// company & project, delete MCP server). "owner" for solo users and team
+		// creators; "member" for invited users. The backend enforces regardless.
+		"role": api.teamRole(ctx, user.ID),
 	}
 	if exp, err := api.q.GetSessionAbsoluteExpiry(ctx, user.ID); err == nil && !exp.IsZero() {
 		reauthAt := exp.Add(-db.SessionReauthGap())

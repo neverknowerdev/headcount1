@@ -61,7 +61,8 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		keyPath := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		defer cleanup()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
@@ -114,7 +115,9 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager.CreateProjectDirectories(comp, proj)
 
 	if req.RepositoryUrl != "" {
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)); err != nil {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, repoKey); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -179,7 +182,8 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		keyPath := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		defer cleanup()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
@@ -190,7 +194,9 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
 		fsManager := filesystem.NewManager(settings.BasePath)
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)); err != nil {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, repoKey); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}

@@ -2,9 +2,9 @@ package secrets
 
 import (
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,14 +15,25 @@ import (
 // is configured.
 const EnvMasterKey = "HEADCOUNT1_MASTER_KEY"
 
-// KeySource supplies the 32-byte master key (KEK) that wraps the data key.
-// Implementations are consulted on every seal/open so that revoking the key
+// MasterKeyMaterial is what a KeySource yields. When Passphrase is true the
+// material is a (potentially low-entropy) human passphrase in Raw that MUST be
+// stretched with a salted Argon2id KDF before use as a KEK; otherwise Key holds
+// a ready 32-byte high-entropy key used verbatim. Distinguishing the two is what
+// lets a leaked keystore + weak passphrase resist an offline dictionary attack.
+type MasterKeyMaterial struct {
+	Key        [32]byte
+	Raw        []byte
+	Passphrase bool
+}
+
+// KeySource supplies the master key material that (after any KDF) wraps the data
+// key. Implementations are consulted on every seal/open so that revoking the key
 // at its source takes effect without a restart; a source whose fetch is
 // expensive (Vault) applies its own TTL cache internally.
 type KeySource interface {
 	// Name identifies the source in logs and error messages.
 	Name() string
-	MasterKey() ([32]byte, error)
+	MasterKey() (MasterKeyMaterial, error)
 }
 
 // keySourceFromEnv picks the master-key source:
@@ -44,27 +55,29 @@ func keySourceFromEnv(dir string) KeySource {
 	return &fileKeySource{path: filepath.Join(dir, "master.key")}
 }
 
-// parseMasterKey turns a user-supplied key string into 32 bytes: 64 hex
-// chars or base64 of exactly 32 bytes are used verbatim; anything else is
-// treated as a passphrase and hashed with SHA-256.
-func parseMasterKey(v string) ([32]byte, error) {
-	var key [32]byte
+// parseMasterKey classifies a user-supplied key string: 64 hex chars or base64
+// of exactly 32 bytes are high-entropy keys used verbatim; anything else is
+// treated as a passphrase to be run through Argon2id with a per-install salt
+// (see SecretManager.deriveKEK) — never a bare unsalted hash.
+func parseMasterKey(v string) (MasterKeyMaterial, error) {
 	v = strings.TrimSpace(v)
 	if v == "" {
-		return key, fmt.Errorf("master key is empty")
+		return MasterKeyMaterial{}, fmt.Errorf("master key is empty")
 	}
+	var m MasterKeyMaterial
 	if len(v) == 64 {
 		if b, err := hex.DecodeString(v); err == nil {
-			copy(key[:], b)
-			return key, nil
+			copy(m.Key[:], b)
+			return m, nil
 		}
 	}
 	if b, err := base64.StdEncoding.DecodeString(v); err == nil && len(b) == 32 {
-		copy(key[:], b)
-		return key, nil
+		copy(m.Key[:], b)
+		return m, nil
 	}
-	key = sha256.Sum256([]byte(v))
-	return key, nil
+	m.Passphrase = true
+	m.Raw = []byte(v)
+	return m, nil
 }
 
 // ── env var source ───────────────────────────────────────────────────────────
@@ -75,10 +88,10 @@ type envKeySource struct{}
 
 func (envKeySource) Name() string { return "env:" + EnvMasterKey }
 
-func (envKeySource) MasterKey() ([32]byte, error) {
+func (envKeySource) MasterKey() (MasterKeyMaterial, error) {
 	v := os.Getenv(EnvMasterKey)
 	if v == "" {
-		return [32]byte{}, fmt.Errorf("%s is no longer set", EnvMasterKey)
+		return MasterKeyMaterial{}, fmt.Errorf("%s is no longer set", EnvMasterKey)
 	}
 	return parseMasterKey(v)
 }
@@ -92,27 +105,46 @@ type fileKeySource struct{ path string }
 
 func (f *fileKeySource) Name() string { return "file:" + f.path }
 
-func (f *fileKeySource) MasterKey() ([32]byte, error) {
+func (f *fileKeySource) MasterKey() (MasterKeyMaterial, error) {
 	data, err := os.ReadFile(f.path)
 	if os.IsNotExist(err) {
 		return f.generate()
 	}
 	if err != nil {
-		return [32]byte{}, err
+		return MasterKeyMaterial{}, err
 	}
 	return parseMasterKey(string(data))
 }
 
-func (f *fileKeySource) generate() ([32]byte, error) {
+// generate creates the auto key file on first use. It writes with O_EXCL so two
+// concurrent first-boot callers can't each generate a DIFFERENT random key and
+// race to write — that would leave the file holding one key while another
+// caller wrapped the DEK under the other, tripping the fingerprint guard forever
+// (unrecoverable). On EEXIST we re-read the winner's key.
+func (f *fileKeySource) generate() (MasterKeyMaterial, error) {
 	var key [32]byte
 	if _, err := rand.Read(key[:]); err != nil {
-		return key, err
+		return MasterKeyMaterial{}, err
 	}
-	if err := os.MkdirAll(filepath.Dir(f.path), 0755); err != nil {
-		return key, err
+	if err := os.MkdirAll(filepath.Dir(f.path), 0700); err != nil {
+		return MasterKeyMaterial{}, err
 	}
-	if err := os.WriteFile(f.path, []byte(hex.EncodeToString(key[:])+"\n"), 0600); err != nil {
-		return key, err
+	fh, err := os.OpenFile(f.path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if errors.Is(err, os.ErrExist) {
+			data, rerr := os.ReadFile(f.path)
+			if rerr != nil {
+				return MasterKeyMaterial{}, rerr
+			}
+			return parseMasterKey(string(data))
+		}
+		return MasterKeyMaterial{}, err
 	}
-	return key, nil
+	defer fh.Close()
+	if _, err := fh.Write([]byte(hex.EncodeToString(key[:]) + "\n")); err != nil {
+		return MasterKeyMaterial{}, err
+	}
+	var m MasterKeyMaterial
+	m.Key = key
+	return m, nil
 }

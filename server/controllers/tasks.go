@@ -79,6 +79,39 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, tasks)
 }
 
+// authorizeTaskRefs verifies every object a task references — project, agent,
+// sprint, parent — belongs to the SAME company as the task. project_id/agent_id
+// are sequential int32; without this a user could point a task in their own
+// company at another tenant's project or agent and drive a worktree/agent from
+// a foreign record. companyID is the task's already-authorized company.
+func (api *API) authorizeTaskRefs(r *http.Request, companyID int32, projectID, agentID, sprintID, parentID *int32) error {
+	if projectID != nil {
+		proj, err := api.authorizeProject(r, *projectID)
+		if err != nil || proj.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if agentID != nil {
+		agent, err := api.authorizeAgent(r, *agentID)
+		if err != nil || agent.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if sprintID != nil && *sprintID != 0 {
+		var s db.Sprint
+		if err := api.db.WithContext(r.Context()).First(&s, *sprintID).Error; err != nil || s.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if parentID != nil {
+		var p db.Task
+		if err := api.db.WithContext(r.Context()).First(&p, *parentID).Error; err != nil || p.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	return nil
+}
+
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CompanyID       int32   `json:"company_id"`
@@ -120,6 +153,11 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+	sprintPtr := &req.SprintID
+	if err := api.authorizeTaskRefs(r, req.CompanyID, req.ProjectID, req.AgentID, sprintPtr, req.ParentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
 		return
 	}
 
@@ -185,6 +223,13 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+
+	// Referenced objects must belong to the task's company (same tenancy check
+	// as CreateTask) — a foreign project_id/agent_id must never be bound here.
+	if err := api.authorizeTaskRefs(r, task.CompanyID, req.ProjectID, req.AgentID, req.SprintID, req.ParentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
+		return
+	}
 
 	statusChanged := false
 	prevStatus := task.Status
@@ -301,7 +346,8 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
 	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
-	keyPath := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
+	keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
+	defer keyCleanup()
 	gitMgr := git.NewGitManager(repoDir, keyPath)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)

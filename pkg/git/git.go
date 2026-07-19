@@ -102,14 +102,30 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 	return nil
 }
 
+// sshCommandFor builds the GIT_SSH_COMMAND for a key path, with host-key
+// verification enabled. The mode is HEADCOUNT1_GIT_STRICT_HOST_KEY_CHECKING
+// (default "accept-new": trust a host's key on first contact, then detect any
+// later change — MITM protection that "no" + /dev/null threw away entirely).
+// Set "yes" to require a pre-seeded known_hosts, or "no" to restore the old
+// no-verification behavior. The known_hosts lives next to the key so first-seen
+// host keys persist across ops.
+func sshCommandFor(keyPath string) string {
+	mode := os.Getenv("HEADCOUNT1_GIT_STRICT_HOST_KEY_CHECKING")
+	if mode == "" {
+		mode = "accept-new"
+	}
+	knownHosts := filepath.Join(filepath.Dir(keyPath), "known_hosts")
+	return fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=%s -o UserKnownHostsFile=%s -o BatchMode=yes",
+		keyPath, mode, knownHosts)
+}
+
 // sshEnv returns the GIT_SSH_COMMAND env string for the configured key.
 // Returns "" if the URL is a local file:// path (SSH is irrelevant).
 func (g *GitManager) sshEnv() string {
 	if g.isLocalOnly() {
 		return ""
 	}
-	keyPath := g.sshKeyPath
-	return fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
+	return sshCommandFor(g.sshKeyPath)
 }
 
 // withGitEnv returns os.Environ() plus GIT_SSH_COMMAND when appropriate.
@@ -200,7 +216,7 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
 	if !strings.HasPrefix(repoURL, "file://") && !strings.HasPrefix(repoURL, "/") && !strings.HasPrefix(repoURL, "./") && !strings.HasPrefix(repoURL, "../") {
 		keyPath := g.sshKeyPath
-		env = append(env, fmt.Sprintf("GIT_SSH_COMMAND=ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath))
+		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(keyPath))
 	}
 	cmd.Env = env
 
@@ -262,7 +278,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
 		keyPath := g.sshKeyPath
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
+		sshCmd := sshCommandFor(keyPath)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
 		out, err := cmd.CombinedOutput()
 		if err != nil {
@@ -295,7 +311,7 @@ func (g *GitManager) MergeBranch(ctx context.Context, baseRepoDir, branchName st
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = baseRepoDir
 		keyPath := g.sshKeyPath
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
+		sshCmd := sshCommandFor(keyPath)
 		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
 		out, err := cmd.CombinedOutput()
 		if err != nil {

@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2, SearchIcon } from 'lucide-react';
 
 interface MCPAccount {
@@ -83,6 +83,7 @@ const emptyForm = {
 
 export const MCPServers: React.FC = () => {
     const { selectedCompanyId } = useStore();
+    const isOwner = useIsOwner();
 
     // ── Server modal state (for custom servers only) ───────────────────────────
     const [servers, setServers] = useState<MCPServer[]>([]);
@@ -477,9 +478,11 @@ export const MCPServers: React.FC = () => {
                                         <button onClick={() => openModal(s)} className="p-1.5 text-gray-500 hover:text-gray-700 rounded">
                                             <Edit2 size={16} />
                                         </button>
-                                        <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
-                                            <Trash2 size={16} />
-                                        </button>
+                                        {isOwner && (
+                                            <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
+                                                <Trash2 size={16} />
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                                 {discoverErrors[s.id] && (

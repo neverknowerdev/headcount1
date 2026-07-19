@@ -1,12 +1,13 @@
 import { SecretLockBadge } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
     const { selectedCompanyId, companies, setCompanies } = useStore();
+    const isOwner = useIsOwner();
 
     const [companyShortName, setCompanyShortName] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -211,7 +212,7 @@ export const Settings: React.FC = () => {
                 </form>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
+            {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>
                 <div className="flex items-center justify-between">
                     <div>
@@ -228,7 +229,7 @@ export const Settings: React.FC = () => {
                         Delete Company
                     </button>
                 </div>
-            </div>
+            </div>}
 
             {showDeleteConfirm && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

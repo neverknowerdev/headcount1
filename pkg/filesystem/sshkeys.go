@@ -2,7 +2,6 @@ package filesystem
 
 import (
 	"context"
-	"fmt"
 	"os"
 	"path/filepath"
 
@@ -10,54 +9,65 @@ import (
 	"agent-orchestrator/pkg/secrets"
 )
 
-// UserSSHKeyFile is the per-user private-key path, materialized from the
-// encrypted DB row for git operations. Kept separate per user so one account's
-// key can never overwrite another's.
-func (p Paths) UserSSHKeyFile(userID int32) string {
-	return filepath.Join(p.SSHDir(), fmt.Sprintf("u%d", userID), "id_rsa")
-}
+// noopCleanup is returned when nothing was materialized (the shared key path).
+func noopCleanup() {}
 
-// writeUserSSHKey materializes a decrypted key to the per-user path (0600) so
-// `ssh -i` can read it, and returns the path.
-func (p Paths) writeUserSSHKey(userID int32, key string) (string, error) {
-	path := p.UserSSHKeyFile(userID)
-	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
-		return "", err
+// materializeEphemeralKey writes a decrypted key to a FRESH 0700 temp dir under
+// <base>/ssh and returns its path plus a cleanup that removes it. The plaintext
+// key must not outlive the git operation that needs it — a persistent per-user
+// file would survive logout, vault-lock, and crypto-shred, defeating the
+// at-rest-encryption and crypto-shred guarantees. Callers defer the cleanup.
+func materializeEphemeralKey(base, key string) (string, func(), error) {
+	sshDir := NewPaths(base).SSHDir()
+	if err := os.MkdirAll(sshDir, 0700); err != nil {
+		return "", noopCleanup, err
 	}
+	dir, err := os.MkdirTemp(sshDir, "key-*")
+	if err != nil {
+		return "", noopCleanup, err
+	}
+	if err := os.Chmod(dir, 0700); err != nil {
+		os.RemoveAll(dir)
+		return "", noopCleanup, err
+	}
+	path := filepath.Join(dir, "id_rsa")
 	if err := os.WriteFile(path, []byte(key), 0600); err != nil {
-		return "", err
+		os.RemoveAll(dir)
+		return "", noopCleanup, err
 	}
-	return path, nil
+	return path, func() { os.RemoveAll(dir) }, nil
 }
 
 // ResolveSSHKeyPath returns the SSH key path to use for git operations on behalf
-// of userID. It prefers the user's own key — decrypted from the DB and written
-// to a 0600 file — when the user has one AND their vault is unlocked. Otherwise
-// it falls back to the shared, operator-provisioned key (the historical single
-// key), which covers local/dev and users who never uploaded a personal key.
+// of userID, plus a cleanup func the caller MUST defer. When the user has their
+// own key AND their vault is unlocked, the key is decrypted and written to a
+// short-lived 0700 temp file that the cleanup deletes right after the git op —
+// so the plaintext never lingers on disk. Otherwise it falls back to the shared,
+// operator-provisioned key (persistent; cleanup is a no-op), which covers
+// local/dev and users who never uploaded a personal key.
 //
 // A user with a personal key whose vault is locked also falls back to the shared
 // key; the per-user key is simply undecryptable until they re-authenticate.
-func ResolveSSHKeyPath(ctx context.Context, q *db.Queries, base string, userID int32) string {
+func ResolveSSHKeyPath(ctx context.Context, q *db.Queries, base string, userID int32) (string, func()) {
 	paths := NewPaths(base)
 	if userID != 0 && secrets.IsUnlocked(userID) {
 		if cred, err := q.GetUserGitCredential(ctx, userID); err == nil && cred.SSHPrivateKeyEncrypted != "" {
-			// Decrypt at the point of use — the plaintext lives only long enough
-			// to be written to the 0600 key file.
+			// Decrypt at the point of use — the plaintext lives only for the
+			// lifetime of the returned cleanup.
 			if key, err := secrets.Default().Decrypt(cred.SSHPrivateKeyEncrypted); err == nil && key != "" {
-				if path, err := paths.writeUserSSHKey(userID, key); err == nil {
-					return path
+				if path, cleanup, err := materializeEphemeralKey(base, key); err == nil {
+					return path, cleanup
 				}
 			}
 		}
 	}
-	return paths.SSHKeyFile()
+	return paths.SSHKeyFile(), noopCleanup
 }
 
 // ResolveSSHKeyPathForCompany resolves the git key for a company's pushes: the
 // company creator's personal key (companies always carry their creator's
-// UserID), else the shared key.
-func ResolveSSHKeyPathForCompany(ctx context.Context, q *db.Queries, base string, company db.Company) string {
+// UserID), else the shared key. The returned cleanup MUST be deferred.
+func ResolveSSHKeyPathForCompany(ctx context.Context, q *db.Queries, base string, company db.Company) (string, func()) {
 	var userID int32
 	if company.UserID != nil {
 		userID = *company.UserID

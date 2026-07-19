@@ -28,6 +28,17 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"golang.org/x/crypto/argon2"
+)
+
+// Argon2id parameters for stretching a passphrase master key into the KEK.
+// ~64 MiB / 3 passes is comfortably above OWASP's minimum and makes an offline
+// dictionary attack on a leaked keystore infeasible.
+const (
+	argonTime      = 3
+	argonMemoryKiB = 64 * 1024
+	argonThreads   = 4
 )
 
 // Prefix marks a value as sealed by this package. Values without it are
@@ -59,6 +70,10 @@ type SecretManager struct {
 	// the Vault TTL at worst).
 	wrappedDEK []byte
 	kekFP      string
+
+	// kdfSalt is the per-install Argon2id salt for a passphrase master key,
+	// persisted (non-secret) in the keystore. Empty for high-entropy keys.
+	kdfSalt []byte
 
 	// keyring holds unlocked per-user DEKs in memory (see keyring.go). It is
 	// the sole place a user's DEK exists in plaintext, and only while that
@@ -163,6 +178,10 @@ type keystoreFile struct {
 	// KEKFingerprint identifies which master key wrapped the DEK, so a key
 	// mismatch produces a clear error instead of a bare GCM failure.
 	KEKFingerprint string `json:"kek_fingerprint"`
+	// KDFSalt is the base64 per-install Argon2id salt used to stretch a
+	// passphrase master key into the KEK. Non-secret; absent for high-entropy
+	// (hex/base64-32) master keys, which need no stretching.
+	KDFSalt string `json:"kdf_salt,omitempty"`
 }
 
 // dek returns the unwrapped data key. The wrapped blob is cached in memory;
@@ -170,7 +189,7 @@ type keystoreFile struct {
 // applies its own TTL cache internally).
 func (s *SecretManager) dek() ([32]byte, error) {
 	var zero [32]byte
-	kek, err := s.source.MasterKey()
+	mat, err := s.source.MasterKey()
 	if err != nil {
 		return zero, fmt.Errorf("secrets: master key unavailable from %s: %w", s.source.Name(), err)
 	}
@@ -178,9 +197,15 @@ func (s *SecretManager) dek() ([32]byte, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if s.wrappedDEK == nil {
-		if err := s.loadOrCreateKeystoreLocked(kek); err != nil {
+		// Loads (or creates) the keystore, which is where kdfSalt lives — needed
+		// before the KEK can be derived from a passphrase.
+		if err := s.loadOrCreateKeystoreLocked(mat); err != nil {
 			return zero, err
 		}
+	}
+	kek, err := s.deriveKEK(mat)
+	if err != nil {
+		return zero, err
 	}
 	if fp := fingerprint(kek); fp != s.kekFP {
 		return zero, fmt.Errorf("secrets: master key from %s (fingerprint %s) does not match the key that created %s (fingerprint %s) — restore the original master key, or delete the keystore to start over (existing stored secrets will become unreadable)",
@@ -198,10 +223,28 @@ func (s *SecretManager) dek() ([32]byte, error) {
 	return dek, nil
 }
 
-func (s *SecretManager) loadOrCreateKeystoreLocked(kek [32]byte) error {
+// deriveKEK turns master-key material into the 32-byte KEK. A high-entropy key
+// is used verbatim; a passphrase is stretched with Argon2id over the per-install
+// keystore salt, so a leaked keystore + weak passphrase can't be brute-forced
+// with a cheap unsalted hash. s.kdfSalt must already be populated (by the
+// keystore load/create) for the passphrase path.
+func (s *SecretManager) deriveKEK(mat MasterKeyMaterial) ([32]byte, error) {
+	if !mat.Passphrase {
+		return mat.Key, nil
+	}
+	if len(s.kdfSalt) == 0 {
+		return [32]byte{}, fmt.Errorf("secrets: passphrase master key needs a KDF salt but keystore %s has none — delete it to re-initialize", s.keystorePath)
+	}
+	var kek [32]byte
+	dk := argon2.IDKey(mat.Raw, s.kdfSalt, argonTime, argonMemoryKiB, argonThreads, 32)
+	copy(kek[:], dk)
+	return kek, nil
+}
+
+func (s *SecretManager) loadOrCreateKeystoreLocked(mat MasterKeyMaterial) error {
 	data, err := os.ReadFile(s.keystorePath)
 	if os.IsNotExist(err) {
-		return s.createKeystoreLocked(kek)
+		return s.createKeystoreLocked(mat)
 	}
 	if err != nil {
 		return fmt.Errorf("secrets: cannot read keystore %s: %w", s.keystorePath, err)
@@ -214,12 +257,32 @@ func (s *SecretManager) loadOrCreateKeystoreLocked(kek [32]byte) error {
 	if err != nil {
 		return fmt.Errorf("secrets: keystore %s is corrupt: %w", s.keystorePath, err)
 	}
+	if ks.KDFSalt != "" {
+		salt, err := base64.StdEncoding.DecodeString(ks.KDFSalt)
+		if err != nil {
+			return fmt.Errorf("secrets: keystore %s has a corrupt kdf_salt: %w", s.keystorePath, err)
+		}
+		s.kdfSalt = salt
+	}
 	s.wrappedDEK = wrapped
 	s.kekFP = ks.KEKFingerprint
 	return nil
 }
 
-func (s *SecretManager) createKeystoreLocked(kek [32]byte) error {
+func (s *SecretManager) createKeystoreLocked(mat MasterKeyMaterial) error {
+	// A passphrase master key gets a fresh per-install salt before the KEK is
+	// derived; a high-entropy key needs none.
+	if mat.Passphrase {
+		salt := make([]byte, 16)
+		if _, err := rand.Read(salt); err != nil {
+			return err
+		}
+		s.kdfSalt = salt
+	}
+	kek, err := s.deriveKEK(mat)
+	if err != nil {
+		return err
+	}
 	var dek [32]byte
 	if _, err := rand.Read(dek[:]); err != nil {
 		return err
@@ -233,11 +296,14 @@ func (s *SecretManager) createKeystoreLocked(kek [32]byte) error {
 		WrappedDEK:     base64.StdEncoding.EncodeToString(wrapped),
 		KEKFingerprint: fingerprint(kek),
 	}
+	if len(s.kdfSalt) > 0 {
+		ks.KDFSalt = base64.StdEncoding.EncodeToString(s.kdfSalt)
+	}
 	data, err := json.MarshalIndent(ks, "", "  ")
 	if err != nil {
 		return err
 	}
-	if err := os.MkdirAll(filepath.Dir(s.keystorePath), 0755); err != nil {
+	if err := os.MkdirAll(filepath.Dir(s.keystorePath), 0700); err != nil {
 		return err
 	}
 	// The wrapped DEK is ciphertext, but there's no reason to make it

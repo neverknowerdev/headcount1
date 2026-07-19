@@ -47,7 +47,8 @@ func setupTeamRouter(database *gorm.DB) chi.Router {
 		r.Post("/team/invites", api.CreateTeamInvite)
 		r.Delete("/team/invites/{id}", api.DeleteTeamInvite)
 		r.Get("/companies", api.ListCompanies)
-		r.Post("/companies", api.CreateCompany)
+		// Mirror production: creating a company is owner-only.
+		r.With(api.RequireTeamOwner).Post("/companies", api.CreateCompany)
 	})
 	return r
 }
@@ -173,6 +174,31 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 	// The token is single-use.
 	_, err := tryRegister(database, "other@corp.io", token)
 	require.Error(t, err, "a used invite token must not work again")
+}
+
+func TestOnlyOwnerCanCreateCompany(t *testing.T) {
+	database := setupTeamTestDB(t)
+	r := setupTeamRouter(database)
+	endpoints.SetMailer(&recordingMailer{})
+
+	// Owner (registered without an invite) can create a company.
+	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
+	cw := postJSON(t, r, "/companies", map[string]string{"name": "Acme", "short_name": "acme"}, ownerCookie)
+	require.Equal(t, http.StatusCreated, cw.Code, cw.Body.String())
+
+	// Invite a teammate, who joins as a member.
+	iw := postJSON(t, r, "/team/invites", map[string]string{"email": "dev@corp.io"}, ownerCookie)
+	require.Equal(t, http.StatusCreated, iw.Code)
+	var created struct {
+		InviteURL string `json:"invite_url"`
+	}
+	require.NoError(t, json.Unmarshal(iw.Body.Bytes(), &created))
+	token := inviteURLRe.FindStringSubmatch(created.InviteURL)[1]
+	memberCookie := registerHelper(t, database, "dev@corp.io", token)
+
+	// The member is blocked from creating a company (owner-only) — 403, not 404.
+	mw := postJSON(t, r, "/companies", map[string]string{"name": "Sneaky", "short_name": "sneak"}, memberCookie)
+	require.Equal(t, http.StatusForbidden, mw.Code, mw.Body.String())
 }
 
 func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {

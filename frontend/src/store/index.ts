@@ -20,6 +20,10 @@ export interface AuthUser {
     session_expires_at?: string;
     reauth_at?: string;
     reauth_required?: boolean;
+    // "owner" | "member". Members are blocked (backend-enforced) from structural
+    // actions — creating/deleting a company, creating a project, deleting a
+    // shared MCP server — so the UI hides those controls for them.
+    role?: string;
 }
 
 interface AppState {
@@ -35,6 +39,15 @@ interface AppState {
     // /api/auth/me; the global 401 interceptor clears it.
     user: AuthUser | null;
     setUser: (user: AuthUser | null) => void;
+}
+
+// useIsOwner reports whether the signed-in user may perform owner-only
+// structural actions (create/delete company, create project, delete MCP server).
+// Defaults to true when the role is unknown — the backend is the real gate, so
+// this only hides controls a member's request would be 403'd on anyway.
+export function useIsOwner(): boolean {
+    const user = useStore((s) => s.user);
+    return !user?.role || user.role === 'owner';
 }
 
 export const useStore = create<AppState>((set) => ({

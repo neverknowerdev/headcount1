@@ -38,7 +38,7 @@ type vaultKeySource struct {
 	client    *http.Client
 
 	mu        sync.Mutex
-	cached    [32]byte
+	cached    MasterKeyMaterial
 	hasCached bool
 	fetchedAt time.Time
 }
@@ -73,7 +73,7 @@ func (v *vaultKeySource) Name() string {
 	return fmt.Sprintf("vault:%s/v1/%s#%s", v.addr, v.path, v.field)
 }
 
-func (v *vaultKeySource) MasterKey() ([32]byte, error) {
+func (v *vaultKeySource) MasterKey() (MasterKeyMaterial, error) {
 	v.mu.Lock()
 	defer v.mu.Unlock()
 	if v.hasCached && v.ttl > 0 && time.Since(v.fetchedAt) < v.ttl {
@@ -81,7 +81,7 @@ func (v *vaultKeySource) MasterKey() ([32]byte, error) {
 	}
 	key, err := v.fetch()
 	if err != nil {
-		return [32]byte{}, err
+		return MasterKeyMaterial{}, err
 	}
 	v.cached = key
 	v.hasCached = true
@@ -89,8 +89,8 @@ func (v *vaultKeySource) MasterKey() ([32]byte, error) {
 	return key, nil
 }
 
-func (v *vaultKeySource) fetch() ([32]byte, error) {
-	var zero [32]byte
+func (v *vaultKeySource) fetch() (MasterKeyMaterial, error) {
+	var zero MasterKeyMaterial
 	if v.token == "" {
 		return zero, fmt.Errorf("VAULT_ADDR is set but VAULT_TOKEN is empty")
 	}

@@ -61,6 +61,15 @@ func webauthnRP() (*webauthn.WebAuthn, error) {
 			RPID:          envOr("WEBAUTHN_RP_ID", "localhost"),
 			RPDisplayName: envOr("WEBAUTHN_RP_DISPLAY_NAME", "headcount1"),
 			RPOrigins:     strings.Split(envOr("WEBAUTHN_RP_ORIGINS", "http://localhost:8080"), ","),
+			// Passwordless RP: the passkey is the ONLY factor, so require User
+			// Verification (PIN/biometric), not bare User Presence (a tap) — and
+			// require a discoverable (resident) credential. go-webauthn copies
+			// these into both the registration options and the login session, and
+			// ValidateLogin enforces UV only when the session demands it.
+			AuthenticatorSelection: protocol.AuthenticatorSelection{
+				UserVerification: protocol.VerificationRequired,
+				ResidentKey:      protocol.ResidentKeyRequirementRequired,
+			},
 		})
 	})
 	return webauthnInst, webauthnErr
@@ -302,7 +311,7 @@ func (api *API) LoginBegin(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "this account has no passkey — use account recovery")
 		return
 	}
-	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()))
+	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()), webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to start login: "+err.Error())
 		return
@@ -326,7 +335,7 @@ func (api *API) UnlockBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	wa, _ := webauthnRP()
 	wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
-	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()))
+	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()), webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to start unlock")
 		return
@@ -353,7 +362,7 @@ func (api *API) ReauthBegin(w http.ResponseWriter, r *http.Request) {
 	}
 	wa, _ := webauthnRP()
 	wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
-	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()))
+	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()), webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to start re-auth")
 		return
@@ -405,7 +414,18 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 		api.respondError(w, http.StatusUnauthorized, "unknown credential")
 		return
 	}
-	_ = api.q.UpdateCredentialUsage(r.Context(), dbCred.ID, validated.Authenticator.SignCount)
+	// Clone detection: go-webauthn flags a non-monotonic sign counter via
+	// CloneWarning without erroring. A regressed counter (when both sides are
+	// non-zero) means two copies of the credential's private key exist — treat
+	// it as a compromised authenticator and refuse the assertion. Never persist
+	// the lower counter, which would mask the next replay.
+	newCount := validated.Authenticator.SignCount
+	if validated.Authenticator.CloneWarning ||
+		(dbCred.SignCount != 0 && newCount != 0 && newCount <= dbCred.SignCount) {
+		api.respondError(w, http.StatusUnauthorized, "authenticator failed clone detection — this passkey may be compromised")
+		return
+	}
+	_ = api.q.UpdateCredentialUsage(r.Context(), dbCred.ID, newCount)
 
 	if issueSession {
 		api.issueTokenPair(w, r, user)

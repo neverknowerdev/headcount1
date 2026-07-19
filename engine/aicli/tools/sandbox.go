@@ -78,14 +78,24 @@ func scrubbedEnv() []string {
 
 func isServerSecretEnv(key string) bool {
 	up := strings.ToUpper(key)
+	// The app's own crown jewels + cloud creds, by prefix.
 	for _, p := range []string{"HEADCOUNT1_", "VAULT_", "AWS_", "AZURE_", "GCP_", "GOOGLE_"} {
 		if strings.HasPrefix(up, p) {
 			return true
 		}
 	}
 	switch up {
-	case "DATABASE_URL", "SMTP_PASSWORD", "SMTP_USERNAME", "SMTP_HOST":
+	case "DATABASE_URL", "REDIS_URL":
 		return true
+	}
+	// Catch third-party secrets the operator may have in the server env
+	// (GITHUB_TOKEN, NPM_TOKEN, OPENAI_API_KEY, STRIPE_SECRET_KEY,
+	// DOCKER_PASSWORD, …) by well-known secret-ish substrings, so the
+	// model-driven shell can't read them via `env` / /proc/self/environ.
+	for _, sub := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "APIKEY", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"} {
+		if strings.Contains(up, sub) {
+			return true
+		}
 	}
 	return false
 }

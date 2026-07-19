@@ -423,7 +423,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
-			keyPath := filesystem.ResolveSSHKeyPathForCompany(ctx, e.q, settings.BasePath, company)
+			keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, e.q, settings.BasePath, company)
+			defer keyCleanup() // remove the materialized key when the session ends
 			gitMgr = git.NewGitManager(projectRepoDir, keyPath)
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())

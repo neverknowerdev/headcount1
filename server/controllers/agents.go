@@ -8,6 +8,26 @@ import (
 	"agent-orchestrator/db"
 )
 
+// authorizeAgentBindings verifies the provider and model group an agent is
+// bound to belong to the caller. Providers/groups are per-user and keyed by
+// sequential int32, and secrets.Decrypt routes by the owner embedded in the
+// ciphertext — so without this check an agent could point at another tenant's
+// provider_id and spend their API key. Nil bindings are fine (agent falls back
+// to the owner's default models).
+func (api *API) authorizeAgentBindings(r *http.Request, providerID, modelGroupID *int32) error {
+	if providerID != nil {
+		if _, err := api.authorizeProvider(r, *providerID); err != nil {
+			return err
+		}
+	}
+	if modelGroupID != nil {
+		if _, err := api.authorizeModelGroup(r, *modelGroupID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
 	if err != nil {
@@ -64,6 +84,10 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Permissions != "" {
 		agent.Permissions = req.Permissions
 	}
+	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
+		return
+	}
 	agent.ProviderID = req.ProviderID
 	agent.ModelGroupID = req.ModelGroupID
 
@@ -112,6 +136,10 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
 		return
 	}
 	p := db.Agent{

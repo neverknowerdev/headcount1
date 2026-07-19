@@ -174,7 +174,10 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 	// (free-first ordering, failover, per-attempt stats).
 	if agent.ModelGroupID != nil {
 		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
-		if gErr != nil {
+		// Re-authorize the resolved group against the caller's tenant — the
+		// direct group path does the same (proxyChatCompletionsForGroup). An
+		// agent bound to another tenant's group_id must not spend their keys.
+		if gErr != nil || !g.mayUseGroup(r, group) {
 			http.Error(w, "Model group not found", http.StatusNotFound)
 			return agentProxyTarget{}, false
 		}
@@ -186,7 +189,9 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 		return agentProxyTarget{}, false
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), *agent.ProviderID)
-	if err != nil {
+	// Re-authorize the resolved provider against the caller's tenant, mirroring
+	// the direct provider path (proxyChatCompletionsForProvider).
+	if err != nil || !g.mayUseProvider(r, provider) {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return agentProxyTarget{}, false
 	}

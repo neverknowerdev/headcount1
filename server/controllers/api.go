@@ -1,6 +1,7 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"net/http"
@@ -158,6 +159,44 @@ func filterAccountsForUser(r *http.Request, accounts []db.MCPAccount) []db.MCPAc
 // account, ...) belongs to the ctx user.
 func ownedByUser(r *http.Request, rowUserID *int32) bool {
 	return rowUserID != nil && *rowUserID == authctx.UserID(r.Context())
+}
+
+// isTeamOwner reports whether the caller is an OWNER of their team. Structural,
+// destructive actions — creating/deleting a company, creating a project,
+// deleting a shared MCP server — are gated on this so an invited member can
+// work within the team but cannot restructure or destroy it. A user with no
+// membership row is a solo user, the sole owner of their own workspace, so they
+// pass; an invited member always has a row with role=member and is blocked.
+func (api *API) isTeamOwner(r *http.Request) bool {
+	m, err := api.q.GetTeamMembership(r.Context(), api.currentUserID(r))
+	if err != nil {
+		return true // no team → solo user; owner of their own data
+	}
+	return m.Role == db.TeamRoleOwner
+}
+
+// teamRole returns the caller's role string ("owner"/"member") for the /me
+// response. A user with no membership row is a solo owner.
+func (api *API) teamRole(ctx context.Context, userID int32) string {
+	m, err := api.q.GetTeamMembership(ctx, userID)
+	if err != nil {
+		return db.TeamRoleOwner
+	}
+	return m.Role
+}
+
+// RequireTeamOwner is route middleware that 403s a non-owner before the handler
+// runs. Mounted on the owner-only structural routes; the per-resource LoadX
+// middleware still runs alongside it for tenancy (so a foreign resource is 404,
+// a member acting on their own team's resource is 403 — the two are distinct).
+func (api *API) RequireTeamOwner(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !api.isTeamOwner(r) {
+			api.respondError(w, http.StatusForbidden, "only a team owner can perform this action")
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (api *API) respondJSON(w http.ResponseWriter, status int, data interface{}) {

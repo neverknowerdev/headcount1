@@ -37,6 +37,13 @@ func (api *API) UpdateDefaultModelSetting(w http.ResponseWriter, r *http.Request
 	if req.ProviderID != nil {
 		req.ModelGroupID = nil
 	}
+	// Both IDs are per-user and sequential; purpose resolution later decrypts
+	// the referenced provider by its embedded owner, so bind only the caller's
+	// own provider/group here.
+	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
+		return
+	}
 	updated, err := api.q.UpdateDefaultModelSetting(r.Context(), api.currentUserID(r), purpose, req.ProviderID, req.Model, req.ModelGroupID)
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "unknown purpose")

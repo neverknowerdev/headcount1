@@ -111,7 +111,7 @@ func TestFileKeySourceGeneratesPrivateKeyFile(t *testing.T) {
 		t.Fatalf("key file mode = %v, want 0600", info.Mode().Perm())
 	}
 	k2, err := src.MasterKey()
-	if err != nil || k1 != k2 {
+	if err != nil || k1.Key != k2.Key {
 		t.Fatalf("key not stable across reads: %v", err)
 	}
 }
@@ -125,13 +125,14 @@ func TestParseMasterKeyFormats(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if fromHex[:][0] != 0 || fromHex[31] != 31 {
-		t.Fatal("hex key not decoded verbatim")
+	if fromHex.Passphrase || fromHex.Key[0] != 0 || fromHex.Key[31] != 31 {
+		t.Fatal("hex key not decoded verbatim as a high-entropy key")
 	}
-	passphrase1, _ := parseMasterKey("correct horse battery staple")
-	passphrase2, _ := parseMasterKey("correct horse battery staple")
-	if passphrase1 != passphrase2 {
-		t.Fatal("passphrase derivation not deterministic")
+	// A passphrase is carried raw (Argon2id happens later, over the keystore
+	// salt) — it must be flagged Passphrase and preserved verbatim.
+	pass, _ := parseMasterKey("correct horse battery staple")
+	if !pass.Passphrase || string(pass.Raw) != "correct horse battery staple" {
+		t.Fatal("passphrase not carried as raw stretch material")
 	}
 	if _, err := parseMasterKey("  "); err == nil {
 		t.Fatal("empty key must error")
@@ -179,7 +180,7 @@ func TestVaultKeySourceKV2AndTTLCache(t *testing.T) {
 		t.Fatal(err)
 	}
 	k2, err := src.MasterKey()
-	if err != nil || k1 != k2 {
+	if err != nil || k1.Passphrase != k2.Passphrase || string(k1.Raw) != string(k2.Raw) || k1.Key != k2.Key {
 		t.Fatalf("cached fetch mismatch: %v", err)
 	}
 	if n := atomic.LoadInt64(&fetches); n != 1 {

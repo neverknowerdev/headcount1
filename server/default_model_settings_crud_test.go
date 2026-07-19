@@ -39,7 +39,8 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	database := setupDefaultModelSettingsTestDB(t)
 	r := setupDefaultModelSettingsRouter(t, database)
 	q := db.New(database)
-	require.NoError(t, q.EnsureDefaultModelSettingsForUser(context.Background(), testSeedUserID(t, q)))
+	uid := testSeedUserID(t, q)
+	require.NoError(t, q.EnsureDefaultModelSettingsForUser(context.Background(), uid))
 
 	// List shows both purposes, initially unconfigured (no Utility group in this DB).
 	req := httptest.NewRequest(http.MethodGet, "/default-model-settings", nil)
@@ -51,7 +52,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	require.Len(t, list, 2)
 
 	// Point commit_messages at a fixed provider+model.
-	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default"}
+	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default", UserID: &uid}
 	require.NoError(t, database.Create(&provider).Error)
 	payload := map[string]interface{}{"provider_id": provider.ID, "model": "my-model"}
 	b, _ := json.Marshal(payload)
@@ -67,7 +68,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	assert.Nil(t, updated.ModelGroupID)
 
 	// Point ask_artifact at a model group instead.
-	group := db.ModelGroup{Name: "G", Slug: "g"}
+	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &uid}
 	require.NoError(t, database.Create(&group).Error)
 	payload = map[string]interface{}{"model_group_id": group.ID}
 	b, _ = json.Marshal(payload)

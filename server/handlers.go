@@ -157,11 +157,12 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Route("/companies", func(r chi.Router) {
 		r.Get("/", api.ListCompanies)
-		r.Post("/", api.CreateCompany)
+		// Creating and deleting a company are owner-only structural actions.
+		r.With(api.RequireTeamOwner).Post("/", api.CreateCompany)
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadCompany)
 			r.Put("/", api.UpdateCompany)
-			r.Delete("/", api.DeleteCompany)
+			r.With(api.RequireTeamOwner).Delete("/", api.DeleteCompany)
 		})
 	})
 
@@ -195,7 +196,8 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Route("/projects", func(r chi.Router) {
 		r.Get("/", api.ListProjects)
-		r.Post("/", api.CreateProject)
+		// Creating a project is an owner-only structural action.
+		r.With(api.RequireTeamOwner).Post("/", api.CreateProject)
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadProject)
 			r.Get("/", api.GetProject)
@@ -308,7 +310,8 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadMCPServer)
 			r.Get("/", api.GetMCPServer)
 			r.Put("/", api.UpdateMCPServer)
-			r.Delete("/", api.DeleteMCPServer)
+			// Deleting a (shared) MCP server is an owner-only action.
+			r.With(api.RequireTeamOwner).Delete("/", api.DeleteMCPServer)
 			r.Post("/discover", api.DiscoverMCPServerTools)
 			r.Post("/accounts", api.CreateMCPAccount)
 			r.Post("/google-oauth", api.StartGoogleOAuth)
