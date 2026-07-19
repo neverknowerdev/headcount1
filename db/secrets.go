@@ -10,11 +10,5 @@ import (
 // The serializer stores/loads sealed secret columns verbatim (ciphertext in the
 // struct); the app seals on write and decrypts at the point of use.
 func init() {
-	secrets.SetBaseDirResolver(Headcount1Home)
 	schema.RegisterSerializer("sealed", secrets.SealedColumnSerializer{})
-}
-
-// SecretsBackend names the active master-key source for startup logging.
-func SecretsBackend() string {
-	return secrets.Default().SourceName()
 }

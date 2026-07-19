@@ -19,11 +19,19 @@ import (
 	"gorm.io/gorm"
 )
 
-// sealKey seals an ownerless provider API key for tests (the write guard on the
-// sealed column refuses raw plaintext). Decryption at the point of use routes
-// back through the root DEK.
+// sealTestUserID is a fixed user kept unlocked for the whole test process, so
+// tests can seal a provider API key (the write guard refuses raw plaintext) and
+// have it decrypt at the point of use via the in-memory keyring.
+const sealTestUserID = 424242
+
+// sealKey seals a provider API key under sealTestUserID. Ciphertext embeds that
+// user id ("enc:u1:<id>:…"), so Decrypt opens it as long as the user is unlocked
+// — which this helper guarantees.
 func sealKey(s string) string {
-	v, err := secrets.Default().Encrypt(s)
+	var dek [32]byte
+	dek[0], dek[1] = 0x42, 0x42
+	secrets.Default().UnlockUser(sealTestUserID, dek, time.Hour)
+	v, err := secrets.Default().EncryptForUser(sealTestUserID, s)
 	if err != nil {
 		panic(err)
 	}

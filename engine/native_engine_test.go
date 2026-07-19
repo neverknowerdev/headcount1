@@ -90,7 +90,13 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&sprint, "company_id = ?", company.ID).Error)
 
 	var provider db.LLMProvider
-	sealedKey, err := secrets.Default().Encrypt("test-key")
+	// Seal the provider key under a fixed, unlocked fixture user so the sealed
+	// column holds real "enc:u1:" ciphertext the engine can open at point of use.
+	const engineTestUserID int32 = 707070
+	var engineTestDEK [32]byte
+	engineTestDEK[0], engineTestDEK[1] = 0x70, 0x70
+	secrets.Default().UnlockUser(engineTestUserID, engineTestDEK, time.Hour)
+	sealedKey, err := secrets.Default().EncryptForUser(engineTestUserID, "test-key")
 	require.NoError(t, err)
 	require.NoError(t, database.Create(&db.LLMProvider{
 		Name:            "mock-provider",

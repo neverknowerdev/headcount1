@@ -183,9 +183,10 @@ func main() {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
-	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user and
-	// stored as ciphertext; the app decrypts only at the point of use.
-	log.Printf("Secrets encrypted at rest; master key source: %s", db.SecretsBackend())
+	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
+	// keys derived from each user's passkey, held only in memory while they're
+	// signed in; the app decrypts only at the point of use.
+	log.Printf("Secrets encrypted at rest with per-user passkey-derived keys.")
 
 	// Restore the graceful-exit keyring snapshot, if a boot key is configured
 	// and a snapshot from a planned shutdown exists — so a deploy re-warms

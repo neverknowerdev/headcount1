@@ -1,88 +1,52 @@
-// Package secrets provides envelope encryption for user-supplied credentials
-// (LLM provider API keys, MCP auth tokens) so they are never persisted in raw
-// form — not in the database, not in the filesystem mirror, not in backups.
+// Package secrets provides per-user encryption for user-supplied credentials
+// (LLM provider API keys, MCP auth tokens, SSH keys) so they are never persisted
+// in raw form — not in the database, not in the filesystem mirror, not in
+// backups.
 //
-// Layout:
-//   - Every secret value is encrypted with AES-256-GCM under a random data
-//     encryption key (DEK) and stored as "enc:v1:<base64(nonce||ciphertext)>".
-//   - The DEK itself is stored wrapped (encrypted) by a master key (KEK) in a
-//     small keystore file next to the rest of the headcount1 data. The wrapped
-//     DEK is ciphertext, so the keystore file is safe to keep on disk and to
-//     include in backups.
-//   - The master key comes from a KeySource: HashiCorp Vault (when VAULT_ADDR
-//     is set), the HEADCOUNT1_MASTER_KEY env var, or — as a zero-config last
-//     resort — an auto-generated 0600 key file.
+// Every secret is sealed under its owning user's data-encryption key (DEK) with
+// AES-256-GCM and stored self-describingly as "enc:u1:<userID>:<base64>". A
+// user's DEK exists only in the in-memory keyring (see keyring.go), unlocked at
+// login by their passkey's WebAuthn PRF output (see prf.go) and evicted on
+// logout — so when a user is logged out, no key on the box can open their
+// secrets. There is deliberately no server-held master key: the only thing that
+// can decrypt a user's data is that user's passkey.
+//
+// The keyring can be sealed under a boot key across a planned restart (see
+// seal.go, pkg/bootkey) to avoid a passkey re-tap; that boot key is unrelated to
+// the per-user DEKs and never decrypts them at rest.
 package secrets
 
 import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
-	"encoding/base64"
-	"encoding/hex"
-	"encoding/json"
 	"fmt"
-	"os"
-	"path/filepath"
 	"strings"
 	"sync"
 	"time"
-
-	"golang.org/x/crypto/argon2"
 )
-
-// Argon2id parameters for stretching a passphrase master key into the KEK.
-// ~64 MiB / 3 passes is comfortably above OWASP's minimum and makes an offline
-// dictionary attack on a leaked keystore infeasible.
-const (
-	argonTime      = 3
-	argonMemoryKiB = 64 * 1024
-	argonThreads   = 4
-)
-
-// Prefix marks a value as sealed by this package. Values without it are
-// treated as legacy plaintext and passed through on read, which is what makes
-// upgrading an existing install a no-op: rows are re-sealed the next time
-// they are written.
-const Prefix = "enc:v1:"
 
 // IsSealed reports whether a stored value is ciphertext produced by this
-// package (root-DEK "enc:v1:" or per-user "enc:u1:").
+// package (a per-user "enc:u1:" value). Anything else is treated as legacy
+// plaintext and passed through on read.
 func IsSealed(v string) bool {
-	return strings.HasPrefix(v, Prefix) || strings.HasPrefix(v, PrefixUser)
+	return strings.HasPrefix(v, PrefixUser)
 }
 
-// SecretManager encrypts and decrypts secret values using a DEK wrapped by the
-// KeySource's master key. It is the single component that turns plaintext into
-// stored ciphertext and back — callers hold it (via Default) and invoke
-// Encrypt/EncryptForUser/Decrypt only at the exact point a secret is written or
-// used, so plaintext never lives on a long-lived struct or in the DB layer.
-// Safe for concurrent use.
+// SecretManager encrypts and decrypts user-owned secret values. It is the single
+// component that turns plaintext into stored ciphertext and back — callers hold
+// it (via Default) and invoke EncryptForUser/Decrypt only at the exact point a
+// secret is written or used, so plaintext never lives on a long-lived struct or
+// in the DB layer. Safe for concurrent use.
 type SecretManager struct {
-	source       KeySource
-	keystorePath string
-
-	mu sync.Mutex
-	// wrappedDEK caches the keystore file contents. Only ciphertext is
-	// cached — unwrapping still requires the master key on every operation,
-	// so revoking the key at its source takes effect immediately (or after
-	// the Vault TTL at worst).
-	wrappedDEK []byte
-	kekFP      string
-
-	// kdfSalt is the per-install Argon2id salt for a passphrase master key,
-	// persisted (non-secret) in the keystore. Empty for high-entropy keys.
-	kdfSalt []byte
-
-	// keyring holds unlocked per-user DEKs in memory (see keyring.go). It is
-	// the sole place a user's DEK exists in plaintext, and only while that
-	// user has an active session.
+	// keyring holds unlocked per-user DEKs in memory (see keyring.go). It is the
+	// sole place a user's DEK exists in plaintext, and only while that user has
+	// an active session.
 	keyring *Keyring
 }
 
-func NewManager(source KeySource, keystorePath string) *SecretManager {
-	return &SecretManager{source: source, keystorePath: keystorePath, keyring: NewKeyring()}
+func NewManager() *SecretManager {
+	return &SecretManager{keyring: NewKeyring()}
 }
 
 // Keyring returns the store's in-memory unlocked-DEK keyring.
@@ -119,222 +83,16 @@ func UnlockUser(userID int32, dek [32]byte, ttl time.Duration) {
 func LockUser(userID int32)        { Default().LockUser(userID) }
 func IsUnlocked(userID int32) bool { return Default().IsUnlocked(userID) }
 
-// SourceName names the active master-key source, for startup logging.
-func (s *SecretManager) SourceName() string { return s.source.Name() }
-
-// Encrypt seals a plaintext secret under the root DEK (ownerless "enc:v1:"
-// values). Most secrets are user-owned — prefer EncryptForUser. Empty stays
-// empty so presence checks (HasToken etc.) keep working, and already-sealed
-// values pass through unchanged so a value can never be double-encrypted.
-func (s *SecretManager) Encrypt(plaintext string) (string, error) {
-	if plaintext == "" || IsSealed(plaintext) {
-		return plaintext, nil
-	}
-	dek, err := s.dek()
-	if err != nil {
-		return "", err
-	}
-	blob, err := gcmSeal(dek, []byte(plaintext))
-	if err != nil {
-		return "", err
-	}
-	return Prefix + base64.StdEncoding.EncodeToString(blob), nil
-}
-
-// Decrypt turns a stored value back into plaintext, routing by its
-// self-describing prefix: "enc:u1:" uses the embedded owner's DEK, "enc:v1:"
-// the root DEK, and anything else is legacy plaintext returned as-is. Returns
-// ErrLocked when a user-owned value's owner is currently locked. Call it at the
-// point of use and use the result immediately — never stash it.
+// Decrypt turns a stored value back into plaintext. A per-user "enc:u1:" value
+// is opened with the embedded owner's unlocked DEK (returning ErrLocked when
+// that user is currently locked); anything else is legacy plaintext returned
+// as-is. Call it at the point of use and use the result immediately — never
+// stash it.
 func (s *SecretManager) Decrypt(stored string) (string, error) {
 	if !IsSealed(stored) {
 		return stored, nil
 	}
-	if strings.HasPrefix(stored, PrefixUser) {
-		return s.openUser(stored)
-	}
-	blob, err := base64.StdEncoding.DecodeString(strings.TrimPrefix(stored, Prefix))
-	if err != nil {
-		return "", fmt.Errorf("secrets: malformed sealed value: %w", err)
-	}
-	dek, err := s.dek()
-	if err != nil {
-		return "", err
-	}
-	plain, err := gcmOpen(dek, blob)
-	if err != nil {
-		return "", fmt.Errorf("secrets: cannot decrypt stored secret (was the master key changed?): %w", err)
-	}
-	return string(plain), nil
-}
-
-// ── keystore (wrapped DEK) ───────────────────────────────────────────────────
-
-type keystoreFile struct {
-	Version int `json:"version"`
-	// WrappedDEK is the data key encrypted with the master key:
-	// base64(nonce||ciphertext).
-	WrappedDEK string `json:"wrapped_dek"`
-	// KEKFingerprint identifies which master key wrapped the DEK, so a key
-	// mismatch produces a clear error instead of a bare GCM failure.
-	KEKFingerprint string `json:"kek_fingerprint"`
-	// KDFSalt is the base64 per-install Argon2id salt used to stretch a
-	// passphrase master key into the KEK. Non-secret; absent for high-entropy
-	// (hex/base64-32) master keys, which need no stretching.
-	KDFSalt string `json:"kdf_salt,omitempty"`
-}
-
-// dek returns the unwrapped data key. The wrapped blob is cached in memory;
-// the master key is fetched from the source on every call (the Vault source
-// applies its own TTL cache internally).
-func (s *SecretManager) dek() ([32]byte, error) {
-	var zero [32]byte
-	mat, err := s.source.MasterKey()
-	if err != nil {
-		return zero, fmt.Errorf("secrets: master key unavailable from %s: %w", s.source.Name(), err)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.wrappedDEK == nil {
-		// Loads (or creates) the keystore, which is where kdfSalt lives — needed
-		// before the KEK can be derived from a passphrase.
-		if err := s.loadOrCreateKeystoreLocked(mat); err != nil {
-			return zero, err
-		}
-	}
-	kek, err := s.deriveKEK(mat)
-	if err != nil {
-		return zero, err
-	}
-	if fp := fingerprint(kek); fp != s.kekFP {
-		return zero, fmt.Errorf("secrets: master key from %s (fingerprint %s) does not match the key that created %s (fingerprint %s) — restore the original master key, or delete the keystore to start over (existing stored secrets will become unreadable)",
-			s.source.Name(), fp, s.keystorePath, s.kekFP)
-	}
-	dekBytes, err := gcmOpen(kek, s.wrappedDEK)
-	if err != nil {
-		return zero, fmt.Errorf("secrets: failed to unwrap data key with master key from %s: %w", s.source.Name(), err)
-	}
-	if len(dekBytes) != 32 {
-		return zero, fmt.Errorf("secrets: keystore %s contains a data key of unexpected size", s.keystorePath)
-	}
-	var dek [32]byte
-	copy(dek[:], dekBytes)
-	return dek, nil
-}
-
-// deriveKEK turns master-key material into the 32-byte KEK. A high-entropy key
-// is used verbatim; a passphrase is stretched with Argon2id over the per-install
-// keystore salt, so a leaked keystore + weak passphrase can't be brute-forced
-// with a cheap unsalted hash. s.kdfSalt must already be populated (by the
-// keystore load/create) for the passphrase path.
-func (s *SecretManager) deriveKEK(mat MasterKeyMaterial) ([32]byte, error) {
-	if !mat.Passphrase {
-		return mat.Key, nil
-	}
-	if len(s.kdfSalt) == 0 {
-		return [32]byte{}, fmt.Errorf("secrets: passphrase master key needs a KDF salt but keystore %s has none — delete it to re-initialize", s.keystorePath)
-	}
-	var kek [32]byte
-	dk := argon2.IDKey(mat.Raw, s.kdfSalt, argonTime, argonMemoryKiB, argonThreads, 32)
-	copy(kek[:], dk)
-	return kek, nil
-}
-
-func (s *SecretManager) loadOrCreateKeystoreLocked(mat MasterKeyMaterial) error {
-	data, err := os.ReadFile(s.keystorePath)
-	if os.IsNotExist(err) {
-		return s.createKeystoreLocked(mat)
-	}
-	if err != nil {
-		return fmt.Errorf("secrets: cannot read keystore %s: %w", s.keystorePath, err)
-	}
-	var ks keystoreFile
-	if err := json.Unmarshal(data, &ks); err != nil {
-		return fmt.Errorf("secrets: keystore %s is corrupt: %w", s.keystorePath, err)
-	}
-	wrapped, err := base64.StdEncoding.DecodeString(ks.WrappedDEK)
-	if err != nil {
-		return fmt.Errorf("secrets: keystore %s is corrupt: %w", s.keystorePath, err)
-	}
-	if ks.KDFSalt != "" {
-		salt, err := base64.StdEncoding.DecodeString(ks.KDFSalt)
-		if err != nil {
-			return fmt.Errorf("secrets: keystore %s has a corrupt kdf_salt: %w", s.keystorePath, err)
-		}
-		s.kdfSalt = salt
-	}
-	s.wrappedDEK = wrapped
-	s.kekFP = ks.KEKFingerprint
-	return nil
-}
-
-func (s *SecretManager) createKeystoreLocked(mat MasterKeyMaterial) error {
-	// A passphrase master key gets a fresh per-install salt before the KEK is
-	// derived; a high-entropy key needs none.
-	if mat.Passphrase {
-		salt := make([]byte, 16)
-		if _, err := rand.Read(salt); err != nil {
-			return err
-		}
-		s.kdfSalt = salt
-	}
-	kek, err := s.deriveKEK(mat)
-	if err != nil {
-		return err
-	}
-	var dek [32]byte
-	if _, err := rand.Read(dek[:]); err != nil {
-		return err
-	}
-	wrapped, err := gcmSeal(kek, dek[:])
-	if err != nil {
-		return err
-	}
-	ks := keystoreFile{
-		Version:        1,
-		WrappedDEK:     base64.StdEncoding.EncodeToString(wrapped),
-		KEKFingerprint: fingerprint(kek),
-	}
-	if len(s.kdfSalt) > 0 {
-		ks.KDFSalt = base64.StdEncoding.EncodeToString(s.kdfSalt)
-	}
-	data, err := json.MarshalIndent(ks, "", "  ")
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(filepath.Dir(s.keystorePath), 0700); err != nil {
-		return err
-	}
-	// Write with O_EXCL so two concurrent first-boot processes can't each
-	// generate a DIFFERENT random DEK and clobber one another — that would
-	// leave the keystore holding one DEK while a caller wrapped rows under the
-	// other, tripping the fingerprint guard forever. On EEXIST, another process
-	// won the race: load its keystore instead of overwriting. (The wrapped DEK
-	// is ciphertext, but 0600 keeps it non-world-readable regardless.)
-	fh, err := os.OpenFile(s.keystorePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
-	if err != nil {
-		if os.IsExist(err) {
-			return s.loadOrCreateKeystoreLocked(mat)
-		}
-		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
-	}
-	if _, err := fh.Write(data); err != nil {
-		fh.Close()
-		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
-	}
-	if err := fh.Close(); err != nil {
-		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
-	}
-	s.wrappedDEK = wrapped
-	s.kekFP = ks.KEKFingerprint
-	return nil
-}
-
-// fingerprint returns a short non-reversible identifier for a master key.
-func fingerprint(key [32]byte) string {
-	sum := sha256.Sum256(key[:])
-	return hex.EncodeToString(sum[:8])
+	return s.openUser(stored)
 }
 
 // ── AES-256-GCM primitives ───────────────────────────────────────────────────
@@ -375,46 +133,13 @@ func gcmOpen(key [32]byte, blob []byte) ([]byte, error) {
 var (
 	defaultOnce    sync.Once
 	defaultManager *SecretManager
-
-	baseDirMu       sync.Mutex
-	baseDirResolver func() string
 )
 
-// SetBaseDirResolver overrides where the default store keeps its keystore and
-// fallback key file. Called by the db package with PaperclipHome so the two
-// packages agree on a home directory without an import cycle. Must be called
-// before the first Seal/Open; later calls are ignored once the default store
-// exists.
-func SetBaseDirResolver(f func() string) {
-	baseDirMu.Lock()
-	defer baseDirMu.Unlock()
-	baseDirResolver = f
-}
-
-func baseDir() string {
-	baseDirMu.Lock()
-	f := baseDirResolver
-	baseDirMu.Unlock()
-	if f != nil {
-		return f()
-	}
-	// Fallback mirrors db.PaperclipHome for standalone use of this package.
-	if e2eHome := os.Getenv("E2E_HEADCOUNT1_HOME"); e2eHome != "" {
-		return filepath.Join(e2eHome, ".headcount1")
-	}
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return "/tmp/.headcount1"
-	}
-	return filepath.Join(homeDir, ".headcount1")
-}
-
-// Default returns the process-wide store, configured from the environment on
-// first use (see keySourceFromEnv for the source selection rules).
+// Default returns the process-wide store. All secret material lives in memory
+// (the keyring), so there is nothing to configure from the environment.
 func Default() *SecretManager {
 	defaultOnce.Do(func() {
-		dir := baseDir()
-		defaultManager = NewManager(keySourceFromEnv(dir), filepath.Join(dir, "keystore.json"))
+		defaultManager = NewManager()
 	})
 	return defaultManager
 }

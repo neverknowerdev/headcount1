@@ -117,19 +117,6 @@ func restoreFilesystem(tempDir, basePath string) error {
 		os.WriteFile(filepath.Join(basePath, "settings.yaml"), data, 0644)
 	}
 
-	// Restore the secrets keystore only when the target has none: on the
-	// machine that made the backup the two are identical, and clobbering a
-	// live keystore that already protects in-place secrets (with a different
-	// master key) would make them unreadable. When absent (fresh machine),
-	// writing the archived keystore is what makes the restored enc: values
-	// decryptable, given the same master key.
-	dstKeystore := filepath.Join(basePath, "keystore.json")
-	if _, err := os.Stat(dstKeystore); os.IsNotExist(err) {
-		if data, err := os.ReadFile(filepath.Join(tempDir, "keystore.json")); err == nil {
-			os.WriteFile(dstKeystore, data, 0600)
-		}
-	}
-
 	return nil
 }
 

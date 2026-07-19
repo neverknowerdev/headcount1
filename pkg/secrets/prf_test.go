@@ -74,7 +74,7 @@ func TestTamperedWrapFails(t *testing.T) {
 }
 
 func TestStoreUnlockLockIsUnlocked(t *testing.T) {
-	s := NewManager(&fileKeySource{path: t.TempDir() + "/master.key"}, t.TempDir()+"/keystore.json")
+	s := NewManager()
 	dek, _ := NewUserDEK()
 
 	if s.IsUnlocked(5) {

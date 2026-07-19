@@ -99,16 +99,6 @@ func CreateBackupWithContext(ctx context.Context, basePath string, database *gor
 		itemCount++
 	}
 
-	// Backup the secrets keystore (the root DEK, wrapped by the master key).
-	// It is ciphertext, so it is safe to archive — and it is what lets the
-	// encrypted api_key/auth_token values in the entity tree decrypt after a
-	// restore (together with the master key, which is deliberately never
-	// archived and must be supplied out of band).
-	if data, err := os.ReadFile(filepath.Join(basePath, "keystore.json")); err == nil {
-		writeTarEntry(tarWriter, "keystore.json", data)
-		itemCount++
-	}
-
 	// Entity JSON tree, generated from the database — the restore source.
 	if database != nil {
 		n, err := exportEntities(tarWriter, database)

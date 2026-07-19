@@ -38,9 +38,19 @@ func sealForUserTest(uid int32, plaintext string) string {
 	return v
 }
 
-// sealTest seals an ownerless secret under the root DEK for fixtures.
+// sealTestUserID is a fixed fixture user whose DEK sealTest keeps unlocked, so
+// tests that seal a secret with no particular owner (e.g. gateway fixtures where
+// the provider row has a nil UserID) still get openable "enc:u1:" ciphertext.
+const sealTestUserID int32 = 909090
+
+// sealTest seals a secret under a fixed, always-unlocked fixture user. Use it for
+// fixtures that don't care which user owns the secret but still need the sealed
+// column to hold real ciphertext.
 func sealTest(plaintext string) string {
-	v, err := secrets.Default().Encrypt(plaintext)
+	var dek [32]byte
+	dek[0], dek[1] = 0x90, 0x90
+	secrets.Default().UnlockUser(sealTestUserID, dek, time.Hour)
+	v, err := secrets.Default().EncryptForUser(sealTestUserID, plaintext)
 	if err != nil {
 		panic(err)
 	}

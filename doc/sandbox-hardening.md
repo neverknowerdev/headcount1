@@ -42,8 +42,8 @@ With no configuration the agent shell gets:
   runs (see step 7).
 
 What the default does **not** give you: the agent (running as the server's own
-uid, with read access to `/`) can still **read** the server's at-rest secrets —
-`${HEADCOUNT1_HOME}/keystore.json`, `keyring.sealed`, the SQLite DB, SSH keys.
+uid, with read access to `/`) can still **read** the server's at-rest files —
+`${HEADCOUNT1_HOME}/keyring.sealed`, the SQLite DB, materialized SSH keys.
 Closing that is what steps 3–6 are for. On a single-user dev box that's fine; for
 a shared/multi-tenant deployment, do the full setup.
 
@@ -140,7 +140,7 @@ two zones:
 
 | Zone | Paths under `${HEADCOUNT1_HOME}` | Requirement |
 | ---- | -------------------------------- | ----------- |
-| **Secrets — keep away from the sandbox uid** | `keystore.json`, `keyring.sealed`, the master key file (if file-based), `db/`, `ssh/`, `credentials/`, `backups/` | owned by the **server** uid, mode `0600`/`0700`, **not** readable by the sandbox uid |
+| **Secrets — keep away from the sandbox uid** | `keyring.sealed`, `keyring.bootkey` (self-managed boot key, if used), `db/`, `ssh/`, `credentials/`, `backups/` | owned by the **server** uid, mode `0600`/`0700`, **not** readable by the sandbox uid |
 | **Workspaces — must be writable by the sandbox uid** | `workspace/`, `repos/`, `artifacts/`, `logs/`, `uploads/`, `skills/`, `venv/` | writable by the sandbox uid/gid |
 
 Because dedicated-uid mode implies the server runs as root, the clean approach is
@@ -155,7 +155,7 @@ for d in workspace repos artifacts logs uploads skills venv; do
 done
 # secret zone → server-only, unreadable by others
 for s in db ssh credentials backups; do chmod 0700 "$HOME_DIR/$s"; done
-chmod 0600 "$HOME_DIR/keystore.json" "$HOME_DIR/keyring.sealed" 2>/dev/null || true
+chmod 0600 "$HOME_DIR/keyring.sealed" "$HOME_DIR/keyring.bootkey" 2>/dev/null || true
 chmod 0711 "$HOME_DIR"              # traversable, but not listable/readable by the sandbox uid
 ```
 
@@ -261,7 +261,7 @@ touch ./hc1-probe && rm hc1-probe   # expected: OK (inside workspace)
 id                              # expected: uid=<HEADCOUNT1_SANDBOX_UID>
 
 # 3. Secret files unreadable (uid mode and/or read-scoping)
-cat "$HOME/../<server-user>/.headcount1/keystore.json"   # expected: Permission denied / No such file
+cat "$HOME/../<server-user>/.headcount1/keyring.sealed"   # expected: Permission denied / No such file
 cat /proc/1/environ            # (server pid) expected: Permission denied under a dedicated uid
 
 # 4. Env scrub: no server secrets present

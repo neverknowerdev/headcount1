@@ -63,19 +63,29 @@ the change just needs a re-tap).
 
 ---
 
-## Boot key vs. master key — don't confuse them
+## There is no server-held master key
 
-They are different keys with very different stakes:
+headcount1 deliberately has **no master key**. A secret at rest is sealed only
+under its owning user's DEK, and that DEK exists only in memory while the user is
+signed in (unlocked by their passkey's PRF). Nothing on the box — no
+`master.key`, no `keystore.json`, no KMS-wrapped root key — can decrypt a user's
+secrets when they are logged out. This is what makes the system zero-knowledge:
+compromising the server at rest yields only ciphertext.
 
-| | **Master key** | **Boot key** |
-| --- | --- | --- |
-| Env / source | `HEADCOUNT1_MASTER_KEY`, `~/.headcount1/master.key`, or Vault | `HEADCOUNT1_BOOT_KEY` or Vault Transit |
-| Protects | secrets **at rest** — wraps the data key in `keystore.json` | the **transient** `keyring.sealed` restart snapshot only |
-| If lost / changed | at-rest data sealed under it becomes **unreadable** (a fingerprint guard refuses to boot rather than silently fail) — this is the serious one | users **re-tap once**; **no data loss** |
-| Default when unset | auto-generated `master.key` (0600) is created and reused | none — restarts require a re-tap |
+The boot key is the *only* server-side key material, and it is strictly an
+availability convenience — it protects the **transient** `keyring.sealed` restart
+snapshot and nothing else:
 
-Rule of thumb: **guard the master key like the crown jewels; treat the boot key
-as an availability convenience you can rotate freely.**
+| | **Boot key** |
+| --- | --- |
+| Env / source | `HEADCOUNT1_BOOT_KEY`, `HEADCOUNT1_LOCAL_BOOTKEY=1`, or Vault Transit |
+| Protects | the **transient** `keyring.sealed` restart snapshot only |
+| If lost / changed | users **re-tap once**; **no data loss** |
+| Default when unset | none — restarts require a re-tap |
+
+Rule of thumb: **treat the boot key as an availability convenience you can rotate
+freely — there is nothing else to guard, because no server-held key can open a
+signed-out user's secrets.**
 
 ---
 
@@ -114,9 +124,10 @@ another user can't read it and neither can the agent under a dedicated sandbox
 uid, but **any process running as your own user can** — including the agent's
 `bash` tool, which by default runs as the server's uid with unrestricted reads.
 In the self-managed local mode there is no boot-key file on disk *while the
-server runs* — but the at-rest files that are always present (`master.key`,
-`keystore.json`, the SQLite DB, SSH keys) carry the same `0600`/same-UID
-exposure. To keep the agent out of all of them, enable
+server runs* — and there is no `master.key`/`keystore.json` to worry about at all
+(the SQLite DB holds only per-user ciphertext no server key can open). The
+remaining at-rest files (the SQLite DB, materialized SSH keys) carry the same
+`0600`/same-UID exposure. To keep the agent out of all of them, enable
 `HEADCOUNT1_SANDBOX_READ_SCOPING` (hides `${HEADCOUNT1_HOME}` from reads) and/or
 `HEADCOUNT1_SANDBOX_UID` (runs the agent as a different uid) — see
 `doc/sandbox-hardening.md`. In production, prefer never writing the boot key to

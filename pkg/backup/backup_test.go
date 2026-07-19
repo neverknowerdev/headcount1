@@ -142,9 +142,10 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 
 // TestBackupRestorePreservesIdentityAndSecrets verifies the multi-tenant
 // alignment: the identity graph (users, teams, memberships, per-user wrapped
-// keys), the tenancy columns on companies/providers, the encrypted secret
-// ciphertext, and the keystore all survive a backup/restore verbatim — so a
-// restored database is a faithful multi-user snapshot, not an ownerless one.
+// keys), the tenancy columns on companies/providers, and the encrypted secret
+// ciphertext all survive a backup/restore verbatim — so a restored database is
+// a faithful multi-user snapshot, not an ownerless one. The passkey-wrapped DEKs
+// travel in web_authn_credentials; there is no server-held keystore to archive.
 func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	basePath := t.TempDir()
 	database := openTestDB(t, t.TempDir())
@@ -171,12 +172,6 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	database.Create(&prov)
 	sealed := "enc:u1:" + itoa(user.ID) + ":Y2lwaGVydGV4dA=="
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
-
-	// A keystore file next to the data — it must ride along so restored
-	// enc: values are decryptable on a fresh machine.
-	if err := os.WriteFile(filepath.Join(basePath, "keystore.json"), []byte(`{"wrapped_dek":"abc"}`), 0600); err != nil {
-		t.Fatal(err)
-	}
 
 	archivePath, err := CreateBackup(basePath, database)
 	if err != nil {
@@ -230,11 +225,6 @@ func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
 	database.Raw("SELECT api_key FROM llm_providers WHERE id = ?", prov.ID).Scan(&gotCipher)
 	if gotCipher != sealed {
 		t.Errorf("provider api_key ciphertext = %q, want %q", gotCipher, sealed)
-	}
-
-	// Keystore restored to the fresh base.
-	if _, err := os.Stat(filepath.Join(newBase, "keystore.json")); err != nil {
-		t.Errorf("keystore not restored: %v", err)
 	}
 }
 
