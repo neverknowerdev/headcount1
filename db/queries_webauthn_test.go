@@ -50,7 +50,7 @@ func TestWebAuthnCredentialCRUD(t *testing.T) {
 	require.Len(t, list, 1)
 
 	// Sign-count + last-used update.
-	require.NoError(t, q.UpdateCredentialUsage(ctx, c.ID, 42))
+	require.NoError(t, q.UpdateCredentialUsage(ctx, c.ID, 42, false))
 	got, _ = q.GetCredentialByCredentialID(ctx, []byte("cred-1"))
 	require.Equal(t, uint32(42), got.SignCount)
 	require.False(t, got.LastUsedAt.IsZero())

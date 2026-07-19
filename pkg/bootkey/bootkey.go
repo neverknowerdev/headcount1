@@ -20,6 +20,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"os"
+	"strings"
 
 	"golang.org/x/crypto/argon2"
 
@@ -40,6 +41,71 @@ func FromEnv() secrets.KeyUnwrapper {
 		}
 	}
 	return nil
+}
+
+// ── self-managed local boot key ──────────────────────────────────────────────
+
+// LocalBootKeyEnabled reports the HEADCOUNT1_LOCAL_BOOTKEY opt-in for the
+// self-managed local boot key (see LocalBootKey). Only consulted when no
+// external boot key (Vault / HEADCOUNT1_BOOT_KEY) is configured.
+func LocalBootKeyEnabled() bool {
+	switch strings.ToLower(strings.TrimSpace(os.Getenv("HEADCOUNT1_LOCAL_BOOTKEY"))) {
+	case "1", "true", "yes", "on":
+		return true
+	}
+	return false
+}
+
+// LocalBootKey is a zero-config boot key for a single-user/local box. Unlike an
+// external boot key (env/Vault, persistent and held off-box), it is a random AES
+// key kept only in memory and written to disk ONLY at graceful shutdown — next
+// to the keyring snapshot it seals — then consumed and deleted at the next
+// startup. So no boot-key material sits on disk while the server is running.
+//
+// The trade-off it makes explicit: during the offline window between a graceful
+// stop and the next start, the key file and the snapshot are on disk together,
+// so anyone who reads the disk in that window can decrypt the snapshot. That's
+// fine for local dev but is why production should use an external boot key
+// (kept off the box) instead — set HEADCOUNT1_BOOT_KEY or VAULT_ADDR.
+type LocalBootKey struct {
+	*envUnwrapper
+	hexKey string
+	path   string
+}
+
+// LoadOrCreateLocalBootKey returns the self-managed boot key at path. If the
+// last graceful shutdown left a key file there, it is loaded (so this boot can
+// unseal that snapshot) and immediately deleted — the key must not linger on
+// disk during runtime. Otherwise a fresh random key is minted in memory. Call
+// Persist at graceful shutdown to write the current key back for the next boot.
+func LoadOrCreateLocalBootKey(path string) (*LocalBootKey, error) {
+	if raw, err := os.ReadFile(path); err == nil {
+		h := strings.TrimSpace(string(raw))
+		if u, err := newEnvUnwrapper(h); err == nil {
+			// Consume it: no key material stays on disk while we run.
+			_ = os.Remove(path)
+			return &LocalBootKey{envUnwrapper: u, hexKey: h, path: path}, nil
+		}
+	}
+	var k [32]byte
+	if _, err := rand.Read(k[:]); err != nil {
+		return nil, err
+	}
+	h := hex.EncodeToString(k[:])
+	u, err := newEnvUnwrapper(h)
+	if err != nil {
+		return nil, err
+	}
+	return &LocalBootKey{envUnwrapper: u, hexKey: h, path: path}, nil
+}
+
+func (l *LocalBootKey) Name() string { return "local:self-managed (" + l.path + ")" }
+
+// Persist writes the key to disk (0600) so the next startup can unseal the
+// snapshot this shutdown produced. Call it ONLY on a graceful exit, right before
+// (or alongside) writing the keyring snapshot.
+func (l *LocalBootKey) Persist() error {
+	return os.WriteFile(l.path, []byte(l.hexKey), 0600)
 }
 
 // ── env boot key (AES-256-GCM) ───────────────────────────────────────────────

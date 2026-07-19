@@ -192,6 +192,20 @@ func main() {
 	// active users' vaults without a passkey re-tap. The blob is deleted after
 	// loading so an unexpected crash can never replay a stale keyring.
 	bootKey := bootkey.FromEnv()
+	// When no external boot key is configured, an operator can opt into a
+	// self-managed local boot key (HEADCOUNT1_LOCAL_BOOTKEY): a random key held
+	// in memory, written to disk only at graceful shutdown next to the snapshot
+	// and consumed at the next boot — so nothing sits on disk during runtime.
+	// For local/dev only (see doc/boot-key.md); production uses an external key.
+	var localBootKey *bootkey.LocalBootKey
+	if bootKey == nil && bootkey.LocalBootKeyEnabled() {
+		if lk, err := bootkey.LoadOrCreateLocalBootKey(filepath.Join(basePath, "keyring.bootkey")); err != nil {
+			log.Printf("Warning: could not initialize self-managed local boot key: %v", err)
+		} else {
+			localBootKey = lk
+			bootKey = lk
+		}
+	}
 	keyringBlobPath := filepath.Join(basePath, "keyring.sealed")
 	if bootKey != nil {
 		if blob, err := os.ReadFile(keyringBlobPath); err == nil {
@@ -378,6 +392,13 @@ func main() {
 		} else if len(blob) > 0 {
 			if err := os.WriteFile(keyringBlobPath, blob, 0600); err != nil {
 				log.Printf("Warning: could not persist sealed keyring: %v", err)
+			} else if localBootKey != nil {
+				// Self-managed mode: write the boot key to disk ONLY now, next to
+				// the snapshot it seals. The next boot consumes and deletes both.
+				if err := localBootKey.Persist(); err != nil {
+					log.Printf("Warning: could not persist local boot key: %v", err)
+					_ = os.Remove(keyringBlobPath) // don't leave a snapshot we can't reopen
+				}
 			}
 		}
 	}

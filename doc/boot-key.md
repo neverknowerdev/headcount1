@@ -21,11 +21,28 @@ the restore on boot are both skipped — so every restart requires a re-tap. Tha
 is the safe default: a machine with no external key material must not be able to
 silently reopen users' vaults.
 
-The boot key comes from `bootkey.FromEnv()`:
+The boot key is selected in this order:
 
 1. `VAULT_ADDR` set → HashiCorp Vault **Transit** (the recommended production path — the key never lives on the box).
-2. `HEADCOUNT1_BOOT_KEY` set → an env-provided AES-256 key: 64 hex chars, or any passphrase (stretched with Argon2id).
-3. neither → no boot key; restarts require a re-tap.
+2. `HEADCOUNT1_BOOT_KEY` set → an env-provided AES-256 key: 64 hex chars, or any passphrase (stretched with Argon2id). Persistent and externally managed.
+3. else `HEADCOUNT1_LOCAL_BOOTKEY=1` → a **self-managed local key** (see below) — zero-config, for a single-user/dev box.
+4. none of the above → no boot key; every restart requires a re-tap.
+
+### Self-managed local key (`HEADCOUNT1_LOCAL_BOOTKEY=1`)
+
+For a local/dev box you usually don't want to manage a persistent key at all. In
+this mode the server generates a **random boot key held only in memory** and
+writes it to `${HEADCOUNT1_HOME}/keyring.bootkey` **only at graceful shutdown** —
+right next to the `keyring.sealed` snapshot it seals. The next startup reads the
+key, restores the keyring, and **deletes both files**. So, just like the
+snapshot, no boot-key material sits on disk while the server is running; the two
+files exist only during the window between a graceful stop and the next start.
+
+The trade-off is deliberate and is exactly why this mode is **local/dev only**:
+during that offline window the key and the ciphertext are on disk *together*, so
+anyone who can read the disk then can decrypt the snapshot. An external boot key
+(options 1–2) avoids that — the key is never on the box, so the at-rest snapshot
+is useless on its own. Use `scripts/run.sh`, which enables this mode by default.
 
 ---
 
@@ -86,42 +103,45 @@ you keep it:
 - **Production**: inject it at boot from a secrets manager / KMS, or use Vault
   Transit (`VAULT_ADDR`) so the key never touches the box. Do **not** write it
   to a file next to the data.
-- **Local dev**: `scripts/run.sh` will, with your consent, persist a boot key in
-  `${HEADCOUNT1_HOME}/headcount1.env` (0600) so restarts stay seamless. That
-  keeps the key next to the data, which is fine for a single-user dev box but
-  deliberately weakens the zero-knowledge guarantee against full-disk theft —
-  don't do it on a shared/production host.
+- **Local dev**: `scripts/run.sh` enables the self-managed local key
+  (`HEADCOUNT1_LOCAL_BOOTKEY=1`), which keeps the key in memory and puts it on
+  disk only during the stopped window (see above). That's fine for a single-user
+  dev box but deliberately weakens the guarantee against disk theft *while the
+  server is stopped* — don't use it on a shared/production host.
 
 **On `0600` and "who can read it".** `0600` restricts by *UID*, not by process:
 another user can't read it and neither can the agent under a dedicated sandbox
 uid, but **any process running as your own user can** — including the agent's
 `bash` tool, which by default runs as the server's uid with unrestricted reads.
-The boot-key file is no more exposed than `master.key`, `keystore.json`, and
-`keyring.sealed`, which already sit in the same directory at `0600`. To keep the
-agent out of all of them, enable `HEADCOUNT1_SANDBOX_READ_SCOPING` (hides
-`${HEADCOUNT1_HOME}` from reads) and/or `HEADCOUNT1_SANDBOX_UID` (runs the agent
-as a different uid) — see `doc/sandbox-hardening.md`. In production, prefer never
-writing the key to disk at all (KMS/Vault Transit).
+In the self-managed local mode there is no boot-key file on disk *while the
+server runs* — but the at-rest files that are always present (`master.key`,
+`keystore.json`, the SQLite DB, SSH keys) carry the same `0600`/same-UID
+exposure. To keep the agent out of all of them, enable
+`HEADCOUNT1_SANDBOX_READ_SCOPING` (hides `${HEADCOUNT1_HOME}` from reads) and/or
+`HEADCOUNT1_SANDBOX_UID` (runs the agent as a different uid) — see
+`doc/sandbox-hardening.md`. In production, prefer never writing the boot key to
+disk at all (KMS/Vault Transit).
 
-`keyring.sealed` itself is short-lived (deleted on the next boot) and useless
-without the boot key, so it is safe to leave on disk between a graceful stop and
-the following start.
+Both `keyring.sealed` and the self-managed `keyring.bootkey` are short-lived —
+written only at graceful shutdown and deleted at the next boot. The snapshot is
+useless without the key; the key is useless without the snapshot; the risk is
+only if *both* are read during the stopped window.
 
 ---
 
 ## Quick start
 
 ```bash
-# One-off: enable seamless restarts for a local run.
-export HEADCOUNT1_BOOT_KEY=$(openssl rand -hex 32)
-make run          # Ctrl+C to stop → keyring.sealed written; next start restores it
+# Local/dev — zero-config, no key on disk while running (self-managed local key):
+scripts/run.sh            # Ctrl+C to stop → snapshot + key written; next start restores + deletes both
 
-# Or let the launch script persist the key for you and prompt on first run:
-scripts/run.sh
+# Or an explicit external key (persistent; also the production shape):
+export HEADCOUNT1_BOOT_KEY=$(openssl rand -hex 32)
+make run
 ```
 
 On a successful restore you'll see, at startup:
 
 ```
-Restored N unlocked vault(s) from graceful-exit snapshot (boot key: env:HEADCOUNT1_BOOT_KEY)
+Restored N unlocked vault(s) from graceful-exit snapshot (boot key: local:self-managed (…/keyring.bootkey))
 ```
