@@ -89,6 +89,14 @@ type WebAuthnCredential struct {
 	SignCount    uint32    `json:"-"`
 	Transports   string    `json:"transports" gorm:"type:text"` // JSON array of authenticator transports
 	AAGUID       []byte    `json:"-"`
+	// WebAuthn backup flags. BackupEligible (BE) is immutable per credential and
+	// MUST be restored on login — go-webauthn rejects an assertion whose BE flag
+	// differs from the stored one ("Backup Eligible flag inconsistency"). Synced
+	// passkeys (iCloud Keychain, Chrome, 1Password, ...) report BE=true, so a
+	// credential stored without it (BE=false) can never log in. BackupState (BS)
+	// is mutable and refreshed on each successful assertion.
+	BackupEligible bool `json:"-"`
+	BackupState    bool `json:"-"`
 	Nickname     string    `json:"nickname"`
 	WrappedDEK   string    `json:"-" gorm:"not null"` // DEK sealed under this credential's PRF-derived key
 	PRFSalt      []byte    `json:"-" gorm:"not null"` // constant PRF eval input for this credential

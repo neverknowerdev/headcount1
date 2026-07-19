@@ -32,10 +32,10 @@ func (q *Queries) GetCredentialByCredentialID(ctx context.Context, credentialID 
 // UpdateCredentialUsage records the authenticator sign counter and last-used
 // time after a successful assertion (sign-count regression is the caller's to
 // detect via the returned prior value).
-func (q *Queries) UpdateCredentialUsage(ctx context.Context, id int32, signCount uint32) error {
+func (q *Queries) UpdateCredentialUsage(ctx context.Context, id int32, signCount uint32, backupState bool) error {
 	return q.db.WithContext(ctx).Model(&WebAuthnCredential{}).
 		Where("id = ?", id).
-		Updates(map[string]interface{}{"sign_count": signCount, "last_used_at": time.Now()}).Error
+		Updates(map[string]interface{}{"sign_count": signCount, "backup_state": backupState, "last_used_at": time.Now()}).Error
 }
 
 func (q *Queries) RenameCredential(ctx context.Context, id, userID int32, nickname string) error {

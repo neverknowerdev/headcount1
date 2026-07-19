@@ -98,8 +98,11 @@ func (u webauthnUser) WebAuthnCredentials() []webauthn.Credential {
 	out := make([]webauthn.Credential, 0, len(u.creds))
 	for _, c := range u.creds {
 		out = append(out, webauthn.Credential{
-			ID:            c.CredentialID,
-			PublicKey:     c.PublicKey,
+			ID:        c.CredentialID,
+			PublicKey: c.PublicKey,
+			// Restore the backup flags stored at registration — go-webauthn
+			// validates BE consistency on every login.
+			Flags:         webauthn.CredentialFlags{BackupEligible: c.BackupEligible, BackupState: c.BackupState},
 			Authenticator: webauthn.Authenticator{SignCount: c.SignCount, AAGUID: c.AAGUID},
 		})
 	}
@@ -288,6 +291,7 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 	if _, err := api.q.CreateWebAuthnCredential(r.Context(), db.WebAuthnCredential{
 		UserID: user.ID, CredentialID: cred.ID, PublicKey: cred.PublicKey,
 		SignCount: cred.Authenticator.SignCount, AAGUID: cred.Authenticator.AAGUID,
+		BackupEligible: cred.Flags.BackupEligible, BackupState: cred.Flags.BackupState,
 		WrappedDEK: wrapped, PRFSalt: prfSalt, Nickname: "This device", LastUsedAt: time.Now(),
 	}); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to save passkey")
@@ -457,6 +461,9 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 	}
 	validated, err := wa.ValidateLogin(wu, *sessionData, parsed)
 	if err != nil {
+		// Log the real reason server-side (origin/RPID/challenge/credential
+		// mismatch, ...) — the client only ever sees the generic message.
+		log.Printf("webauthn: %s assertion failed for user %d: %v", purpose, user.ID, err)
 		api.respondError(w, http.StatusUnauthorized, "assertion failed")
 		return
 	}
@@ -477,7 +484,7 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 		api.respondError(w, http.StatusUnauthorized, "authenticator failed clone detection — this passkey may be compromised")
 		return
 	}
-	_ = api.q.UpdateCredentialUsage(r.Context(), dbCred.ID, newCount)
+	_ = api.q.UpdateCredentialUsage(r.Context(), dbCred.ID, newCount, validated.Flags.BackupState)
 
 	if issueSession {
 		api.issueTokenPair(w, r, user)
@@ -566,6 +573,7 @@ func (api *API) AddCredentialFinish(w http.ResponseWriter, r *http.Request) {
 	if _, err := api.q.CreateWebAuthnCredential(r.Context(), db.WebAuthnCredential{
 		UserID: user.ID, CredentialID: cred.ID, PublicKey: cred.PublicKey,
 		SignCount: cred.Authenticator.SignCount, AAGUID: cred.Authenticator.AAGUID,
+		BackupEligible: cred.Flags.BackupEligible, BackupState: cred.Flags.BackupState,
 		WrappedDEK: wrapped, PRFSalt: prfSalt, Nickname: "New device", LastUsedAt: time.Now(),
 	}); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to save passkey")
