@@ -675,7 +675,7 @@ func setReenrollCookie(w http.ResponseWriter, r *http.Request, token string) {
 		Value:    token,
 		Path:     "/api/auth",
 		HttpOnly: true,
-		Secure:   requestIsTLS(r),
+		Secure:   cookieSecure(r),
 		SameSite: http.SameSiteLaxMode,
 		MaxAge:   int(reenrollTTL / time.Second),
 	})
@@ -684,7 +684,7 @@ func setReenrollCookie(w http.ResponseWriter, r *http.Request, token string) {
 func clearReenrollCookie(w http.ResponseWriter, r *http.Request) {
 	http.SetCookie(w, &http.Cookie{
 		Name: reenrollCookieName, Value: "", Path: "/api/auth",
-		HttpOnly: true, Secure: requestIsTLS(r), SameSite: http.SameSiteLaxMode, MaxAge: -1,
+		HttpOnly: true, Secure: cookieSecure(r), SameSite: http.SameSiteLaxMode, MaxAge: -1,
 	})
 }
 

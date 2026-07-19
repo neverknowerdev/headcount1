@@ -21,15 +21,24 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 // When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
 // to only those whose project belongs to the given company. When userID > 0,
 // visibility is tenant-scoped: builtin catalog rows, the user's own custom
-// servers, and codegraph servers; account preloads are filtered to the
-// user's own credentials. userID 0 (background cache refresh) sees all.
+// servers, and codegraph servers whose project belongs to a company the user
+// can access; account preloads are filtered to the user's own credentials.
+// userID 0 (background cache refresh) sees all.
 func (q *Queries) ListMCPServers(ctx context.Context, companyID, userID int32) ([]MCPServer, error) {
 	var servers []MCPServer
 	db := q.db.WithContext(ctx).Order("id").Preload("Project")
 	if userID > 0 {
+		// Codegraph servers (project_id set) leak project names, repository URLs
+		// and workspace paths, so they must be bounded to the caller's own tenants
+		// — projects of a company they created or whose team they belong to. A bare
+		// "project_id IS NOT NULL" would expose every tenant's projects.
+		accessibleCodegraph := "project_id IN (" +
+			"SELECT p.id FROM projects p JOIN companies c ON c.id = p.company_id WHERE " +
+			"c.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?) OR " +
+			"(c.team_id IS NULL AND c.user_id = ?))"
 		db = db.
 			Preload("Accounts", "user_id = ?", userID).
-			Where("builtin = ? OR owner_user_id = ? OR project_id IS NOT NULL", true, userID)
+			Where("builtin = ? OR owner_user_id = ? OR ("+accessibleCodegraph+")", true, userID, userID, userID)
 	} else {
 		db = db.Preload("Accounts")
 	}

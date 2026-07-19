@@ -5,6 +5,7 @@ import (
 	"crypto/sha256"
 	"errors"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -292,7 +293,7 @@ func setAccessCookie(w http.ResponseWriter, r *http.Request, token string) {
 		Path:     "/",
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsTLS(r),
+		Secure:   cookieSecure(r),
 		MaxAge:   int(db.AccessTokenLifetime / time.Second),
 	})
 }
@@ -304,7 +305,7 @@ func setRefreshCookie(w http.ResponseWriter, r *http.Request, token string) {
 		Path:     authctx.RefreshCookiePath,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsTLS(r),
+		Secure:   cookieSecure(r),
 		MaxAge:   int(db.SessionAbsoluteCap() / time.Second),
 	})
 }
@@ -322,7 +323,7 @@ func setCSRFCookie(w http.ResponseWriter, r *http.Request) {
 		Path:     "/",
 		HttpOnly: false,
 		SameSite: http.SameSiteLaxMode,
-		Secure:   requestIsTLS(r),
+		Secure:   cookieSecure(r),
 		MaxAge:   int(db.SessionAbsoluteCap() / time.Second),
 	})
 }
@@ -333,7 +334,7 @@ func (api *API) clearAuthCookies(w http.ResponseWriter, r *http.Request) {
 }
 
 func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
-	secure := requestIsTLS(r)
+	secure := cookieSecure(r)
 	http.SetCookie(w, &http.Cookie{
 		Name: authctx.CookieName, Value: "", Path: "/",
 		HttpOnly: true, SameSite: http.SameSiteLaxMode, Secure: secure, MaxAge: -1,
@@ -350,6 +351,34 @@ func clearSessionCookie(w http.ResponseWriter, r *http.Request) {
 
 func requestIsTLS(r *http.Request) bool {
 	return r.TLS != nil || strings.EqualFold(r.Header.Get("X-Forwarded-Proto"), "https")
+}
+
+// cookieSecure decides the Secure attribute for auth cookies. It defaults to
+// true so that a reverse proxy which terminates TLS but forgets to set
+// X-Forwarded-Proto can never cause a session/refresh/CSRF cookie to be issued
+// over the clear. The only exception is a plain-HTTP request to a loopback host
+// (local dev and E2E on http://localhost), where the browser would silently drop
+// a Secure cookie.
+func cookieSecure(r *http.Request) bool {
+	if requestIsTLS(r) {
+		return true
+	}
+	return !isLoopbackHost(r)
+}
+
+func isLoopbackHost(r *http.Request) bool {
+	host := r.Host
+	if h, _, err := net.SplitHostPort(host); err == nil {
+		host = h
+	}
+	switch strings.ToLower(host) {
+	case "localhost", "127.0.0.1", "::1", "[::1]":
+		return true
+	}
+	if ip := net.ParseIP(host); ip != nil {
+		return ip.IsLoopback()
+	}
+	return false
 }
 
 func looksLikeEmail(email string) bool {

@@ -77,6 +77,23 @@ func TestOpenLegacyPlaintextPassthrough(t *testing.T) {
 	}
 }
 
+// A value in the reserved "enc:" namespace that this version cannot open (e.g.
+// the retired server-master-key "enc:v1:" format, or a corrupted sealed value)
+// must be rejected — never returned as if it were plaintext, which would ship
+// raw ciphertext to an outbound request in place of the real secret.
+func TestDecryptRejectsUnknownSealedFormat(t *testing.T) {
+	s := NewManager()
+	for _, v := range []string{"enc:v1:AAAA", "enc:u2:1:AAAA", "enc:garbage"} {
+		out, err := s.Decrypt(v)
+		if err == nil {
+			t.Fatalf("expected error for unrecognized sealed value %q, got plaintext %q", v, out)
+		}
+		if out != "" {
+			t.Fatalf("must not return any value for unrecognized sealed value %q, got %q", v, out)
+		}
+	}
+}
+
 func TestSecretsAreUserIsolated(t *testing.T) {
 	s := NewManager()
 	var d1, d2 [32]byte

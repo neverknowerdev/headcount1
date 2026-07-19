@@ -25,7 +25,10 @@ func setupMCPTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	err = database.AutoMigrate(
 		&db.User{},
+		&db.Team{},
+		&db.TeamMember{},
 		&db.Company{},
+		&db.Project{},
 		&db.Agent{},
 		&db.MCPServer{},
 		&db.AgentMCPServer{},

@@ -26,6 +26,12 @@ import (
 	"time"
 )
 
+// secretNamespace is the reserved prefix for every sealed-value format this
+// project has ever used. A value in this namespace that is not a format the
+// running version understands must be rejected on read, never passed through
+// as plaintext.
+const secretNamespace = "enc:"
+
 // IsSealed reports whether a stored value is ciphertext produced by this
 // package (a per-user "enc:u1:" value). Anything else is treated as legacy
 // plaintext and passed through on read.
@@ -89,10 +95,18 @@ func IsUnlocked(userID int32) bool { return Default().IsUnlocked(userID) }
 // as-is. Call it at the point of use and use the result immediately — never
 // stash it.
 func (s *SecretManager) Decrypt(stored string) (string, error) {
-	if !IsSealed(stored) {
-		return stored, nil
+	if IsSealed(stored) {
+		return s.openUser(stored)
 	}
-	return s.openUser(stored)
+	// A value that carries the reserved "enc:" namespace but is not a format
+	// this version can open (e.g. the retired server-master-key "enc:v1:", or a
+	// corrupted/truncated sealed value) must NOT be handed back as plaintext —
+	// that would ship raw ciphertext to an outbound request in place of the real
+	// secret. Fail loudly instead of leaking.
+	if strings.HasPrefix(stored, secretNamespace) {
+		return "", fmt.Errorf("secrets: unrecognized sealed format, refusing to use as plaintext")
+	}
+	return stored, nil
 }
 
 // ── AES-256-GCM primitives ───────────────────────────────────────────────────
