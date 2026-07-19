@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
-import { Plus, LogOut, Settings as SettingsIcon, Users } from 'lucide-react';
+import { Plus, LogOut, Settings as SettingsIcon, Users, User } from 'lucide-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 
 export const CompanySwitcher: React.FC = () => {
@@ -18,8 +18,6 @@ export const CompanySwitcher: React.FC = () => {
         }
         return company.name.split(' ').map((n: string) => n[0]).join('').substring(0, 2).toUpperCase();
     };
-
-    const userInitials = (user?.email || '?').slice(0, 2).toUpperCase();
 
     const logout = async () => {
         try {
@@ -74,7 +72,7 @@ export const CompanySwitcher: React.FC = () => {
                         className={`w-12 h-12 rounded-full bg-purple-600 text-white font-bold flex items-center justify-center transition-transform hover:scale-105 ${menuOpen ? 'ring-4 ring-white ring-opacity-50' : ''}`}
                         title={user.email}
                     >
-                        {userInitials}
+                        <User size={22} />
                     </button>
 
                     {menuOpen && (
