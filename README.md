@@ -16,13 +16,13 @@ You can build the single binary containing both the frontend and backend with ou
 make build
 ```
 
-This creates an executable file named `orchestrator`.
+This creates an executable file named `agent-orchestrator`.
 
 ### 2. Running the Server
 You can run the generated binary directly. By default, it will create a local SQLite database at `~/.headcount1/headcount1.db` and perform automatic migrations on startup!
 
 ```sh
-./orchestrator
+./agent-orchestrator
 ```
 
 **PostgreSQL Support (Optional)**:
@@ -34,38 +34,28 @@ export DATABASE_URL="postgres://username:password@localhost:5432/orchestrator?ss
 
 The server will start on port `8080`. You can access the UI at [http://localhost:8080](http://localhost:8080).
 
-## Cloud Mode: Accounts & Multi-User
+## Accounts & Multi-User
 
-headcount1 runs in cloud mode: users register with email + password (open self-registration at `/register`), and everything — companies, projects, tasks, agents, LLM providers, MCP credentials, model groups — belongs to the user who created it. Sessions are httpOnly cookies backed by server-side tokens (30-day sliding expiry, instant revocation on logout/password change). WebSocket events are delivered only to the owning user's clients.
+Authentication is **passwordless** — every account is a **WebAuthn passkey**. Users self-register at `/register` (Face ID / Touch ID / a security key; no passwords are ever stored), and everything — companies, projects, tasks, agents, LLM providers, MCP credentials, model groups — belongs to the user who created it. WebSocket events are delivered only to the owning user's clients.
 
-- **Password reset:** configure `SMTP_HOST`, `SMTP_PORT` (587 STARTTLS default, 465 implicit TLS), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and `APP_BASE_URL` for emailed reset links. Without SMTP, the reset link is printed to the server log. Resetting a forgotten password never loses data — see below.
-- **Fresh database:** cloud mode assumes a new database; pre-auth local databases are not migrated.
-- The password authenticates only — it is never used as an encryption master key directly (see next section).
+- **Sessions** are httpOnly cookies backed by a short-lived **access token** (1-hour sliding window) plus a rotating **refresh token**. A refresh-token family has a hard absolute cap (14 days by default, `SESSION_ABSOLUTE_CAP` in days); the UI proactively prompts to re-authenticate before that ceiling (`SESSION_REAUTH_GAP`). Logout revokes the family immediately; refresh-token reuse trips family-wide revocation.
+- **Recovery** (`/recover`) emails a reset link. Confirming it **crypto-shreds the user's secrets** — API keys, MCP tokens, and SSH keys become unrecoverable — and lets the user re-enroll a fresh passkey. The account, teams, companies, and tasks are all preserved; only the encrypted credentials are lost (there is no master key that could recover them — that's the point). Configure `SMTP_HOST`, `SMTP_PORT` (587 STARTTLS default, 465 implicit TLS), `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM`, and `APP_BASE_URL` for the email; without SMTP the link is printed to the server log.
+- **Teams**: an owner can invite teammates (`APP_BASE_URL` builds the invite link). Members share the owner's companies but are restricted from destructive actions (creating/deleting companies or projects, deleting MCP servers).
+- **Deploying on a real domain** requires pointing the WebAuthn relying-party config at your host — see [`doc/domain-deployment.md`](doc/domain-deployment.md).
 
-## Secrets Encryption at Rest
+## Secrets Encryption at Rest — Zero-Knowledge
 
-User-supplied credentials (LLM provider API keys, MCP auth tokens) are never stored raw. Each user gets their own random **data key** at registration; secrets on their rows are AES-256-GCM-encrypted under it (`enc:u1:<userID>:…`). The user's data key is itself stored only wrapped — twice:
+User-supplied credentials (LLM provider API keys, MCP auth tokens, SSH keys) are **never stored raw** — not in the database, not in the filesystem mirror, not in backups. Each secret is AES-256-GCM-sealed under its owning user's **data-encryption key (DEK)** and stored self-describingly as `enc:u1:<userID>:<base64>`.
 
-1. **Server wrap** under the install's root key chain (root data key in `~/.headcount1/keystore.json`, wrapped by the master key below) — this is what lets agent runs, schedulers, and the LLM proxy decrypt with nobody logged in, and what makes password reset non-destructive: the keyring is re-wrapped under the new password, secrets intact.
-2. **Password wrap** under an Argon2id key derived from the user's password — verified at login, rotated on password change; defense-in-depth against exposure of the server key chain alone.
+The design is deliberately **zero-knowledge**: a user's DEK exists only in an **in-memory keyring**, unwrapped at login by their passkey's WebAuthn **PRF** output and evicted on logout. There is **no server-held master key** — nothing on the box (no `master.key`, no `keystore.json`, no KMS-wrapped root key) can decrypt a user's secrets while that user is signed out. Compromising the server at rest yields only ciphertext.
 
-Deleting a user's key row crypto-shreds every secret they own. Secrets are decrypted in memory only at the moment they are used for an outbound request, and the API never returns them to the browser — clients only see a `has_api_key` / `has_token` flag.
+- Secrets are decrypted in memory only at the exact moment they're used for an outbound request; a locked (signed-out) user's secret returns a clear "vault locked — re-authenticate" error rather than a decrypt failure. The API never returns secret values to the browser — clients see only a `has_api_key` / `has_token` flag.
+- Deleting a user (or account recovery) crypto-shreds every secret they own.
 
-The master key is taken from the first configured source:
+### Seamless restarts (boot key)
 
-1. **HashiCorp Vault** — set `VAULT_ADDR` and `VAULT_TOKEN`. The key is read from the KV secret at `HEADCOUNT1_VAULT_SECRET_PATH` (default `secret/data/headcount1`, KV v2), field `HEADCOUNT1_VAULT_SECRET_FIELD` (default `master_key`). The fetched key is cached in memory for `HEADCOUNT1_VAULT_KEY_TTL_SECONDS` (default 300), so revoking the Vault token locks the app out of all stored secrets within one TTL. If Vault is configured but unreachable, secret operations fail loudly — there is no silent fallback to a weaker source.
+Because DEKs live only in memory, a plain restart would force every active user to re-tap their passkey. An optional **boot key** seals the in-memory keyring on a graceful shutdown and restores it on the next boot, avoiding the re-tap — it protects only that transient restart snapshot and never decrypts secrets at rest. It's off by default (safe); `make run-dev` and `scripts/run.sh` enable a zero-config local boot key. See [`doc/boot-key.md`](doc/boot-key.md).
 
-   ```sh
-   # one-time setup
-   vault kv put secret/headcount1 master_key="$(openssl rand -hex 32)"
-   # run
-   export VAULT_ADDR=https://vault.example.com:8200
-   export VAULT_TOKEN=...
-   ./orchestrator
-   ```
+### Hardening the agent sandbox
 
-2. **Environment variable** — set `HEADCOUNT1_MASTER_KEY` (64 hex chars, base64 of 32 bytes, or any passphrase, which is SHA-256-derived).
-
-3. **Key file (zero-config default)** — with neither of the above set, a random key is auto-generated at `~/.headcount1/master.key` (mode 0600). This protects database dumps, the filesystem mirror, and backups, but not an attacker with full filesystem access as the same user — use Vault or the env var for stronger isolation.
-
-Existing installs upgrade automatically: any secrets stored in plaintext by older versions are encrypted on the next startup. Backups include the keystore (safe — it holds only the wrapped data key) but never the master key itself; to restore a backup on a new machine, configure the same master key source first.
+The agent's shell tool runs as the server's user by default and can read the server's at-rest files. For shared/multi-tenant hosts, run the agent under a dedicated uid and/or hide the data directory from it — see [`doc/sandbox-hardening.md`](doc/sandbox-hardening.md).
