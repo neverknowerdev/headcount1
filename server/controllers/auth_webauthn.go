@@ -3,6 +3,7 @@ package endpoints
 import (
 	"bytes"
 	"context"
+	"crypto/subtle"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -185,6 +186,16 @@ func (api *API) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 			api.respondError(w, http.StatusConflict, "an account with this email already exists")
 			return
 		}
+		// A credential-less account that just went through recovery is guarded
+		// by a re-enroll ticket, so only the browser that performed the recovery
+		// can enroll a new passkey. (Accounts that were never recovered — e.g. an
+		// abandoned first registration — carry no ticket and are unaffected.)
+		if existing.ReenrollTokenHash != "" {
+			if !api.validReenrollTicket(r, existing) {
+				api.respondError(w, http.StatusForbidden, "this account is being recovered — re-enroll from the recovery link you opened")
+				return
+			}
+		}
 		user = existing // re-enroll onto the existing (credential-less) account
 	} else {
 		// Validate an invite up front (before creating anything) so a bad token
@@ -282,9 +293,31 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 	}
 	secrets.UnlockUser(user.ID, dek, keyringTTL())
 	api.seedNewUser(r.Context(), user.ID)
+	// Re-enrollment succeeded — retire any recovery ticket so it can't be reused.
+	if user.ReenrollTokenHash != "" {
+		_ = api.q.ClearUserReenrollTicket(r.Context(), user.ID)
+	}
+	clearReenrollCookie(w, r)
 
 	api.issueTokenPair(w, r, user)
 	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email}, "unlocked": true})
+}
+
+// validReenrollTicket reports whether the request carries the re-enroll ticket
+// cookie matching (and not past the expiry of) the recovering account's stored
+// ticket. Constant-time compare on the hash; an expired ticket never matches.
+func (api *API) validReenrollTicket(r *http.Request, user db.User) bool {
+	if user.ReenrollTokenHash == "" {
+		return false
+	}
+	if user.ReenrollExpiresAt == nil || time.Now().After(*user.ReenrollExpiresAt) {
+		return false
+	}
+	c, err := r.Cookie(reenrollCookieName)
+	if err != nil || c.Value == "" {
+		return false
+	}
+	return subtle.ConstantTimeCompare([]byte(authctx.HashToken(c.Value)), []byte(user.ReenrollTokenHash)) == 1
 }
 
 // ── login (existing account) ─────────────────────────────────────────────────
@@ -589,7 +622,44 @@ func (api *API) RecoverConfirm(w http.ResponseWriter, r *http.Request) {
 	// Also revoke refresh tokens: recovery is a full reset, and a stolen refresh
 	// token would otherwise survive it and mint fresh access sessions.
 	_ = api.q.RevokeRefreshTokensForUser(r.Context(), user.ID)
+
+	// The account is now momentarily credential-less. Bind the re-enrollment
+	// that must follow to THIS browser via a short-lived ticket, so a racing
+	// attacker who knows the email can't enroll their own passkey onto the
+	// (data-bearing) account in the gap before the legitimate user re-registers.
+	ticket, terr := authctx.NewToken()
+	if terr == nil {
+		if err := api.q.SetUserReenrollTicket(r.Context(), user.ID, authctx.HashToken(ticket), time.Now().Add(reenrollTTL)); err == nil {
+			setReenrollCookie(w, r, ticket)
+		}
+	}
 	api.respondJSON(w, http.StatusOK, map[string]any{"email": user.Email})
+}
+
+// reenrollTTL bounds how long the post-recovery re-enrollment ticket is valid.
+const reenrollTTL = 15 * time.Minute
+
+// reenrollCookieName carries the post-recovery re-enroll ticket. httpOnly and
+// path-scoped to the auth routes; it never leaves the recovering browser.
+const reenrollCookieName = "hc1_reenroll"
+
+func setReenrollCookie(w http.ResponseWriter, r *http.Request, token string) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     reenrollCookieName,
+		Value:    token,
+		Path:     "/api/auth",
+		HttpOnly: true,
+		Secure:   requestIsTLS(r),
+		SameSite: http.SameSiteLaxMode,
+		MaxAge:   int(reenrollTTL / time.Second),
+	})
+}
+
+func clearReenrollCookie(w http.ResponseWriter, r *http.Request) {
+	http.SetCookie(w, &http.Cookie{
+		Name: reenrollCookieName, Value: "", Path: "/api/auth",
+		HttpOnly: true, Secure: requestIsTLS(r), SameSite: http.SameSiteLaxMode, MaxAge: -1,
+	})
 }
 
 // ── helpers ──────────────────────────────────────────────────────────────────

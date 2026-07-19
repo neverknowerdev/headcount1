@@ -121,16 +121,22 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	for _, f := range []string{
 		filepath.Join(newBase, "uploads", "1", "a.txt"),
 		filepath.Join(newBase, "logs", "acme", "1", "run-1", "main.log"),
-		filepath.Join(newBase, "ssh", "id_rsa"),
 	} {
 		if _, err := os.Stat(f); err != nil {
 			t.Errorf("file not restored: %s", f)
 		}
 	}
 
-	// Credentials must NOT be in the backup.
-	if _, err := os.Stat(filepath.Join(newBase, "credentials", "secret.json")); err == nil {
-		t.Error("credentials were restored — they must be excluded from backups")
+	// Cleartext private keys must NOT be in the backup: credentials/ and ssh/
+	// hold usable secrets and are excluded (per-user keys survive as ciphertext
+	// in the DB; the shared ssh key is re-provisioned on restore).
+	for _, f := range []string{
+		filepath.Join(newBase, "credentials", "secret.json"),
+		filepath.Join(newBase, "ssh", "id_rsa"),
+	} {
+		if _, err := os.Stat(f); err == nil {
+			t.Errorf("secret file was restored — it must be excluded from backups: %s", f)
+		}
 	}
 }
 

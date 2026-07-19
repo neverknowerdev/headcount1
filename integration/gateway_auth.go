@@ -145,6 +145,15 @@ func (g *LLMGateway) userOwnedResourceAllowed(r *http.Request, ownerUserID *int3
 }
 
 func (g *LLMGateway) mayUseProvider(r *http.Request, provider db.LLMProvider) bool {
+	// An ownerless, non-builtin provider that still carries a stored credential
+	// is not a genuinely shared resource — the only ownerless providers meant to
+	// be usable across tenants are the builtin catalog entries. Don't let an
+	// arbitrary run spend a stray ownerless key. (Providers created via the API
+	// always carry a UserID, so this only bites legacy/imported rows.)
+	if p := principalFrom(r.Context()); p.runID != 0 &&
+		provider.UserID == nil && !provider.Builtin && provider.ApiKeyEncrypted != "" {
+		return false
+	}
 	return g.userOwnedResourceAllowed(r, provider.UserID)
 }
 

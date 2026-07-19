@@ -26,7 +26,13 @@ type BackupManifest struct {
 // ready-to-work. credentials/ is deliberately excluded (raw secrets),
 // venv/ is machine-specific and rebuilt by setup, backups/ would recurse,
 // and the live db/ ships as db-snapshot/ + the entities/ tree instead.
-var fileDirs = []string{"repos", "workspace", "uploads", "artifacts", "logs", "skills", "ssh"}
+// Note: "ssh" and "credentials" are deliberately EXCLUDED. They hold cleartext
+// private keys (the operator-provisioned shared key and any transiently
+// materialized per-user key) — including them would ship usable secrets in an
+// unencrypted archive. Per-user SSH keys survive a backup as ciphertext in the
+// database (UserGitCredential.SSHPrivateKeyEncrypted); the shared key is
+// re-provisioned by the operator on restore.
+var fileDirs = []string{"repos", "workspace", "uploads", "artifacts", "logs", "skills"}
 
 func CreateBackup(basePath string, database *gorm.DB) (string, error) {
 	return CreateBackupWithContext(context.Background(), basePath, database)

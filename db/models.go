@@ -13,6 +13,15 @@ type User struct {
 	Email     string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
+	// ReenrollTokenHash / ReenrollExpiresAt bind the re-enrollment that follows a
+	// passkey recovery to the browser that performed it. Recovery crypto-shreds
+	// the account's credentials, leaving it momentarily credential-less; without
+	// this ticket anyone who knows the email could race in and enroll their own
+	// passkey onto the (data-bearing) account. Set by RecoverConfirm, verified by
+	// RegisterBegin, cleared on a successful RegisterFinish. Empty for accounts
+	// that were never recovered (e.g. an abandoned first registration).
+	ReenrollTokenHash string     `json:"-"`
+	ReenrollExpiresAt *time.Time `json:"-"`
 }
 
 // Session is a server-side login session. The cookie carries an opaque random

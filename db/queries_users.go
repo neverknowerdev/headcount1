@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"strings"
+	"time"
 )
 
 // NormalizeEmail canonicalizes an email for storage and lookup.
@@ -32,4 +33,18 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	err := q.db.WithContext(ctx).Order("id").Find(&users).Error
 	return users, err
+}
+
+// SetUserReenrollTicket records the hashed re-enroll ticket and its expiry on a
+// just-recovered account, gating the re-enrollment that follows recovery.
+func (q *Queries) SetUserReenrollTicket(ctx context.Context, userID int32, tokenHash string, expiresAt time.Time) error {
+	return q.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).
+		Updates(map[string]any{"reenroll_token_hash": tokenHash, "reenroll_expires_at": expiresAt}).Error
+}
+
+// ClearUserReenrollTicket drops the re-enroll ticket once re-enrollment
+// completes (or is no longer pending).
+func (q *Queries) ClearUserReenrollTicket(ctx context.Context, userID int32) error {
+	return q.db.WithContext(ctx).Model(&User{}).Where("id = ?", userID).
+		Updates(map[string]any{"reenroll_token_hash": "", "reenroll_expires_at": nil}).Error
 }
