@@ -17,10 +17,11 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"crypto/rand"
-	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
 	"os"
+
+	"golang.org/x/crypto/argon2"
 
 	"agent-orchestrator/pkg/secrets"
 )
@@ -87,6 +88,13 @@ func newGCM(key [32]byte) (cipher.AEAD, error) {
 }
 
 // parseKey accepts 64-hex, or hashes any other passphrase to 32 bytes.
+// bootKeyKDFSalt is a fixed application salt for stretching a passphrase boot
+// key. A per-install salt would need somewhere non-secret to live (the boot key
+// is injected at runtime, not stored), so a constant is used — it still forces
+// an attacker to pay the Argon2id memory-hard cost per guess rather than a
+// trivial unsalted hash, which is the point.
+var bootKeyKDFSalt = []byte("headcount1-bootkey-kdf-v1")
+
 func parseKey(raw string) ([32]byte, error) {
 	var key [32]byte
 	if len(raw) == 64 {
@@ -95,5 +103,10 @@ func parseKey(raw string) ([32]byte, error) {
 			return key, nil
 		}
 	}
-	return sha256.Sum256([]byte(raw)), nil
+	// Not a 32-byte hex key → treat as a (possibly low-entropy) passphrase and
+	// stretch it with Argon2id instead of a bare SHA-256, so a leaked transient
+	// keyring.sealed blob can't be brute-forced with a cheap unsalted hash.
+	dk := argon2.IDKey([]byte(raw), bootKeyKDFSalt, 3, 64*1024, 4, 32)
+	copy(key[:], dk)
+	return key, nil
 }

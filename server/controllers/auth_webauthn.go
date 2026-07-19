@@ -235,7 +235,7 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, "register")
+	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, "register", nil)
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "registration session expired — start over")
 		return
@@ -419,7 +419,18 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 		api.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, purpose)
+	// Unlock/reauth run behind RequireAuth, so bind the ceremony to the
+	// authenticated user: a logged-in user must not be able to consume (or, by
+	// guessing the sequential session id, delete) another user's in-flight
+	// ceremony. Login is unauthenticated, so it stays unscoped.
+	var expectUser *int32
+	if purpose == "unlock" || purpose == "reauth" {
+		if u, ok := authctx.UserFrom(r.Context()); ok {
+			uid := u.ID
+			expectUser = &uid
+		}
+	}
+	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, purpose, expectUser)
 	if err != nil || sess.UserID == nil {
 		api.respondError(w, http.StatusBadRequest, "session expired — start over")
 		return
@@ -517,7 +528,7 @@ func (api *API) AddCredentialFinish(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, "add-credential")
+	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, "add-credential", &user.ID)
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "session expired — start over")
 		return

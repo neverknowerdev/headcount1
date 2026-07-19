@@ -70,14 +70,27 @@ func (q *Queries) CreateWebAuthnSession(ctx context.Context, userID *int32, purp
 
 // ConsumeWebAuthnSession fetches an unexpired ceremony challenge and deletes it
 // (single-use), returning its stored session data.
-func (q *Queries) ConsumeWebAuthnSession(ctx context.Context, id int32, purpose string) (WebAuthnSession, error) {
+// ConsumeWebAuthnSession atomically fetches and deletes a ceremony session. It
+// runs the select+delete in one transaction so a session can be consumed only
+// once even under concurrent finishes. When expectUserID is non-nil the lookup
+// is additionally scoped to that user — used by the authenticated unlock/reauth
+// ceremonies so a logged-in user can neither consume nor (by guessing the
+// sequential id) delete another user's in-flight ceremony.
+func (q *Queries) ConsumeWebAuthnSession(ctx context.Context, id int32, purpose string, expectUserID *int32) (WebAuthnSession, error) {
 	var s WebAuthnSession
-	if err := q.db.WithContext(ctx).
-		Where("id = ? AND purpose = ? AND expires_at > ?", id, purpose, time.Now()).
-		First(&s).Error; err != nil {
+	err := q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		query := tx.Where("id = ? AND purpose = ? AND expires_at > ?", id, purpose, time.Now())
+		if expectUserID != nil {
+			query = query.Where("user_id = ?", *expectUserID)
+		}
+		if err := query.First(&s).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&WebAuthnSession{}, s.ID).Error
+	})
+	if err != nil {
 		return WebAuthnSession{}, err
 	}
-	q.db.WithContext(ctx).Delete(&WebAuthnSession{}, s.ID)
 	return s, nil
 }
 

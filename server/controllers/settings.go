@@ -7,6 +7,7 @@ import (
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/secrets"
+	"agent-orchestrator/pkg/utils"
 )
 
 type Settings = appsettings.Settings
@@ -25,6 +26,14 @@ func SaveSettings(settings Settings) error {
 
 func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
+	// BasePath (the server's filesystem layout) and WorkspaceFolders (a list
+	// built from every tenant's company/project names) are instance-global and
+	// must not leak to an ordinary self-registered user. Expose them only to the
+	// operator, mirroring the gate on UpdateSettings.
+	if !utils.IsE2E() && !globalAdminAPIEnabled() {
+		settings.BasePath = ""
+		settings.WorkspaceFolders = nil
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
 }

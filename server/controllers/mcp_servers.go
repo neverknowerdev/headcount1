@@ -18,8 +18,8 @@ import (
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/secrets"
-	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/pkg/setup"
+	"agent-orchestrator/pkg/utils"
 )
 
 // categorizeMCPError returns a human-readable reason for a discovery failure.
@@ -652,6 +652,22 @@ func (api *API) SetAgentMCPServers(w http.ResponseWriter, r *http.Request) {
 	if err := json.NewDecoder(r.Body).Decode(&assignments); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
+	}
+	// A referenced MCP server must not belong to ANOTHER tenant. The engine
+	// re-scopes at run time, so a foreign id here is inert today — validate
+	// anyway to keep the invariant local and resilient to future changes.
+	// Builtin/project/ownerless servers are allowed; a server owned by a
+	// different user is rejected.
+	for _, a := range assignments {
+		s, err := api.q.GetMCPServer(r.Context(), a.MCPServerID)
+		if err != nil {
+			api.respondError(w, http.StatusBadRequest, "unknown mcp server")
+			return
+		}
+		if s.OwnerUserID != nil && *s.OwnerUserID != api.currentUserID(r) {
+			api.respondError(w, http.StatusBadRequest, "mcp server not owned by you")
+			return
+		}
 	}
 	if err := api.q.SetAgentMCPServers(r.Context(), int32(agentID), assignments); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

@@ -143,23 +143,23 @@ func TestWebAuthnSessionSingleUseAndExpiry(t *testing.T) {
 	require.NoError(t, err)
 
 	// Consume once.
-	got, err := q.ConsumeWebAuthnSession(ctx, s.ID, "register")
+	got, err := q.ConsumeWebAuthnSession(ctx, s.ID, "register", nil)
 	require.NoError(t, err)
 	require.Equal(t, "session-data", got.Data)
 
 	// Second consume fails (single-use).
-	_, err = q.ConsumeWebAuthnSession(ctx, s.ID, "register")
+	_, err = q.ConsumeWebAuthnSession(ctx, s.ID, "register", nil)
 	require.Error(t, err)
 
 	// Wrong purpose is rejected.
 	s2, _ := q.CreateWebAuthnSession(ctx, nil, "login", "d")
-	_, err = q.ConsumeWebAuthnSession(ctx, s2.ID, "register")
+	_, err = q.ConsumeWebAuthnSession(ctx, s2.ID, "register", nil)
 	require.Error(t, err, "purpose mismatch must not consume")
 
 	// Expired challenge is rejected + GC'd.
 	expired := db.WebAuthnSession{Purpose: "login", Data: "d", ExpiresAt: time.Now().Add(-time.Minute)}
 	require.NoError(t, database.Create(&expired).Error)
-	_, err = q.ConsumeWebAuthnSession(ctx, expired.ID, "login")
+	_, err = q.ConsumeWebAuthnSession(ctx, expired.ID, "login", nil)
 	require.Error(t, err)
 	require.NoError(t, q.DeleteExpiredWebAuthnSessions(ctx))
 }

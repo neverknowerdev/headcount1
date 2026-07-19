@@ -195,12 +195,24 @@ func main() {
 	keyringBlobPath := filepath.Join(basePath, "keyring.sealed")
 	if bootKey != nil {
 		if blob, err := os.ReadFile(keyringBlobPath); err == nil {
-			if err := secrets.Default().UnsealKeyring(bootKey, blob, db.SessionLifetime); err != nil {
+			// Re-warm with the same ceiling a normal unlock grants (the absolute
+			// session cap), not the longer SessionLifetime — a restored DEK must
+			// not outlive the session that could authenticate its owner.
+			if err := secrets.Default().UnsealKeyring(bootKey, blob, db.SessionAbsoluteCap()); err != nil {
 				log.Printf("Warning: could not restore sealed keyring: %v", err)
 			} else {
 				log.Printf("Restored %d unlocked vault(s) from graceful-exit snapshot (boot key: %s)", secrets.DefaultKeyring().Len(), bootKey.Name())
 			}
-			os.Remove(keyringBlobPath)
+			// The snapshot must never survive boot: a lingering blob would let an
+			// unexpected later crash replay a stale keyring. If the unlink fails,
+			// truncate it so it can't be replayed, and refuse to continue if even
+			// that fails rather than leave sealed DEKs on disk.
+			if err := os.Remove(keyringBlobPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Warning: could not delete keyring snapshot %s: %v — truncating", keyringBlobPath, err)
+				if terr := os.Truncate(keyringBlobPath, 0); terr != nil {
+					log.Fatalf("FATAL: keyring snapshot %s could be neither deleted nor truncated (%v); refusing to run with a replayable snapshot on disk", keyringBlobPath, terr)
+				}
+			}
 		}
 	}
 

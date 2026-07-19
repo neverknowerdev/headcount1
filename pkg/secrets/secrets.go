@@ -306,9 +306,24 @@ func (s *SecretManager) createKeystoreLocked(mat MasterKeyMaterial) error {
 	if err := os.MkdirAll(filepath.Dir(s.keystorePath), 0700); err != nil {
 		return err
 	}
-	// The wrapped DEK is ciphertext, but there's no reason to make it
-	// world-readable either.
-	if err := os.WriteFile(s.keystorePath, data, 0600); err != nil {
+	// Write with O_EXCL so two concurrent first-boot processes can't each
+	// generate a DIFFERENT random DEK and clobber one another — that would
+	// leave the keystore holding one DEK while a caller wrapped rows under the
+	// other, tripping the fingerprint guard forever. On EEXIST, another process
+	// won the race: load its keystore instead of overwriting. (The wrapped DEK
+	// is ciphertext, but 0600 keeps it non-world-readable regardless.)
+	fh, err := os.OpenFile(s.keystorePath, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0600)
+	if err != nil {
+		if os.IsExist(err) {
+			return s.loadOrCreateKeystoreLocked(mat)
+		}
+		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
+	}
+	if _, err := fh.Write(data); err != nil {
+		fh.Close()
+		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
+	}
+	if err := fh.Close(); err != nil {
 		return fmt.Errorf("secrets: cannot write keystore %s: %w", s.keystorePath, err)
 	}
 	s.wrappedDEK = wrapped

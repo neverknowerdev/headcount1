@@ -17,8 +17,9 @@ const PrefixUser = "enc:u1:"
 // ErrLocked is returned when an operation needs a user's DEK but the user is
 // not unlocked: logged out, session/TTL lapsed, or — after an unexpected
 // crash — not yet re-tapped. It is not a decryption failure; callers translate
-// it to a clear "vault locked — re-authenticate" response, and the GORM
-// serializer degrades a locked read to an empty value rather than erroring.
+// it to a clear "vault locked — re-authenticate" response. (The GORM serializer
+// never hits this: it stores/loads ciphertext verbatim and never decrypts on
+// read — decryption happens only at the explicit point of use.)
 var ErrLocked = errors.New("secrets: user vault is locked")
 
 // EncryptForUser seals a secret under the user's in-memory DEK — the primary
