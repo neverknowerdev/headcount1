@@ -63,7 +63,13 @@ func webauthnRP() (*webauthn.WebAuthn, error) {
 		webauthnInst, webauthnErr = webauthn.New(&webauthn.Config{
 			RPID:          envOr("WEBAUTHN_RP_ID", "localhost"),
 			RPDisplayName: envOr("WEBAUTHN_RP_DISPLAY_NAME", "headcount1"),
-			RPOrigins:     strings.Split(envOr("WEBAUTHN_RP_ORIGINS", "http://localhost:8080"), ","),
+			// Accept both local-dev origins by default: 8080 (the Go server
+			// serving the built frontend — E2E / production-style) and 5174 (the
+			// Vite dev server used by `make run-dev`, which proxies /api to 8080).
+			// WebAuthn matches origins exactly incl. port, so the dev origin must
+			// be listed or attestation fails with "Error validating origin".
+			// Production overrides WEBAUTHN_RP_ORIGINS with the real domain.
+			RPOrigins: strings.Split(envOr("WEBAUTHN_RP_ORIGINS", "http://localhost:8080,http://localhost:5174"), ","),
 			// Passwordless RP: the passkey is the ONLY factor, so require User
 			// Verification (PIN/biometric), not bare User Presence (a tap) — and
 			// require a discoverable (resident) credential. go-webauthn copies
