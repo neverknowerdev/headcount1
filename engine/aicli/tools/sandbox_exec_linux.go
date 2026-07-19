@@ -33,9 +33,23 @@ type childConfig struct {
 // cannot reach ~/.headcount1 (DB, keystore, keyring snapshot, SSH keys). The
 // workspace, toolchain caches, and read-only roots are granted separately.
 // IgnoreIfMissing tolerates absent entries across distros.
+//
+// It also deliberately omits the wholesale /run and /var trees, granting only
+// safe subdirectories: those trees hold container secret mounts that are
+// world-readable (0444) and therefore reachable EVEN WITH a dedicated uid —
+// Docker secrets at /run/secrets/*, Kubernetes service-account tokens at
+// /var/run/secrets/kubernetes.io/serviceaccount/token, systemd credentials
+// under /run. Not granting the parent trees keeps them out of reach.
+//
+// Note: /proc is granted because toolchains read /proc/self, /proc/cpuinfo,
+// etc., but Landlock cannot exclude just /proc/<other-pid>. Under a SHARED uid
+// (read-scoping without a dedicated uid) the agent can still read
+// /proc/<server_pid>/environ; only a dedicated uid closes that. Read-scoping
+// alone is not a substitute for the dedicated uid — see doc/sandbox-hardening.md.
 var readScopeRoots = []string{
 	"/usr", "/bin", "/sbin", "/lib", "/lib64", "/lib32", "/libx32",
-	"/etc", "/opt", "/proc", "/sys", "/dev", "/run", "/var", "/snap",
+	"/etc", "/opt", "/proc", "/sys", "/dev", "/snap",
+	"/var/tmp", "/var/cache", "/var/lib",
 }
 
 // sandboxChildArg is the hidden argv[1] marker that tells a re-executed copy
@@ -76,16 +90,37 @@ func sandboxDescription() string {
 // re-execute our own binary, which applies the ruleset to itself (see
 // MaybeRunSandboxChild) and then execs the shell in place.
 func sandboxedCommand(ctx context.Context, workspacePath, command string, readOnlyDirs []string) (*exec.Cmd, func(), error) {
+	h := loadSandboxHardening()
+
+	// Resolve the dedicated sandbox uid's home once — needed both for the
+	// writable cache grants and for the child's HOME/USER env.
+	var sandboxHome, sandboxUser string
+	if h.uid > 0 {
+		if u, err := user.LookupId(strconv.Itoa(h.uid)); err == nil {
+			sandboxHome, sandboxUser = u.HomeDir, u.Username
+		}
+	}
+
 	if landlockABI() == 0 {
-		// No kernel support: run unsandboxed, same as the historical behavior.
-		return exec.CommandContext(ctx, "sh", "-c", command), nil, nil
+		// No Landlock write sandbox on this kernel. Historically this meant
+		// "run unsandboxed", but the dedicated-uid drop is INDEPENDENT of
+		// Landlock and is the primary isolation of the server's secret files
+		// and /proc from the untrusted shell — so it must still be applied when
+		// configured. A configured uid that can't be dropped to fails closed at
+		// cmd.Start() (missing CAP_SETUID) rather than silently running the
+		// untrusted shell at the server's (possibly root) uid.
+		cmd := exec.CommandContext(ctx, "sh", "-c", command)
+		if h.uid > 0 {
+			applySandboxCredential(cmd, h)
+			cmd.Env = sandboxEnvForHome(sandboxHome, sandboxUser)
+		}
+		return cmd, nil, nil
 	}
 	self, err := os.Executable()
 	if err != nil {
 		return nil, nil, fmt.Errorf("cannot locate own executable for sandbox re-exec: %w", err)
 	}
 	args := []string{sandboxChildArg, workspacePath, command}
-	h := loadSandboxHardening()
 	if h.active() {
 		// Compute the grant lists here (as the server uid) and hand them to the
 		// child. When a dedicated sandbox uid is used, the toolchain caches must
@@ -93,10 +128,8 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 		// by the server uid and unwritable by the sandbox uid, so `go build` /
 		// `npm install` would fail without this.
 		writable := extraWritableDirs()
-		if h.uid > 0 {
-			if u, err := user.LookupId(strconv.Itoa(h.uid)); err == nil && u.HomeDir != "" {
-				writable = extraWritableDirsForHome(u.HomeDir)
-			}
+		if h.uid > 0 && sandboxHome != "" {
+			writable = extraWritableDirsForHome(sandboxHome)
 		}
 		cfg := childConfig{
 			WritableDirs: writable,
@@ -109,19 +142,29 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 	}
 	cmd := exec.CommandContext(ctx, self, args...)
 	if h.uid > 0 {
-		// Drop the sandboxed shell to a dedicated unprivileged user. NoSetGroups
-		// avoids inheriting the server's supplementary groups. Requires the
-		// server to hold CAP_SETUID (e.g. running as root); if it doesn't, the
-		// command start fails loudly rather than silently running privileged.
-		cmd.SysProcAttr = &syscall.SysProcAttr{
-			Credential: &syscall.Credential{
-				Uid:         uint32(h.uid),
-				Gid:         uint32(h.gid),
-				NoSetGroups: true,
-			},
-		}
+		applySandboxCredential(cmd, h)
+		cmd.Env = sandboxEnvForHome(sandboxHome, sandboxUser)
 	}
 	return cmd, nil, nil
+}
+
+// applySandboxCredential drops the child to the dedicated unprivileged
+// uid/gid. Groups is set to exactly the primary gid with NoSetGroups=false so
+// the kernel calls setgroups() and CLEARS the server's supplementary groups;
+// leaving NoSetGroups=true would SKIP setgroups and let the sandbox uid inherit
+// whatever groups the server process belongs to (e.g. a shared data/docker
+// group), undermining the isolation the dedicated uid provides. Requires
+// CAP_SETUID; without it cmd.Start() fails loudly rather than running
+// privileged.
+func applySandboxCredential(cmd *exec.Cmd, h sandboxHardening) {
+	cmd.SysProcAttr = &syscall.SysProcAttr{
+		Credential: &syscall.Credential{
+			Uid:         uint32(h.uid),
+			Gid:         uint32(h.gid),
+			Groups:      []uint32{uint32(h.gid)},
+			NoSetGroups: false,
+		},
+	}
 }
 
 // MaybeRunSandboxChild must be called first thing in main() (and in TestMain

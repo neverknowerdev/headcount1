@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"encoding/json"
 	"errors"
+	"log"
 	"net/http"
 	"os"
 	"strconv"
@@ -546,8 +547,16 @@ func (api *API) RecoverRequest(w http.ResponseWriter, r *http.Request) {
 	if user, err := api.q.GetUserByEmail(r.Context(), email); err == nil {
 		if token, err := authctx.NewToken(); err == nil {
 			if _, err := api.q.CreatePasswordResetToken(r.Context(), user.ID, authctx.HashToken(token)); err == nil {
-				link := appBaseURL(r) + "/recover?token=" + token
-				go apiMailer.Send(email, "Reset your passkey", "Use this link to reset your passkey and regain access to your account. Your stored secrets will be cleared and must be re-entered.\n\n"+link)
+				base, berr := appBaseURL(r)
+				if berr != nil {
+					// Misconfiguration: don't build a link from an untrusted
+					// Host header. Log for the operator; still return 200 below
+					// so the response stays non-enumerating.
+					log.Printf("recovery: cannot send reset email: %v", berr)
+				} else {
+					link := base + "/recover?token=" + token
+					go apiMailer.Send(email, "Reset your passkey", "Use this link to reset your passkey and regain access to your account. Your stored secrets will be cleared and must be re-entered.\n\n"+link)
+				}
 			}
 		}
 	}

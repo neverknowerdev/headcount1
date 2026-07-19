@@ -15,11 +15,25 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
 
 	"github.com/go-chi/chi/v5"
 )
+
+// internalGatewayHeaders are headers that authenticate or annotate a request
+// to the in-process LLM gateway only. They must NEVER reach an upstream
+// provider — most importantly the per-run gateway token, which would otherwise
+// be handed to (and potentially logged/replayed by) an external LLM provider.
+// Stripping them here, in the single function that talks to providers, is a
+// centralized guarantee that does not depend on each caller's skipHeaders set.
+var internalGatewayHeaders = map[string]bool{
+	strings.ToLower(runtokens.TokenHeader): true, // X-Gateway-Token
+	"x-run-id":                             true,
+	strings.ToLower(proxyLogModeHeader):    true, // X-Proxy-Log-Mode
+	"x-provider-id":                        true,
+}
 
 // Rate-limit cooldowns double per consecutive rate limit, capped so a model
 // is always retried within the hour.
@@ -213,7 +227,8 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 		return nil, err
 	}
 	for k, vv := range srcHeader {
-		if skipHeaders[strings.ToLower(k)] {
+		lk := strings.ToLower(k)
+		if skipHeaders[lk] || internalGatewayHeaders[lk] {
 			continue
 		}
 		for _, v := range vv {
@@ -257,6 +272,19 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
+	}
+
+	// Defense in depth against a cross-tenant member: every member provider
+	// must belong to the group's owner. replaceGroupMembers enforces this at
+	// write time; re-checking here means a tampered or legacy row can never
+	// cause the gateway to decrypt and spend another tenant's provider key.
+	if group.UserID != nil {
+		for _, m := range group.Members {
+			if m.Provider.UserID != nil && *m.Provider.UserID != *group.UserID {
+				http.Error(w, "Model group references a provider owned by another user", http.StatusForbidden)
+				return
+			}
+		}
 	}
 
 	bodyBytes, err := io.ReadAll(r.Body)

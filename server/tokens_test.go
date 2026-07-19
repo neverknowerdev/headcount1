@@ -117,7 +117,7 @@ func TestCSRFDoubleSubmit(t *testing.T) {
 	user, err := q.CreateUser(ctx, "csrf@test.local")
 	require.NoError(t, err)
 	raw, _ := authctx.NewToken()
-	_, err = q.CreateSession(ctx, user.ID, authctx.HashToken(raw))
+	_, err = q.CreateSession(ctx, user.ID, authctx.HashToken(raw), time.Now().Add(db.SessionAbsoluteCap()))
 	require.NoError(t, err)
 	sessionCookie := &http.Cookie{Name: authctx.CookieName, Value: raw}
 
@@ -185,7 +185,7 @@ func TestMeReportsSessionTiming(t *testing.T) {
 
 	// A live access session + a refresh family whose ceiling is a full cap out.
 	raw, _ := authctx.NewToken()
-	_, err = q.CreateSession(ctx, user.ID, authctx.HashToken(raw))
+	_, err = q.CreateSession(ctx, user.ID, authctx.HashToken(raw), time.Now().Add(db.SessionAbsoluteCap()))
 	require.NoError(t, err)
 	rraw, _ := authctx.NewToken()
 	ceiling := time.Now().Add(db.SessionAbsoluteCap())

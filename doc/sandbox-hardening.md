@@ -122,9 +122,11 @@ with server privileges.
   ```
 - **Docker:** running as root is enough; with `--user` you must add the caps.
 
-The sandbox process is started with `NoSetGroups` — it keeps **only** its
-primary gid (`HEADCOUNT1_SANDBOX_GID`, default = the uid). Supplementary-group
-tricks won't grant it access; plan file permissions around that one gid.
+The sandbox process's credentials are set with `Groups=[gid]` (and
+`NoSetGroups=false`), so the kernel calls `setgroups()` and **clears the
+server's supplementary groups** — the child ends up in only its primary gid
+(`HEADCOUNT1_SANDBOX_GID`, default = the uid). Supplementary-group tricks won't
+grant it access; plan file permissions around that one gid.
 
 ### 5. Make workspaces writable by the sandbox uid — **the app does NOT do this**
 
@@ -174,14 +176,27 @@ bypasses permissions); the sandbox uid can write its workspace but is blocked by
 
 `HEADCOUNT1_SANDBOX_READ_SCOPING=1` swaps Landlock's "read everything" grant for
 an allowlist of system roots that **excludes the home directory**, so the agent
-can't read `${HEADCOUNT1_HOME}` secrets *even at the server's own uid*. Enable it
-on its own (cheap, no uid needed) or alongside the dedicated uid for defense in
-depth.
+can't read `${HEADCOUNT1_HOME}` secret *files* even at the server's own uid.
+Enable it on its own (cheap, no uid needed) or alongside the dedicated uid for
+defense in depth.
+
+> **Read-scoping is not a substitute for the dedicated uid.** Landlock filters by
+> path, not by process. `/proc` must stay on the allowlist (toolchains read
+> `/proc/self`, `/proc/cpuinfo`), and Landlock can't exclude just
+> `/proc/<other-pid>` — so under a **shared uid** the agent can still read
+> `/proc/<server_pid>/environ` (and, with a permissive `yama`, `/proc/<pid>/mem`)
+> to reach the very secrets scrubbing removed from its own environment. Only a
+> **dedicated uid** (a different uid → the kernel denies `/proc/<pid>` access)
+> closes that. Treat the dedicated uid as mandatory when secrecy matters.
 
 The allowed read roots are: `/usr /bin /sbin /lib* /etc /opt /proc /sys /dev
-/run /var /snap`, plus the workspace, the toolchain caches, and any read-only
-roots passed to the tools. **Anything the build must read that lives elsewhere is
-denied.** Practical consequences for your image:
+/snap`, plus `/var/tmp /var/cache /var/lib`, the workspace, the toolchain caches,
+and any read-only roots passed to the tools. The wholesale `/run` and `/var`
+trees are **deliberately not granted**: they hold world-readable container secret
+mounts (Docker `/run/secrets/*`, Kubernetes
+`/var/run/secrets/kubernetes.io/serviceaccount/token`, systemd credentials) that
+would otherwise be reachable **even with a dedicated uid**. **Anything the build
+must read that lives elsewhere is denied.** Practical consequences for your image:
 
 - Install language runtimes/toolchains under **system paths** (`/usr/local`,
   `/opt`, `/usr`) — **not** under `$HOME` (`~/.asdf`, `~/.nvm`, `~/.rbenv`,
@@ -198,15 +213,20 @@ denied.** Practical consequences for your image:
 
 ## Step 7: Environment scrubbing — name your secrets correctly
 
-Before running the shell the server removes secret env vars by **prefix/name**.
-Removed: anything starting `HEADCOUNT1_`, `VAULT_`, `AWS_`, `AZURE_`, `GCP_`,
-`GOOGLE_`, plus exactly `DATABASE_URL`, `SMTP_PASSWORD`, `SMTP_USERNAME`,
-`SMTP_HOST`.
+Before running the shell the server removes secret env vars by
+**prefix/name/substring** (best effort). Removed: anything starting
+`HEADCOUNT1_`, `VAULT_`, `AWS_`, `AZURE_`, `GCP_`, `GOOGLE_`, `SMTP_`, `SSH_`;
+the exact names `DATABASE_URL`, `REDIS_URL`; and any name containing `TOKEN`,
+`SECRET`, `PASSWORD`, `PASSWD`, `PASSPHRASE`, `CREDENTIAL`, `KEY`, `DSN`, or
+`URI`. So `MYCORP_API_TOKEN`, `SIGNING_KEY`, and `SENTRY_DSN` are all caught.
 
-Operator action: **give every server secret one of those prefixes.** A secret
-injected as, say, `MYCORP_API_TOKEN` will **not** be scrubbed and the agent can
-read it via `env`. Prefer `HEADCOUNT1_…` for app config, and keep provider/cloud
-creds under the cloud prefixes. (If you have an unavoidable differently-named
+This is a **denylist**, so it is best-effort: an unconventionally named secret
+(e.g. a bare `LICENSE` value that is actually sensitive) can still slip through.
+Operator action: **give every server secret a recognizable name** — prefer
+`HEADCOUNT1_…` for app config, keep provider/cloud creds under the cloud
+prefixes, and avoid opaque names for secret values. The strongest isolation
+remains the **dedicated sandbox uid**, which prevents reading the server's env
+via `/proc` regardless of naming. (If you have an unavoidable differently-named
 secret, extend `isServerSecretEnv` in `engine/aicli/tools/sandbox.go`.)
 
 This layer is always on and needs no kernel support, but it only removes what it

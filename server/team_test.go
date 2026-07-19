@@ -10,6 +10,7 @@ import (
 	"regexp"
 	"strconv"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/go-chi/chi/v5"
@@ -96,7 +97,7 @@ func registerHelper(t *testing.T, database *gorm.DB, email, inviteToken string) 
 
 func sessionCookieForUser(database *gorm.DB, userID int32) *http.Cookie {
 	raw, _ := authctx.NewToken()
-	_, _ = db.New(database).CreateSession(context.Background(), userID, authctx.HashToken(raw))
+	_, _ = db.New(database).CreateSession(context.Background(), userID, authctx.HashToken(raw), time.Now().Add(db.SessionAbsoluteCap()))
 	return &http.Cookie{Name: authctx.CookieName, Value: raw}
 }
 
@@ -136,6 +137,7 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 	database := setupTeamTestDB(t)
 	r := setupTeamRouter(database)
 	rec := &recordingMailer{}
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
 	endpoints.SetMailer(rec)
 
 	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
@@ -179,6 +181,7 @@ func TestInviteFlowJoinsTeamAsMember(t *testing.T) {
 func TestOnlyOwnerCanCreateCompany(t *testing.T) {
 	database := setupTeamTestDB(t)
 	r := setupTeamRouter(database)
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
 	endpoints.SetMailer(&recordingMailer{})
 
 	// Owner (registered without an invite) can create a company.
@@ -205,6 +208,7 @@ func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {
 	database := setupTeamTestDB(t)
 	r := setupTeamRouter(database)
 	rec := &recordingMailer{}
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
 	endpoints.SetMailer(rec)
 
 	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
@@ -262,6 +266,7 @@ func TestTeamMembersShareCompanies(t *testing.T) {
 	database := setupTeamTestDB(t)
 	r := setupTeamRouter(database)
 	rec := &recordingMailer{}
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
 	endpoints.SetMailer(rec)
 
 	ownerCookie := registerHelper(t, database, "boss@corp.io", "")

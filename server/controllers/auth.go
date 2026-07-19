@@ -42,17 +42,27 @@ func SetMailer(m mailer.Mailer) {
 	}
 }
 
-// appBaseURL is the public URL recovery links point at: APP_BASE_URL when set
-// (cloud, behind a proxy), otherwise reconstructed from the request.
-func appBaseURL(r *http.Request) string {
+// appBaseURL is the public URL recovery/invite links point at. It prefers the
+// operator-configured APP_BASE_URL. Falling back to the request's Host header is
+// only safe when the link is NOT emailed to a third party: an attacker who knows
+// a victim's email can send a request with a spoofed Host header and, if we
+// built the link from it, the victim would receive a link to the attacker's
+// domain that leaks the reset/invite token (CWE-640). So when a real mailer is
+// configured we refuse the Host fallback and require APP_BASE_URL; with the
+// dev/local NopMailer (which only logs the link) the Host reconstruction is
+// retained for convenience.
+func appBaseURL(r *http.Request) (string, error) {
 	if base := os.Getenv("APP_BASE_URL"); base != "" {
-		return strings.TrimRight(base, "/")
+		return strings.TrimRight(base, "/"), nil
+	}
+	if _, isNop := apiMailer.(mailer.NopMailer); !isNop {
+		return "", errors.New("APP_BASE_URL is not set — refusing to build an email link from the untrusted request Host header")
 	}
 	scheme := "http"
 	if requestIsTLS(r) {
 		scheme = "https"
 	}
-	return scheme + "://" + r.Host
+	return scheme + "://" + r.Host, nil
 }
 
 // ── logout / me ──────────────────────────────────────────────────────────────
@@ -66,6 +76,10 @@ func (api *API) Logout(w http.ResponseWriter, r *http.Request) {
 		if user, err := api.q.GetSessionUser(r.Context(), hash); err == nil {
 			secrets.LockUser(user.ID)
 			_ = api.q.RevokeRefreshTokensForUser(r.Context(), user.ID)
+			// Logout already revokes every refresh lineage for the user; drop
+			// their access sessions too so no other still-live access cookie
+			// keeps working for up to an hour after an explicit logout.
+			_ = api.q.DeleteSessionsForUser(r.Context(), user.ID)
 		}
 		_ = api.q.DeleteSessionByTokenHash(r.Context(), hash)
 	}
@@ -182,19 +196,21 @@ func (api *API) e2eUser(ctx context.Context) (db.User, error) {
 // rotating refresh token (new family), and a double-submit CSRF token. Called
 // on register/login finish and by the E2E register bypass.
 func (api *API) issueTokenPair(w http.ResponseWriter, r *http.Request, user db.User) error {
-	// Access session (short; slides while active).
+	// Access session (short; slides while active) and refresh family share one
+	// absolute ceiling, so a directly-used access cookie can never outlive the
+	// login's hard cap.
+	absExpiry := time.Now().Add(db.SessionAbsoluteCap())
 	access, err := authctx.NewToken()
 	if err != nil {
 		return err
 	}
-	if _, err := api.q.CreateSession(r.Context(), user.ID, authctx.HashToken(access)); err != nil {
+	if _, err := api.q.CreateSession(r.Context(), user.ID, authctx.HashToken(access), absExpiry); err != nil {
 		return err
 	}
 	setAccessCookie(w, r, access)
 
-	// Refresh token: first member of a new family, capped by the absolute
-	// session ceiling.
-	if err := api.issueRefreshToken(w, r, user.ID, ""); err != nil {
+	// Refresh token: first member of a new family, capped by the same ceiling.
+	if err := api.issueRefreshToken(w, r, user.ID, "", absExpiry); err != nil {
 		return err
 	}
 	setCSRFCookie(w, r)
@@ -205,7 +221,7 @@ func (api *API) issueTokenPair(w http.ResponseWriter, r *http.Request, user db.U
 // a new family (fresh login); a non-empty familyID continues an existing lineage
 // (rotation) — but rotation goes through RotateRefreshToken, so callers here pass
 // "" and let CreateRefreshToken assign a fresh family.
-func (api *API) issueRefreshToken(w http.ResponseWriter, r *http.Request, userID int32, familyID string) error {
+func (api *API) issueRefreshToken(w http.ResponseWriter, r *http.Request, userID int32, familyID string, absExpiry time.Time) error {
 	refresh, err := authctx.NewToken()
 	if err != nil {
 		return err
@@ -216,7 +232,6 @@ func (api *API) issueRefreshToken(w http.ResponseWriter, r *http.Request, userID
 			return err
 		}
 	}
-	absExpiry := time.Now().Add(db.SessionAbsoluteCap())
 	if _, err := api.q.CreateRefreshToken(r.Context(), userID, familyID, authctx.HashToken(refresh), absExpiry); err != nil {
 		return err
 	}
@@ -252,7 +267,9 @@ func (api *API) Refresh(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "token generation failed")
 		return
 	}
-	if _, err := api.q.CreateSession(r.Context(), next.UserID, authctx.HashToken(access)); err != nil {
+	// The new access session inherits the family's absolute ceiling, so
+	// rotating near the cap can't mint a session that outlives it.
+	if _, err := api.q.CreateSession(r.Context(), next.UserID, authctx.HashToken(access), next.AbsoluteExpiresAt); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "session creation failed")
 		return
 	}

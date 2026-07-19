@@ -5,6 +5,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/go-chi/chi/v5"
@@ -131,7 +132,7 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	newSessionCookie := func(userID int32) *http.Cookie {
 		raw, err := authctx.NewToken()
 		require.NoError(t, err)
-		_, err = q.CreateSession(t.Context(), userID, authctx.HashToken(raw))
+		_, err = q.CreateSession(t.Context(), userID, authctx.HashToken(raw), time.Now().Add(db.SessionAbsoluteCap()))
 		require.NoError(t, err)
 		return &http.Cookie{Name: authctx.CookieName, Value: raw}
 	}

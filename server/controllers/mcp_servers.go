@@ -18,6 +18,7 @@ import (
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/secrets"
+	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/pkg/setup"
 )
 
@@ -219,6 +220,17 @@ func (api *API) GetMCPServer(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) UpdateMCPServer(w http.ResponseWriter, r *http.Request) {
 	existing := api.mcpServerFromCtx(r) // loaded + authorized by LoadMCPServer
+
+	// Builtin rows are a single global catalog shared by every tenant (per-user
+	// state lives in MCPAccount). Allowing an arbitrary user to mutate one lets
+	// them rewrite fields like URL/Headers and redirect other tenants' MCP
+	// traffic (and their per-user tokens) to an attacker-controlled host, or
+	// globally disable/deface a builtin. Restrict mutation to the operator, the
+	// same boundary that governs other instance-global operations.
+	if existing.Builtin && !utils.IsE2E() && !globalAdminAPIEnabled() {
+		api.respondError(w, http.StatusForbidden, "built-in MCP servers are managed by the operator and cannot be modified")
+		return
+	}
 
 	var req db.MCPServer
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {

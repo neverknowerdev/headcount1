@@ -130,6 +130,11 @@ func (api *API) authorizeMCPServer(r *http.Request, serverID int32) (db.MCPServe
 	if err != nil {
 		return db.MCPServer{}, err
 	}
+	// GetMCPServer preloads Accounts with no user filter. For a shared builtin
+	// row that would leak every tenant's account metadata (labels, user IDs,
+	// last-error strings) to any caller, so scope it to the caller's own
+	// accounts before the row is ever handed to a handler.
+	s.Accounts = filterAccountsForUser(r, s.Accounts)
 	switch {
 	case s.Builtin:
 		return s, nil

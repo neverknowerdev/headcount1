@@ -104,6 +104,16 @@ func (api *API) CreateTeamInvite(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve the public base URL before creating the invite. When a real
+	// mailer is configured this refuses to derive the link from an untrusted
+	// Host header (see appBaseURL) — fail here rather than emailing a
+	// Host-poisoned invite link.
+	base, err := appBaseURL(r)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "server email is misconfigured: set APP_BASE_URL to send invites")
+		return
+	}
+
 	token, err := authctx.NewToken()
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -117,7 +127,7 @@ func (api *API) CreateTeamInvite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	team, _ := api.q.GetTeam(r.Context(), membership.TeamID)
-	inviteURL := fmt.Sprintf("%s/register?invite=%s", appBaseURL(r), token)
+	inviteURL := fmt.Sprintf("%s/register?invite=%s", base, token)
 	body := fmt.Sprintf(
 		"You've been invited to join the team %q on headcount1.\n\n"+
 			"Create your account within 7 days:\n%s\n\n"+

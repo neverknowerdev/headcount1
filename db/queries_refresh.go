@@ -116,15 +116,24 @@ func (q *Queries) RotateRefreshToken(ctx context.Context, oldHash, newHash strin
 			// A revoked token means the family was already burned (theft, logout,
 			// or a prior reuse). Reject; do not resurrect it.
 			reuse = true
+			if err := tx.Where("user_id = ?", cur.UserID).Delete(&Session{}).Error; err != nil {
+				return err
+			}
 			return tx.Model(&RefreshToken{}).Where("family_id = ? AND revoked_at IS NULL", cur.FamilyID).
 				Update("revoked_at", now).Error
 		}
 		if cur.UsedAt != nil {
 			if now.Sub(*cur.UsedAt) > refreshReuseGracePeriod {
-				// Replay of a long-spent token → theft. Burn the whole family.
+				// Replay of a long-spent token → theft. Burn the whole family AND
+				// every live access session for the user, so a thief who grabbed
+				// only the access cookie loses access the moment the theft is
+				// detected (instead of keeping it until the sliding window lapses).
 				// Commit the revocation (return nil, not the sentinel, so the
 				// transaction is NOT rolled back) and signal reuse afterwards.
 				reuse = true
+				if err := tx.Where("user_id = ?", cur.UserID).Delete(&Session{}).Error; err != nil {
+					return err
+				}
 				return tx.Model(&RefreshToken{}).Where("family_id = ? AND revoked_at IS NULL", cur.FamilyID).
 					Update("revoked_at", now).Error
 			}

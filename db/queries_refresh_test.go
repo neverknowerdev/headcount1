@@ -18,7 +18,7 @@ func setupRefreshTestDB(t *testing.T) (*db.Queries, *gorm.DB, context.Context, i
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.RefreshToken{}))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.RefreshToken{}, &db.Session{}))
 	q := db.New(database)
 	ctx := context.Background()
 	user, err := q.CreateUser(ctx, "refresh@test.local")

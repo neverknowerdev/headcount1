@@ -2,6 +2,7 @@ package endpoints
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
 	"strings"
@@ -9,6 +10,17 @@ import (
 
 	"agent-orchestrator/db"
 )
+
+// respondReplaceMembersErr maps a replaceGroupMembers failure to a status: an
+// ownership violation on a referenced provider is a client error (400), not a
+// server error.
+func (api *API) respondReplaceMembersErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errNotOwned) {
+		api.respondError(w, http.StatusBadRequest, "one or more members reference a provider you do not own")
+		return
+	}
+	api.respondError(w, http.StatusInternalServerError, err.Error())
+}
 
 type modelGroupMemberReq struct {
 	ProviderID int32  `json:"provider_id"`
@@ -67,7 +79,7 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
+		api.respondReplaceMembersErr(w, err)
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -91,7 +103,7 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
+		api.respondReplaceMembersErr(w, err)
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -112,6 +124,19 @@ func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers [
 	for _, m := range reqMembers {
 		if m.ProviderID == 0 {
 			continue
+		}
+		// A group member may not reference ANOTHER tenant's provider. Without
+		// this check any user could add another tenant's provider id (a small
+		// sequential int) as a member and, at serve time, spend that tenant's
+		// decrypted API key — the gateway only authorizes the group owner, not
+		// each member provider. Providers owned by the caller and ownerless
+		// shared/builtin providers (UserID nil) are allowed.
+		prov, err := api.q.GetLLMProvider(r.Context(), m.ProviderID)
+		if err != nil {
+			return errNotOwned
+		}
+		if prov.UserID != nil && *prov.UserID != api.currentUserID(r) {
+			return errNotOwned
 		}
 		if m.AllModels {
 			members = append(members, db.ModelGroupMember{ProviderID: m.ProviderID, AllModels: true, IsFree: m.IsFree})

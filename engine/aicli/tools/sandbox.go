@@ -78,8 +78,12 @@ func scrubbedEnv() []string {
 
 func isServerSecretEnv(key string) bool {
 	up := strings.ToUpper(key)
-	// The app's own crown jewels + cloud creds, by prefix.
-	for _, p := range []string{"HEADCOUNT1_", "VAULT_", "AWS_", "AZURE_", "GCP_", "GOOGLE_"} {
+	// The app's own crown jewels + cloud creds + mailer + ssh-agent, by prefix.
+	// SMTP_ covers SMTP_USERNAME/SMTP_HOST/SMTP_FROM (SMTP_PASSWORD is also
+	// caught by the PASSWORD substring); SSH_ covers SSH_AUTH_SOCK /
+	// SSH_AGENT_PID, which would otherwise let a same-uid child sign with the
+	// server's forwarded ssh-agent.
+	for _, p := range []string{"HEADCOUNT1_", "VAULT_", "AWS_", "AZURE_", "GCP_", "GOOGLE_", "SMTP_", "SSH_"} {
 		if strings.HasPrefix(up, p) {
 			return true
 		}
@@ -90,14 +94,48 @@ func isServerSecretEnv(key string) bool {
 	}
 	// Catch third-party secrets the operator may have in the server env
 	// (GITHUB_TOKEN, NPM_TOKEN, OPENAI_API_KEY, STRIPE_SECRET_KEY,
-	// DOCKER_PASSWORD, …) by well-known secret-ish substrings, so the
-	// model-driven shell can't read them via `env` / /proc/self/environ.
-	for _, sub := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "CREDENTIAL", "APIKEY", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY"} {
+	// DOCKER_PASSWORD, SIGNING_KEY, DEPLOY_KEY, SENTRY_DSN, …) by well-known
+	// secret-ish substrings, so the model-driven shell can't read them via
+	// `env` / /proc/self/environ. This is a best-effort denylist: an
+	// unconventionally named secret can still slip through, so the strongest
+	// isolation remains the dedicated sandbox uid (see doc/sandbox-hardening.md).
+	for _, sub := range []string{"TOKEN", "SECRET", "PASSWORD", "PASSWD", "PASSPHRASE", "CREDENTIAL", "APIKEY", "API_KEY", "PRIVATE_KEY", "ACCESS_KEY", "KEY", "DSN", "URI"} {
 		if strings.Contains(up, sub) {
 			return true
 		}
 	}
 	return false
+}
+
+// sandboxEnvForHome returns the scrubbed environment with HOME/USER/LOGNAME
+// pointed at the dedicated sandbox uid's home. Without this the child inherits
+// the server uid's HOME, so tools that write $HOME/.cache would target a
+// directory the sandbox uid can't write (and that read-scoping blocks), while
+// the writable cache dir granted for that uid goes unused. Only used on the
+// dedicated-uid path, where the override is correct.
+func sandboxEnvForHome(home, username string) []string {
+	env := scrubbedEnv()
+	if home != "" {
+		env = overrideEnvVar(env, "HOME", home)
+	}
+	if username != "" {
+		env = overrideEnvVar(env, "USER", username)
+		env = overrideEnvVar(env, "LOGNAME", username)
+	}
+	return env
+}
+
+// overrideEnvVar sets key=val in a KEY=VALUE slice, replacing an existing entry
+// or appending a new one.
+func overrideEnvVar(env []string, key, val string) []string {
+	prefix := key + "="
+	for i, kv := range env {
+		if strings.HasPrefix(kv, prefix) {
+			env[i] = prefix + val
+			return env
+		}
+	}
+	return append(env, prefix+val)
 }
 
 // resolvePath resolves path relative to workspacePath and verifies the result
