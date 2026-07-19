@@ -1,7 +1,6 @@
 import React, { useMemo } from 'react';
-import axios from 'axios';
 import { Link, useLocation } from 'react-router-dom';
-import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings, Cpu, LogOut } from 'lucide-react';
+import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings, Cpu } from 'lucide-react';
 import { useStore } from '../store';
 
 const getNavItems = (companyIdentifier: string | null) => {
@@ -21,15 +20,8 @@ const getNavItems = (companyIdentifier: string | null) => {
 
 export const Sidebar: React.FC = () => {
   const location = useLocation();
-  const { selectedCompanyId, companies, user, setUser } = useStore();
+  const { selectedCompanyId, companies } = useStore();
 
-  const logout = async () => {
-    try {
-      await axios.post('/api/auth/logout');
-    } finally {
-      setUser(null); // AuthGate flips back to the login screen
-    }
-  };
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
@@ -74,35 +66,6 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-      <div className="border-t px-2 py-2">
-        <Link
-          to="/team"
-          className={`${
-            location.pathname === '/team'
-              ? 'bg-indigo-50 text-indigo-600'
-              : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-          } group flex items-center px-2 py-2 text-sm font-medium rounded-md`}
-        >
-          <Users className={`${location.pathname === '/team' ? 'text-indigo-600' : 'text-gray-400 group-hover:text-gray-500'} mr-3 h-5 w-5 flex-shrink-0`} />
-          Team
-        </Link>
-      </div>
-
-      {user && (
-        <div className="border-t px-4 py-3">
-          <div className="flex items-center justify-between gap-2">
-            <span className="truncate text-xs text-gray-500" title={user.email}>{user.email}</span>
-            <button
-              onClick={logout}
-              title="Log out"
-              className="flex shrink-0 items-center gap-1 text-xs font-medium text-gray-500 hover:text-gray-900"
-            >
-              <LogOut className="h-4 w-4" />
-              Log out
-            </button>
-          </div>
-        </div>
-      )}
     </div>
   );
 };
