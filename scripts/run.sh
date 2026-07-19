@@ -69,6 +69,11 @@ set_env_var() {
 }
 
 mkdir -p "$DATA_DIR"
+# Lock the data dir to the owner (0700). The secret files inside are already
+# 0600, but this stops other local users from even traversing in. Note: a
+# dedicated-sandbox-uid production setup needs a different mode (see
+# doc/sandbox-hardening.md) — this 0700 is for the local single-user path.
+chmod 700 "$DATA_DIR" 2>/dev/null || true
 
 # Load any previously-persisted config (this is what makes the boot key stable
 # across launches).

@@ -92,6 +92,17 @@ you keep it:
   deliberately weakens the zero-knowledge guarantee against full-disk theft —
   don't do it on a shared/production host.
 
+**On `0600` and "who can read it".** `0600` restricts by *UID*, not by process:
+another user can't read it and neither can the agent under a dedicated sandbox
+uid, but **any process running as your own user can** — including the agent's
+`bash` tool, which by default runs as the server's uid with unrestricted reads.
+The boot-key file is no more exposed than `master.key`, `keystore.json`, and
+`keyring.sealed`, which already sit in the same directory at `0600`. To keep the
+agent out of all of them, enable `HEADCOUNT1_SANDBOX_READ_SCOPING` (hides
+`${HEADCOUNT1_HOME}` from reads) and/or `HEADCOUNT1_SANDBOX_UID` (runs the agent
+as a different uid) — see `doc/sandbox-hardening.md`. In production, prefer never
+writing the key to disk at all (KMS/Vault Transit).
+
 `keyring.sealed` itself is short-lived (deleted on the next boot) and useless
 without the boot key, so it is safe to leave on disk between a graceful stop and
 the following start.
