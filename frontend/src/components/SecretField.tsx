@@ -64,13 +64,3 @@ export function SecretField({
         </div>
     );
 }
-
-// SecretLockBadge is a compact standalone marker for secret inputs that can't
-// easily adopt the full SecretField (e.g. file dropzones).
-export function SecretLockBadge({ text = 'Encrypted — never stored raw' }: { text?: string }) {
-    return (
-        <span className="inline-flex items-center gap-1 text-xs text-emerald-700">
-            <Lock size={12} /> {text}
-        </span>
-    );
-}

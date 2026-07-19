@@ -1,4 +1,4 @@
-import { SecretLockBadge } from '../components/SecretField';
+import { SecretLabel } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
@@ -505,7 +505,7 @@ export const ProvidersManager: React.FC = () => {
                         {!editingId && selectedPresetKey !== 'custom' ? (
                             <>
                                 <div className="flex-1 overflow-y-auto pr-2">
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">API Key <SecretLockBadge /></label>
+                                    <SecretLabel>API Key</SecretLabel>
                                     <input
                                         type="password"
                                         autoFocus
@@ -545,7 +545,7 @@ export const ProvidersManager: React.FC = () => {
                                 <input required type="text" value={formData.base_url} onChange={e => setFormData({...formData, base_url: e.target.value})} className="w-full border rounded p-2" />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">API Key <SecretLockBadge /> {editingId && '(Leave blank to keep existing)'}</label>
+                                <SecretLabel>API Key {editingId && '(Leave blank to keep existing)'}</SecretLabel>
                                 <input type="password" required={!editingId} value={formData.api_key} onChange={e => setFormData({...formData, api_key: e.target.value})} className="w-full border rounded p-2" />
                             </div>
                             <div>
@@ -615,7 +615,7 @@ export const ProvidersManager: React.FC = () => {
 
                         <div className="space-y-4 overflow-y-auto flex-1 pr-2">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">API Key <SecretLockBadge /></label>
+                                <SecretLabel>API Key</SecretLabel>
                                 <input
                                     type="password"
                                     autoFocus

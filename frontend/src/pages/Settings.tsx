@@ -1,4 +1,4 @@
-import { SecretLockBadge } from '../components/SecretField';
+import { SecretLabel } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
@@ -157,9 +157,7 @@ export const Settings: React.FC = () => {
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            SSH Private Key <SecretLockBadge />
-                        </label>
+                        <SecretLabel>SSH Private Key</SecretLabel>
                         <p className="text-xs text-gray-500 mb-2">
                             Your personal key to authenticate Git operations for private repositories.
                             Encrypted at rest under your passkey; never shared with other users. Paste the key or upload the file directly.
