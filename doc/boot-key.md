@@ -97,10 +97,14 @@ signed-out user's secrets.**
 - **Not written** on a hard kill — `kill -9` / `SIGKILL`, OOM, power loss, or a
   panic. Nothing is left behind, so users re-tap. This is intentional: an
   *unexpected* death must leak nothing.
-- **Watch out for dev hot-reloaders** (`air`, `reflex`, `make run-dev`): they
-  usually `SIGKILL` the process on reload, so the snapshot is *not* written and
-  you'll re-tap. Use `make run` (or `scripts/run.sh`) if you want to exercise
-  the seamless-restart path locally.
+- **Dev hot-reloaders**: `make run-dev` is wired for the seamless path — it
+  enables the self-managed local boot key (`HEADCOUNT1_LOCAL_BOOTKEY=1`) and its
+  `.air.toml` sets `send_interrupt = true` + a `kill_delay`, so `air` sends
+  `SIGINT` and the server has time to seal on every rebuild and on Ctrl+C. A
+  raw hot-reloader that `SIGKILL`s the process (e.g. `air` with
+  `send_interrupt = false`, `reflex`) still skips the snapshot and forces a
+  re-tap; use `make run-dev`, `make run`, or `scripts/run.sh` for the seamless
+  path.
 
 ---
 

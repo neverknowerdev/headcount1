@@ -19,7 +19,7 @@ run-dev:
 		sleep 1; \
 	fi
 	@trap 'kill 0' EXIT; \
-	go tool air & \
+	HEADCOUNT1_LOCAL_BOOTKEY=1 go tool air & \
 	cd frontend && npm run dev
 
 dev:
