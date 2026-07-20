@@ -142,13 +142,15 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 		ReadOnlyDirs: readOnlyDirs,
 		ReadScoping:  h.readScoping,
 	}
-	// In the default broad-read mode, always deny the server's secret files by
-	// granting "/" minus those subtrees. Full read-scoping already hides the
-	// whole home, so it needs no extra exclusion. Enumeration runs here (server
-	// uid), which can always list the excluded paths' ancestors.
+	// In the default mode, hide the whole headcount1 data root from the agent by
+	// granting "/" minus that subtree; the task's own dirs (workspace + the
+	// read-only dirs) are re-granted below, so the agent sees only its task and
+	// not the DB, secrets, or any other tenant's files. Full read-scoping hides
+	// even more (the whole home), so it needs no extra exclusion. Enumeration
+	// runs here (server uid), which can always list the excluded paths.
 	if !h.readScoping {
-		if pd := protectedDirs(); len(pd) > 0 {
-			cfg.ReadRoots = readRootsExcluding(pd)
+		if hd := hiddenDirs(); len(hd) > 0 {
+			cfg.ReadRoots = readRootsExcluding(hd)
 		}
 	}
 	// Pass the config whenever it carries anything the child can't recompute on
@@ -247,10 +249,11 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 		roots := append(append([]string{}, readScopeRoots...), cfg.ReadOnlyDirs...)
 		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
 	case len(cfg.ReadRoots) > 0:
-		// Broad read of the whole filesystem EXCEPT the server's secret files:
-		// the parent granted "/" minus the protected subtrees. The workspace,
-		// caches, and configured read-only dirs are covered too (they are not
-		// among the excluded subtrees), but re-list ReadOnlyDirs for clarity.
+		// Read the whole filesystem EXCEPT the headcount1 data root (the parent
+		// granted "/" minus that subtree), then re-grant the task's own dirs
+		// that live inside it: the read-only dirs here, plus the workspace via
+		// the RW grant above. Net effect — system/home toolchains stay readable,
+		// but the only data-root paths the agent can read are its own task's.
 		roots := append(append([]string{}, cfg.ReadRoots...), cfg.ReadOnlyDirs...)
 		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
 	default:

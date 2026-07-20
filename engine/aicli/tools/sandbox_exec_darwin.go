@@ -28,7 +28,7 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 		// No sandbox-exec available: run unsandboxed, same as the historical behavior.
 		return exec.CommandContext(ctx, "sh", "-c", command), nil, nil
 	}
-	profile, err := seatbeltProfile(workspacePath)
+	profile, err := seatbeltProfile(workspacePath, readOnlyDirs)
 	if err != nil {
 		return nil, nil, fmt.Errorf("building sandbox profile: %w", err)
 	}
@@ -50,10 +50,11 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 	return cmd, cleanup, nil
 }
 
-// seatbeltProfile generates a Seatbelt policy: allow everything, deny file
-// writes, then re-allow writes under the workspace and the shared writable
-// dirs. Later rules win, so the allow-list overrides the deny.
-func seatbeltProfile(workspacePath string) (string, error) {
+// seatbeltProfile generates a Seatbelt policy: allow everything, deny reads of
+// the headcount1 data root (re-allowing the task's own dirs), deny file writes,
+// then re-allow writes under the workspace and the shared writable dirs. Later
+// rules win, so each allow-list overrides the deny above it.
+func seatbeltProfile(workspacePath string, readOnlyDirs []string) (string, error) {
 	writable := append([]string{workspacePath}, extraWritableDirs()...)
 
 	var subpaths []string
@@ -78,15 +79,26 @@ func seatbeltProfile(workspacePath string) (string, error) {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
-	// Deny reads of the server's secret files (DB, SSH keys, credentials,
-	// backups, keyring snapshot). Later rules win, so this overrides the
-	// allow-all-read default above. Same set as the Linux read exclusion.
-	for _, p := range protectedDirs() {
+	// Hide the whole headcount1 data root (DB, secrets, and every other tenant's
+	// files), then re-allow reads of the task's own dirs — the workspace and the
+	// configured read-only dirs (parent workspace, project repo, artifacts).
+	// Later rules win, so the re-allow overrides the deny. Mirrors the Linux
+	// "/" minus data-root read exclusion.
+	for _, p := range hiddenDirs() {
 		esc, err := escapeSeatbeltString(filepath.Clean(p))
 		if err != nil {
 			return "", err
 		}
 		fmt.Fprintf(&b, "(deny file-read* (subpath \"%s\"))\n", esc)
+	}
+	if len(hiddenDirs()) > 0 {
+		for _, p := range append([]string{workspacePath}, readOnlyDirs...) {
+			esc, err := escapeSeatbeltString(filepath.Clean(p))
+			if err != nil {
+				return "", err
+			}
+			fmt.Fprintf(&b, "(allow file-read* (subpath \"%s\"))\n", esc)
+		}
 	}
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString("(allow file-write*\n")

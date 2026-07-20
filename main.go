@@ -58,20 +58,13 @@ func main() {
 		log.Printf("Warning: failed to create base directories: %v", err)
 	}
 
-	// Deny the agent's shell any read access to the server's own secret files —
-	// always, even without opt-in hardening. The agent never needs the SQLite
-	// DB, SSH keys, credentials, backups, or the keyring snapshot / boot key, so
-	// the kernel sandbox (Landlock / Seatbelt) hides them from the untrusted
-	// shell. See doc/sandbox-hardening.md.
-	paths := filesystem.NewPaths(basePath)
-	tools.SetProtectedReadDirs([]string{
-		paths.DBDir(),
-		paths.SSHDir(),
-		paths.CredentialsDir(),
-		paths.BackupsDir(),
-		filepath.Join(basePath, "keyring.sealed"),
-		filepath.Join(basePath, "keyring.bootkey"),
-	})
+	// Confine the agent's shell to its own task. The kernel sandbox (Landlock /
+	// Seatbelt) hides the entire headcount1 data root from the untrusted shell,
+	// re-granting only the task's own dirs per run (workspace, parent workspace,
+	// project repo, artifacts). So the DB, SSH keys, credentials, backups, the
+	// keyring snapshot, and every OTHER company's/task's files are all invisible,
+	// while system and home toolchains stay readable. See doc/sandbox-hardening.md.
+	tools.SetHiddenReadDirs([]string{basePath})
 
 	dbConnStr := os.Getenv("DATABASE_URL")
 

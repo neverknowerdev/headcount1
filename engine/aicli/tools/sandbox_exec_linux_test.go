@@ -202,64 +202,78 @@ func TestLandlockInheritedByChildProcesses(t *testing.T) {
 	}
 }
 
-// TestLandlockProtectedDirsAlwaysDenied proves that registered secret paths are
-// denied to the agent shell in the DEFAULT (broad-read) mode — no opt-in
-// hardening — while everything else, including sibling dirs under the same
-// parent, stays readable.
-func TestLandlockProtectedDirsAlwaysDenied(t *testing.T) {
+// TestLandlockHidesDataRootExceptTaskDirs proves the DEFAULT confinement (no
+// opt-in hardening): the whole headcount1 data root is hidden from the agent,
+// EXCEPT its own workspace and the granted read-only dirs, while system reads
+// stay open.
+func TestLandlockHidesDataRootExceptTaskDirs(t *testing.T) {
 	if landlockABI() == 0 {
 		t.Skip("kernel lacks Landlock support")
 	}
-	workspace := t.TempDir()
 
-	// A "secrets" dir with a sibling the agent legitimately reads — like
-	// {base}/db (secret) next to {base}/repos (fine). Both live under one
-	// parent, so this also proves we carve out just the secret subtree, not the
-	// whole parent.
+	// Simulate the data root: {base}/db (secret), {base}/repos/proj (the
+	// project, granted read-only), and {base}/workspace/task-1 (the workdir).
 	base := outsideDir(t)
-	secretDir := filepath.Join(base, "db")
-	siblingDir := filepath.Join(base, "repos")
-	for _, d := range []string{secretDir, siblingDir} {
-		if err := os.MkdirAll(d, 0o700); err != nil {
+	secretFile := filepath.Join(base, "db", "headcount1.db")
+	projectDir := filepath.Join(base, "repos", "proj")
+	projectFile := filepath.Join(projectDir, "main.go")
+	otherTenant := filepath.Join(base, "workspace", "other", "task-9", "notes.txt")
+	workspace := filepath.Join(base, "workspace", "acme", "task-1")
+	for _, f := range []string{secretFile, projectFile, otherTenant} {
+		if err := os.MkdirAll(filepath.Dir(f), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(f, []byte("DATA"), 0o600); err != nil {
 			t.Fatal(err)
 		}
 	}
-	secretFile := filepath.Join(secretDir, "headcount1.db")
-	if err := os.WriteFile(secretFile, []byte("TOPSECRET"), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	siblingFile := filepath.Join(siblingDir, "readme.txt")
-	if err := os.WriteFile(siblingFile, []byte("HELLO"), 0o644); err != nil {
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
 		t.Fatal(err)
 	}
 
-	// Baseline: with nothing registered, reads are open — the secret is readable.
-	out := execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, secretFile))
-	if !strings.Contains(out, "TOPSECRET") {
-		t.Fatalf("baseline (no protected dirs) should read the file, got: %q", out)
+	// Read via a shell variable so validateCommandPaths (which rejects explicit
+	// absolute paths) is bypassed and the KERNEL layer is what's under test.
+	readVia := func(readOnly []string, file string) string {
+		t.Helper()
+		args, _ := json.Marshal(map[string]string{
+			"command": fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null && echo READ || echo BLOCKED`, file),
+		})
+		out, err := NewExecCommand(workspace, readOnly...).Execute(context.Background(), args)
+		if err != nil {
+			t.Fatalf("Execute: %v", err)
+		}
+		return out
 	}
 
-	// Register the secret dir as protected — no env hardening enabled.
-	SetProtectedReadDirs([]string{secretDir})
-	t.Cleanup(func() { SetProtectedReadDirs(nil) })
-
-	// The secret is now denied.
-	out = execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null && echo LEAKED || echo BLOCKED`, secretFile))
-	if strings.Contains(out, "TOPSECRET") || strings.Contains(out, "LEAKED") || !strings.Contains(out, "BLOCKED") {
-		t.Errorf("protected secret dir must be denied, got: %q", out)
+	// Baseline: nothing hidden → the secret is readable.
+	if out := readVia(nil, secretFile); !strings.Contains(out, "DATA") {
+		t.Fatalf("baseline should read the file, got: %q", out)
 	}
 
-	// Its sibling under the same parent is still readable (we hid only the
-	// secret subtree, not the parent).
-	out = execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, siblingFile))
-	if !strings.Contains(out, "HELLO") {
-		t.Errorf("a non-secret sibling dir must stay readable, got: %q", out)
-	}
+	// Hide the whole data root; grant the project dir read-only (as the engine
+	// does). Workspace is always granted.
+	SetHiddenReadDirs([]string{base})
+	t.Cleanup(func() { SetHiddenReadDirs(nil) })
 
-	// Sanity: workspace and system toolchain reads still work.
-	out = execBash(t, workspace, `echo hi > f.txt && cat f.txt && cat /etc/hostname >/dev/null 2>&1 && echo OK`)
+	// The secret and another tenant's workspace are denied.
+	if out := readVia([]string{projectDir}, secretFile); !strings.Contains(out, "BLOCKED") || strings.Contains(out, "DATA") {
+		t.Errorf("data-root secret must be hidden, got: %q", out)
+	}
+	if out := readVia([]string{projectDir}, otherTenant); !strings.Contains(out, "BLOCKED") || strings.Contains(out, "DATA") {
+		t.Errorf("another tenant's workspace must be hidden, got: %q", out)
+	}
+	// The granted project dir IS readable.
+	if out := readVia([]string{projectDir}, projectFile); !strings.Contains(out, "DATA") {
+		t.Errorf("granted project dir must be readable, got: %q", out)
+	}
+	// Workspace + system toolchain reads still work.
+	args, _ := json.Marshal(map[string]string{"command": `echo hi > f.txt && cat f.txt && cat /etc/hostname >/dev/null 2>&1 && echo OK`})
+	out, err := NewExecCommand(workspace, projectDir).Execute(context.Background(), args)
+	if err != nil {
+		t.Fatalf("Execute: %v", err)
+	}
 	if !strings.Contains(out, "hi") || !strings.Contains(out, "OK") {
-		t.Errorf("protected-dirs mode broke normal workspace/system access, got: %q", out)
+		t.Errorf("data-root hiding broke workspace/system access, got: %q", out)
 	}
 }
 

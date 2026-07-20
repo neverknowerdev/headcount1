@@ -38,27 +38,37 @@ With no configuration the agent shell gets:
 - **Write sandbox** — can only write inside its workspace + scratch/cache dirs
   (`/tmp`, `~/.cache`, `~/.npm`, `~/go/pkg`, …). Enforced by Landlock (Linux) or
   Seatbelt (macOS).
-- **Secret-file read denial (always on)** — the agent is denied *read* access to
-  the server's own secret files, with no opt-in required: the SQLite DB
-  (`${HEADCOUNT1_HOME}/db`), SSH keys (`ssh/`), `credentials/`, `backups/`, and
-  the keyring snapshot / boot key (`keyring.sealed`, `keyring.bootkey`). Landlock
-  is an allowlist with no deny rule, so this is done by granting read of the
-  whole filesystem *minus* those subtrees (the rest of `${HEADCOUNT1_HOME}` —
-  `workspace/`, `repos/`, `skills/`, `venv/`, … — stays readable); Seatbelt uses
-  an explicit `(deny file-read* …)`. Reads everywhere else remain open, so
-  toolchains are unaffected.
+- **Data-root confinement (always on)** — the agent's shell can *read* the whole
+  filesystem EXCEPT the headcount1 data root (`${HEADCOUNT1_HOME}`), of which it
+  sees only the current task's own dirs: its **workspace**, its **parent task's**
+  workspace, the **project repo**, and the task's **artifacts** dir. Everything
+  else under the data root is invisible — the SQLite DB, SSH keys, credentials,
+  backups, the keyring snapshot / boot key, *and every other company's and
+  task's files*. Landlock is an allowlist with no deny rule, so this is done by
+  granting "/" *minus* the data root and re-granting those task dirs; Seatbelt
+  uses an explicit `(deny file-read* …)` re-allowing the task dirs. System and
+  home toolchain paths (`/usr`, `/lib`, `~/.gitconfig`, build caches, …) stay
+  readable, so builds and tools are unaffected.
 - **Env scrub** — the server's secret env vars are stripped before the shell
   runs (see step 7).
 
 What the always-on default does **not** cover: a shared-uid agent can still read
 the server's environment via `/proc/<server_pid>/environ`, and `/proc`, `/tmp`,
 and other world-readable locations stay open. Closing those — and hiding the
-*whole* home rather than just the known secret files — is what the
-dedicated-uid (steps 3–5) and read-scoping (step 6) modes are for. On a
-single-user dev box the always-on denial is usually enough; for a
-shared/multi-tenant deployment, do the full setup.
+whole home, not just the data root — is what the dedicated-uid (steps 3–5) and
+read-scoping (step 6) modes are for. On a single-user dev box the always-on
+confinement is usually enough; for a shared/multi-tenant deployment, do the full
+setup.
 
 `${HEADCOUNT1_HOME}` defaults to `~/.headcount1` (the server user's home).
+
+> **Keep the data root out of world-writable dirs.** The confinement grants the
+> agent's workspace and scratch dirs (`/tmp`, `/var/tmp`, `~/.cache`, …) as
+> writable, and a Landlock/Seatbelt writable grant implies read. So if
+> `${HEADCOUNT1_HOME}` is placed *inside* one of those (e.g. under `/tmp`), the
+> data root becomes readable through that grant and the hiding is defeated. The
+> default (`~/.headcount1`) is safely outside them; only override `BasePath` to
+> another location that is likewise not under a temp/cache dir.
 
 ---
 

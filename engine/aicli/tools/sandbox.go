@@ -34,25 +34,30 @@ type sandboxHardening struct {
 // needs to carry the extra child config).
 func (h sandboxHardening) active() bool { return h.uid > 0 || h.readScoping }
 
-// protectedReadDirs are absolute paths holding the server's own secrets (the
-// SQLite DB, SSH keys, credentials, backups, the keyring snapshot / boot key).
-// The agent's shell never needs them, so the read sandbox denies them ALWAYS —
-// even in the default broad-read mode, with no operator opt-in required. This
-// is the always-on, targeted counterpart to HEADCOUNT1_SANDBOX_READ_SCOPING
-// (which hides the whole home) and HEADCOUNT1_SANDBOX_UID (which uses file
-// ownership). Registered once at startup via SetProtectedReadDirs.
-var protectedReadDirs []string
+// hiddenReadDirs are subtrees the agent's shell must never read, EXCEPT for the
+// specific paths granted per-command as the workspace or a read-only dir. In
+// practice this is the whole headcount1 data root ({base} = ~/.headcount1):
+// hiding it in one stroke keeps the agent's shell confined to its own task —
+// its workspace, its parent task's workspace, its project repo, and its
+// artifacts — with everything else under the data root (the SQLite DB, SSH
+// keys, credentials, backups, keyring snapshot, and every OTHER company's and
+// task's files) invisible. System and home toolchain paths outside the data
+// root stay readable, so builds and tools are unaffected. Registered once at
+// startup via SetHiddenReadDirs; this is the always-on counterpart to
+// HEADCOUNT1_SANDBOX_READ_SCOPING (which additionally hides the whole home) and
+// HEADCOUNT1_SANDBOX_UID (which uses file ownership).
+var hiddenReadDirs []string
 
-// SetProtectedReadDirs registers the server-internal secret files/dirs that the
-// agent shell must never be able to read. Call once at startup, before any tool
-// runs. Passing nil (or never calling it) leaves the historical behavior —
-// reads are open unless read-scoping is enabled.
-func SetProtectedReadDirs(dirs []string) {
-	protectedReadDirs = append([]string(nil), dirs...)
+// SetHiddenReadDirs registers subtrees the agent shell must never read (except
+// paths explicitly granted per command as the workspace / a read-only dir).
+// Call once at startup, before any tool runs. Passing nil (or never calling it)
+// leaves the historical behavior — reads are open unless read-scoping is on.
+func SetHiddenReadDirs(dirs []string) {
+	hiddenReadDirs = append([]string(nil), dirs...)
 }
 
-// protectedDirs returns the registered secret paths (nil when none set).
-func protectedDirs() []string { return protectedReadDirs }
+// hiddenDirs returns the registered hidden subtrees (nil when none set).
+func hiddenDirs() []string { return hiddenReadDirs }
 
 func loadSandboxHardening() sandboxHardening {
 	h := sandboxHardening{uid: envInt("HEADCOUNT1_SANDBOX_UID"), gid: envInt("HEADCOUNT1_SANDBOX_GID")}

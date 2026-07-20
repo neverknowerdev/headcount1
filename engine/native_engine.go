@@ -423,6 +423,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
+			// The worktree's .git points back into the project repo's object
+			// store, so git commands in the workspace read {projectRepoDir}/.git.
+			// Grant the project repo read-only so the agent can inspect the repo
+			// and run git — under the strict data-root hiding below it would
+			// otherwise be invisible.
+			readOnlyDirs = append(readOnlyDirs, projectRepoDir)
 			keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, e.q, settings.BasePath, company)
 			defer keyCleanup() // remove the materialized key when the session ends
 			gitMgr = git.NewGitManager(projectRepoDir, keyPath)

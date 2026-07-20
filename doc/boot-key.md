@@ -127,10 +127,12 @@ you keep it:
 another user can't read it and neither can the agent under a dedicated sandbox
 uid, but **any process running as your own user can** at the OS level. The
 agent's `bash` tool runs as the server's uid, but its kernel sandbox now
-**always denies reads** of the secret files (the DB, `ssh/`, `credentials/`,
-`backups/`, `keyring.sealed`, `keyring.bootkey`) even under a shared uid — see
-`doc/sandbox-hardening.md`. That closes the agent path specifically; other
-same-uid processes are still bounded only by `0600`.
+**hides the whole data root** (`${HEADCOUNT1_HOME}`) from it by default,
+re-granting only the current task's own dirs — so the DB, `ssh/`, `credentials/`,
+`backups/`, `keyring.sealed`, and `keyring.bootkey` are all unreadable to the
+agent even under a shared uid (see `doc/sandbox-hardening.md`). That closes the
+agent path specifically; other same-uid processes are still bounded only by
+`0600`.
 In the self-managed local mode there is no boot-key file on disk *while the
 server runs* — and there is no `master.key`/`keystore.json` to worry about at all
 (the SQLite DB holds only per-user ciphertext no server key can open). The
