@@ -78,6 +78,16 @@ func seatbeltProfile(workspacePath string) (string, error) {
 	var b strings.Builder
 	b.WriteString("(version 1)\n")
 	b.WriteString("(allow default)\n")
+	// Deny reads of the server's secret files (DB, SSH keys, credentials,
+	// backups, keyring snapshot). Later rules win, so this overrides the
+	// allow-all-read default above. Same set as the Linux read exclusion.
+	for _, p := range protectedDirs() {
+		esc, err := escapeSeatbeltString(filepath.Clean(p))
+		if err != nil {
+			return "", err
+		}
+		fmt.Fprintf(&b, "(deny file-read* (subpath \"%s\"))\n", esc)
+	}
 	b.WriteString("(deny file-write*)\n")
 	b.WriteString("(allow file-write*\n")
 	for _, p := range subpaths {

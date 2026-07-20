@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"os/user"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"syscall"
@@ -26,6 +27,12 @@ type childConfig struct {
 	WritableDirs []string `json:"w"`
 	ReadOnlyDirs []string `json:"r"`
 	ReadScoping  bool     `json:"s"`
+	// ReadRoots, when set, is the explicit read allowlist to grant instead of
+	// the whole filesystem: it covers "/" MINUS the server's secret subtrees
+	// (see readRootsExcluding). Used in the default broad-read mode to hide
+	// protectedReadDirs without the operator turning on full read-scoping.
+	// Ignored when ReadScoping is true (that path has its own curated roots).
+	ReadRoots []string `json:"rr"`
 }
 
 // readScopeRoots are the system directories a toolchain needs to read. It
@@ -121,21 +128,32 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 		return nil, nil, fmt.Errorf("cannot locate own executable for sandbox re-exec: %w", err)
 	}
 	args := []string{sandboxChildArg, workspacePath, command}
-	if h.active() {
-		// Compute the grant lists here (as the server uid) and hand them to the
-		// child. When a dedicated sandbox uid is used, the toolchain caches must
-		// resolve against THAT uid's home — the server's ~/.cache etc. are owned
-		// by the server uid and unwritable by the sandbox uid, so `go build` /
-		// `npm install` would fail without this.
-		writable := extraWritableDirs()
-		if h.uid > 0 && sandboxHome != "" {
-			writable = extraWritableDirsForHome(sandboxHome)
+	// Compute the grant lists here (as the server uid) and hand them to the
+	// child. When a dedicated sandbox uid is used, the toolchain caches must
+	// resolve against THAT uid's home — the server's ~/.cache etc. are owned by
+	// the server uid and unwritable by the sandbox uid, so `go build` /
+	// `npm install` would fail without this.
+	writable := extraWritableDirs()
+	if h.uid > 0 && sandboxHome != "" {
+		writable = extraWritableDirsForHome(sandboxHome)
+	}
+	cfg := childConfig{
+		WritableDirs: writable,
+		ReadOnlyDirs: readOnlyDirs,
+		ReadScoping:  h.readScoping,
+	}
+	// In the default broad-read mode, always deny the server's secret files by
+	// granting "/" minus those subtrees. Full read-scoping already hides the
+	// whole home, so it needs no extra exclusion. Enumeration runs here (server
+	// uid), which can always list the excluded paths' ancestors.
+	if !h.readScoping {
+		if pd := protectedDirs(); len(pd) > 0 {
+			cfg.ReadRoots = readRootsExcluding(pd)
 		}
-		cfg := childConfig{
-			WritableDirs: writable,
-			ReadOnlyDirs: readOnlyDirs,
-			ReadScoping:  h.readScoping,
-		}
+	}
+	// Pass the config whenever it carries anything the child can't recompute on
+	// its own: extra hardening, or the secret-excluding read allowlist.
+	if h.active() || len(cfg.ReadRoots) > 0 {
 		if blob, err := json.Marshal(cfg); err == nil {
 			args = append(args, base64.StdEncoding.EncodeToString(blob))
 		}
@@ -221,14 +239,78 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 			"/dev/random", "/dev/urandom",
 		).WithIoctlDev().IgnoreIfMissing(),
 	}
-	if cfg.ReadScoping {
+	switch {
+	case cfg.ReadScoping:
 		// Curated system roots (no home dir) + the explicit read-only roots the
 		// tools were configured with. The workspace and caches are already
 		// readable via the RW grants above.
 		roots := append(append([]string{}, readScopeRoots...), cfg.ReadOnlyDirs...)
 		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
-	} else {
+	case len(cfg.ReadRoots) > 0:
+		// Broad read of the whole filesystem EXCEPT the server's secret files:
+		// the parent granted "/" minus the protected subtrees. The workspace,
+		// caches, and configured read-only dirs are covered too (they are not
+		// among the excluded subtrees), but re-list ReadOnlyDirs for clarity.
+		roots := append(append([]string{}, cfg.ReadRoots...), cfg.ReadOnlyDirs...)
+		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
+	default:
 		rules = append(rules, landlock.RODirs("/"))
 	}
 	return landlock.V5.BestEffort().RestrictPaths(rules...)
+}
+
+// readRootsExcluding returns a set of directories whose union grants read
+// access to the entire filesystem EXCEPT the subtrees in `excludes`. Landlock
+// access is an allowlist with no "deny" primitive, so a subtree is hidden by
+// granting every sibling along its ancestor chain and never the subtree itself.
+//
+// Enumeration runs in the parent (the server uid), which can always list the
+// excluded paths' ancestors. An unreadable ancestor contributes no grants for
+// that branch — fail closed (the tool loses read access there) rather than leak
+// the secret. Returns nil when nothing valid remains, so the caller falls back
+// to granting "/".
+func readRootsExcluding(excludes []string) []string {
+	blocked := map[string]bool{}   // exact paths to never grant (the secrets)
+	ancestors := map[string]bool{} // dirs we must descend into, not grant whole
+	for _, e := range excludes {
+		if e == "" {
+			continue
+		}
+		e = filepath.Clean(e)
+		if e == "/" || e == "." {
+			continue // refuse to hide the whole root
+		}
+		blocked[e] = true
+		for d := filepath.Dir(e); ; d = filepath.Dir(d) {
+			ancestors[d] = true
+			if parent := filepath.Dir(d); parent == d {
+				break
+			}
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+
+	var roots []string
+	var walk func(dir string)
+	walk = func(dir string) {
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			return // can't list → grant nothing under here (fail closed)
+		}
+		for _, ent := range entries {
+			p := filepath.Join(dir, ent.Name())
+			switch {
+			case blocked[p]:
+				// a secret path — never grant it
+			case ancestors[p]:
+				walk(p) // a secret lives deeper in here — descend, don't grant whole
+			default:
+				roots = append(roots, p)
+			}
+		}
+	}
+	walk("/")
+	return roots
 }

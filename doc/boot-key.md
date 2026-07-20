@@ -125,8 +125,12 @@ you keep it:
 
 **On `0600` and "who can read it".** `0600` restricts by *UID*, not by process:
 another user can't read it and neither can the agent under a dedicated sandbox
-uid, but **any process running as your own user can** — including the agent's
-`bash` tool, which by default runs as the server's uid with unrestricted reads.
+uid, but **any process running as your own user can** at the OS level. The
+agent's `bash` tool runs as the server's uid, but its kernel sandbox now
+**always denies reads** of the secret files (the DB, `ssh/`, `credentials/`,
+`backups/`, `keyring.sealed`, `keyring.bootkey`) even under a shared uid — see
+`doc/sandbox-hardening.md`. That closes the agent path specifically; other
+same-uid processes are still bounded only by `0600`.
 In the self-managed local mode there is no boot-key file on disk *while the
 server runs* — and there is no `master.key`/`keystore.json` to worry about at all
 (the SQLite DB holds only per-user ciphertext no server key can open). The

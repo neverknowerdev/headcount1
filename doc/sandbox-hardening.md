@@ -37,15 +37,26 @@ With no configuration the agent shell gets:
 
 - **Write sandbox** — can only write inside its workspace + scratch/cache dirs
   (`/tmp`, `~/.cache`, `~/.npm`, `~/go/pkg`, …). Enforced by Landlock (Linux) or
-  Seatbelt (macOS). *Reads are unrestricted.*
+  Seatbelt (macOS).
+- **Secret-file read denial (always on)** — the agent is denied *read* access to
+  the server's own secret files, with no opt-in required: the SQLite DB
+  (`${HEADCOUNT1_HOME}/db`), SSH keys (`ssh/`), `credentials/`, `backups/`, and
+  the keyring snapshot / boot key (`keyring.sealed`, `keyring.bootkey`). Landlock
+  is an allowlist with no deny rule, so this is done by granting read of the
+  whole filesystem *minus* those subtrees (the rest of `${HEADCOUNT1_HOME}` —
+  `workspace/`, `repos/`, `skills/`, `venv/`, … — stays readable); Seatbelt uses
+  an explicit `(deny file-read* …)`. Reads everywhere else remain open, so
+  toolchains are unaffected.
 - **Env scrub** — the server's secret env vars are stripped before the shell
   runs (see step 7).
 
-What the default does **not** give you: the agent (running as the server's own
-uid, with read access to `/`) can still **read** the server's at-rest files —
-`${HEADCOUNT1_HOME}/keyring.sealed`, the SQLite DB, materialized SSH keys.
-Closing that is what steps 3–6 are for. On a single-user dev box that's fine; for
-a shared/multi-tenant deployment, do the full setup.
+What the always-on default does **not** cover: a shared-uid agent can still read
+the server's environment via `/proc/<server_pid>/environ`, and `/proc`, `/tmp`,
+and other world-readable locations stay open. Closing those — and hiding the
+*whole* home rather than just the known secret files — is what the
+dedicated-uid (steps 3–5) and read-scoping (step 6) modes are for. On a
+single-user dev box the always-on denial is usually enough; for a
+shared/multi-tenant deployment, do the full setup.
 
 `${HEADCOUNT1_HOME}` defaults to `~/.headcount1` (the server user's home).
 
@@ -174,9 +185,12 @@ bypasses permissions); the sandbox uid can write its workspace but is blocked by
 
 ## Step 6: Read-scoping — toolchains must live under system roots
 
-`HEADCOUNT1_SANDBOX_READ_SCOPING=1` swaps Landlock's "read everything" grant for
-an allowlist of system roots that **excludes the home directory**, so the agent
-can't read `${HEADCOUNT1_HOME}` secret *files* even at the server's own uid.
+The always-on default already denies the *known* secret files (see "Default
+behavior"). Read-scoping goes further: `HEADCOUNT1_SANDBOX_READ_SCOPING=1` swaps
+Landlock's broad read grant for an allowlist of system roots that **excludes the
+whole home directory**, so the agent can't read *anything* under
+`${HEADCOUNT1_HOME}` — not just the enumerated secrets — even at the server's own
+uid.
 Enable it on its own (cheap, no uid needed) or alongside the dedicated uid for
 defense in depth.
 

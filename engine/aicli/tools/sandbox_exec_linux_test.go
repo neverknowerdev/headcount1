@@ -13,6 +13,60 @@ import (
 	"testing"
 )
 
+// TestReadRootsExcluding verifies the "/" minus secrets allowlist computation
+// directly — it is pure filesystem enumeration, so it runs even on kernels
+// without Landlock (where the integration test above skips).
+func TestReadRootsExcluding(t *testing.T) {
+	base := t.TempDir()
+	// {base}/db + {base}/keyring.sealed are secret; {base}/repos is not.
+	secretDir := filepath.Join(base, "db")
+	sealed := filepath.Join(base, "keyring.sealed")
+	sibling := filepath.Join(base, "repos")
+	deepOK := filepath.Join(base, "workspace", "task-1")
+	for _, d := range []string{secretDir, sibling, deepOK} {
+		if err := os.MkdirAll(d, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(sealed, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	roots := readRootsExcluding([]string{secretDir, sealed})
+	set := map[string]bool{}
+	for _, r := range roots {
+		set[r] = true
+	}
+
+	// The excluded paths must NOT be granted.
+	if set[secretDir] {
+		t.Errorf("secret dir %q must not be in the read roots", secretDir)
+	}
+	if set[sealed] {
+		t.Errorf("secret file %q must not be in the read roots", sealed)
+	}
+	// The base itself must not be granted wholesale (it contains a secret) — it
+	// must be descended into instead.
+	if set[base] {
+		t.Errorf("base %q must be descended into, not granted whole", base)
+	}
+	// Non-secret siblings under the same base ARE granted.
+	if !set[sibling] {
+		t.Errorf("non-secret sibling %q must be readable, roots=%v", sibling, roots)
+	}
+	// A top-level system dir is granted (proves we reach the filesystem root).
+	if !set["/usr"] && !set["/bin"] {
+		t.Errorf("expected a top-level system root (/usr or /bin) to be granted, roots=%v", roots)
+	}
+	// Empty / root-only excludes are refused (never hide all of "/").
+	if r := readRootsExcluding(nil); r != nil {
+		t.Errorf("nil excludes must yield nil (fall back to RODirs(\"/\")), got %v", r)
+	}
+	if r := readRootsExcluding([]string{"/"}); r != nil {
+		t.Errorf(`excluding "/" must be refused, got %v`, r)
+	}
+}
+
 func execBash(t *testing.T, workspace, command string) string {
 	t.Helper()
 	args, err := json.Marshal(map[string]string{"command": command})
@@ -145,6 +199,67 @@ func TestLandlockInheritedByChildProcesses(t *testing.T) {
 	out := execBash(t, workspace, fmt.Sprintf(`D=%s; sh -c "echo pwned > $D/pwned.txt" && echo WROTE || echo BLOCKED`, outside))
 	if !strings.Contains(out, "BLOCKED") {
 		t.Errorf("expected child-process write to be blocked, got output: %q", out)
+	}
+}
+
+// TestLandlockProtectedDirsAlwaysDenied proves that registered secret paths are
+// denied to the agent shell in the DEFAULT (broad-read) mode — no opt-in
+// hardening — while everything else, including sibling dirs under the same
+// parent, stays readable.
+func TestLandlockProtectedDirsAlwaysDenied(t *testing.T) {
+	if landlockABI() == 0 {
+		t.Skip("kernel lacks Landlock support")
+	}
+	workspace := t.TempDir()
+
+	// A "secrets" dir with a sibling the agent legitimately reads — like
+	// {base}/db (secret) next to {base}/repos (fine). Both live under one
+	// parent, so this also proves we carve out just the secret subtree, not the
+	// whole parent.
+	base := outsideDir(t)
+	secretDir := filepath.Join(base, "db")
+	siblingDir := filepath.Join(base, "repos")
+	for _, d := range []string{secretDir, siblingDir} {
+		if err := os.MkdirAll(d, 0o700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	secretFile := filepath.Join(secretDir, "headcount1.db")
+	if err := os.WriteFile(secretFile, []byte("TOPSECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	siblingFile := filepath.Join(siblingDir, "readme.txt")
+	if err := os.WriteFile(siblingFile, []byte("HELLO"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Baseline: with nothing registered, reads are open — the secret is readable.
+	out := execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, secretFile))
+	if !strings.Contains(out, "TOPSECRET") {
+		t.Fatalf("baseline (no protected dirs) should read the file, got: %q", out)
+	}
+
+	// Register the secret dir as protected — no env hardening enabled.
+	SetProtectedReadDirs([]string{secretDir})
+	t.Cleanup(func() { SetProtectedReadDirs(nil) })
+
+	// The secret is now denied.
+	out = execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null && echo LEAKED || echo BLOCKED`, secretFile))
+	if strings.Contains(out, "TOPSECRET") || strings.Contains(out, "LEAKED") || !strings.Contains(out, "BLOCKED") {
+		t.Errorf("protected secret dir must be denied, got: %q", out)
+	}
+
+	// Its sibling under the same parent is still readable (we hid only the
+	// secret subtree, not the parent).
+	out = execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, siblingFile))
+	if !strings.Contains(out, "HELLO") {
+		t.Errorf("a non-secret sibling dir must stay readable, got: %q", out)
+	}
+
+	// Sanity: workspace and system toolchain reads still work.
+	out = execBash(t, workspace, `echo hi > f.txt && cat f.txt && cat /etc/hostname >/dev/null 2>&1 && echo OK`)
+	if !strings.Contains(out, "hi") || !strings.Contains(out, "OK") {
+		t.Errorf("protected-dirs mode broke normal workspace/system access, got: %q", out)
 	}
 }
 

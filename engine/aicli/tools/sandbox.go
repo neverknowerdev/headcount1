@@ -34,6 +34,26 @@ type sandboxHardening struct {
 // needs to carry the extra child config).
 func (h sandboxHardening) active() bool { return h.uid > 0 || h.readScoping }
 
+// protectedReadDirs are absolute paths holding the server's own secrets (the
+// SQLite DB, SSH keys, credentials, backups, the keyring snapshot / boot key).
+// The agent's shell never needs them, so the read sandbox denies them ALWAYS —
+// even in the default broad-read mode, with no operator opt-in required. This
+// is the always-on, targeted counterpart to HEADCOUNT1_SANDBOX_READ_SCOPING
+// (which hides the whole home) and HEADCOUNT1_SANDBOX_UID (which uses file
+// ownership). Registered once at startup via SetProtectedReadDirs.
+var protectedReadDirs []string
+
+// SetProtectedReadDirs registers the server-internal secret files/dirs that the
+// agent shell must never be able to read. Call once at startup, before any tool
+// runs. Passing nil (or never calling it) leaves the historical behavior —
+// reads are open unless read-scoping is enabled.
+func SetProtectedReadDirs(dirs []string) {
+	protectedReadDirs = append([]string(nil), dirs...)
+}
+
+// protectedDirs returns the registered secret paths (nil when none set).
+func protectedDirs() []string { return protectedReadDirs }
+
 func loadSandboxHardening() sandboxHardening {
 	h := sandboxHardening{uid: envInt("HEADCOUNT1_SANDBOX_UID"), gid: envInt("HEADCOUNT1_SANDBOX_GID")}
 	if h.gid == 0 {

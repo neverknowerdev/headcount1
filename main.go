@@ -58,6 +58,21 @@ func main() {
 		log.Printf("Warning: failed to create base directories: %v", err)
 	}
 
+	// Deny the agent's shell any read access to the server's own secret files —
+	// always, even without opt-in hardening. The agent never needs the SQLite
+	// DB, SSH keys, credentials, backups, or the keyring snapshot / boot key, so
+	// the kernel sandbox (Landlock / Seatbelt) hides them from the untrusted
+	// shell. See doc/sandbox-hardening.md.
+	paths := filesystem.NewPaths(basePath)
+	tools.SetProtectedReadDirs([]string{
+		paths.DBDir(),
+		paths.SSHDir(),
+		paths.CredentialsDir(),
+		paths.BackupsDir(),
+		filepath.Join(basePath, "keyring.sealed"),
+		filepath.Join(basePath, "keyring.bootkey"),
+	})
+
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
