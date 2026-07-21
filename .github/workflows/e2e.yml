@@ -73,6 +73,14 @@ jobs:
         cd frontend
         npm run build
 
+    # Warm the Go module + build cache before the browser suite. globalSetup
+    # boots the server with `go run .`, and a cold module download + compile can
+    # exceed its 60s reachability timeout (the SQLite leg has no prior Go step to
+    # prime the cache). Building here (after frontend/dist exists for the embed)
+    # makes the later `go run .` a fast relink.
+    - name: Pre-build Go server (warm cache)
+      run: go build -o /tmp/headcount1-server .
+
     - name: Install E2E Dependencies
       run: |
         cd e2e
