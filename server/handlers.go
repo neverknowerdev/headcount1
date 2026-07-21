@@ -292,11 +292,14 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/{purpose}", api.UpdateDefaultModelSetting)
 	})
 
-	// Per-user, tenant-scoped export/import: a signed-in user exports ONLY their
-	// own subtree and re-imports it into any database (ID-remapped, re-owned to
-	// the importer), with zero impact on other tenants. This is the real
-	// user-facing backup feature; available to every authenticated user.
+	// Per-user, tenant-scoped export/import: exports the caller's team's
+	// subtree and re-imports it into any database (ID-remapped, re-owned to the
+	// importer), with zero impact on other tenants. Team-owner-only: the
+	// archive covers every company visible to the whole team (and import
+	// re-owners a subtree onto it), which is a structural, team-wide action —
+	// the same bar as creating/deleting a company.
 	r.Route("/data", func(r chi.Router) {
+		r.Use(api.RequireTeamOwner)
 		r.Get("/export", api.ExportMyData)
 		r.Post("/import", api.ImportMyData)
 	})

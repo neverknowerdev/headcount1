@@ -50,6 +50,13 @@ func setupTeamRouter(database *gorm.DB) chi.Router {
 		r.Get("/companies", api.ListCompanies)
 		// Mirror production: creating a company is owner-only.
 		r.With(api.RequireTeamOwner).Post("/companies", api.CreateCompany)
+		// Mirror production: per-user export/import is owner-only too (it
+		// covers the whole team's subtree).
+		r.Route("/data", func(r chi.Router) {
+			r.Use(api.RequireTeamOwner)
+			r.Get("/export", api.ExportMyData)
+			r.Post("/import", api.ImportMyData)
+		})
 	})
 	return r
 }
@@ -202,6 +209,49 @@ func TestOnlyOwnerCanCreateCompany(t *testing.T) {
 	// The member is blocked from creating a company (owner-only) — 403, not 404.
 	mw := postJSON(t, r, "/companies", map[string]string{"name": "Sneaky", "short_name": "sneak"}, memberCookie)
 	require.Equal(t, http.StatusForbidden, mw.Code, mw.Body.String())
+}
+
+// TestOnlyOwnerCanExportOrImportData verifies that /data/export and
+// /data/import — which cover the whole team's subtree, not just the caller's
+// own rows — are gated the same way as creating a company: a member is
+// rejected with 403 before the handler runs any business logic.
+func TestOnlyOwnerCanExportOrImportData(t *testing.T) {
+	database := setupTeamTestDB(t)
+	r := setupTeamRouter(database)
+	t.Setenv("APP_BASE_URL", "http://localhost:8080")
+	endpoints.SetMailer(&recordingMailer{})
+
+	ownerCookie := registerHelper(t, database, "boss@corp.io", "")
+
+	iw := postJSON(t, r, "/team/invites", map[string]string{"email": "dev@corp.io"}, ownerCookie)
+	require.Equal(t, http.StatusCreated, iw.Code)
+	var created struct {
+		InviteURL string `json:"invite_url"`
+	}
+	require.NoError(t, json.Unmarshal(iw.Body.Bytes(), &created))
+	token := inviteURLRe.FindStringSubmatch(created.InviteURL)[1]
+	memberCookie := registerHelper(t, database, "dev@corp.io", token)
+
+	// A member is blocked from exporting or importing team data — 403, not 404.
+	ew := getReq(t, r, "/data/export", memberCookie)
+	require.Equal(t, http.StatusForbidden, ew.Code, ew.Body.String())
+
+	iwReq := httptest.NewRequest(http.MethodPost, "/data/import", nil)
+	iwReq.AddCookie(memberCookie)
+	iwRec := httptest.NewRecorder()
+	r.ServeHTTP(iwRec, iwReq)
+	require.Equal(t, http.StatusForbidden, iwRec.Code, iwRec.Body.String())
+}
+
+func getReq(t *testing.T, r chi.Router, path string, cookie *http.Cookie) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if cookie != nil {
+		req.AddCookie(cookie)
+	}
+	w := httptest.NewRecorder()
+	r.ServeHTTP(w, req)
+	return w
 }
 
 func TestOnlyOwnerCanInviteAndRevoke(t *testing.T) {
