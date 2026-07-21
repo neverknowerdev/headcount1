@@ -194,7 +194,7 @@ func (q *Queries) GetCodegraphServerForProject(ctx context.Context, projectID in
 func (q *Queries) IncrementMCPToolCallCount(ctx context.Context, serverID int32, toolName string) error {
 	return q.db.WithContext(ctx).Exec(
 		`INSERT INTO mcp_tool_stats (mcp_server_id, tool_name, call_count) VALUES (?, ?, 1)
-		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = call_count + 1`,
+		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = mcp_tool_stats.call_count + 1`,
 		serverID, toolName,
 	).Error
 }
