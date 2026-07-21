@@ -204,7 +204,7 @@ export const Settings: React.FC = () => {
                             onClick={() => navigate(`/companies/${companyShortName}/backup`)}
                             className="bg-blue-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-blue-700"
                         >
-                            Backup & Restore
+                            Export & Import
                         </button>
                     </div>
                 </form>
