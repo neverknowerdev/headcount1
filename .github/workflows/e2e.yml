@@ -9,49 +9,90 @@ jobs:
   test:
     timeout-minutes: 60
     runs-on: ubuntu-latest
+    # Run the whole suite twice: once on the default SQLite backend and once
+    # against a real PostgreSQL, so the cloud (Postgres) path gets the same
+    # end-to-end coverage as local (SQLite). The server picks its backend from
+    # DATABASE_URL (see main.go), so the exact same tests exercise both.
+    strategy:
+      fail-fast: false
+      matrix:
+        database: [ sqlite, postgres ]
+
+    # A Postgres service is always available; the SQLite leg simply ignores it
+    # (DATABASE_URL stays empty). Health-checked so the server never races the
+    # database on boot.
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orchestrator
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      # postgres → real DSN; sqlite → empty, which main.go treats as "use SQLite".
+      DATABASE_URL: ${{ matrix.database == 'postgres' && 'postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable' || '' }}
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
         go-version: '1.24.3'
-        
+
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
         node-version: 20
-        
+
+    # Fast dialect-specific signal before the browser suite: the Go integration
+    # tests (AutoMigrate, raw-SQL query surface, backup/restore sequence
+    # realignment) run only when TEST_POSTGRES_URL is set, so they no-op on the
+    # SQLite leg and exercise Postgres on the other.
+    - name: Run Go Postgres integration tests
+      if: matrix.database == 'postgres'
+      run: go test ./db/ ./pkg/backup/ -run TestPostgres -v
+      env:
+        TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
+
     - name: Install Frontend Dependencies
       run: |
         cd frontend
         npm install
-        
+
     - name: Build Frontend
       run: |
         cd frontend
         npm run build
-        
+
     - name: Install E2E Dependencies
       run: |
         cd e2e
         npm install
-        
+
     - name: Install Playwright Browsers
       run: |
         cd e2e
         npx playwright install --with-deps chromium
-        
+
     - name: Run Playwright tests
       run: |
         cd e2e
         npx playwright test
       env:
         E2E_MODE: true
-        
+
     - uses: actions/upload-artifact@v4
       if: always()
       with:
-        name: playwright-report
+        name: playwright-report-${{ matrix.database }}
         path: e2e/playwright-report/
         retention-days: 30

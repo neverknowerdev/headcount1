@@ -6,6 +6,13 @@ import { loadE2EEnv } from '../helpers/env';
 
 const env = loadE2EEnv();
 
+// The suite runs against both backends (see .github/workflows/e2e.yml). The
+// on-disk SQLite file assertions below only make sense for the SQLite backend;
+// with Postgres the database is remote and there is no {basePath}/db file. The
+// cross-process and upload tests, by contrast, are backend-agnostic and run on
+// both.
+const isPostgres = (process.env.DATABASE_URL || '').startsWith('postgres://');
+
 /**
  * The database is the single source of truth, shared by every process
  * pointed at the same BasePath: SQLite lives at {basePath}/db/ with WAL so
@@ -33,6 +40,7 @@ test.describe.serial('Shared database across processes', () => {
     });
 
     test('SQLite lives under {basePath}/db with WAL enabled', async () => {
+        test.skip(isPostgres, 'SQLite-only: with a Postgres backend there is no on-disk {basePath}/db file');
         const dbFile = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'db', 'headcount1-e2e.db');
         expect(fs.existsSync(dbFile)).toBe(true);
         // WAL journaling leaves a -wal sidecar next to the database while
