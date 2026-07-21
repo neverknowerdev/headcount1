@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"os/exec"
 	"time"
 
 	"agent-orchestrator/engine/aicli"
@@ -13,18 +12,19 @@ import (
 // ExecCommand runs shell commands inside the workspace sandbox.
 type ExecCommand struct {
 	workspacePath string
+	readOnlyDirs  []string
 }
 
 // NewExecCommand creates an ExecCommand tool sandboxed to workspacePath.
-func NewExecCommand(workspacePath string) *ExecCommand {
-	return &ExecCommand{workspacePath: workspacePath}
+func NewExecCommand(workspacePath string, readOnlyDirs ...string) *ExecCommand {
+	return &ExecCommand{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
 
 func (t *ExecCommand) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "exec_command",
+			Name:        "bash",
 			Description: "Execute a shell command inside the workspace. Runs with the workspace as the working directory. Only use relative paths — paths outside the workspace are rejected.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -44,15 +44,31 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	if err := validateCommandPaths(t.workspacePath, p.Command); err != nil {
+	if err := validateCommandPaths(t.workspacePath, t.readOnlyDirs, p.Command); err != nil {
 		return "", err
 	}
 	// 60-second hard cap so a misbehaving command can't stall the run forever.
 	cmdCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
-	cmd := exec.CommandContext(cmdCtx, "sh", "-c", p.Command)
+	// Kernel-level write sandbox (Landlock on Linux, Seatbelt on macOS);
+	// see sandbox_exec.go.
+	cmd, cleanup, err := sandboxedCommand(cmdCtx, t.workspacePath, p.Command, t.readOnlyDirs)
+	if err != nil {
+		return "", err
+	}
+	if cleanup != nil {
+		defer cleanup()
+	}
 	cmd.Dir = t.workspacePath
+	// Never hand the agent the server's secrets via the environment. The
+	// Landlock re-exec child inherits this scrubbed set, so `env` /
+	// /proc/self/environ can't leak the boot key, Vault token, etc. The
+	// dedicated-uid path may have already set cmd.Env (scrubbed + a HOME
+	// pointed at the sandbox uid's home); don't clobber it.
+	if cmd.Env == nil {
+		cmd.Env = scrubbedEnv()
+	}
 	output, err := cmd.CombinedOutput()
 	result := string(output)
 	if len(result) > 50_000 {

@@ -8,6 +8,7 @@ import (
 	"agent-orchestrator/db"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
 
 // RunResponse is the wire shape returned to the frontend. It is identical to
@@ -18,7 +19,8 @@ import (
 // an extra round trip to /runs/{id}/token-stats.
 type RunResponse struct {
 	db.Run
-	parsedEntries  []interface{}
+	IsLatest         bool
+	parsedEntries    []interface{}
 	parsedTokenStats interface{}
 }
 
@@ -37,10 +39,12 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 	}
 	return json.Marshal(&struct {
 		Alias
-		LogEntries  []interface{} `json:"log_entries"`
-		TokenStats  interface{}   `json:"token_stats"`
+		IsLatest   bool          `json:"is_latest"`
+		LogEntries []interface{} `json:"log_entries"`
+		TokenStats interface{}   `json:"token_stats"`
 	}{
 		Alias:      Alias(r),
+		IsLatest:   r.IsLatest,
 		LogEntries: entries,
 		TokenStats: tokenStats,
 	})
@@ -64,6 +68,10 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compID, _ := strconv.Atoi(compIDStr)
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	// Fetch all tasks for company
 	var taskIDs []int32
@@ -74,8 +82,17 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The list view only needs overview info: log_content/log_entries are
+	// full transcripts (can be megabytes for long sessions) and are only
+	// ever rendered on the Run Log Details page, so they're omitted here to
+	// keep the list fast and responsive as run history grows. Task/Agent
+	// preloads are similarly trimmed to the handful of fields the list
+	// actually renders.
 	var runs []db.Run
 	err := api.db.
+		Omit("log_content", "log_entries").
+		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
+		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
 		Find(&runs).Error
@@ -93,17 +110,73 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+	resp := toRunResponse(run)
+	// Mark is_latest so the frontend can show the Re-run button only on the
+	// most recent run. Delegated child sessions are never re-runnable entry
+	// points — only the main (root) session of a task can be re-run.
+	if run.ParentRunID == nil {
+		var maxID int64
+		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
+		resp.IsLatest = int64(run.ID) == maxID
+	}
+	api.respondJSON(w, http.StatusOK, resp)
+}
+
+// ListChildRuns returns the delegated session runs spawned by the given run,
+// so the Run Log UI can render nested sessions. With ?deep=true it returns
+// every descendant session in the run's tree (children, grandchildren, …),
+// which the UI uses for whole-tree per-agent token stats.
+func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+	id := run.ID
+	var runs []db.Run
+	var err error
+	if r.URL.Query().Get("deep") == "true" {
+		// Descendants are resolved via root_run_id, which only works for root
+		// runs (they point at themselves); for child sessions fall back to
+		// direct children.
+		runs, err = api.q.ListDescendantRuns(r.Context(), id)
+		if err == nil && len(runs) == 0 {
+			runs, err = api.q.ListChildRuns(r.Context(), id)
+		}
+	} else {
+		runs, err = api.q.ListChildRuns(r.Context(), id)
+	}
 	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
+		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	run, err := api.q.GetRun(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	api.respondJSON(w, http.StatusOK, out)
+}
+
+func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+
+	// Subtasks are delegated sessions owned by the orchestrator — re-running
+	// one in isolation would spawn an orphan session outside the main flow.
+	// Walk up to the root task so a re-run always restarts the main session.
+	for task.ParentID != nil {
+		parent, perr := api.q.GetTask(r.Context(), *task.ParentID)
+		if perr != nil {
+			break
+		}
+		task = parent
+	}
+
+	if task.AgentID == nil {
+		api.respondError(w, http.StatusBadRequest, "task has no assigned agent")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, toRunResponse(run))
+	if err := api.engine.RerunTask(r.Context(), task.ID); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "task_id": task.ID})
 }
 
 func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
@@ -114,31 +187,25 @@ func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := api.q.GetRunBySessionID(r.Context(), sessionID)
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+		api.respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if _, err := api.authorizeRun(r, run.ID); err != nil {
+		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	api.respondJSON(w, http.StatusOK, toRunResponse(run))
 }
 
 func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	run, err := api.q.GetRun(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Run not found")
-		return
-	}
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 
 	if run.Status != "running" {
 		api.respondError(w, http.StatusBadRequest, "Run is not in progress")
 		return
 	}
 
-	api.engine.StopRun(r.Context(), int32(id))
+	api.engine.StopRun(r.Context(), run.ID)
 
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 }

@@ -4,73 +4,77 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"regexp"
 
 	"agent-orchestrator/engine/aicli"
 )
 
-// SubtaskParams holds the arguments provided by the LLM when calling
-// create_subtask.
-type SubtaskParams struct {
-	Title       string `json:"title"`
-	Description string `json:"description"`
-	AgentName   string `json:"agent_name"`
-}
+// absolutePathRe matches absolute filesystem paths that a sandboxed delegated
+// session cannot access (macOS/Linux home paths and Windows drive paths).
+// Subtask instructions must reference artifacts, the codegraph project, or
+// workspace-relative paths instead.
+var absolutePathRe = regexp.MustCompile(`(?m)(/Users/[\w.-]+|/home/[\w.-]+|[A-Za-z]:\\\\?[\w.-]+)`)
 
-// CreateSubtaskFunc is the callback the engine supplies to perform the actual
-// DB write and task dispatch. It returns the created task ID.
-type CreateSubtaskFunc func(ctx context.Context, p SubtaskParams) (int32, error)
-
-type createSubtaskTool struct {
-	fn         CreateSubtaskFunc
+// CreateSubtask delegates a scoped piece of work to a sub-agent by creating a
+// child task and running it as a nested execution session. The call blocks
+// until the session either finishes (returning its final result and produced
+// artifacts) or asks the task owner a question (returning the question, to be
+// answered via answer_subtask_question).
+type CreateSubtask struct {
+	fn         func(ctx context.Context, title, description, agentName string) (string, error)
 	agentNames []string
 }
 
-// NewCreateSubtask returns a tool that creates a subtask and delegates its
-// execution to a named agent. agentNames is used to build an enum in the tool
-// schema so the LLM picks from the configured agents rather than guessing.
-func NewCreateSubtask(fn CreateSubtaskFunc, agentNames []string) aicli.Tool {
-	return &createSubtaskTool{fn: fn, agentNames: agentNames}
+// NewCreateSubtask wraps the engine callback that creates the subtask, runs
+// the nested session, and returns the session's result (or a pending question
+// from the sub-agent).
+func NewCreateSubtask(fn func(ctx context.Context, title, description, agentName string) (string, error), agentNames []string) *CreateSubtask {
+	return &CreateSubtask{fn: fn, agentNames: agentNames}
 }
 
-func (t *createSubtaskTool) Def() aicli.ToolDef {
+func (t *CreateSubtask) Def() aicli.ToolDef {
 	agentNameProp := map[string]interface{}{
 		"type":        "string",
-		"description": "Name of the agent config to use",
+		"description": "Name of the sub-agent to assign the subtask to",
 	}
 	if len(t.agentNames) > 0 {
 		agentNameProp["enum"] = t.agentNames
 	}
-
-	params, _ := json.Marshal(map[string]interface{}{
+	schema, _ := json.Marshal(map[string]interface{}{
 		"type": "object",
 		"properties": map[string]interface{}{
-			"title": map[string]string{
+			"title": map[string]interface{}{
 				"type":        "string",
 				"description": "Short title for the subtask",
 			},
-			"description": map[string]string{
+			"description": map[string]interface{}{
 				"type":        "string",
-				"description": "Detailed description of what the subtask should accomplish",
+				"description": "Detailed, scoped instructions for the sub-agent: what to do, relevant context, and what the expected result looks like",
 			},
 			"agent_name": agentNameProp,
 		},
 		"required": []string{"title", "description", "agent_name"},
 	})
-
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "create_subtask",
-			Description: "Create a subtask and delegate its execution to a specialist agent. Only one subtask can run at a time — this call fails if a subtask is already running.",
-			Parameters:  json.RawMessage(params),
+			Name: "create_subtask",
+			Description: "Create a subtask and assign it to a sub-agent. Runs the subtask as a nested session and waits: " +
+				"returns the sub-agent's final result and produced artifacts when it finishes, or the sub-agent's question " +
+				"(answer it with answer_subtask_question) when it needs input from you. Only one subtask can run at a time.",
+			Parameters: json.RawMessage(schema),
 		},
 	}
 }
 
-func (t *createSubtaskTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var p SubtaskParams
+func (t *CreateSubtask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var p struct {
+		Title       string `json:"title"`
+		Description string `json:"description"`
+		AgentName   string `json:"agent_name"`
+	}
 	if err := json.Unmarshal(args, &p); err != nil {
-		return "", fmt.Errorf("invalid create_subtask args: %w", err)
+		return "", fmt.Errorf("create_subtask: %w", err)
 	}
 	if p.Title == "" {
 		return "", fmt.Errorf("title is required")
@@ -78,9 +82,11 @@ func (t *createSubtaskTool) Execute(ctx context.Context, args json.RawMessage) (
 	if p.AgentName == "" {
 		return "", fmt.Errorf("agent_name is required")
 	}
-	taskID, err := t.fn(ctx, p)
-	if err != nil {
-		return "", err
+	// Fail fast on instructions the sandboxed session cannot follow: absolute
+	// paths outside its workspace waste an entire delegated run.
+	if m := absolutePathRe.FindString(p.Description); m != "" {
+		return "", fmt.Errorf("description references the absolute path %q, which the sandboxed session cannot access — "+
+			"rewrite the instruction to reference artifacts (read_artifact), the codegraph project, or workspace-relative paths", m)
 	}
-	return fmt.Sprintf("Subtask %d created and queued for execution by %s agent.", taskID, p.AgentName), nil
+	return t.fn(ctx, p.Title, p.Description, p.AgentName)
 }

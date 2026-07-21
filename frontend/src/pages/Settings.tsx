@@ -1,6 +1,7 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import { SecretLabel } from '../components/SecretField';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 interface UpdateStatus {
@@ -15,6 +16,7 @@ interface UpdateStatus {
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
     const { selectedCompanyId, companies, setCompanies } = useStore();
+    const isOwner = useIsOwner();
 
     const [companyShortName, setCompanyShortName] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -29,15 +31,13 @@ export const Settings: React.FC = () => {
     }, [selectedCompanyId, companies]);
 
     const [basePath, setBasePath] = useState('');
-    const [gitRemoteUrl, setGitRemoteUrl] = useState('');
-    const [githubPat, setGithubPat] = useState('');
-    const [systemLlmModel, setSystemLlmModel] = useState('');
     const [updateBranch, setUpdateBranch] = useState('main');
     const [autoUpdate, setAutoUpdate] = useState(false);
     const [updateCheckIntervalMins, setUpdateCheckIntervalMins] = useState(60);
     const [saving, setSaving] = useState(false);
-    const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
+    const [sshFileName, setSshFileName] = useState('');
+    const sshFileInputRef = useRef<HTMLInputElement>(null);
 
     const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
     const [checking, setChecking] = useState(false);
@@ -50,9 +50,6 @@ export const Settings: React.FC = () => {
                 const res = await axios.get('/api/settings');
                 if (res.data) {
                     setBasePath(res.data.base_path || '');
-                    setGitRemoteUrl(res.data.git_remote_url || '');
-                    setGithubPat(res.data.github_pat || '');
-                    setSystemLlmModel(res.data.system_llm_model || '');
                     setUpdateBranch(res.data.update_branch || 'main');
                     setAutoUpdate(res.data.auto_update || false);
                     setUpdateCheckIntervalMins(res.data.update_check_interval_mins || 60);
@@ -114,20 +111,25 @@ export const Settings: React.FC = () => {
         e.preventDefault();
         setSaving(true);
         try {
-            await axios.post('/api/settings', {
-                base_path: basePath,
-                git_remote_url: gitRemoteUrl,
-                github_pat: githubPat,
-                system_llm_model: systemLlmModel,
-                update_branch: updateBranch,
-                auto_update: autoUpdate,
-                update_check_interval_mins: updateCheckIntervalMins,
-            });
-
+            // The SSH key is per-user, encrypted at rest under your passkey.
             if (sshKey) {
                 await axios.post('/api/settings/ssh', { key: sshKey });
                 setSshKey('');
-                alert('SSH Key uploaded successfully');
+            }
+
+            // The workspace root and auto-update config are instance-global
+            // (operator-managed). Saving them is only possible when the operator
+            // has enabled the global admin API; a 404 there is expected for
+            // regular users, so don't fail the save.
+            try {
+                await axios.post('/api/settings', {
+                    base_path: basePath,
+                    update_branch: updateBranch,
+                    auto_update: autoUpdate,
+                    update_check_interval_mins: updateCheckIntervalMins,
+                });
+            } catch (err: any) {
+                if (err?.response?.status !== 404) throw err;
             }
 
             const currentCompany = companies.find(c => c.id === selectedCompanyId);
@@ -149,17 +151,13 @@ export const Settings: React.FC = () => {
         }
     };
 
-    const handleSync = async () => {
-        setSyncing(true);
-        try {
-            await axios.post('/api/settings/sync');
-            alert('Sync completed successfully!');
-        } catch (e) {
-            console.error(e);
-            alert('Failed to sync settings from filesystem');
-        } finally {
-            setSyncing(false);
-        }
+    const handleSshFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setSshFileName(file.name);
+        const reader = new FileReader();
+        reader.onload = ev => setSshKey((ev.target?.result as string) || '');
+        reader.readAsText(file);
     };
 
     const handleDeleteCompany = async () => {
@@ -223,59 +221,45 @@ export const Settings: React.FC = () => {
                             value={basePath}
                             onChange={e => setBasePath(e.target.value)}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="/home/user/.paperclip2"
+                            placeholder="/home/user/.headcount1"
                         />
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Data Git Remote URL
-                        </label>
-                        <input
-                            type="text"
-                            value={gitRemoteUrl}
-                            onChange={e => setGitRemoteUrl(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="git@github.com:user/paperclip2-data.git"
-                        />
+                    <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
+                        Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
+                        <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            GitHub PAT (Personal Access Token)
-                        </label>
-                        <input
-                            type="password"
-                            value={githubPat}
-                            onChange={e => setGithubPat(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="ghp_..."
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            System LLM Model
-                        </label>
-                        <input
-                            type="text"
-                            value={systemLlmModel}
-                            onChange={e => setSystemLlmModel(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="gpt-4o-mini"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Upload SSH Key
-                        </label>
-                        <p className="text-xs text-gray-500 mb-3">
-                            Paste your private SSH key here to authenticate Git operations. It will be saved securely.
+                        <SecretLabel>SSH Private Key</SecretLabel>
+                        <p className="text-xs text-gray-500 mb-2">
+                            Your personal key to authenticate Git operations for private repositories.
+                            Encrypted at rest under your passkey; never shared with other users. Paste the key or upload the file directly.
                         </p>
                         <textarea
                             value={sshKey}
-                            onChange={e => setSshKey(e.target.value)}
+                            onChange={e => { setSshKey(e.target.value); setSshFileName(''); }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border font-mono"
                             rows={4}
                             placeholder="-----BEGIN OPENSSH PRIVATE KEY-----..."
                         />
+                        <div className="mt-2 flex items-center gap-3">
+                            <button
+                                type="button"
+                                onClick={() => sshFileInputRef.current?.click()}
+                                className="text-sm text-indigo-600 hover:text-indigo-800 border border-indigo-300 rounded px-3 py-1"
+                            >
+                                Upload from file
+                            </button>
+                            {sshFileName && (
+                                <span className="text-xs text-gray-500 font-mono">{sshFileName}</span>
+                            )}
+                            <input
+                                ref={sshFileInputRef}
+                                type="file"
+                                accept=".pem,.key,*"
+                                className="hidden"
+                                onChange={handleSshFileUpload}
+                            />
+                        </div>
                     </div>
 
                     <div className="flex gap-4">
@@ -285,15 +269,6 @@ export const Settings: React.FC = () => {
                             className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
                         >
                             {saving ? 'Saving...' : 'Save Settings'}
-                        </button>
-
-                        <button
-                            type="button"
-                            onClick={handleSync}
-                            disabled={syncing}
-                            className="bg-green-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-green-700 disabled:bg-green-400"
-                        >
-                            {syncing ? 'Syncing...' : 'Sync from Filesystem'}
                         </button>
 
                         <button
@@ -378,7 +353,7 @@ export const Settings: React.FC = () => {
                             className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
                         />
                         <label htmlFor="auto_update" className="text-sm text-gray-700">
-                            Auto-update when a new version is detected (checks every 60 minutes)
+                            Auto-update when a new version is detected (checks every {updateCheckIntervalMins} minutes)
                         </label>
                     </div>
 
@@ -412,7 +387,7 @@ export const Settings: React.FC = () => {
                 </div>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
+            {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>
                 <div className="flex items-center justify-between">
                     <div>
@@ -429,7 +404,7 @@ export const Settings: React.FC = () => {
                         Delete Company
                     </button>
                 </div>
-            </div>
+            </div>}
 
             {showDeleteConfirm && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

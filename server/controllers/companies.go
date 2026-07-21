@@ -5,31 +5,19 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"path/filepath"
-	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
-	companies, err := api.q.ListCompanies(r.Context())
+	companies, err := api.q.ListCompaniesForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-	validCompanies := []db.Company{}
-	for _, c := range companies {
-		if fsManager.CompanyExists(c) {
-			validCompanies = append(validCompanies, c)
-		}
-	}
-
-	api.respondJSON(w, http.StatusOK, validCompanies)
+	api.respondJSON(w, http.StatusOK, companies)
 }
 
 func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
@@ -43,10 +31,15 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uid := api.currentUserID(r)
 	comp := db.Company{
 		Name:      req.Name,
 		ShortName: req.ShortName,
 		Color:     req.Color,
+		UserID:    &uid, // creator (engine resolves their Default Models)
+	}
+	if membership, err := api.requireMembership(r); err == nil {
+		comp.TeamID = &membership.TeamID
 	}
 
 	if err := api.db.Create(&comp).Error; err != nil {
@@ -58,16 +51,7 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	if err := fsManager.CreateCompanyDirectories(comp); err != nil {
 		// Log error but don't fail the request completely
-		println("Error creating company directories:", err.Error())
-	}
-	if err := fsManager.WriteCompanySettings(comp); err != nil {
-		println("Error writing company settings:", err.Error())
-	}
-
-	// Write company metadata to filesystem
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteCompany(comp); err != nil {
-		log.Printf("Warning: failed to write company metadata: %v", err)
+		log.Printf("Error creating company directories: %v", err)
 	}
 
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
@@ -76,12 +60,6 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
 	var req struct {
 		ShortName string `json:"short_name"`
 	}
@@ -90,11 +68,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
@@ -103,15 +77,18 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Rename company directory on disk if shortname changed
+	// Rename the company-scoped directories on disk if the shortname changed.
 	if oldShortName != req.ShortName {
 		settings := LoadSettings()
-		fsManager := filesystem.NewManager(settings.BasePath)
-		oldPath := filepath.Join(fsManager.GetBasePath(), "data", oldShortName)
-		newPath := filepath.Join(fsManager.GetBasePath(), "data", req.ShortName)
-		if _, err := os.Stat(oldPath); err == nil {
-			if err := os.Rename(oldPath, newPath); err != nil {
-				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldPath, newPath, err)
+		paths := filesystem.NewPaths(settings.BasePath)
+		oldDirs := paths.CompanyDirs(oldShortName)
+		newDirs := paths.CompanyDirs(req.ShortName)
+		for i := range oldDirs {
+			if _, err := os.Stat(oldDirs[i]); err != nil {
+				continue
+			}
+			if err := os.Rename(oldDirs[i], newDirs[i]); err != nil {
+				log.Printf("Warning: failed to rename company directory from %s to %s: %v", oldDirs[i], newDirs[i], err)
 			}
 		}
 	}
@@ -120,17 +97,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	settings := LoadSettings()
 	fsManager := filesystem.NewManager(settings.BasePath)

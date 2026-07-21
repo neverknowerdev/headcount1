@@ -67,6 +67,7 @@ type Updater struct {
 	checkInterval time.Duration
 	status        UpdateStatus
 	githubPATFn   func() string
+	autoApplyFn   func() bool
 	stopCh        chan struct{}
 }
 
@@ -87,6 +88,15 @@ func New(branch, commitHash, buildDate string, githubPATFn func() string) *Updat
 		githubPATFn:   githubPATFn,
 		stopCh:        make(chan struct{}),
 	}
+}
+
+// SetAutoApplyFn installs a predicate consulted after each periodic check. When
+// it returns true and an update is available, the periodic loop downloads and
+// applies the new binary automatically (equivalent to the user clicking "Apply").
+func (u *Updater) SetAutoApplyFn(fn func() bool) {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.autoApplyFn = fn
 }
 
 func (u *Updater) SetCheckInterval(d time.Duration) {
@@ -251,6 +261,17 @@ func (u *Updater) StartPeriodicCheck() {
 			case <-time.After(interval):
 				if err := u.CheckForUpdate(); err != nil {
 					log.Printf("Periodic update check failed: %v", err)
+					continue
+				}
+				u.mu.RLock()
+				available := u.status.UpdateAvailable
+				autoApply := u.autoApplyFn
+				u.mu.RUnlock()
+				if available && autoApply != nil && autoApply() {
+					log.Printf("Auto-update enabled and new version available — applying...")
+					if err := u.ApplyUpdate(); err != nil {
+						log.Printf("Auto-update failed: %v", err)
+					}
 				}
 			case <-u.stopCh:
 				return

@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useRef, useMemo } from 'react';
+import axios from 'axios';
 import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp, MessageSquare, XCircle
+  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -17,7 +18,7 @@ interface TokenUsage {
   cached?: number;
 }
 
-interface RunTokenStats {
+export interface RunTokenStats {
   prompt_tokens?: number;
   completion_tokens?: number;
   reasoning_tokens?: number;
@@ -25,10 +26,12 @@ interface RunTokenStats {
   tool_output_tokens?: number;
   cached_tokens?: number;
   total_tokens?: number;
+  mcp_tool_tokens?: number;
+  mcp_server_tokens?: Record<string, number>;
 }
 
 interface LogEntry {
-  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error';
+  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
   content: string;
   model?: string;
   status_code?: number;
@@ -38,6 +41,10 @@ interface LogEntry {
   prompt_tokens?: number;
   output_tokens?: number;
   input_tokens?: number;
+  run_id?: number;
+  task_id?: number;
+  title?: string;
+  status?: string;
 }
 
 interface LogMessage {
@@ -45,11 +52,20 @@ interface LogMessage {
   entry: LogEntry;
 }
 
+// AgentTokenStats is a per-agent aggregation across all sessions of a run
+// tree (root + delegated child sessions), shown in the expanded stats panel.
+export interface AgentTokenStats {
+  agent: string;
+  stats: RunTokenStats;
+}
+
 interface RunLogViewerProps {
   messages: LogMessage[];
   status?: string;
   autoScroll?: boolean;
   tokenStats?: RunTokenStats | null;
+  compact?: boolean;
+  agentStats?: AgentTokenStats[];
 }
 
 // ─── Hierarchical grouping ────────────────────────────────────────────────────
@@ -60,20 +76,62 @@ interface ToolPair {
 }
 
 type GroupedItem =
-  | { kind: 'in';    key: number; msg: LogMessage }
-  | { kind: 'out';   key: number; msg: LogMessage; toolPairs: ToolPair[] }
-  | { kind: 'error'; key: number; msg: LogMessage }
-  | { kind: 'info';  key: number; msg: LogMessage };
+  | { kind: 'in';             key: number; msg: LogMessage }
+  | { kind: 'out';            key: number; msg: LogMessage; toolPairs: ToolPair[] }
+  | { kind: 'error';          key: number; msg: LogMessage }
+  | { kind: 'session';        key: number; msg: LogMessage; ended?: LogMessage }
+  | { kind: 'info';           key: number; msg: LogMessage }
+  | { kind: 'system';         key: number; content: string; ts?: string }
+  | { kind: 'init-user';      key: number; content: string; ts?: string }
+  | { kind: 'init-human';     key: number; content: string; ts?: string }
+  | { kind: 'init-assistant'; key: number; content: string; ts?: string };
 
 function groupMessages(messages: LogMessage[]): GroupedItem[] {
   const items: GroupedItem[] = [];
   let key = 0;
   let lastOut: (GroupedItem & { kind: 'out' }) | null = null;
+  let firstRequestDone = false;
 
   for (const msg of messages) {
     switch (msg.entry.type) {
       case 'request': {
         lastOut = null;
+        if (!firstRequestDone) {
+          firstRequestDone = true;
+          // Expand initial context into per-message rows (system, user, assistant).
+          let expandedOk = false;
+          try {
+            const parsed = JSON.parse(msg.entry.content);
+            if (parsed.messages && Array.isArray(parsed.messages)) {
+              const ts = msg.entry.ts;
+              const newItems: GroupedItem[] = [];
+              let userMsgCount = 0;
+              for (const m of parsed.messages as any[]) {
+                if (m.role === 'tool') continue;
+                const content = stringifyMessageContent(m.content);
+                if (m.role === 'system') {
+                  newItems.push({ kind: 'system', key: key++, content, ts });
+                } else if (m.role === 'user') {
+                  userMsgCount++;
+                  if (userMsgCount === 1) {
+                    // First user message = task description, sent by agent/orchestrator
+                    newItems.push({ kind: 'init-user', key: key++, content, ts });
+                  } else {
+                    // Subsequent user messages = human comments
+                    newItems.push({ kind: 'init-human', key: key++, content, ts });
+                  }
+                } else if (m.role === 'assistant') {
+                  newItems.push({ kind: 'init-assistant', key: key++, content, ts });
+                }
+              }
+              if (newItems.length > 0) {
+                items.push(...newItems);
+                expandedOk = true;
+              }
+            }
+          } catch {}
+          if (expandedOk) break;
+        }
         items.push({ kind: 'in', key: key++, msg });
         break;
       }
@@ -110,6 +168,26 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
         items.push({ kind: 'error', key: key++, msg });
         break;
       }
+      case 'session_started': {
+        lastOut = null;
+        items.push({ kind: 'session', key: key++, msg });
+        break;
+      }
+      case 'session_ended': {
+        // Attach the end entry to the matching session block (by run_id).
+        const runId = msg.entry.run_id;
+        let matched = false;
+        for (let i = items.length - 1; i >= 0; i--) {
+          const it = items[i];
+          if (it.kind === 'session' && !it.ended && it.msg.entry.run_id === runId) {
+            it.ended = msg;
+            matched = true;
+            break;
+          }
+        }
+        if (!matched) items.push({ kind: 'info', key: key++, msg });
+        break;
+      }
       default: {
         items.push({ kind: 'info', key: key++, msg });
         break;
@@ -131,6 +209,8 @@ function JsonBlock({ data }: { data: string }) {
   );
 }
 
+const MCP_TOOL_NAMES = new Set(['call_mcp_tool', 'discover_mcp_tool']);
+
 interface ParsedRequestContent {
   latestText: string | null;
   messageCount: number;
@@ -140,6 +220,7 @@ interface ParsedRequestContent {
   estimatedTotalTokens: number;
   currentTurnTokens: number;  // tokens for just the new messages in this turn
   toolResultTokens: number;   // estimated tokens from tool results in this turn
+  mcpToolTokens: number;      // subset of toolResultTokens from MCP dispatcher tools
 }
 
 // Try to extract readable text from a tool result value that may be JSON.
@@ -182,7 +263,7 @@ function stringifyMessageContent(content: unknown): string {
 function parseRequestContent(content: string): ParsedRequestContent {
   const empty: ParsedRequestContent = {
     latestText: null, messageCount: 0, toolResultCount: 0, toolResults: [],
-    historyMessageCount: 0, estimatedTotalTokens: 0, currentTurnTokens: 0, toolResultTokens: 0,
+    historyMessageCount: 0, estimatedTotalTokens: 0, currentTurnTokens: 0, toolResultTokens: 0, mcpToolTokens: 0,
   };
   try {
     const parsed = JSON.parse(content);
@@ -221,16 +302,22 @@ function parseRequestContent(content: string): ParsedRequestContent {
       const toolResultTokens = Math.ceil(
         toolResults.reduce((sum, tr) => sum + tr.content.length, 0) / 4
       );
+      const mcpToolTokens = Math.ceil(
+        toolResults.filter(tr => MCP_TOOL_NAMES.has(tr.name))
+          .reduce((sum, tr) => sum + tr.content.length, 0) / 4
+      );
 
+      // Only look at current-turn messages for user text — not history.
+      // This prevents older task messages from showing as the preview on tool-result turns.
       let latestText: string | null = null;
-      for (let i = msgs.length - 1; i >= 0; i--) {
-        if (msgs[i].role === 'user') {
-          const t = stringifyMessageContent(msgs[i].content);
-          if (t) { latestText = t; break; }
+      for (let i = currentTurnMsgs.length - 1; i >= 0; i--) {
+        const m = currentTurnMsgs[i];
+        if (m.role === 'user') {
+          const t = stringifyMessageContent(m.content);
+          if (t && !t.startsWith('[')) { latestText = t; break; }
         }
       }
-      if (!latestText && toolResults.length > 0) latestText = toolResults[0].preview;
-      return { latestText, messageCount: msgs.length, toolResultCount: toolResults.length, toolResults, historyMessageCount, estimatedTotalTokens, currentTurnTokens, toolResultTokens };
+      return { latestText, messageCount: msgs.length, toolResultCount: toolResults.length, toolResults, historyMessageCount, estimatedTotalTokens, currentTurnTokens, toolResultTokens, mcpToolTokens };
     }
     return empty;
   } catch { return empty; }
@@ -310,6 +397,156 @@ function getToolCallPreview(entry: LogEntry): string {
   return entry.tool_name || 'tool call';
 }
 
+// ─── SystemRow: system prompt ─────────────────────────────────────────────────
+
+function SystemRow({ content, ts }: { content: string; ts?: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <Brain size={13} className="text-purple-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-purple-600">System</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-400 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-purple-50/10">
+          <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words font-mono bg-white border border-purple-100 rounded-lg p-3 max-h-80 overflow-y-auto">
+            {content}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitUserRow: user message from initial context (task or human comment) ───
+
+function InitUserRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <User size={13} className="text-blue-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-400 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-blue-50/20">
+          {!rawMode ? (
+            <div className="pl-7 bg-white border border-blue-100 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitHumanRow: human comment from initial context ────────────────────────
+
+function InitHumanRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <User size={13} className="text-gray-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-gray-600">User</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-500 italic">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-gray-50/50">
+          {!rawMode ? (
+            <div className="pl-7 bg-white border border-gray-200 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── InitAssistantRow: assistant message from initial context (AI comment) ────
+
+function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+  const [expanded, setExpanded] = useState(false);
+  const time = formatTime(ts);
+  const preview = content.split('\n').find(l => l.trim()) || '';
+  const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
+
+  return (
+    <div className="border-b border-gray-100">
+      <button
+        onClick={() => setExpanded(!expanded)}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-gray-50 text-left"
+      >
+        <span className="shrink-0 text-gray-400">
+          {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        </span>
+        <Bot size={13} className="text-indigo-500 shrink-0" />
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">AI Model</span>
+        {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
+        <span className="flex-1 truncate text-xs text-gray-600">{previewShort}</span>
+      </button>
+      {expanded && (
+        <div className="px-3 pb-3 pt-1 bg-indigo-50/10">
+          {!rawMode ? (
+            <div className="pl-7 bg-indigo-50 border border-indigo-100 rounded-lg px-3 py-2">
+              <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0">
+                <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+              </div>
+            </div>
+          ) : (
+            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── InRow: collapsed request (IN) ───────────────────────────────────────────
 
 function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
@@ -324,9 +561,8 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
       const line = parsed.latestText.split('\n').find(l => l.trim()) || '';
       return line.length > 80 ? line.slice(0, 80) + '…' : line;
     }
-    const first = entry.content.split('\n').find(l => l.trim()) || '';
-    return first.length > 80 ? first.slice(0, 80) + '…' : first;
-  }, [parsed, entry.content]);
+    return null;
+  }, [parsed]);
 
   return (
     <div className="border-b border-gray-100">
@@ -340,8 +576,8 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
         <User size={13} className="text-blue-500 shrink-0" />
         <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
-        <span className="flex-1 truncate text-xs text-gray-600" title={previewText}>
-          {previewText || '(empty)'}
+        <span className="flex-1 truncate text-xs text-gray-400 italic" title={previewText || ''}>
+          {previewText || ''}
         </span>
         {parsed.toolResultCount > 0 && (
           <span className="shrink-0 text-xs text-green-700 bg-green-50 px-1.5 py-0.5 rounded">
@@ -366,6 +602,11 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
             {parsed.toolResultTokens > 0 && (
               <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded font-mono">
                 tools: {formatTokens(parsed.toolResultTokens)} tok
+              </span>
+            )}
+            {parsed.mcpToolTokens > 0 && (
+              <span className="bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded font-mono">
+                🔌 MCP: {formatTokens(parsed.mcpToolTokens)} tok
               </span>
             )}
             {(promptTokens > 0 || parsed.estimatedTotalTokens > 0) && (
@@ -745,11 +986,112 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
   );
 }
 
+// ─── SessionRow (delegated child session, expandable) ─────────────────────────
+
+interface SessionMeta {
+  run_id?: number;
+  task_id?: number;
+  agent_name?: string;
+  title?: string;
+}
+
+function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
+  const [expanded, setExpanded] = useState(false);
+  const [childRun, setChildRun] = useState<any>(null);
+  const [loading, setLoading] = useState(false);
+
+  let meta: SessionMeta = {};
+  try { meta = JSON.parse(msg.entry.content); } catch {}
+  const runId = meta.run_id ?? msg.entry.run_id;
+  const agentName = meta.agent_name ?? msg.entry.agent_name ?? 'agent';
+  const title = meta.title ?? msg.entry.title ?? '';
+
+  let endStatus: string | undefined = ended?.entry.status;
+  if (!endStatus && ended) {
+    try { endStatus = JSON.parse(ended.entry.content).status; } catch {}
+  }
+  const status = childRun?.status ?? endStatus ?? (ended ? 'completed' : 'running');
+
+  const fetchChild = async () => {
+    if (!runId) return;
+    setLoading(true);
+    try {
+      const res = await axios.get(`/api/runs/${runId}`);
+      setChildRun(res.data);
+    } catch (e) {
+      console.error('failed to load session run', e);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const toggle = () => {
+    const next = !expanded;
+    setExpanded(next);
+    if (next && !childRun) fetchChild();
+  };
+
+  const statusChip =
+    status === 'running'   ? 'bg-yellow-100 text-yellow-800' :
+    status === 'completed' ? 'bg-green-100 text-green-800' :
+    status === 'canceled'  ? 'bg-gray-100 text-gray-600' :
+                             'bg-red-100 text-red-800';
+
+  const childMessages: LogMessage[] = useMemo(() => {
+    if (!Array.isArray(childRun?.log_entries)) return [];
+    return childRun.log_entries.map((entry: any, i: number) => ({ id: i, entry }));
+  }, [childRun]);
+
+  return (
+    <div className="border-l-4 border-violet-300 bg-violet-50/40 my-1 mx-2 rounded" data-testid="session-block">
+      <button
+        onClick={toggle}
+        className="w-full flex items-center gap-2 px-3 py-2 hover:bg-violet-50 text-left text-xs"
+      >
+        {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
+        <div className="shrink-0 w-5 h-5 rounded-full bg-violet-100 flex items-center justify-center">
+          <GitBranch size={11} className="text-violet-600" />
+        </div>
+        <span className="font-semibold text-violet-800">Session #{runId}</span>
+        <span className="font-mono text-violet-600">{agentName}</span>
+        <span className="text-gray-600 truncate flex-1">{title}</span>
+        <span className={`px-1.5 py-0.5 rounded-full font-medium ${statusChip}`}>
+          {status === 'running' && <Loader2 size={9} className="animate-spin inline mr-1" />}
+          {status}
+        </span>
+      </button>
+      {expanded && (
+        <div className="px-2 pb-2">
+          {loading && (
+            <div className="flex items-center gap-2 text-xs text-gray-400 py-2 px-2">
+              <Loader2 size={12} className="animate-spin" /> Loading session…
+            </div>
+          )}
+          {!loading && childRun && (
+            <div className="border rounded bg-white max-h-96 overflow-y-auto flex flex-col">
+              <RunLogViewer
+                messages={childMessages}
+                status={childRun.status}
+                tokenStats={childRun.token_stats}
+                autoScroll={false}
+              />
+            </div>
+          )}
+          {!loading && childRun && status === 'running' && (
+            <button onClick={fetchChild} className="mt-1 text-xs text-violet-600 hover:underline">Refresh</button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── TokenStatsBar ────────────────────────────────────────────────────────────
 
-interface TokenStatsBarProps {
+export interface TokenStatsBarProps {
   stats: RunTokenStats | null;
   messages: LogMessage[];
+  agentStats?: AgentTokenStats[];
 }
 
 interface TokenSegment {
@@ -761,7 +1103,7 @@ interface TokenSegment {
   isSub?: boolean;
 }
 
-function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
+export function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProps) {
   const [expanded, setExpanded] = useState(false);
 
   const aggregate: RunTokenStats = useMemo(() => {
@@ -786,6 +1128,9 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
         agg.tool_input_tokens = (agg.tool_input_tokens || 0) + (e.input_tokens ?? e.output_tokens ?? 0);
       } else if (e.type === 'tool_response') {
         agg.tool_output_tokens = (agg.tool_output_tokens || 0) + (e.output_tokens || 0);
+        if (e.tool_name && MCP_TOOL_NAMES.has(e.tool_name)) {
+          agg.mcp_tool_tokens = (agg.mcp_tool_tokens || 0) + (e.output_tokens || 0);
+        }
       } else if (e.type === 'request' && e.prompt_tokens) {
         agg.prompt_tokens = Math.max(agg.prompt_tokens || 0, e.prompt_tokens);
       }
@@ -832,6 +1177,11 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
           })}
         </div>
         <span className="text-xs text-gray-700 font-mono whitespace-nowrap">{formatTokens(total)} tok</span>
+        {(aggregate.mcp_tool_tokens || 0) > 0 && (
+          <span className="text-xs text-teal-700 font-mono whitespace-nowrap bg-teal-50 px-1.5 py-0.5 rounded">
+            🔌 {formatTokens(aggregate.mcp_tool_tokens!)} MCP
+          </span>
+        )}
         {expanded ? <ChevronUp size={10} className="text-gray-400" /> : <ChevronDown size={10} className="text-gray-400" />}
       </button>
       {expanded && (
@@ -848,6 +1198,52 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
               ⚡ {formatTokens(cachedSegment.value)} {cachedSegment.label}
             </span>
           )}
+          {(aggregate.mcp_tool_tokens || 0) > 0 && (
+            <div className="w-full flex flex-wrap gap-1 pt-0.5 border-t border-gray-100 mt-0.5">
+              <span className="bg-teal-50 text-teal-700 px-1.5 py-0.5 rounded font-mono flex items-center gap-1">
+                🔌 {formatTokens(aggregate.mcp_tool_tokens!)} MCP total
+              </span>
+              {Object.entries(stats?.mcp_server_tokens ?? aggregate.mcp_server_tokens ?? {})
+                .sort((a, b) => b[1] - a[1])
+                .map(([server, count]) => (
+                  <span key={server} className="bg-teal-50/60 text-teal-600 px-1.5 py-0.5 rounded font-mono">
+                    {server}: {formatTokens(count)}
+                  </span>
+                ))}
+            </div>
+          )}
+          {agentStats && agentStats.length > 0 && (
+            <div className="w-full pt-1 border-t border-gray-100 mt-0.5" data-testid="agent-token-stats">
+              <div className="text-xs text-gray-400 font-medium mb-0.5">By agent (all sessions)</div>
+              <div className="flex flex-col gap-0.5">
+                {agentStats.map(({ agent, stats: s }) => {
+                  const agentTotal = s.total_tokens ||
+                    (s.prompt_tokens || 0) + (s.completion_tokens || 0) + (s.reasoning_tokens || 0) +
+                    (s.tool_input_tokens || 0) + (s.tool_output_tokens || 0);
+                  return (
+                    <div key={agent} className="flex items-center gap-1.5 flex-wrap text-xs">
+                      <span className="font-mono font-medium text-violet-700 bg-violet-50 px-1.5 py-0.5 rounded">{agent}</span>
+                      <span className="font-mono text-gray-700">{formatTokens(agentTotal)} tok</span>
+                      {(s.prompt_tokens || 0) > 0 && (
+                        <span className="bg-blue-50 text-blue-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.prompt_tokens!)} prompt</span>
+                      )}
+                      {(s.reasoning_tokens || 0) > 0 && (
+                        <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.reasoning_tokens!)} reasoning</span>
+                      )}
+                      {(s.completion_tokens || 0) > 0 && (
+                        <span className="bg-indigo-50 text-indigo-700 px-1.5 py-0.5 rounded font-mono">{formatTokens(s.completion_tokens!)} completion</span>
+                      )}
+                      {((s.tool_input_tokens || 0) + (s.tool_output_tokens || 0)) > 0 && (
+                        <span className="bg-amber-50 text-amber-700 px-1.5 py-0.5 rounded font-mono">
+                          {formatTokens((s.tool_input_tokens || 0) + (s.tool_output_tokens || 0))} tools
+                        </span>
+                      )}
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
@@ -856,13 +1252,14 @@ function TokenStatsBar({ stats, messages }: TokenStatsBarProps) {
 
 // ─── Main RunLogViewer ────────────────────────────────────────────────────────
 
-export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null }) => {
+export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
   const grouped = useMemo(() => groupMessages(messages || []), [messages]);
+  const visibleItems = compact ? grouped.slice(-10) : grouped;
 
   const counts = useMemo(() => {
     let req = 0, res = 0, tools = 0;
@@ -890,6 +1287,35 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
     setIsAtBottom(scrollHeight - scrollTop - clientHeight < 50);
   };
 
+  if (compact) {
+    return (
+      <div
+        ref={containerRef}
+        className="overflow-y-auto max-h-48 bg-white"
+      >
+        {visibleItems.length === 0 ? (
+          <div className="flex items-center justify-center text-gray-400 text-xs italic py-4">
+            {status === 'running' ? 'Waiting for logs...' : status === 'failed' ? 'No log entries captured.' : 'No activity yet.'}
+          </div>
+        ) : (
+          <div>
+            {visibleItems.map(item => {
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} />;
+              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
+              return <InfoRow key={item.key} msg={item.msg} />;
+            })}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="flex flex-col h-full">
       {/* Header */}
@@ -915,7 +1341,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               {counts.tools > 0 && <span className="px-1.5 py-0.5 bg-amber-50  text-amber-700  rounded">{counts.tools} tools</span>}
             </div>
           )}
-          <TokenStatsBar stats={tokenStats} messages={messages || []} />
+          <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
         </div>
         <button
           onClick={() => setRawMode(!rawMode)}
@@ -951,9 +1377,14 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
         ) : (
           <div>
             {grouped.map(item => {
-              if (item.kind === 'in')    return <InRow    key={item.key} msg={item.msg} rawMode={rawMode} />;
-              if (item.kind === 'out')   return <OutRow   key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
-              if (item.kind === 'error') return <ErrorRow key={item.key} msg={item.msg} />;
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
+              if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>

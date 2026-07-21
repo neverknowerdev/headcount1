@@ -14,18 +14,20 @@ import (
 // ListDir lists files inside the workspace sandbox.
 type ListDir struct {
 	workspacePath string
+	readOnlyDirs  []string
 }
 
-// NewListDir creates a ListDir tool sandboxed to workspacePath.
-func NewListDir(workspacePath string) *ListDir {
-	return &ListDir{workspacePath: workspacePath}
+// NewListDir creates a ListDir tool sandboxed to workspacePath plus optional
+// read-only roots.
+func NewListDir(workspacePath string, readOnlyDirs ...string) *ListDir {
+	return &ListDir{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
 
 func (t *ListDir) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "list_dir",
+			Name:        "ls",
 			Description: "List files inside the workspace. Returns a line-per-entry listing.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -47,7 +49,7 @@ func (t *ListDir) Execute(_ context.Context, args json.RawMessage) (string, erro
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	resolved, err := resolvePath(t.workspacePath, p.Path)
+	resolved, err := resolveReadPath(t.workspacePath, t.readOnlyDirs, p.Path)
 	if err != nil {
 		return "", err
 	}
@@ -67,12 +69,12 @@ func (t *ListDir) Execute(_ context.Context, args json.RawMessage) (string, erro
 			return nil
 		})
 		if err != nil {
-			return "", fmt.Errorf("list_dir: %w", err)
+			return "", fmt.Errorf("ls: %w", err)
 		}
 	} else {
 		entries, err := os.ReadDir(resolved)
 		if err != nil {
-			return "", fmt.Errorf("list_dir: %w", err)
+			return "", fmt.Errorf("ls: %w", err)
 		}
 		for _, e := range entries {
 			if e.IsDir() {

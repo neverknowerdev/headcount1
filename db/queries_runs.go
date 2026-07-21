@@ -28,6 +28,43 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	return q.db.WithContext(ctx).Save(&r).Error
 }
 
+// SetRunRootID sets root_run_id after creation. Root runs point at themselves
+// so all sessions of one execution tree share the same root id.
+func (q *Queries) SetRunRootID(ctx context.Context, id int32, rootID int32) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("root_run_id", rootID).Error
+}
+
+// ListChildRuns returns all runs whose parent_run_id equals parentRunID,
+// ordered by start time ascending. Used by the Run Log UI to render nested
+// delegation sessions.
+func (q *Queries) ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Preload("Task").Preload("Agent").
+		Where("parent_run_id = ?", parentRunID).
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
+
+// ListDescendantRuns returns every run in the given root run's session tree
+// except the root itself (all sessions share the root's id in root_run_id),
+// ordered by start time ascending. Used for whole-tree per-agent token stats.
+func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Preload("Task").Preload("Agent").
+		Where("root_run_id = ? AND id <> ?", rootRunID, rootRunID).
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
+
+// UpdateRunCurrentStatus stores the agent's self-reported progress line.
+func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+}
+
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }
@@ -96,7 +133,7 @@ func (q *Queries) TouchRunLastMessageTime(ctx context.Context, id int32) error {
 
 func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 	var r Run
-	err := q.db.WithContext(ctx).First(&r, id).Error
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").Preload("Agent").First(&r, id).Error
 	return r, err
 }
 
@@ -166,7 +203,7 @@ func (q *Queries) GetRunTokenStats(ctx context.Context, runID int32) (RunTokenSt
 // stats. The column is stored as JSON; we read-modify-write the struct and
 // round the totals so re-reads stay stable. Safe to call concurrently.
 func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTokenStats) error {
-	if delta == (RunTokenStats{}) {
+	if delta.IsEmpty() {
 		return nil
 	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
@@ -184,8 +221,64 @@ func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTo
 		cur.ToolInputTokens += delta.ToolInputTokens
 		cur.ToolOutputTokens += delta.ToolOutputTokens
 		cur.CachedTokens += delta.CachedTokens
+		cur.MCPToolTokens += delta.MCPToolTokens
+		if len(delta.MCPServerTokens) > 0 {
+			if cur.MCPServerTokens == nil {
+				cur.MCPServerTokens = make(map[string]int, len(delta.MCPServerTokens))
+			}
+			for k, v := range delta.MCPServerTokens {
+				cur.MCPServerTokens[k] += v
+			}
+		}
 		cur.TotalTokens = cur.PromptTokens + cur.CompletionTokens + cur.ReasoningTokens + cur.ToolInputTokens + cur.ToolOutputTokens
 		b, _ := json.Marshal(cur)
 		return tx.Model(&Run{}).Where("id = ?", runID).Update("token_stats", string(b)).Error
 	})
+}
+
+// UpdateRunResult stores the short description and detailed explanation produced
+// by the finish_task_execution tool call at the end of a run.
+func (q *Queries) UpdateRunResult(ctx context.Context, runID int32, description, explanation string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{
+			"result_description": description,
+			"result_explanation": explanation,
+		}).Error
+}
+
+// ListCompletedRunsByTask returns all completed runs for a task that have a
+// result_description set, ordered by start time ascending.
+func (q *Queries) ListCompletedRunsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("task_id = ? AND status = ? AND result_description != ''", taskID, "completed").
+		Order("started_at asc").
+		Find(&runs).Error
+	return runs, err
+}
+
+// GetLatestRunByTask returns the most recently started run for a task.
+func (q *Queries) GetLatestRunByTask(ctx context.Context, taskID int32) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).
+		Where("task_id = ?", taskID).
+		Order("started_at desc").
+		First(&r).Error
+	return r, err
+}
+
+// UpdateRunName stores the human-readable run key (e.g. "DEC-50-CEO").
+func (q *Queries) UpdateRunName(ctx context.Context, id int32, name string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("name", name).Error
+}
+
+// CountRunsByNameKey counts runs on a task whose name is the given key or a
+// numbered variant of it ("<key>" or "<key>-N"). Used to pick the next run
+// name suffix.
+func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key string) (int64, error) {
+	var count int64
+	err := q.db.WithContext(ctx).Model(&Run{}).
+		Where("task_id = ? AND (name = ? OR name LIKE ?)", taskID, key, key+"-%").
+		Count(&count).Error
+	return count, err
 }

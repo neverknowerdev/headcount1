@@ -3,16 +3,40 @@ import * as net from 'net';
 import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
-const TOOL_NAME = 'update_task_status';
+const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
-const TOOL_ARGS = { status: 'in-review' };
-const COMPLETION_TEXT = 'Task status has been updated. All done.';
+const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
+const COMPLETION_TEXT = 'Task is now in review. All done.';
 
 interface ReceivedRequest {
     method: string;
     path: string;
     body: unknown;
     timestamp: number;
+}
+
+/**
+ * A scenario is an ordered sequence of responses the mock server returns
+ * instead of its default logic. Each entry is either a tool call or a text
+ * completion. The server works through entries one-by-one on each POST to
+ * /v1/chat/completions, cycling to a text "Done." after the last entry.
+ */
+export interface ScenarioToolCall {
+    id: string;
+    name: string;
+    arguments: Record<string, unknown>;
+}
+
+export interface ScenarioEntry {
+    /** Emit a tool call. */
+    tool_call?: ScenarioToolCall;
+    /** Emit a plain text completion. */
+    text?: string;
+}
+
+interface ScenarioState {
+    entries: ScenarioEntry[];
+    index: number;
 }
 
 interface ChatCompletionRequest {
@@ -52,7 +76,7 @@ interface ChatChunk {
  * tests.
  *
  * Endpoints:
- *   - POST /v1/chat/completions   -> returns a tool call to `update_task_status`
+ *   - POST /v1/chat/completions   -> returns a tool call to `finish_task`
  *                                   on the first request, then a text completion.
  *   - GET  /v1/models             -> returns one model so `TestProvider` succeeds.
  *   - GET  /__test/requests       -> returns the log of received requests (test introspection).
@@ -65,7 +89,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
     const state = {
         received: [] as ReceivedRequest[],
         requestCount: 0,
-        chatRequestCount: 0,
+        scenario: null as ScenarioState | null,
     };
 
     const server = http.createServer(async (req, res) => {
@@ -74,7 +98,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         state.requestCount++;
         state.received.push({ method: req.method || '', path: req.url || '', body, timestamp: Date.now() });
 
-        if (handleTestRoutes(req, res, state)) return;
+        if (handleTestRoutes(req, res, body, state)) return;
         if (handleModelsRoute(req, res)) return;
         if (handleChatCompletionsRoute(req, res, body, state)) return;
 
@@ -110,7 +134,8 @@ async function parseRequestBody(req: http.IncomingMessage): Promise<unknown> {
 function handleTestRoutes(
     req: http.IncomingMessage,
     res: http.ServerResponse,
-    state: { received: ReceivedRequest[]; requestCount: number; chatRequestCount: number }
+    body: unknown,
+    state: { received: ReceivedRequest[]; requestCount: number; scenario: ScenarioState | null }
 ): boolean {
     if (req.url?.startsWith('/__test/requests') && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -120,8 +145,16 @@ function handleTestRoutes(
     if (req.url === '/__test/reset' && req.method === 'POST') {
         state.received.length = 0;
         state.requestCount = 0;
+        state.scenario = null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
+        return true;
+    }
+    if (req.url === '/__test/set-scenario' && req.method === 'POST') {
+        const data = body as { entries: ScenarioEntry[] };
+        state.scenario = { entries: data.entries ?? [], index: 0 };
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', count: state.scenario.entries.length }));
         return true;
     }
     if (req.url === '/__test/health' && req.method === 'GET') {
@@ -148,7 +181,7 @@ function handleChatCompletionsRoute(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     body: unknown,
-    state: { received: ReceivedRequest[]; requestCount: number; chatRequestCount: number }
+    state: { received: ReceivedRequest[]; requestCount: number; scenario: ScenarioState | null }
 ): boolean {
     if (!req.url?.includes('/chat/completions') || req.method !== 'POST') {
         return false;
@@ -157,15 +190,24 @@ function handleChatCompletionsRoute(
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
 
-    // Only count requests that include tool definitions — those are real agent
-    // calls. The TestProvider endpoint sends a bare "Say hello" request without
-    // tools to verify connectivity; that request should not advance the counter
-    // so it doesn't consume the first-call slot.
-    const hasTools = Array.isArray((request as any).tools) && (request as any).tools.length > 0;
-    if (hasTools) {
-        state.chatRequestCount++;
+    // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
+    if (state.scenario) {
+        const sc = state.scenario;
+        const entry = sc.index < sc.entries.length ? sc.entries[sc.index++] : null;
+
+        if (wantsStream) {
+            writeStreamingScenarioEntry(res, entry);
+        } else {
+            res.writeHead(200, { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify(buildScenarioResponse(entry)));
+        }
+        return true;
     }
-    const isFirstCall = state.chatRequestCount === 1;
+
+    // Default mode: first call returns finish_task, subsequent calls return text.
+    const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
+    const hasToolResult = messages.some((m: any) => m.role === 'tool');
+    const isFirstCall = !hasToolResult;
 
     if (wantsStream) {
         writeStreamingChatCompletion(res, isFirstCall);
@@ -174,6 +216,74 @@ function handleChatCompletionsRoute(
         res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall)));
     }
     return true;
+}
+
+function buildScenarioResponse(entry: ScenarioEntry | null): object {
+    if (!entry || entry.text !== undefined) {
+        const text = entry?.text ?? 'Done.';
+        return {
+            id: `chatcmpl-sc-${Date.now()}`,
+            object: 'chat.completion',
+            created: Math.floor(Date.now() / 1000),
+            model: MOCK_MODEL_ID,
+            choices: [{
+                index: 0,
+                message: { role: 'assistant' as const, content: text },
+                finish_reason: 'stop',
+            }],
+            usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
+        };
+    }
+    const tc = entry.tool_call!;
+    return {
+        id: `chatcmpl-sc-${Date.now()}`,
+        object: 'chat.completion',
+        created: Math.floor(Date.now() / 1000),
+        model: MOCK_MODEL_ID,
+        choices: [{
+            index: 0,
+            message: {
+                role: 'assistant' as const,
+                content: null,
+                tool_calls: [{
+                    id: tc.id,
+                    type: 'function',
+                    function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
+                }],
+            },
+            finish_reason: 'tool_calls',
+        }],
+        usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
+    };
+}
+
+function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null): void {
+    res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+    });
+
+    const chunk = createChunkFactory();
+    res.write(formatSSE(chunk({ role: 'assistant' }, null)));
+
+    if (!entry || entry.text !== undefined) {
+        const text = entry?.text ?? 'Done.';
+        res.write(formatSSE(chunk({ content: text }, null)));
+        res.write(formatSSE(chunk({}, 'stop')));
+    } else {
+        const tc = entry.tool_call!;
+        res.write(formatSSE(chunk({
+            tool_calls: [{ index: 0, id: tc.id, function: { name: tc.name, arguments: '' } }],
+        }, null)));
+        res.write(formatSSE(chunk({
+            tool_calls: [{ index: 0, function: { arguments: JSON.stringify(tc.arguments) } }],
+        }, null)));
+        res.write(formatSSE(chunk({}, 'tool_calls')));
+    }
+
+    res.write('data: [DONE]\n\n');
+    res.end();
 }
 
 function buildChatCompletionResponse(withToolCall: boolean): object {

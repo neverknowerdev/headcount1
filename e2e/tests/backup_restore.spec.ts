@@ -148,6 +148,52 @@ test.describe.serial('Backup & Restore', () => {
         expect(comments[0].content).toBe('Test comment for backup');
     });
 
+    test('encrypted provider secret survives backup + restore and is decryptable', async ({ request }) => {
+        // A provider API key is sealed at rest as enc:u1:<userID>:… under the
+        // fixture user's data key (in E2E the DEK is deterministic — the stand-in
+        // for a passkey PRF unlock). This proves the ciphertext round-trips
+        // through backup + restore and is still decryptable afterwards.
+        const secret = 'sk-roundtrip-' + Date.now();
+        const createRes = await request.post('/api/providers', {
+            data: {
+                name: 'Secret Roundtrip Provider',
+                base_url: 'https://example.test/v1',
+                api_key: secret,
+                provider_type: 'openai',
+                default_model: 'e2e-model',
+            },
+        });
+        expect(createRes.ok(), await createRes.text()).toBeTruthy();
+        const provider = await createRes.json();
+        // The API never echoes the raw key back — only a boolean flag.
+        expect(provider.api_key).not.toBe(secret);
+        expect(provider.has_api_key).toBe(true);
+
+        // Sanity: while unlocked, the E2E reveal endpoint decrypts it correctly.
+        const revealBefore = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealBefore.ok()).toBeTruthy();
+        expect((await revealBefore.json()).api_key).toBe(secret);
+
+        // Back up, wipe, restore.
+        const backupRes = await request.post('/api/backup');
+        expect(backupRes.ok()).toBeTruthy();
+        const archivePath = (await backupRes.json()).archive_path;
+
+        expect((await request.post('/api/e2e/wipe-db')).ok()).toBeTruthy();
+
+        const restoreRes = await request.post('/api/backup/restore', {
+            data: { archive_path: archivePath },
+        });
+        expect(restoreRes.ok(), await restoreRes.text()).toBeTruthy();
+
+        // After restore the fixture user is re-unlocked with the same
+        // deterministic DEK; the enc:u1 ciphertext (carried verbatim in the
+        // backup) must decrypt back to the exact original secret.
+        const revealAfter = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealAfter.ok(), await revealAfter.text()).toBeTruthy();
+        expect((await revealAfter.json()).api_key).toBe(secret);
+    });
+
     test('backup via Settings UI button', async ({ page }) => {
         // Navigate to settings for 'bt' company (exists after restore from roundtrip test)
         await page.goto('/companies/bt/settings');
@@ -160,29 +206,30 @@ test.describe.serial('Backup & Restore', () => {
         ]);
         await expect(page.getByRole('heading', { name: 'Backup & Restore' })).toBeVisible();
 
-        // Handle the alert dialog that appears on backup success
-        page.on('dialog', async dialog => {
-            await dialog.accept();
-        });
+        // Wait for the page to finish loading (the "Backup Now" button only renders after the
+        // async status fetch completes, so waiting for it ensures the backup list is populated).
+        await expect(page.getByRole('button', { name: 'Backup Now' })).toBeVisible({ timeout: 10000 });
 
-        // Click Backup Now button
-        await page.click('button:has-text("Backup Now")');
+        // Count how many backups exist before clicking so we can wait for a NEW one.
+        const countBefore = await page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).count();
 
-        // Wait for the backup to complete and the status to refresh.
-        // page.getByText() is avoided: it resolves to <option> elements inside the
-        // restore <select> dropdown first, and <option> elements in a closed select
-        // are always hidden in Playwright. Target <li> elements in the backup list.
-        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).first()).toBeVisible({ timeout: 30000 });
+        // Click Backup Now and accept the success dialog in parallel.
+        const [dialog] = await Promise.all([
+            page.waitForEvent('dialog'),
+            page.click('button:has-text("Backup Now")'),
+        ]);
+        await dialog.accept();
+
+        // Wait for the backup list to grow (a new entry appears after the dialog is dismissed).
+        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ })).toHaveCount(countBefore + 1, { timeout: 30000 });
     });
 
     test.afterAll(async () => {
-        // Remove bt's filesystem data so its comment IDs (written before the roundtrip
-        // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
-        // when sync_filesystem.spec.ts calls POST /api/settings/sync.
+        // Remove bt's filesystem footprint so later specs start clean.
         const env = loadE2EEnv();
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        for (const subDir of ['data/bt', 'companies/bt']) {
-            const fullPath = path.join(paperclipBase, subDir);
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'bt');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
     });

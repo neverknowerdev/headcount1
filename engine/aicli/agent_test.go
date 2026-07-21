@@ -3,7 +3,6 @@ package aicli_test
 import (
 	"context"
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -82,13 +81,13 @@ func TestAgentToolCall(t *testing.T) {
 	fixturePath := filepath.Join("testdata", "fixtures", "tool_call.json")
 	client := newTestClient(t, fixturePath)
 
-	// Track whether update_task_status was called.
-	var statusCalled atomic.Bool
+	// Track whether finish_task was called.
+	var finishCalled atomic.Bool
 	var capturedStatus string
 
 	reg := aicli.NewRegistry()
-	reg.Register(tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
-		statusCalled.Store(true)
+	reg.Register(tools.NewFinishTask(false, func(ctx context.Context, status, finishStatus, resultDetails string) error {
+		finishCalled.Store(true)
 		capturedStatus = status
 		return nil
 	}))
@@ -103,7 +102,7 @@ func TestAgentToolCall(t *testing.T) {
 	result, err := agent.Run(context.Background(), "You are an agent.", "Complete the task and update its status.")
 	require.NoError(t, err)
 
-	assert.True(t, statusCalled.Load(), "update_task_status should have been called")
+	assert.True(t, finishCalled.Load(), "finish_task should have been called")
 	assert.Equal(t, "in-review", capturedStatus)
 	assert.Contains(t, result, "in-review")
 }
@@ -195,7 +194,7 @@ func TestClientBodyEmbeddedError(t *testing.T) {
 	assert.Contains(t, err.Error(), "model not found")
 }
 
-// TestToolReadFile verifies the read_file tool in isolation.
+// TestToolReadFile verifies the read tool in isolation.
 func TestToolReadFile(t *testing.T) {
 	workDir := t.TempDir()
 	content := "line1\nline2\nline3"
@@ -203,12 +202,12 @@ func TestToolReadFile(t *testing.T) {
 
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"test.txt"}`))
+	result, err := reg.Execute(context.Background(), "read", json.RawMessage(`{"path":"test.txt"}`))
 	require.NoError(t, err)
 	assert.Equal(t, content, result)
 }
 
-// TestToolListDir verifies the list_dir tool.
+// TestToolListDir verifies the ls tool.
 func TestToolListDir(t *testing.T) {
 	workDir := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "a.txt"), []byte("a"), 0644))
@@ -217,19 +216,19 @@ func TestToolListDir(t *testing.T) {
 
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "list_dir", json.RawMessage(`{"path":".","recursive":false}`))
+	result, err := reg.Execute(context.Background(), "ls", json.RawMessage(`{"path":".","recursive":false}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "a.txt")
 	assert.Contains(t, result, "sub/")
 	assert.NotContains(t, result, "b.txt") // non-recursive
 }
 
-// TestToolExecCommand verifies the exec_command tool.
+// TestToolExecCommand verifies the bash tool.
 func TestToolExecCommand(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
-	result, err := reg.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo hello"}`))
+	result, err := reg.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo hello"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "hello\n", result)
 }
@@ -257,28 +256,28 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 		tool string
 		args string
 	}{
-		// read_file: absolute path outside workspace
-		{"read_file", `{"path":"/etc/passwd"}`},
-		// read_file: traversal via ../..
-		{"read_file", `{"path":"../../etc/passwd"}`},
-		// list_dir: parent traversal
-		{"list_dir", `{"path":".."}`},
+		// read: absolute path outside workspace
+		{"read", `{"path":"/etc/passwd"}`},
+		// read: traversal via ../..
+		{"read", `{"path":"../../etc/passwd"}`},
+		// ls: parent traversal
+		{"ls", `{"path":".."}`},
 		// grep: absolute path outside workspace
 		{"grep", `{"pattern":"root","path":"/etc"}`},
-		// write_file: absolute path outside workspace
-		{"write_file", `{"path":"/tmp/evil.txt","content":"hack"}`},
-		// write_file: traversal outside workspace
-		{"write_file", `{"path":"../evil.txt","content":"hack"}`},
-		// exec_command: ls on absolute path outside workspace
-		{"exec_command", `{"command":"ls /etc"}`},
-		// exec_command: cat on absolute path outside workspace
-		{"exec_command", `{"command":"cat /etc/passwd"}`},
-		// exec_command: parent directory via ".."
-		{"exec_command", `{"command":"ls .."}`},
-		// exec_command: parent traversal in relative path
-		{"exec_command", `{"command":"cat ../secret.txt"}`},
-		// exec_command: embedded traversal in relative path
-		{"exec_command", `{"command":"ls sub/../../outside"}`},
+		// write: absolute path outside workspace
+		{"write", `{"path":"/tmp/evil.txt","content":"hack"}`},
+		// write: traversal outside workspace
+		{"write", `{"path":"../evil.txt","content":"hack"}`},
+		// bash: ls on absolute path outside workspace
+		{"bash", `{"command":"ls /etc"}`},
+		// bash: cat on absolute path outside workspace
+		{"bash", `{"command":"cat /etc/passwd"}`},
+		// bash: parent directory via ".."
+		{"bash", `{"command":"ls .."}`},
+		// bash: parent traversal in relative path
+		{"bash", `{"command":"cat ../secret.txt"}`},
+		// bash: embedded traversal in relative path
+		{"bash", `{"command":"ls sub/../../outside"}`},
 	}
 
 	for _, tc := range cases {
@@ -291,14 +290,14 @@ func TestToolWorkspaceSandbox(t *testing.T) {
 	}
 }
 
-// TestToolWriteFile verifies that write_file creates files inside the workspace
-// and that read_file can read them back.
+// TestToolWriteFile verifies that write creates files inside the workspace
+// and that read can read them back.
 func TestToolWriteFile(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
 	// Write a top-level file.
-	result, err := reg.Execute(context.Background(), "write_file",
+	result, err := reg.Execute(context.Background(), "write",
 		json.RawMessage(`{"path":"output.txt","content":"hello from agent"}`))
 	require.NoError(t, err)
 	assert.Contains(t, result, "output.txt")
@@ -308,22 +307,22 @@ func TestToolWriteFile(t *testing.T) {
 	assert.Equal(t, "hello from agent", string(data))
 
 	// Write in a nested subdirectory — parent dirs should be created automatically.
-	_, err = reg.Execute(context.Background(), "write_file",
+	_, err = reg.Execute(context.Background(), "write",
 		json.RawMessage(`{"path":"sub/dir/nested.txt","content":"nested content"}`))
 	require.NoError(t, err)
 	data, err = os.ReadFile(filepath.Join(workDir, "sub", "dir", "nested.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "nested content", string(data))
 
-	// Round-trip: write then read back via read_file.
-	readResult, err := reg.Execute(context.Background(), "read_file",
+	// Round-trip: write then read back via read.
+	readResult, err := reg.Execute(context.Background(), "read",
 		json.RawMessage(`{"path":"output.txt"}`))
 	require.NoError(t, err)
 	assert.Equal(t, "hello from agent", readResult)
 }
 
 // TestAgentWriteFileTool verifies the full agent-loop path where the LLM calls
-// write_file and the file is created in the workspace.
+// write and the file is created in the workspace.
 func TestAgentWriteFileTool(t *testing.T) {
 	fixturePath := filepath.Join("testdata", "fixtures", "write_file_tool.json")
 	client := newTestClient(t, fixturePath)
@@ -344,20 +343,6 @@ func TestAgentWriteFileTool(t *testing.T) {
 	data, err := os.ReadFile(filepath.Join(workDir, "result.txt"))
 	require.NoError(t, err)
 	assert.Equal(t, "task completed", string(data))
-}
-
-// TestUpdateTaskStatusTool verifies that UpdateTaskStatusTool calls the callback.
-func TestUpdateTaskStatusTool(t *testing.T) {
-	var called string
-	tool := tools.NewUpdateTaskStatus(func(ctx context.Context, status string) error {
-		called = status
-		return nil
-	})
-
-	result, err := tool.Execute(context.Background(), json.RawMessage(`{"status":"blocked"}`))
-	require.NoError(t, err)
-	assert.Equal(t, "blocked", called)
-	assert.Contains(t, result, "blocked")
 }
 
 // ---- Registry.Filter tests --------------------------------------------------
@@ -384,110 +369,17 @@ func TestRegistryFilter_Subset(t *testing.T) {
 	workDir := t.TempDir()
 	reg := tools.DefaultRegistry(workDir)
 
-	filtered := reg.Filter([]string{"read_file", "grep"})
+	filtered := reg.Filter([]string{"read", "grep"})
 
-	// read_file and grep should work.
+	// read and grep should work.
 	require.NoError(t, os.WriteFile(filepath.Join(workDir, "f.txt"), []byte("hi"), 0644))
-	_, err := filtered.Execute(context.Background(), "read_file", json.RawMessage(`{"path":"f.txt"}`))
+	_, err := filtered.Execute(context.Background(), "read", json.RawMessage(`{"path":"f.txt"}`))
 	require.NoError(t, err)
 
-	// exec_command should not exist in the filtered registry.
-	_, err = filtered.Execute(context.Background(), "exec_command", json.RawMessage(`{"command":"echo x"}`))
+	// bash should not exist in the filtered registry.
+	_, err = filtered.Execute(context.Background(), "bash", json.RawMessage(`{"command":"echo x"}`))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown tool")
-}
-
-// ---- CreateSubtask tool tests -----------------------------------------------
-
-// TestCreateSubtaskTool_Success verifies the happy path.
-func TestCreateSubtaskTool_Success(t *testing.T) {
-	var capturedParams tools.SubtaskParams
-	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
-		capturedParams = p
-		return 42, nil
-	}, []string{"Programmer", "QA", "Researcher"})
-
-	result, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "Write tests",
-		"description": "Add unit tests for the new feature",
-		"agent_name": "QA"
-	}`))
-	require.NoError(t, err)
-	assert.Equal(t, "Write tests", capturedParams.Title)
-	assert.Equal(t, "QA", capturedParams.AgentName)
-	assert.Contains(t, result, "42")
-	assert.Contains(t, result, "QA")
-}
-
-// TestCreateSubtaskTool_DefIncludesEnum verifies that the tool definition
-// includes the agent_name enum when agent names are provided.
-func TestCreateSubtaskTool_DefIncludesEnum(t *testing.T) {
-	names := []string{"Programmer", "QA", "Researcher"}
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, names)
-	def := tool.Def()
-
-	// The schema should embed the enum values.
-	var schema map[string]interface{}
-	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
-	props := schema["properties"].(map[string]interface{})
-	agentProp := props["agent_name"].(map[string]interface{})
-	enumRaw := agentProp["enum"].([]interface{})
-	var got []string
-	for _, v := range enumRaw {
-		got = append(got, v.(string))
-	}
-	assert.Equal(t, names, got)
-}
-
-// TestCreateSubtaskTool_DefNoEnumWhenEmpty verifies that no enum is emitted
-// when no agent names are provided.
-func TestCreateSubtaskTool_DefNoEnumWhenEmpty(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	def := tool.Def()
-
-	var schema map[string]interface{}
-	require.NoError(t, json.Unmarshal(def.Function.Parameters, &schema))
-	props := schema["properties"].(map[string]interface{})
-	agentProp := props["agent_name"].(map[string]interface{})
-	_, hasEnum := agentProp["enum"]
-	assert.False(t, hasEnum)
-}
-
-// TestCreateSubtaskTool_CallbackError propagates callback errors.
-func TestCreateSubtaskTool_CallbackError(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(ctx context.Context, p tools.SubtaskParams) (int32, error) {
-		return 0, fmt.Errorf("a subtask is already running")
-	}, nil)
-
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "x", "description": "y", "agent_name": "QA"
-	}`))
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "already running")
-}
-
-// TestCreateSubtaskTool_MissingTitle returns error when title is empty.
-func TestCreateSubtaskTool_MissingTitle(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	_, err := tool.Execute(context.Background(), json.RawMessage(`{
-		"title": "", "description": "d", "agent_name": "QA"
-	}`))
-	require.Error(t, err)
-}
-
-// TestCreateSubtaskTool_InvalidJSON returns error on bad JSON.
-func TestCreateSubtaskTool_InvalidJSON(t *testing.T) {
-	tool := tools.NewCreateSubtask(func(_ context.Context, _ tools.SubtaskParams) (int32, error) {
-		return 1, nil
-	}, nil)
-	_, err := tool.Execute(context.Background(), json.RawMessage(`not json`))
-	require.Error(t, err)
 }
 
 // TestAgentWithLiveProvider runs against the real LLM provider and records

@@ -2,13 +2,14 @@ package engine
 
 import (
 	"bytes"
+	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"text/template"
+	"time"
 
 	"agent-orchestrator/db"
-	"gopkg.in/yaml.v3"
+	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 type SystemPromptBuilder interface {
@@ -23,42 +24,28 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 	return &defaultSystemPromptBuilder{q: q}
 }
 
-type Settings struct {
-	BasePath         string   `yaml:"base_path"`
-	WorkspaceFolders []string `yaml:"workspace_folders"`
+// loadSettings reads the app settings through the shared appsettings loader.
+func loadSettings() appsettings.Settings {
+	return appsettings.Load()
 }
 
-func loadSettings() Settings {
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
-	}
-	settingsPath := filepath.Join(homeDir, ".paperclip2_settings.yaml")
-	data, err := os.ReadFile(settingsPath)
-	if err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
-	}
+const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
 
-	var settings Settings
-	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.PaperclipHome()}
-	}
+At the end of every run you MUST call finish_task — there are no exceptions. Choose the final status yourself:
+- done: work is complete and needs no human attention (the normal completion status, especially for delegated subtasks — your task owner reviews the result)
+- in-review: work is complete but a human should review or approve it before it counts as finished
+- blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
+- refinement: you need clarification before you can start
+Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — it is returned to your task owner when your session completes.
 
-	if settings.BasePath == "" {
-		settings.BasePath = db.PaperclipHome()
-	}
-	return settings
-}
+Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
 
-const promptTemplate = `you're an agent that works on a task. Your goal is to implement the task by itself, asking for help only when you're stuck with smth.
+Deliverables are ARTIFACTS: write them with write_artifact, discover existing ones with list_artifacts, and read them with read_artifact. Artifacts are shared across the whole task tree — check what already exists before re-deriving work another agent may have produced. Never paste a full document into a chat message when it exists as an artifact; reference its filename instead.
 
-You should call update_task_status when it's needed:
-- when you start works on it - in-progress
-- when you're done - in-review
-- when you stuck - blocked
-- when you have clarification questions in the beginning of the work - refinement
+Your file tools are sandboxed to the working directory (plus any listed read-only dirs). Absolute paths outside them are inaccessible; explore code through the codegraph tools when available.
 
 Context of your work:
+Current date: {{.CurrentDate}}
 {{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}
 {{if .ProjectName}}Project: {{.ProjectName}}. {{.ProjectDescription}}{{end}}
 {{if .SprintName}}Sprint: {{.SprintName}}. {{.SprintDescription}}{{end}}
@@ -66,8 +53,14 @@ Working directory: {{.WorkingDirectory}}
 
 Task name: {{.TaskName}}
 Task status: {{.TaskStatus}}
-Task: {{.TaskDescription}}
-`
+{{if .TaskDescription}}Task (user input): {{.TaskDescription}}
+{{end}}{{if .RefinedDescription}}Refined task description:
+{{.RefinedDescription}}
+{{end}}{{if .AcceptanceCriteria}}Acceptance criteria:
+{{.AcceptanceCriteria}}
+{{end}}{{if .TestCases}}Test cases:
+{{.TestCases}}
+{{end}}`
 
 type PromptData struct {
 	CompanyName        string
@@ -77,16 +70,45 @@ type PromptData struct {
 	SprintName         string
 	SprintDescription  string
 	WorkingDirectory   string
+	CurrentDate        string
 	TaskName           string
 	TaskStatus         string
 	TaskDescription    string
+	RefinedDescription string
+	AcceptanceCriteria string
+	TestCases          string
+}
+
+// formatSpecItems renders structured spec items as numbered lines with their
+// id and verification status, so agents can reference items by id when
+// calling verify_spec_items. Legacy plain-text content passes through as-is.
+func formatSpecItems(raw string) string {
+	items := db.ParseSpecItems(raw)
+	if items == nil {
+		return raw
+	}
+	var b bytes.Buffer
+	for i, item := range items {
+		if i > 0 {
+			b.WriteString("\n")
+		}
+		fmt.Fprintf(&b, "%d. [%s] %s", item.ID, item.Status, item.Text)
+		if item.Note != "" {
+			fmt.Fprintf(&b, " — %s", item.Note)
+		}
+	}
+	return b.String()
 }
 
 func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string {
 	data := PromptData{
-		TaskName:        task.Title,
-		TaskStatus:      task.Status,
-		TaskDescription: task.Description,
+		TaskName:           task.Title,
+		TaskStatus:         task.Status,
+		TaskDescription:    task.Description,
+		RefinedDescription: task.RefinedDescription,
+		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
+		TestCases:          formatSpecItems(task.TestCases),
+		CurrentDate:        time.Now().Format("2006-01-02"),
 	}
 
 	if task.CompanyID != 0 {
@@ -99,8 +121,10 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		data.ProjectDescription = task.Project.Description
 
 		settings := loadSettings()
-		if task.Company.ShortName != "" && task.Project.WorkspaceFolder != "" {
-			data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		if task.Company.ShortName != "" {
+			// The agent's actual working directory is the task's git worktree.
+			fsMgr := filesystem.NewManager(settings.BasePath)
+			data.WorkingDirectory = fsMgr.GetTaskWorktreePath(task.Company, task)
 		}
 	}
 

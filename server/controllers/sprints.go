@@ -7,7 +7,6 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
 )
 
 func (api *API) ListSprints(w http.ResponseWriter, r *http.Request) {
@@ -20,6 +19,10 @@ func (api *API) ListSprints(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(compIDStr)
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid company_id")
+		return
+	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 
@@ -41,6 +44,10 @@ func (api *API) CreateSprint(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
+		return
+	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 
@@ -66,12 +73,6 @@ func (api *API) CreateSprint(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
-	}
-
-	var comp db.Company
-	if api.db.First(&comp, req.CompanyID).Error == nil {
-		settings := LoadSettings()
-		filesystem.NewManager(settings.BasePath).SaveSprint(comp, sprint)
 	}
 
 	api.logActivity(req.CompanyID, "sprint_created", int32(sprint.ID), "sprint", "")

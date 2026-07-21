@@ -20,6 +20,10 @@ func (api *API) ListActivities(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "invalid company_id", http.StatusBadRequest)
 		return
 	}
+	if _, err := api.authorizeCompany(r, int32(companyID)); err != nil {
+		http.Error(w, "company not found", http.StatusNotFound)
+		return
+	}
 
 	var logs []db.ActivityLog
 	if err := api.db.Where("company_id = ?", companyID).Order("created_at desc").Limit(50).Find(&logs).Error; err != nil {

@@ -56,7 +56,9 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
 
   // If there are no companies at all, force redirect to /add-company
   useEffect(() => {
-    if (!loading && companies.length === 0 && location.pathname !== '/add-company') {
+    // The Team page works without any company (e.g. a freshly invited
+    // member before the team has created one).
+    if (!loading && companies.length === 0 && location.pathname !== '/add-company' && location.pathname !== '/team') {
       window.location.href = '/add-company';
     }
   }, [loading, companies.length, location.pathname]);
@@ -69,7 +71,7 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
       return <AddCompany />;
   }
 
-  if (loading || (companies.length === 0 && location.pathname !== '/add-company')) {
+  if (loading || (companies.length === 0 && location.pathname !== '/add-company' && location.pathname !== '/team')) {
     return <div className="h-screen w-screen flex items-center justify-center bg-gray-50">Loading...</div>;
   }
 

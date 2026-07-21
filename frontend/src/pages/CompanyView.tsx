@@ -2,11 +2,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Link } from 'react-router-dom';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { Folder, GitBranch } from 'lucide-react';
 
 export const CompanyView: React.FC = () => {
   const { selectedCompanyId } = useStore();
+  const isOwner = useIsOwner();
   const [projects, setProjects] = useState<any[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({ name: '', workspace_folder: '', repository_url: '' });
@@ -64,11 +65,13 @@ export const CompanyView: React.FC = () => {
     <div>
       <h1 className="text-2xl font-bold mb-6">Projects</h1>
 
-      <div className="mb-8">
-        <button onClick={() => { setIsModalOpen(true); setError(''); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
-          Create Project
-        </button>
-      </div>
+      {isOwner && (
+        <div className="mb-8">
+          <button onClick={() => { setIsModalOpen(true); setError(''); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
+            Create Project
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.map(p => (
@@ -104,7 +107,7 @@ export const CompanyView: React.FC = () => {
                 }} className="w-full border rounded p-2" placeholder="e.g. NextGen Mobile App" />
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Relative to .paperclip2/)</label>
+                <label className="block text-sm font-medium text-gray-700 mb-1">Workspace Folder (Relative to .headcount1/)</label>
                 <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" />
                 <p className="text-xs text-gray-500 mt-1">This directory will be created automatically.</p>
               </div>

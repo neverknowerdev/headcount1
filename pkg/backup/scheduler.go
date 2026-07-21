@@ -6,6 +6,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 func GetLatestBackup(basePath string) (*time.Time, error) {
@@ -24,9 +26,13 @@ func GetLatestBackup(basePath string) (*time.Time, error) {
 			continue
 		}
 
-		// Parse timestamp from filename: backup_2006-01-02_150405.tar.gz
+		// Parse timestamp from filename: backup_2006-01-02_150405.tar.gz,
+		// optionally with a collision suffix: backup_2006-01-02_150405-2.tar.gz.
 		name := strings.TrimPrefix(entry.Name(), "backup_")
 		name = strings.TrimSuffix(name, ".tar.gz")
+		if len(name) > len("2006-01-02_150405") {
+			name = name[:len("2006-01-02_150405")]
+		}
 
 		t, err := time.Parse("2006-01-02_150405", name)
 		if err != nil {
@@ -53,13 +59,13 @@ func ShouldBackupOnStartup(basePath string) bool {
 	return time.Since(*latest) > 24*time.Hour
 }
 
-func StartDailyScheduler(basePath string) {
+func StartDailyScheduler(basePath string, database *gorm.DB) {
 	ticker := time.NewTicker(24 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
 		log.Println("Running scheduled backup...")
-		_, err := CreateBackup(basePath)
+		_, err := CreateBackup(basePath, database)
 		if err != nil {
 			log.Printf("Scheduled backup failed: %v", err)
 		}

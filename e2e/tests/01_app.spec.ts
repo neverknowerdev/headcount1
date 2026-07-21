@@ -7,16 +7,16 @@ import { waitForTaskStatus, waitForComment } from '../helpers/wait-for';
 const env = loadE2EEnv();
 
 // Use serial mode because subsequent tests depend on state created by the first
-test.describe.serial('Paperclip2 App', () => {
+test.describe.serial('Headcount1 App', () => {
     test.beforeAll(async ({ request }) => {
         // Clean up any filesystem state left by a failed previous attempt.
         // In serial mode, beforeAll re-runs on retry, so this prevents
         // data/pw-inc/ (and nw, second-co) from causing the app to skip
         // onboarding and redirect to an existing company on the retry run.
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         for (const shortName of ['pw-inc', 'nw', 'second-co']) {
-            for (const subDir of [`data/${shortName}`, `companies/${shortName}`]) {
-                const fullPath = path.join(paperclipBase, subDir);
+            for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+                const fullPath = path.join(headcount1Base, root, shortName);
                 if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
@@ -30,8 +30,19 @@ test.describe.serial('Paperclip2 App', () => {
         await page.fill('input[placeholder="acme"]', 'pw-inc');
         await page.click('button:has-text("Next Step")');
 
-        // Step 2: Setup LLM Provider — point at the local mock provider server
+        // Step 2: Setup LLM Provider. The default onboarding path offers the
+        // builtin free providers (OpenRouter / OpenCode Zen); switch to the
+        // custom-provider form to point at the local mock provider server.
         await expect(page.getByText('Setup LLM Provider')).toBeVisible();
+        // The onboarding lands on the free-providers picker (builtin OpenRouter /
+        // OpenCode Zen cards plus a "Custom provider" escape hatch). Switch to the
+        // custom form; if no builtins are available the form is already shown, so
+        // the escape hatch is optional.
+        const customProviderCard = page.locator('button:has-text("Custom provider")');
+        await customProviderCard.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
+        if (await customProviderCard.isVisible().catch(() => false)) {
+            await customProviderCard.click();
+        }
         await page.fill('input[type="text"]', env.E2E_MOCK_PROVIDER_URL);
         await page.fill('input[type="password"]', 'test-api-key');
         await page.locator('label:has-text("Model Name") + input').fill('e2e-mock-model');
@@ -51,10 +62,16 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10_000 });
         await expect(page.getByText('System created workspace')).toBeVisible();
 
-        // Verify CEO agent settings initialized correctly
+        // Verify CEO agent settings initialized correctly. The provider ID is
+        // looked up dynamically — builtin providers (OpenRouter, OpenCode
+        // Zen) are seeded first, so "Main Provider" isn't necessarily ID 1.
+        const providers = await (await request.get('/api/providers')).json();
+        const mainProvider = providers.find((p: any) => p.name === 'Main Provider');
+        expect(mainProvider).toBeDefined();
+
         await page.goto('/companies/pw-inc/agents/1');
         await page.click('button:has-text("Settings")');
-        await expect(page.locator('select').nth(0)).toHaveValue("1"); // Provider
+        await expect(page.locator('select').nth(0)).toHaveValue(`provider:${mainProvider.id}`); // Provider or Model Group
         await expect(page.locator('select').nth(1)).toHaveValue("e2e-mock-model"); // Model
         await page.goto('/companies/pw-inc');
 
@@ -100,13 +117,13 @@ test.describe.serial('Paperclip2 App', () => {
 
         // Assign agent and move to "To Do" — this triggers the engine
         await page.click('text=Write E2E Tests');
-        await expect(page.getByText('Task PW-INC-1')).toBeVisible();
+        await expect(page.getByText('PW-INC-1')).toBeVisible();
         await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
         await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
         // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to update_task_status, moving the task
+        // will respond with a tool call to finish_task, moving the task
         // to "in-review". Wait for that real outcome.
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
@@ -119,23 +136,28 @@ test.describe.serial('Paperclip2 App', () => {
         const runs = await runsRes.json();
         expect(runs.length).toBeGreaterThan(0);
         const run = runs[0];
-        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        const logFile = path.join(basePath, 'data', 'pw-inc', 'logs', String(taskId), `run-${run.id}.log`);
+        const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        // Session-based JSONL layout: logs are grouped per main run in
+        // logs/{company}/{taskId}/run-{id}/, the root session writing
+        // main.jsonl (one JSON object per line).
+        const logFile = path.join(basePath, 'logs', 'pw-inc', String(taskId), `run-${run.id}`, 'main.jsonl');
         expect(fs.existsSync(logFile)).toBeTruthy();
-        const logContent = fs.readFileSync(logFile, 'utf8');
-        expect(logContent).toContain('LLM Request');
-        expect(logContent).toContain('LLM Response');
+        const logEntries = fs.readFileSync(logFile, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
+        expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
         // Re-open the task to verify both the user comment and the agent comment are visible
         await page.goto('/companies/pw-inc/tasks');
         await page.click('text=Write E2E Tests');
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('.fixed.inset-0').locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
-        await expect(page.getByText('Let us see if the agent works')).toBeVisible();
+        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        // Scope to the comments list: the text can also appear in the run-log
+        // preview of the agent run this comment triggers.
+        await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
 
         // Verify Agent Run Logs
-        await expect(page.getByText(/Run #\d/)).toBeVisible();
-        await page.click('summary:has-text("Run #")');
+        await expect(page.getByText(/Run (#\d|[A-Z0-9-]+-[A-Z0-9]+)/).first()).toBeVisible();
+        await page.locator('summary:has-text("Run ")').first().click();
 
         // Verify Run Logs page
         await page.keyboard.press('Escape');
@@ -161,15 +183,21 @@ test.describe.serial('Paperclip2 App', () => {
         await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
     });
 
-    test('can add a second company using existing provider', async ({ page }) => {
+    test('can add a second company reusing the existing provider', async ({ page }) => {
         // Navigate to dashboard
         await page.goto('/companies/nw');
 
         // Wait for dashboard and company switcher to load
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
 
-        // Click the Add Workspace button
+        // Opening the form triggers GET /api/providers; wait for it so the
+        // already-configured provider is detected before we advance and the
+        // provider-setup step is auto-skipped.
+        const providersLoaded = page.waitForResponse(
+            r => r.url().includes('/api/providers') && r.request().method() === 'GET'
+        );
         await page.click('button[title="Add Workspace"]');
+        await providersLoaded;
 
         // Step 1: Create second Company
         await expect(page.getByText('Add Workspace')).toBeVisible();
@@ -177,11 +205,9 @@ test.describe.serial('Paperclip2 App', () => {
         await page.fill('input[placeholder="acme"]', 'second-co');
         await page.click('button:has-text("Next Step")');
 
-        // Step 2: Use existing Provider
-        await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
-        await page.click('button:has-text("Next Step")');
-
-        // Step 3: Hire new CEO
+        // Provider setup (step 2) is skipped automatically because a provider is
+        // already configured from the first company — the flow jumps straight to
+        // the CEO step and reuses that provider.
         await expect(page.getByText('Hire your CEO')).toBeVisible();
         await page.fill('input[type="text"]', 'Second CEO');
         await page.click('button:has-text("Finish & Launch")');

@@ -24,7 +24,7 @@ func (t *WriteFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "write_file",
+			Name:        "write",
 			Description: "Write content to a file inside the workspace. Creates parent directories as needed.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -51,10 +51,10 @@ func (t *WriteFile) Execute(_ context.Context, args json.RawMessage) (string, er
 		return "", err
 	}
 	if err := os.MkdirAll(filepath.Dir(resolved), 0755); err != nil {
-		return "", fmt.Errorf("write_file: mkdir: %w", err)
+		return "", fmt.Errorf("write: mkdir: %w", err)
 	}
 	if err := os.WriteFile(resolved, []byte(p.Content), 0644); err != nil {
-		return "", fmt.Errorf("write_file: %w", err)
+		return "", fmt.Errorf("write: %w", err)
 	}
 	return fmt.Sprintf("wrote %d bytes to %s", len(p.Content), p.Path), nil
 }

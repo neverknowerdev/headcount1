@@ -1,12 +1,13 @@
-/* eslint-disable @typescript-eslint/no-explicit-any */
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
-import { useParams } from 'react-router-dom';
+import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
 import { Plus, Settings } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
+import { useWebSocket, wsUrl } from '../useWebSocket';
+import { useCoalescedCallback } from '../utils/useCoalescedCallback';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
 
@@ -16,6 +17,8 @@ interface Task {
     description: string;
     status: string;
     priority: string;
+    ref_key?: string;
+    parent_id?: number | null;
 }
 
 interface Project {
@@ -31,6 +34,7 @@ interface Sprint {
 export const ProjectBoard: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const prefix = shortName ? shortName.toUpperCase() : 'T';
+    const navigate = useNavigate();
   const { selectedCompanyId } = useStore();
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
@@ -41,7 +45,6 @@ export const ProjectBoard: React.FC = () => {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [viewingTaskId, setViewingTaskId] = useState<number | null>(null);
 
   const fetchFiltersData = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -57,8 +60,13 @@ export const ProjectBoard: React.FC = () => {
     }
   }, [selectedCompanyId]);
 
+  // Guards against out-of-order responses: only the latest in-flight fetch
+  // may apply its result, so a slow older response can never overwrite a
+  // newer board state.
+  const fetchSeqRef = useRef(0);
   const fetchTasks = useCallback(async () => {
     if (!selectedCompanyId) return;
+    const seq = ++fetchSeqRef.current;
     try {
       let url = `/api/tasks?company_id=${selectedCompanyId}&archived=${showArchived}`;
       if (selectedProjectIds.length > 0) {
@@ -69,11 +77,16 @@ export const ProjectBoard: React.FC = () => {
       }
 
       const res = await axios.get(url);
+      if (seq !== fetchSeqRef.current) return; // superseded by a newer fetch
       setTasks(res.data || []);
     } catch (e) {
       console.error(e);
     }
   }, [selectedCompanyId, selectedProjectIds, selectedSprintIds, showArchived]);
+
+  // Event bursts (an agent updating many tasks) coalesce into one refetch
+  // instead of firing a request per event.
+  const scheduleFetchTasks = useCoalescedCallback(fetchTasks);
 
   useEffect(() => {
     fetchFiltersData();
@@ -81,15 +94,16 @@ export const ProjectBoard: React.FC = () => {
 
   useEffect(() => {
     fetchTasks();
-    const ws = new WebSocket(`ws://${window.location.host}/api/ws`);
-    ws.onmessage = (event) => {
-      const msg = JSON.parse(event.data);
-      if (msg.type === 'task_updated' || msg.type === 'task_created') {
-        fetchTasks();
-      }
-    };
-    return () => ws.close();
   }, [fetchTasks]);
+
+  useWebSocket(wsUrl(), (msg) => {
+    if (msg.type === 'task_updated' || msg.type === 'task_created') {
+      scheduleFetchTasks();
+    }
+  }, {
+    // Re-fetch on every (re)connect so board state missed while offline is recovered.
+    onConnect: fetchTasks,
+  });
 
   const updateTaskStatus = async (id: number, status: string) => {
     try {
@@ -194,12 +208,12 @@ export const ProjectBoard: React.FC = () => {
                                         ref={provided.innerRef}
                                         {...provided.draggableProps}
                                         {...provided.dragHandleProps}
-                                        onClick={() => setViewingTaskId(task.id)}
+                                        onClick={() => navigate(`/companies/${shortName}/tasks/${task.id}`)}
                                         className={`bg-white p-4 rounded-md border shadow-sm ${snapshot.isDragging ? 'shadow-lg ring-2 ring-indigo-500 border-transparent' : 'hover:border-indigo-300'} transition-shadow cursor-grab`}
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
                                         <div className="mt-4 flex justify-between items-center">
-                                            <span className="text-xs text-gray-400">{prefix}-{task.id}</span>
+                                            <span className="text-xs text-gray-400">{task.ref_key || `${prefix}-${task.id}`}</span>
                                             {task.priority !== 'Normal' && (
                                                 <span className={`text-[10px] px-2 py-0.5 rounded-full ${
                                                     task.priority === 'Urgent' ? 'bg-red-100 text-red-800' :
@@ -223,7 +237,6 @@ export const ProjectBoard: React.FC = () => {
             </div>
         </DragDropContext>
       </div>
-      {viewingTaskId && <TaskModal taskId={viewingTaskId} onClose={() => {setViewingTaskId(null); fetchTasks();}} />}
       {isCreateModalOpen && <TaskModal onClose={() => setIsCreateModalOpen(false)} onTaskCreated={fetchTasks} />}
     </div>
   );
