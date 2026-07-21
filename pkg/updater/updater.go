@@ -18,7 +18,10 @@ import (
 const (
 	githubAPIBase = "https://api.github.com"
 	repoOwner     = "neverknowerdev"
-	repoName      = "paperclip2"
+	// The repo was renamed from paperclip2 → headcount1; releases are published
+	// under the current name. (GitHub redirects the old path, but track the
+	// canonical one so update checks don't depend on that redirect.)
+	repoName = "headcount1"
 )
 
 type VersionInfo struct {
