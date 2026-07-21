@@ -6,13 +6,13 @@ import * as path from 'path';
 /**
  * Creates a local bare git repository with a dummy initial commit and returns
  * its `file://` URL. The bare repo lives in a temp directory under
- * `<tmp>/paperclip-e2e/<id>/repo.git` so each test run gets a clean slate.
+ * `<tmp>/headcount1-e2e/<id>/repo.git` so each test run gets a clean slate.
  *
  * The dummy commit is required so that `git ls-remote` and `git clone` succeed
  * when the orchestrator validates the remote and clones it.
  */
 export function setupBareRepo(): string {
-    const baseDir = path.join(os.tmpdir(), 'paperclip-e2e');
+    const baseDir = path.join(os.tmpdir(), 'headcount1-e2e');
     fs.mkdirSync(baseDir, { recursive: true });
 
     const id = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
@@ -23,8 +23,8 @@ export function setupBareRepo(): string {
     run('git', ['init', '--initial-branch=main', workDir]);
 
     // Configure a local committer so commits succeed
-    run('git', ['-C', workDir, 'config', 'user.email', 'e2e@paperclip.local']);
-    run('git', ['-C', workDir, 'config', 'user.name', 'paperclip e2e']);
+    run('git', ['-C', workDir, 'config', 'user.email', 'e2e@headcount1.local']);
+    run('git', ['-C', workDir, 'config', 'user.name', 'headcount1 e2e']);
 
     // Create an initial commit so the repo isn't empty. The .md files double
     // as documentation for the Hindsight memory ingestion e2e tests: every

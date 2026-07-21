@@ -32,9 +32,9 @@ test.describe.serial('Backup & Restore', () => {
         // below gets its bank configured from scratch even when its ID was
         // used by an earlier spec file — or by a failed previous attempt of
         // this serial group (retries re-run this hook).
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        for (const subDir of ['data/bt', 'companies/bt', 'data/artifacts/bt', 'workspace/bt']) {
-            const fullPath = path.join(paperclipBase, subDir);
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'bt');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
         await request.post('/api/e2e/wipe-db');
@@ -183,7 +183,7 @@ test.describe.serial('Backup & Restore', () => {
         // "<bank>.zip" — the two exports are complementary (see
         // pkg/hindsight/transfer.go ExportAllToDir).
         const extractedDir = extractArchive(archivePath);
-        const hindsightDir = path.join(extractedDir, 'data', 'hindsight');
+        const hindsightDir = path.join(extractedDir, 'files', 'hindsight');
         expect(fs.existsSync(path.join(hindsightDir, `${bank}.zip`)), `expected ${bank}.zip in backup`).toBeTruthy();
         expect(fs.existsSync(path.join(hindsightDir, `${bank}.template.json`)), `expected ${bank}.template.json in backup`).toBeTruthy();
         fs.rmSync(extractedDir, { recursive: true, force: true });
@@ -283,6 +283,52 @@ test.describe.serial('Backup & Restore', () => {
         expect(modelsAfter).toEqual(modelsBefore);
     });
 
+    test('encrypted provider secret survives backup + restore and is decryptable', async ({ request }) => {
+        // A provider API key is sealed at rest as enc:u1:<userID>:… under the
+        // fixture user's data key (in E2E the DEK is deterministic — the stand-in
+        // for a passkey PRF unlock). This proves the ciphertext round-trips
+        // through backup + restore and is still decryptable afterwards.
+        const secret = 'sk-roundtrip-' + Date.now();
+        const createRes = await request.post('/api/providers', {
+            data: {
+                name: 'Secret Roundtrip Provider',
+                base_url: 'https://example.test/v1',
+                api_key: secret,
+                provider_type: 'openai',
+                default_model: 'e2e-model',
+            },
+        });
+        expect(createRes.ok(), await createRes.text()).toBeTruthy();
+        const provider = await createRes.json();
+        // The API never echoes the raw key back — only a boolean flag.
+        expect(provider.api_key).not.toBe(secret);
+        expect(provider.has_api_key).toBe(true);
+
+        // Sanity: while unlocked, the E2E reveal endpoint decrypts it correctly.
+        const revealBefore = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealBefore.ok()).toBeTruthy();
+        expect((await revealBefore.json()).api_key).toBe(secret);
+
+        // Back up, wipe, restore.
+        const backupRes = await request.post('/api/backup');
+        expect(backupRes.ok()).toBeTruthy();
+        const archivePath = (await backupRes.json()).archive_path;
+
+        expect((await request.post('/api/e2e/wipe-db')).ok()).toBeTruthy();
+
+        const restoreRes = await request.post('/api/backup/restore', {
+            data: { archive_path: archivePath },
+        });
+        expect(restoreRes.ok(), await restoreRes.text()).toBeTruthy();
+
+        // After restore the fixture user is re-unlocked with the same
+        // deterministic DEK; the enc:u1 ciphertext (carried verbatim in the
+        // backup) must decrypt back to the exact original secret.
+        const revealAfter = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealAfter.ok(), await revealAfter.text()).toBeTruthy();
+        expect((await revealAfter.json()).api_key).toBe(secret);
+    });
+
     test('backup via Settings UI button', async ({ page }) => {
         // Navigate to settings for 'bt' company (exists after restore from roundtrip test)
         await page.goto('/companies/bt/settings');
@@ -314,12 +360,10 @@ test.describe.serial('Backup & Restore', () => {
     });
 
     test.afterAll(async () => {
-        // Remove bt's filesystem data so its comment IDs (written before the roundtrip
-        // wipe and preserved in companies/bt/) don't collide with ent-sync-test IDs
-        // when sync_filesystem.spec.ts calls POST /api/settings/sync.
-        const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        for (const subDir of ['data/bt', 'companies/bt', 'data/artifacts/bt']) {
-            const fullPath = path.join(paperclipBase, subDir);
+        // Remove bt's filesystem footprint so later specs start clean.
+        const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'bt');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
         }
         // Leave the mock memory backend clean for the specs that follow.

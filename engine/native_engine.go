@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -22,6 +23,9 @@ import (
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/runtokens"
+	"agent-orchestrator/pkg/secrets"
+
 	"gorm.io/gorm"
 )
 
@@ -188,7 +192,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
 			e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 			go e.run(context.Background(), task, "implement")
 		} else {
@@ -197,7 +201,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 			if _, err := e.q.UpdateTask(ctx, task); err != nil {
 				return err
 			}
-			e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
 			e.emitStatusChange(ctx, task.ID, prevStatus, "refinement")
 			go e.run(context.Background(), task, "plan")
 		}
@@ -214,7 +218,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
 		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
 		go e.run(context.Background(), task, "implement")
 	}
@@ -239,7 +243,7 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 		return
 	}
 	e.q.UpdateRunLog(ctx, runID, "Run marked as failed: previous run no longer active", "failed")
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
 	e.q.UnlockTaskRun(ctx, run.TaskID)
 }
 
@@ -325,7 +329,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		parent.onRunCreated(run)
 	}
 
-	e.hub.BroadcastEvent("run_started", run)
+	e.hub.BroadcastEventForCompany(task.CompanyID, "run_started", run)
 
 	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
 	if compErr != nil {
@@ -333,12 +337,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Write initial run metadata to filesystem.
 	settings := loadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteRun(run, company.ShortName); err != nil {
-		fmt.Printf("Warning: failed to write run metadata: %v\n", err)
-	}
 
 	// Session hierarchy: which run/task the log folder is grouped under.
 	rootRunID := run.ID
@@ -407,14 +406,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Set up the session logger. All sessions of one main run share the
 	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
-	// session writes main.log, child sessions write session-{runID}.log.
+	// session writes main.jsonl, child sessions write session-{runID}.jsonl.
 	proxyLogger, logErr := logging.NewSessionLoggerWithHub(
 		settings.BasePath,
 		company.ShortName,
 		rootTaskID,
 		rootRunID,
 		run.ID,
-		e.hub,
+		e.hub.ForCompany(task.CompanyID),
 		e.q,
 	)
 	if logErr != nil {
@@ -434,8 +433,15 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if projErr == nil && project.RepositoryUrl != "" {
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
-			sshDir := filepath.Join(settings.BasePath, ".ssh")
-			gitMgr = git.NewGitManager(projectRepoDir, sshDir)
+			// The worktree's .git points back into the project repo's object
+			// store, so git commands in the workspace read {projectRepoDir}/.git.
+			// Grant the project repo read-only so the agent can inspect the repo
+			// and run git — under the strict data-root hiding below it would
+			// otherwise be invisible.
+			readOnlyDirs = append(readOnlyDirs, projectRepoDir)
+			keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, e.q, settings.BasePath, company)
+			defer keyCleanup() // remove the materialized key when the session ends
+			gitMgr = git.NewGitManager(projectRepoDir, keyPath)
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())
 			}
@@ -459,14 +465,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
 	}
 
-	// Resolve artifact directory: {basePath}/artifacts/{project_folder} or /artifacts/task-{id}
-	artifactDir := func() string {
-		base := settings.BasePath
-		if task.ProjectID != nil && task.Project != nil && task.Project.WorkspaceFolder != "" {
-			return filepath.Join(base, "artifacts", task.Project.WorkspaceFolder)
-		}
-		return filepath.Join(base, "artifacts", fmt.Sprintf("task-%d", task.ID))
-	}()
+	// Artifact (deliverable) directory: {basePath}/artifacts/{company}/{rootTaskID}.
+	// Always keyed by the root task so it matches ListArtifactsByTaskTree —
+	// every session of one execution tree shares the same deliverables dir.
+	artifactDir := fsMgr.Paths().TaskArtifactsDir(company.ShortName, rootTaskID)
 	// Artifact files are readable by every session's file tools (the CEO has
 	// no file tools, so it only ever sees the metadata list below).
 	readOnlyDirs = append(readOnlyDirs, artifactDir)
@@ -514,8 +516,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
 
-	// Track whether finish_task was called so we can force it if not.
+	// Track whether finish_task was called so we can force it if not, plus
+	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
+	var finishTaskStatus, finishSummary string
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -523,12 +527,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return err
 		}
 		taskFinished = true
+		finishTaskStatus = status
+		finishSummary = finishStatus
 		prevStatus := t.Status
 		t.Status = status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("task_updated", map[string]interface{}{"id": task.ID, "status": status})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": status})
 		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, resultDetails); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
@@ -542,7 +548,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			RunID:       &runID,
 		})
 		if cErr == nil {
-			e.hub.BroadcastEvent("comment_created", comment)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", comment)
 		}
 		return nil
 	}))
@@ -579,7 +585,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			if upErr := e.q.UpdateArtifactContent(wCtx, existing.ID, content, run.ID); upErr != nil {
 				fmt.Printf("Warning: failed to update artifact in DB: %v\n", upErr)
 			}
-			e.hub.BroadcastEvent("artifact_created", *existing)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "artifact_created", *existing)
 			if existing.RunID == run.ID {
 				return fmt.Sprintf("Artifact %q updated.", filename), nil
 			}
@@ -599,7 +605,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			fmt.Printf("Warning: failed to save artifact to DB: %v\n", err)
 			return "", nil
 		}
-		e.hub.BroadcastEvent("artifact_created", artifact)
+		e.hub.BroadcastEventForCompany(task.CompanyID, "artifact_created", artifact)
 		commentContent, _ := json.Marshal(map[string]string{
 			"artifact_id": fmt.Sprintf("%d", artifact.ID),
 			"filename":    filename,
@@ -611,7 +617,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			CommentType: "artifact_created",
 			Content:     string(commentContent),
 		}); cErr == nil {
-			e.hub.BroadcastEvent("comment_created", ac)
+			e.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", ac)
 		}
 		return fmt.Sprintf("Artifact %q written.", filename), nil
 	}))
@@ -706,7 +712,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
 			return err
 		}
-		e.hub.BroadcastEvent("run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
 		e.logInfo(proxyLogger, "Status: "+status)
 		return nil
 	}))
@@ -797,7 +803,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Load MCP accounts enabled for this agent and register external servers in the store.
 	if accounts, mcpErr := e.q.ListMCPAccountsForAgent(ctx, agent.ID); mcpErr == nil && len(accounts) > 0 {
-		allServers, _ := e.q.ListMCPServers(ctx, 0) // 0 = all companies
+		allServers, _ := e.q.ListMCPServers(ctx, 0, 0) // all companies/users — accounts are already agent-scoped
 		serverByID := make(map[int32]db.MCPServer, len(allServers))
 		for _, s := range allServers {
 			serverByID[s.ID] = s
@@ -822,8 +828,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 					continue
 				}
 			}
+			// Decrypt the account's auth token at the point of use. If the owner's
+			// vault is locked we can't recover it — skip the account rather than
+			// wire up a server that would fail every call with an empty token.
+			authToken, decErr := secrets.Default().Decrypt(acc.AuthTokenEncrypted)
+			if decErr != nil {
+				e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping MCP account %q: %v", acc.Name, decErr))
+				continue
+			}
 			synthetic := srv
-			synthetic.AuthToken = acc.AuthToken
+			synthetic.AuthToken = authToken
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
 			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
@@ -876,15 +890,26 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentCfg != nil && agentCfg.Name != "" {
 		agentDisplayName = agentCfg.Name
 	}
-	llmClient := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	// Decrypt the provider key at the point of use. A locked owner surfaces as a
+	// clear provider-auth failure downstream rather than a silent empty key.
+	apiKey, keyErr := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+	if keyErr != nil {
+		e.logInfo(proxyLogger, fmt.Sprintf("Warning: could not decrypt provider key: %v", keyErr))
+	}
+	llmClient := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	if groupMode {
 		// The group router picks the real provider+model per request. X-Run-ID
 		// lets it write model_switch entries into this run's log; switches-only
 		// keeps it from double-logging requests/responses (the agent loop
-		// below already does that).
+		// below already does that). The gateway token authenticates this run
+		// to the (otherwise locked) local proxy — it is only ever sent to the
+		// in-process gateway, never to an external provider.
+		gatewayToken := runtokens.Default().Issue(run.ID)
+		defer runtokens.Default().Revoke(run.ID)
 		llmClient.ExtraHeaders = map[string]string{
-			"X-Run-ID":         fmt.Sprintf("%d", run.ID),
-			"X-Proxy-Log-Mode": "switches-only",
+			"X-Run-ID":            fmt.Sprintf("%d", run.ID),
+			"X-Proxy-Log-Mode":    "switches-only",
+			runtokens.TokenHeader: gatewayToken,
 		}
 	}
 	agentCfgObj := aicli.Config{
@@ -917,8 +942,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
+			if proxyLogger != nil {
+				proxyLogger.LogOutcome("canceled", "canceled", finishTaskStatus, agentDisplayName, task.ID, "Run canceled by user")
+			}
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
-			e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
+			e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
 			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
 		}
@@ -928,7 +956,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// If finish_task was not called, force a follow-up turn.
+	forcedFinish := false
 	if agentErr == nil && !taskFinished {
+		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
 			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
@@ -952,12 +982,31 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		))
 	}
 
+	// Close the trajectory with an outcome entry: how the loop terminated
+	// and the agent's own verdict. Written last so it's the final line of
+	// the run's JSONL log.
+	if proxyLogger != nil {
+		endReason := "no_finish"
+		summary := finishSummary
+		switch {
+		case agentErr != nil && errors.Is(agentErr, aicli.ErrMaxTurns):
+			endReason = "max_turns"
+			summary = agentErr.Error()
+		case agentErr != nil:
+			endReason = "error"
+			summary = agentErr.Error()
+		case taskFinished && forcedFinish:
+			endReason = "finish_task_forced"
+		case taskFinished:
+			endReason = "finish_task"
+		}
+		proxyLogger.LogOutcome(status, endReason, finishTaskStatus, agentDisplayName, task.ID, summary)
+	}
+
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
 
-	// Update run metadata in filesystem.
+	// Feed the run outcome into long-term memory.
 	if updatedRun, err := e.q.GetRun(ctx, run.ID); err == nil {
-		storage.WriteRun(updatedRun, company.ShortName)
-
 		// Feed the session outcome into long-term memory (async; failures
 		// only logged — memory must never block or fail a run).
 		if e.memory.Available() {
@@ -975,7 +1024,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
+	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
 	// Notify the parent task that this subtask has completed or failed.
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
@@ -1156,8 +1205,8 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	if err != nil {
 		return "", fmt.Errorf("ask_human: failed to post question: %w", err)
 	}
-	e.hub.BroadcastEvent("comment_created", questionComment)
-	e.hub.BroadcastEvent("human_input_requested", map[string]interface{}{
+	e.broadcastForTask(ctx, taskID, "comment_created", questionComment)
+	e.broadcastForTask(ctx, taskID, "human_input_requested", map[string]interface{}{
 		"task_id":  taskID,
 		"run_id":   runID,
 		"question": question,
@@ -1252,7 +1301,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			return "", fmt.Errorf("failed to create subtask: %w", err)
 		}
 
-		e.hub.BroadcastEvent("task_created", map[string]interface{}{
+		e.hub.BroadcastEventForCompany(subtask.CompanyID, "task_created", map[string]interface{}{
 			"id":        subtask.ID,
 			"parent_id": parentTask.ID,
 			"title":     subtask.Title,
@@ -1275,9 +1324,9 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			onRunCreated: func(childRun db.Run) {
 				state.childRunID = childRun.ID
 				if parentLogger != nil {
-					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.log", childRun.ID))
+					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.jsonl", childRun.ID))
 				}
-				e.hub.BroadcastEvent("session_started", map[string]interface{}{
+				e.hub.BroadcastEventForCompany(subtask.CompanyID, "session_started", map[string]interface{}{
 					"parent_run_id": parentRun.ID,
 					"run_id":        childRun.ID,
 					"task_id":       subtask.ID,
@@ -1333,7 +1382,7 @@ func (e *NativeEngine) waitForSubtaskEvent(
 		if !ev.done {
 			pending.put(state)
 			e.logInfo(logger, fmt.Sprintf("Subtask #%d asked its owner: %s", state.subtaskID, ev.question))
-			e.hub.BroadcastEvent("subtask_question", map[string]interface{}{
+			e.broadcastForTask(ctx, state.subtaskID, "subtask_question", map[string]interface{}{
 				"subtask_id":   state.subtaskID,
 				"owner_run_id": ownerRun.ID,
 				"question":     ev.question,
@@ -1384,7 +1433,7 @@ func (e *NativeEngine) buildSubtaskReply(
 	if logger != nil {
 		logger.LogSessionEnded(state.childRunID, status, result)
 	}
-	e.hub.BroadcastEvent("session_ended", map[string]interface{}{
+	e.broadcastForTask(context.Background(), ownerRun.TaskID, "session_ended", map[string]interface{}{
 		"parent_run_id": ownerRun.ID,
 		"run_id":        state.childRunID,
 		"status":        status,
@@ -1480,12 +1529,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
-	e.hub.BroadcastEvent("task_created", newTask)
-
-	// Mirror the API endpoint's filesystem bookkeeping so the task shows up
-	// in exports/sync exactly like a human-created one.
-	fsMgr := filesystem.NewManager(loadSettings().BasePath)
-	fsMgr.SaveTask(company, newTask)
+	e.hub.BroadcastEventForCompany(newTask.CompanyID, "task_created", newTask)
 
 	if status == "to-do" {
 		// Independent root run, same as a human moving the card to "to-do".
@@ -1508,6 +1552,25 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	return reply, nil
 }
 
+// ownerUserIDForCompany resolves a company's owning user, or 0 when unset —
+// Default Models settings are per-user, so internal one-shot LLM calls made
+// on behalf of a task use the task owner's configuration.
+func (e *NativeEngine) ownerUserIDForCompany(ctx context.Context, companyID int32) int32 {
+	company, err := e.q.GetCompany(ctx, companyID)
+	if err != nil || company.UserID == nil {
+		return 0
+	}
+	return *company.UserID
+}
+
+func (e *NativeEngine) ownerUserIDForCompanyOfTask(ctx context.Context, taskID int32) int32 {
+	task, err := e.q.GetTask(ctx, taskID)
+	if err != nil {
+		return 0
+	}
+	return e.ownerUserIDForCompany(ctx, task.CompanyID)
+}
+
 // resolvePurposeModel resolves the provider/model pair configured for one
 // internal-use purpose (see db.PurposeCommitMessages, db.PurposeAskArtifact)
 // via the "Default Models" settings — independent of any Model Group's own
@@ -1517,8 +1580,8 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 // tracking, which isn't worth the bookkeeping for an infrequent one-shot
 // call). Falls back to the session's own provider and model when the
 // purpose has no override configured, or its target no longer resolves.
-func (e *NativeEngine) resolvePurposeModel(ctx context.Context, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
-	setting, err := e.q.GetDefaultModelSetting(ctx, purpose)
+func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, purpose string, sessionProvider db.LLMProvider, sessionModel string) (db.LLMProvider, string) {
+	setting, err := e.q.GetDefaultModelSetting(ctx, userID, purpose)
 	if err != nil {
 		return sessionProvider, sessionModel
 	}
@@ -1594,7 +1657,7 @@ func (e *NativeEngine) askArtifact(
 		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
 	}
 
-	provider, model := e.resolvePurposeModel(ctx, db.PurposeAskArtifact, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompanyOfTask(ctx, rootTaskID), db.PurposeAskArtifact, provider, sessionModel)
 
 	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
 
@@ -1603,7 +1666,11 @@ Document %q:
 
 Question: %s`, filename, content, truncNote, question)
 
-	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
+	}
+	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 500,
@@ -1667,7 +1734,7 @@ func (e *NativeEngine) recordSystemLLMCall(source, detail string, provider db.LL
 }
 
 // logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.log / session-N.log), so the short
+// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
 // answer in the session log can always be traced back to the full reader
 // prompt and the exact artifact content it saw.
 func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
@@ -1715,7 +1782,7 @@ func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32,
 		fmt.Printf("Warning: failed to record subtask %s comment: %v\n", commentType, err)
 		return
 	}
-	e.hub.BroadcastEvent("comment_created", created)
+	e.broadcastForTask(ctx, taskID, "comment_created", created)
 }
 
 // notifyParentOfSubtaskCompletion adds a comment to the parent task when this
@@ -1734,8 +1801,8 @@ func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subt
 		fmt.Printf("Warning: failed to notify parent task %d of subtask completion: %v\n", *subtask.ParentID, err)
 		return
 	}
-	e.hub.BroadcastEvent("comment_created", comment)
-	e.hub.BroadcastEvent("subtask_completed", map[string]interface{}{
+	e.broadcastForTask(ctx, *subtask.ParentID, "comment_created", comment)
+	e.broadcastForTask(ctx, *subtask.ParentID, "subtask_completed", map[string]interface{}{
 		"subtask_id":    subtask.ID,
 		"parent_id":     *subtask.ParentID,
 		"status":        status,
@@ -1764,6 +1831,17 @@ func formatArtifactList(arts []db.Artifact) string {
 	return strings.TrimRight(b.String(), "\n")
 }
 
+// broadcastForTask delivers a tenant-scoped event by resolving the task's
+// company owner; when the task can't be loaded the event goes to in-process
+// subscribers only (fail closed for WS clients).
+func (e *NativeEngine) broadcastForTask(ctx context.Context, taskID int32, event string, payload interface{}) {
+	if task, err := e.q.GetTask(ctx, taskID); err == nil {
+		e.hub.BroadcastEventForCompany(task.CompanyID, event, payload)
+		return
+	}
+	e.hub.BroadcastEventForCompany(-1, event, payload)
+}
+
 // emitStatusChange creates a status_change comment and broadcasts it.
 func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from, to string) {
 	content, _ := json.Marshal(map[string]string{"from": from, "to": to})
@@ -1774,14 +1852,19 @@ func (e *NativeEngine) emitStatusChange(ctx context.Context, taskID int32, from,
 		Content:     string(content),
 	})
 	if err == nil {
-		e.hub.BroadcastEvent("comment_created", comment)
+		e.broadcastForTask(ctx, taskID, "comment_created", comment)
 	}
 }
 
 // failRun marks a run as failed and broadcasts the event.
 func (e *NativeEngine) failRun(ctx context.Context, runID int32, errMsg string) {
 	e.q.UpdateRunLog(ctx, runID, errMsg, "failed")
-	e.hub.BroadcastEvent("run_ended", map[string]interface{}{"run_id": runID, "status": "failed"})
+	payload := map[string]interface{}{"run_id": runID, "status": "failed"}
+	if run, err := e.q.GetRun(ctx, runID); err == nil {
+		e.broadcastForTask(ctx, run.TaskID, "run_ended", payload)
+	} else {
+		e.hub.BroadcastEventForCompany(-1, "run_ended", payload) // owner unknown — subscribers only
+	}
 }
 
 // logInfo writes an info entry to the proxy logger (if non-nil).
@@ -1851,7 +1934,7 @@ func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent
 	if sessionModel == "" {
 		sessionModel = provider.DefaultModel
 	}
-	provider, model := e.resolvePurposeModel(ctx, db.PurposeCommitMessages, provider, sessionModel)
+	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeCommitMessages, provider, sessionModel)
 	const maxDiffChars = 60000
 	if len(diff) > maxDiffChars {
 		diff = diff[:maxDiffChars] + "\n... (truncated)"
@@ -1864,7 +1947,11 @@ Task: %s
 Changes:
 %s`, task.Title, diff)
 
-	client := aicli.NewClient(provider.BaseUrl, provider.ApiKey, model)
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+	if err != nil {
+		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
+	}
+	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 200,

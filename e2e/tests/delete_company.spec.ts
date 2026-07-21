@@ -18,12 +18,15 @@ test.describe('Delete Company', () => {
         expect(companyRes.ok()).toBeTruthy();
         const company = await companyRes.json();
 
-        // Verify company exists in filesystem
-        const companyPath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'data', 'dtc');
-        expect(fs.existsSync(companyPath)).toBe(true);
+        // Verify the company-scoped directories exist in the filesystem
+        const base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        const companyDirs = ['repos', 'workspace', 'artifacts', 'logs', 'skills'].map(r => path.join(base, r, 'dtc'));
+        for (const dir of companyDirs) {
+            expect(fs.existsSync(dir)).toBe(true);
+        }
 
-        // Add some content to the company folder so it gets archived
-        fs.writeFileSync(path.join(companyPath, 'test_file.txt'), 'test content');
+        // Add some content to a company folder so it gets archived
+        fs.writeFileSync(path.join(base, 'workspace', 'dtc', 'test_file.txt'), 'test content');
 
         // Navigate to company settings
         await page.goto(`/companies/dtc/settings`);
@@ -75,11 +78,13 @@ test.describe('Delete Company', () => {
         }
         expect(deletedCompany).toBeUndefined();
 
-        // Verify company directory is deleted from filesystem
-        expect(fs.existsSync(companyPath)).toBe(false);
+        // Verify the company directories are deleted from the filesystem
+        for (const dir of companyDirs) {
+            expect(fs.existsSync(dir)).toBe(false);
+        }
 
         // Verify archive was created
-        const archiveDir = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'archive');
+        const archiveDir = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'archive');
         expect(fs.existsSync(archiveDir)).toBe(true);
 
         const archives = fs.readdirSync(archiveDir);
@@ -142,12 +147,12 @@ test.describe('Delete Company', () => {
         });
         expect(companyRes.ok()).toBeTruthy();
 
-        // Verify company exists in filesystem
-        const companyPath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'data', 'ec');
+        // Verify the company workspace dir exists in the filesystem
+        const companyPath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'workspace', 'ec');
         expect(fs.existsSync(companyPath)).toBe(true);
 
         // Check archive dir before deletion
-        const archiveDir = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2', 'archive');
+        const archiveDir = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'archive');
         const archivesBefore = fs.existsSync(archiveDir) ? fs.readdirSync(archiveDir).filter(a => a.startsWith('ec_')) : [];
 
         // Navigate to company settings and delete

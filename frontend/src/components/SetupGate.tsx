@@ -10,7 +10,7 @@ interface SetupFailure {
 
 type SetupStatus =
   | { phase: 'checking' }
-  | { phase: 'pending' }
+  | { phase: 'pending'; step?: string }
   | { phase: 'ok'; warning?: string; warnings?: SetupFailure[] }
   | { phase: 'error'; message: string; warning?: string; failures?: SetupFailure[]; warnings?: SetupFailure[] };
 
@@ -61,11 +61,11 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
         const res = await axios.get('/api/setup-status');
         if (cancelled) return;
         const data = res.data as {
-          pending?: boolean; ok?: boolean; error?: string; warning?: string;
+          pending?: boolean; ok?: boolean; error?: string; warning?: string; step?: string;
           failures?: SetupFailure[]; warnings?: SetupFailure[];
         };
         if (data.pending) {
-          setStatus({ phase: 'pending' });
+          setStatus({ phase: 'pending', step: data.step || undefined });
           timerRef.current = setTimeout(poll, POLL_INTERVAL_MS);
         } else if (data.ok) {
           setStatus({ phase: 'ok', warning: data.warning || undefined, warnings: data.warnings || undefined });
@@ -126,7 +126,7 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
             <h1 className="text-lg font-semibold">Setup failed</h1>
           </div>
           <p className="mb-3 text-sm text-slate-400">
-            Paperclip couldn't finish installing its required dependencies. Fix the issue below and restart the
+            Headcount1 couldn't finish installing its required dependencies. Fix the issue below and restart the
             server — the app will unlock automatically once setup succeeds.
           </p>
           {status.failures && status.failures.length > 0 ? (
@@ -166,6 +166,9 @@ export function SetupGate({ children }: { children: React.ReactNode }) {
       <div className="flex flex-col items-center gap-3 text-slate-300">
         <Loader2 size={28} className="animate-spin" />
         <p className="text-sm">Setting up dependencies...</p>
+        {status.phase === 'pending' && status.step && (
+          <p className="text-xs text-slate-500">{status.step}</p>
+        )}
       </div>
     </div>
   );

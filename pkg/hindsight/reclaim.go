@@ -31,7 +31,7 @@ import (
 // hold the pid or the port is reported, never touched.
 
 func pidFilePath() string {
-	return filepath.Join(db.PaperclipHome(), "hindsight-api.pid")
+	return filepath.Join(db.Headcount1Home(), "hindsight-api.pid")
 }
 
 func writePIDFile(pid int) {

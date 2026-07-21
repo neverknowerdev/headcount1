@@ -5,19 +5,17 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
-	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProviders(w http.ResponseWriter, r *http.Request) {
-	providers, err := api.q.ListLLMProviders(r.Context())
+	providers, err := api.q.ListLLMProvidersForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -73,10 +71,17 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
+	uid := api.currentUserID(r)
+	sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
+		return
+	}
 	p := db.LLMProvider{
 		Name:            preset.Name,
 		BaseUrl:         preset.BaseUrl,
-		ApiKey:          req.ApiKey,
+		ApiKeyEncrypted: sealedKey,
+		UserID:          &uid,
 		ProviderType:    preset.ProviderType,
 		DefaultModel:    models[0],
 		SupportedModels: strings.Join(models, ","),
@@ -87,49 +92,28 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
 func (api *API) DeleteProvider(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 	if provider.Builtin {
-		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProviders
+		// Deleting a builtin provider is pointless anyway — EnsureBuiltinLLMProvidersForUser
 		// just recreates it (blank) on the next startup. Disable it instead.
 		api.respondError(w, http.StatusForbidden, "built-in providers cannot be deleted — disable it instead")
 		return
 	}
 
-	err = api.q.DeleteLLMProvider(r.Context(), int32(id))
+	err := api.q.DeleteLLMProvider(r.Context(), provider.ID)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).DeleteLLMProviderFile(int32(id))
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
 func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name            string `json:"name"`
 		BaseUrl         string `json:"base_url"`
@@ -147,11 +131,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 
 	provider.Name = req.Name
 	provider.BaseUrl = req.BaseUrl
@@ -159,21 +139,25 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
 	if req.ApiKey != "" {
-		provider.ApiKey = req.ApiKey
+		uid := api.currentUserID(r)
+		sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
+		if err != nil {
+			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to change the API key")
+			return
+		}
+		provider.ApiKeyEncrypted = sealedKey
 	}
 	if req.Enabled != nil {
 		provider.Enabled = *req.Enabled
 	}
 
-	provider, err = api.q.UpdateLLMProvider(r.Context(), provider)
+	updated, err := api.q.UpdateLLMProvider(r.Context(), provider)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).SaveLLMProvider(provider)
-	api.respondJSON(w, http.StatusOK, provider)
+	api.respondJSON(w, http.StatusOK, updated)
 }
 
 // RediscoverProviderModels re-fetches a provider's model catalog on demand —
@@ -184,21 +168,11 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 // the freshly fetched list — the whole point of a user explicitly asking
 // to re-discover models is to get the current best/full pick.
 func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	provider, err := api.q.GetLLMProvider(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "provider not found")
-		return
-	}
+	provider := api.providerFromCtx(r) // loaded + authorized by loadProvider
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	var models []string
+	var err error
 	switch {
 	case provider.Builtin:
 		switch provider.ProviderName {
@@ -211,11 +185,16 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 			return
 		}
 	case provider.PresetKey != "":
-		if provider.ApiKey == "" {
+		if provider.ApiKeyEncrypted == "" {
 			api.respondError(w, http.StatusBadRequest, "add an API key before re-discovering models")
 			return
 		}
-		models, err = llmdiscovery.FetchModelsForPreset(r.Context(), client, provider.PresetKey, provider.BaseUrl, provider.ApiKey)
+		apiKey, decErr := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+		if decErr != nil {
+			api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to re-discover models")
+			return
+		}
+		models, err = llmdiscovery.FetchModelsForPreset(r.Context(), client, provider.PresetKey, provider.BaseUrl, apiKey)
 	default:
 		api.respondError(w, http.StatusBadRequest, "only built-in or preset-based providers support model re-discovery")
 		return
@@ -239,8 +218,6 @@ func (api *API) RediscoverProviderModels(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).SaveLLMProvider(updated)
 	api.respondJSON(w, http.StatusOK, updated)
 }
 
@@ -257,10 +234,17 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
+	uid := api.currentUserID(r)
+	sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, "vault is locked — re-authenticate to save an API key")
+		return
+	}
 	p := db.LLMProvider{
 		Name:            req.Name,
 		BaseUrl:         req.BaseUrl,
-		ApiKey:          req.ApiKey,
+		ApiKeyEncrypted: sealedKey,
+		UserID:          &uid,
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
@@ -270,8 +254,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	settings := LoadSettings()
-	filesystem.NewManager(settings.BasePath).SaveLLMProvider(p)
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -282,6 +265,12 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		ApiKey       string `json:"api_key"`
 		Model        string `json:"model"`
 		ProviderType string `json:"provider_type"`
+		// Exact tests only the requested model, with no fallback to other
+		// catalog models on a rate-limit. Used when the user has explicitly
+		// picked a specific default model and wants to know whether *that* one
+		// works right now (vs. the initial connection test, which falls back
+		// to get past a throttled default).
+		Exact bool `json:"exact"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -291,18 +280,26 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	apiKey := req.ApiKey
 	baseUrl := req.BaseUrl
 	providerType := req.ProviderType
+	// Other models to fall back to if the requested one is rate-limited
+	// upstream (a per-model condition on gateways like OpenRouter's free tier).
+	var catalogModels []string
 
-	if req.ProviderID != nil && (apiKey == "" || baseUrl == "" || providerType == "") {
+	if req.ProviderID != nil {
 		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
-		if err == nil {
+		if err == nil && ownedByUser(r, provider.UserID) {
 			if apiKey == "" {
-				apiKey = provider.ApiKey
+				// Decrypt the saved key at the point of use; a locked vault
+				// simply leaves apiKey empty and the 400 below asks for one.
+				apiKey, _ = secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 			}
 			if baseUrl == "" {
 				baseUrl = provider.BaseUrl
 			}
 			if providerType == "" {
 				providerType = provider.ProviderType
+			}
+			if provider.SupportedModels != "" {
+				catalogModels = strings.Split(provider.SupportedModels, ",")
 			}
 		}
 	}
@@ -315,30 +312,19 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	url := strings.TrimSpace(baseUrl)
 
 	// Helper to make request
-	makeRequest := func(reqUrl string, isAnthropic bool) (int, string, string, error) {
+	makeRequest := func(reqUrl string, isAnthropic bool, model string) (int, string, string, error) {
 		var payload []byte
 		var clientReq *http.Request
 		var err error
 
-		if isAnthropic {
-			p := map[string]interface{}{
-				"model": req.Model,
-				"messages": []map[string]string{
-					{"role": "user", "content": "Say 'hello world'"},
-				},
-				"max_tokens": 10,
-			}
-			payload, _ = json.Marshal(p)
-		} else {
-			p := map[string]interface{}{
-				"model": req.Model,
-				"messages": []map[string]string{
-					{"role": "user", "content": "Say 'hello world'"},
-				},
-				"max_tokens": 10,
-			}
-			payload, _ = json.Marshal(p)
+		p := map[string]interface{}{
+			"model": model,
+			"messages": []map[string]string{
+				{"role": "user", "content": "Say 'hello world'"},
+			},
+			"max_tokens": 10,
 		}
+		payload, _ = json.Marshal(p)
 
 		clientReq, err = http.NewRequest("POST", reqUrl, bytes.NewBuffer(payload))
 		if err != nil {
@@ -402,11 +388,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		return resp.StatusCode, logMsg, parsedErr, nil
 	}
 
-	var openAiUrls []string
-	var anthropicUrls []string
-
-	openAiUrls = append(openAiUrls, utils.BuildProviderURL(url, "/chat/completions"))
-	anthropicUrls = append(anthropicUrls, utils.BuildProviderURL(url, "/messages"))
+	openAiUrls := []string{utils.BuildProviderURL(url, "/chat/completions")}
+	anthropicUrls := []string{utils.BuildProviderURL(url, "/messages")}
 
 	// Channel to receive the first successful result
 	type TestResult struct {
@@ -419,66 +402,148 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		providerType string
 	}
 
-	resultCh := make(chan TestResult, len(openAiUrls)+len(anthropicUrls))
+	// modelOutcome probes a single model against both the OpenAI- and
+	// Anthropic-shaped endpoints and reports the first success (or the last
+	// error). rateLimited/authFailed drive the fallback decision below.
+	type modelOutcome struct {
+		success      bool
+		providerType string
+		testUrl      string
+		log          string
+		parsedErr    string
+		rateLimited  bool
+		authFailed   bool
+	}
+	testModel := func(model string) modelOutcome {
+		resultCh := make(chan TestResult, len(openAiUrls)+len(anthropicUrls))
+		for _, testUrl := range openAiUrls {
+			go func(u string) {
+				status, logMsg, parsedErr, err := makeRequest(u, false, model)
+				res := TestResult{
+					isSuccess:    err == nil && status >= 200 && status < 300,
+					status:       status,
+					logMsg:       "--- OpenAI Format Attempt (" + u + ") ---\n" + logMsg,
+					parsedErr:    parsedErr,
+					err:          err,
+					testUrl:      u,
+					providerType: "openai",
+				}
+				if err != nil {
+					res.logMsg = "--- OpenAI Format Attempt (" + u + ") ---\nError: " + err.Error()
+				}
+				resultCh <- res
+			}(testUrl)
+		}
+		for _, testUrl := range anthropicUrls {
+			go func(u string) {
+				status, logMsg, parsedErr, err := makeRequest(u, true, model)
+				res := TestResult{
+					isSuccess:    err == nil && status >= 200 && status < 300,
+					status:       status,
+					logMsg:       "--- Anthropic Format Attempt (" + u + ") ---\n" + logMsg,
+					parsedErr:    parsedErr,
+					err:          err,
+					testUrl:      u,
+					providerType: "anthropic",
+				}
+				if err != nil {
+					res.logMsg = "--- Anthropic Format Attempt (" + u + ") ---\nError: " + err.Error()
+				}
+				resultCh <- res
+			}(testUrl)
+		}
 
-	for _, testUrl := range openAiUrls {
-		go func(u string) {
-			status, logMsg, parsedErr, err := makeRequest(u, false)
-			res := TestResult{
-				isSuccess:    err == nil && status >= 200 && status < 300,
-				status:       status,
-				logMsg:       "--- OpenAI Format Attempt (" + u + ") ---\n" + logMsg,
-				parsedErr:    parsedErr,
-				err:          err,
-				testUrl:      u,
-				providerType: "openai",
+		out := modelOutcome{}
+		// Endpoint-shape attempts complete in a non-deterministic order, so
+		// bucket errors by kind and pick the most meaningful one at the end
+		// (auth > rate-limit > other) rather than letting a stray 404 from the
+		// unused shape overwrite the real reason.
+		var authErr, rateErr, otherErr string
+		for i := 0; i < len(openAiUrls)+len(anthropicUrls); i++ {
+			res := <-resultCh
+			out.log += res.logMsg + "\n\n"
+			if res.isSuccess && !out.success {
+				out.success = true
+				out.providerType = res.providerType
+				out.testUrl = res.testUrl
 			}
-			if err != nil {
-				res.logMsg = "--- OpenAI Format Attempt (" + u + ") ---\nError: " + err.Error()
+			switch {
+			case res.status == http.StatusTooManyRequests:
+				out.rateLimited = true
+				if res.parsedErr != "" {
+					rateErr = res.parsedErr
+				}
+			case res.status == http.StatusUnauthorized || res.status == http.StatusForbidden:
+				out.authFailed = true
+				if res.parsedErr != "" {
+					authErr = res.parsedErr
+				}
+			default:
+				if res.parsedErr != "" {
+					otherErr = res.parsedErr
+				}
 			}
-			resultCh <- res
-		}(testUrl)
+		}
+		switch {
+		case authErr != "":
+			out.parsedErr = authErr
+		case rateErr != "":
+			out.parsedErr = rateErr
+		default:
+			out.parsedErr = otherErr
+		}
+		return out
 	}
 
-	for _, testUrl := range anthropicUrls {
-		go func(u string) {
-			status, logMsg, parsedErr, err := makeRequest(u, true)
-			res := TestResult{
-				isSuccess:    err == nil && status >= 200 && status < 300,
-				status:       status,
-				logMsg:       "--- Anthropic Format Attempt (" + u + ") ---\n" + logMsg,
-				parsedErr:    parsedErr,
-				err:          err,
-				testUrl:      u,
-				providerType: "anthropic",
-			}
-			if err != nil {
-				res.logMsg = "--- Anthropic Format Attempt (" + u + ") ---\nError: " + err.Error()
-			}
-			resultCh <- res
-		}(testUrl)
+	// Candidate models: the requested one first, then the rest of the
+	// provider's catalog as fallbacks. A free gateway rate-limits per model,
+	// so if the default is throttled another free model often works — try a
+	// bounded few rather than failing the whole setup. In Exact mode the user
+	// wants a verdict on one specific model, so we skip the catalog fallbacks.
+	fallbackModels := catalogModels
+	if req.Exact {
+		fallbackModels = nil
+	}
+	const maxModelsToTry = 6
+	candidates := []string{}
+	seen := map[string]bool{}
+	for _, m := range append([]string{req.Model}, fallbackModels...) {
+		m = strings.TrimSpace(m)
+		if m == "" || seen[m] {
+			continue
+		}
+		seen[m] = true
+		candidates = append(candidates, m)
+	}
+	if len(candidates) == 0 {
+		candidates = []string{req.Model} // no model + no catalog: preserve prior behavior
 	}
 
-	totalRequests := len(openAiUrls) + len(anthropicUrls)
 	var combinedLog string
 	var lastParsedErr string
-
-	for i := 0; i < totalRequests; i++ {
-		res := <-resultCh
-		combinedLog += res.logMsg + "\n\n"
-
-		if res.isSuccess {
-			// Short circuit on first success
+	for i, model := range candidates {
+		if i >= maxModelsToTry {
+			break
+		}
+		out := testModel(model)
+		combinedLog += "=== Model: " + model + " ===\n" + out.log
+		if out.success {
 			api.respondJSON(w, http.StatusOK, map[string]interface{}{
 				"status":        "ok",
-				"provider_type": res.providerType,
-				"url":           res.testUrl,
+				"provider_type": out.providerType,
+				"url":           out.testUrl,
+				"model":         model,
 				"log":           combinedLog,
 			})
 			return
 		}
-		if res.parsedErr != "" {
-			lastParsedErr = res.parsedErr
+		if out.parsedErr != "" {
+			lastParsedErr = out.parsedErr
+		}
+		// A bad key or a non-rate-limit error won't be fixed by another model —
+		// stop and report. Only a rate-limit is worth falling back over.
+		if out.authFailed || !out.rateLimited {
+			break
 		}
 	}
 

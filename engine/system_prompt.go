@@ -4,13 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"log"
-	"os"
-	"path/filepath"
 	"text/template"
 	"time"
 
 	"agent-orchestrator/db"
-	"gopkg.in/yaml.v3"
+	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 type SystemPromptBuilder interface {
@@ -25,38 +24,9 @@ func NewSystemPromptBuilder(q *db.Queries) SystemPromptBuilder {
 	return &defaultSystemPromptBuilder{q: q}
 }
 
-type Settings struct {
-	BasePath         string   `yaml:"base_path"`
-	WorkspaceFolders []string `yaml:"workspace_folders"`
-	// Memory recall token budget overrides — see server/controllers.Settings
-	// for the full doc comment; 0 means use the pkg/hindsight defaults.
-	MemoryRecallMaxTokens   int `yaml:"memory_recall_max_tokens"`
-	MemoryBriefingMaxTokens int `yaml:"memory_briefing_max_tokens"`
-}
-
-// loadSettings reads the app settings. The canonical file is the one the
-// settings API writes (PaperclipHome()/settings.yaml); the legacy
-// ~/.paperclip2_settings.yaml location is kept as a fallback.
-func loadSettings() Settings {
-	paths := []string{db.SettingsFilePath()}
-	if homeDir, err := os.UserHomeDir(); err == nil {
-		paths = append(paths, filepath.Join(homeDir, ".paperclip2_settings.yaml"))
-	}
-	for _, settingsPath := range paths {
-		data, err := os.ReadFile(settingsPath)
-		if err != nil {
-			continue
-		}
-		var settings Settings
-		if err := yaml.Unmarshal(data, &settings); err != nil {
-			continue
-		}
-		if settings.BasePath == "" {
-			settings.BasePath = db.PaperclipHome()
-		}
-		return settings
-	}
-	return Settings{BasePath: db.PaperclipHome()}
+// loadSettings reads the app settings through the shared appsettings loader.
+func loadSettings() appsettings.Settings {
+	return appsettings.Load()
 }
 
 const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
@@ -151,8 +121,10 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		data.ProjectDescription = task.Project.Description
 
 		settings := loadSettings()
-		if task.Company.ShortName != "" && task.Project.WorkspaceFolder != "" {
-			data.WorkingDirectory = settings.BasePath + "/" + task.Company.ShortName + "/" + task.Project.WorkspaceFolder
+		if task.Company.ShortName != "" {
+			// The agent's actual working directory is the task's git worktree.
+			fsMgr := filesystem.NewManager(settings.BasePath)
+			data.WorkingDirectory = fsMgr.GetTaskWorktreePath(task.Company, task)
 		}
 	}
 

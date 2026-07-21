@@ -23,23 +23,24 @@ func setupDefaultModelSettingsTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{}))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{}))
 	return database
 }
 
-func setupDefaultModelSettingsRouter(database *gorm.DB) chi.Router {
+func setupDefaultModelSettingsRouter(t *testing.T, database *gorm.DB) chi.Router {
 	api := endpoints.NewAPI(database, nil, nil)
 	r := chi.NewRouter()
 	r.Get("/default-model-settings", api.ListDefaultModelSettings)
 	r.Put("/default-model-settings/{purpose}", api.UpdateDefaultModelSetting)
-	return r
+	return withTestUser(t, database, r)
 }
 
 func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	database := setupDefaultModelSettingsTestDB(t)
-	r := setupDefaultModelSettingsRouter(database)
+	r := setupDefaultModelSettingsRouter(t, database)
 	q := db.New(database)
-	require.NoError(t, q.EnsureDefaultModelSettings(context.Background()))
+	uid := testSeedUserID(t, q)
+	require.NoError(t, q.EnsureDefaultModelSettingsForUser(context.Background(), uid))
 
 	// List shows every known purpose, initially unconfigured (no Utility group in this DB).
 	req := httptest.NewRequest(http.MethodGet, "/default-model-settings", nil)
@@ -51,7 +52,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	require.Len(t, list, 5)
 
 	// Point commit_messages at a fixed provider+model.
-	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default"}
+	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default", UserID: &uid}
 	require.NoError(t, database.Create(&provider).Error)
 	payload := map[string]interface{}{"provider_id": provider.ID, "model": "my-model"}
 	b, _ := json.Marshal(payload)
@@ -67,7 +68,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	assert.Nil(t, updated.ModelGroupID)
 
 	// Point ask_artifact at a model group instead.
-	group := db.ModelGroup{Name: "G", Slug: "g"}
+	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &uid}
 	require.NoError(t, database.Create(&group).Error)
 	payload = map[string]interface{}{"model_group_id": group.ID}
 	b, _ = json.Marshal(payload)
@@ -83,7 +84,7 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 
 func TestDefaultModelSettings_UpdateUnknownPurpose(t *testing.T) {
 	database := setupDefaultModelSettingsTestDB(t)
-	r := setupDefaultModelSettingsRouter(database)
+	r := setupDefaultModelSettingsRouter(t, database)
 
 	req := httptest.NewRequest(http.MethodPut, "/default-model-settings/not-a-real-purpose", bytes.NewReader([]byte(`{}`)))
 	w := httptest.NewRecorder()

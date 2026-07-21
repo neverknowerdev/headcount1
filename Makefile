@@ -13,13 +13,13 @@ run: build-frontend
 	go run .
 
 run-dev:
-	@if pid=$$(lsof -ti :8080); then \
+	@if pid=$$(lsof -ti TCP:8080 -sTCP:LISTEN); then \
 		echo "Port 8080 in use by PID $$pid, killing..."; \
 		kill -9 $$pid; \
 		sleep 1; \
 	fi
 	@trap 'kill 0' EXIT; \
-	go tool air & \
+	HEADCOUNT1_LOCAL_BOOTKEY=1 go tool air & \
 	cd frontend && npm run dev
 
 dev:

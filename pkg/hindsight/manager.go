@@ -129,7 +129,7 @@ func (m *Manager) setNotice(msg string) {
 
 // binaryPath returns the hindsight-api executable inside the app venv.
 func binaryPath() string {
-	return filepath.Join(db.PaperclipHome(), "venv", "bin", "hindsight-api")
+	return filepath.Join(db.Headcount1Home(), "venv", "bin", "hindsight-api")
 }
 
 // Start brings the memory backend up. Blocking; intended to run in a
@@ -481,7 +481,7 @@ func summarizeFailure(errMsg, output string) string {
 // the app venv ("" when it can't be determined), read from the dist-info
 // directory name to avoid spawning Python.
 func installedVersion() string {
-	pattern := filepath.Join(db.PaperclipHome(), "venv", "lib", "python*", "site-packages", "hindsight_api-*.dist-info")
+	pattern := filepath.Join(db.Headcount1Home(), "venv", "lib", "python*", "site-packages", "hindsight_api-*.dist-info")
 	matches, _ := filepath.Glob(pattern)
 	for _, match := range matches {
 		base := filepath.Base(match)

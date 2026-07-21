@@ -3,6 +3,7 @@ package aicli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -11,6 +12,11 @@ import (
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/tokens"
 )
+
+// ErrMaxTurns is returned (wrapped) when the agent loop hits its turn cap
+// without producing a final answer. Callers can errors.Is against it to
+// distinguish a runaway loop from a hard LLM/tool failure.
+var ErrMaxTurns = errors.New("agent loop exceeded max turns without a final answer")
 
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
@@ -306,7 +312,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 	}
 
-	return "", fmt.Errorf("agent loop exceeded %d turns without a final answer", maxTurns)
+	return "", fmt.Errorf("%w (%d turns)", ErrMaxTurns, maxTurns)
 }
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each
@@ -416,9 +422,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-// appendRunLog persists a structured log entry to the run's log_entries column
-// and broadcasts it over WebSocket via db.Queries. It is a fire-and-forget
-// goroutine so it never blocks the agent loop.
 func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
 	if a.q == nil || a.runID <= 0 {
 		return

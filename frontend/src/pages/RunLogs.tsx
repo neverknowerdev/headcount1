@@ -254,17 +254,24 @@ export const RunLogs: React.FC = () => {
         if (msg.type === 'run_started') {
             fetchRuns();
         } else if (msg.type === 'run_ended') {
-            setRuns((prev) => {
-                const runId = msg.payload.run_id;
-                const status = msg.payload.status;
-                return prev.map(r => r.id === runId ? { ...r, status } : r);
-            });
+            const runId = msg.payload.run_id;
+            const status = msg.payload.status;
+            if (!runs.some(r => r.id === runId)) {
+                // We never saw this run start (event missed or it began
+                // before this page loaded) — re-sync the list instead of
+                // silently ignoring it.
+                fetchRuns();
+                return;
+            }
+            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, status } : r));
         } else if (msg.type === 'run_status') {
-            setRuns((prev) => {
-                const runId = msg.payload.run_id;
-                const status = msg.payload.status;
-                return prev.map(r => r.id === runId ? { ...r, current_status: status } : r);
-            });
+            const runId = msg.payload.run_id;
+            const status = msg.payload.status;
+            if (!runs.some(r => r.id === runId)) {
+                fetchRuns();
+                return;
+            }
+            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, current_status: status } : r));
         }
     }, {
         enabled: !!selectedCompanyId,

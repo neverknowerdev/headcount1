@@ -12,10 +12,31 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/secrets"
+
 	"github.com/glebarez/sqlite"
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
+
+// sealTestUserID is a fixed user kept unlocked for the whole test process, so
+// tests can seal a provider API key (the write guard refuses raw plaintext) and
+// have it decrypt at the point of use via the in-memory keyring.
+const sealTestUserID = 424242
+
+// sealKey seals a provider API key under sealTestUserID. Ciphertext embeds that
+// user id ("enc:u1:<id>:…"), so Decrypt opens it as long as the user is unlocked
+// — which this helper guarantees.
+func sealKey(s string) string {
+	var dek [32]byte
+	dek[0], dek[1] = 0x42, 0x42
+	secrets.Default().UnlockUser(sealTestUserID, dek, time.Hour)
+	v, err := secrets.Default().EncryptForUser(sealTestUserID, s)
+	if err != nil {
+		panic(err)
+	}
+	return v
+}
 
 func setupGroupTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -76,8 +97,8 @@ func TestGroupProxyFailover(t *testing.T) {
 	}))
 	defer okServer.Close()
 
-	p1 := db.LLMProvider{Name: "Limited", BaseUrl: failServer.URL, ApiKey: "k1"}
-	p2 := db.LLMProvider{Name: "Backup", BaseUrl: okServer.URL, ApiKey: "k2"}
+	p1 := db.LLMProvider{Name: "Limited", BaseUrl: failServer.URL, ApiKeyEncrypted: sealKey("k1")}
+	p2 := db.LLMProvider{Name: "Backup", BaseUrl: okServer.URL, ApiKeyEncrypted: sealKey("k2")}
 	database.Create(&p1)
 	database.Create(&p2)
 
@@ -154,8 +175,8 @@ func TestGroupProxyFreeBeforePaid(t *testing.T) {
 	defer freeServer.Close()
 	defer paidServer.Close()
 
-	pPaid := db.LLMProvider{Name: "Paid", BaseUrl: paidServer.URL, ApiKey: "k"}
-	pFree := db.LLMProvider{Name: "Free", BaseUrl: freeServer.URL, ApiKey: "k"}
+	pPaid := db.LLMProvider{Name: "Paid", BaseUrl: paidServer.URL, ApiKeyEncrypted: sealKey("k")}
+	pFree := db.LLMProvider{Name: "Free", BaseUrl: freeServer.URL, ApiKeyEncrypted: sealKey("k")}
 	database.Create(&pPaid)
 	database.Create(&pFree)
 
@@ -189,7 +210,7 @@ func TestGroupProxyAllFail(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := db.LLMProvider{Name: "Down", BaseUrl: srv.URL, ApiKey: "k"}
+	p := db.LLMProvider{Name: "Down", BaseUrl: srv.URL, ApiKeyEncrypted: sealKey("k")}
 	database.Create(&p)
 	group := db.ModelGroup{Name: "Down Group", Slug: "down-group"}
 	database.Create(&group)
@@ -227,7 +248,7 @@ func TestAgentProxyUsesModelGroup(t *testing.T) {
 
 	comp := db.Company{Name: "T", ShortName: "t"}
 	database.Create(&comp)
-	p := db.LLMProvider{Name: "P", BaseUrl: srv.URL, ApiKey: "k"}
+	p := db.LLMProvider{Name: "P", BaseUrl: srv.URL, ApiKeyEncrypted: sealKey("k")}
 	database.Create(&p)
 	group := db.ModelGroup{Name: "Agent Group", Slug: "agent-group"}
 	database.Create(&group)
@@ -281,8 +302,8 @@ func TestGroupProxySwitchesOnlyLogging(t *testing.T) {
 	database.Create(&comp)
 	sprint := db.Sprint{CompanyID: comp.ID, Name: "S"}
 	database.Create(&sprint)
-	p1 := db.LLMProvider{Name: "Bad", BaseUrl: failServer.URL, ApiKey: "k"}
-	p2 := db.LLMProvider{Name: "Good", BaseUrl: okServer.URL, ApiKey: "k"}
+	p1 := db.LLMProvider{Name: "Bad", BaseUrl: failServer.URL, ApiKeyEncrypted: sealKey("k")}
+	p2 := db.LLMProvider{Name: "Good", BaseUrl: okServer.URL, ApiKeyEncrypted: sealKey("k")}
 	database.Create(&p1)
 	database.Create(&p2)
 	group := db.ModelGroup{Name: "Run Group", Slug: "run-group"}
@@ -352,7 +373,7 @@ func TestGroupProxyAllModelsMember(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKey: "k", SupportedModels: "model-a,model-b"}
+	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKeyEncrypted: sealKey("k"), SupportedModels: "model-a,model-b"}
 	database.Create(&p)
 	group := db.ModelGroup{Name: "Any Group", Slug: "any-group"}
 	database.Create(&group)
@@ -406,7 +427,7 @@ func TestGroupProxyAllModelsMember_TriesEveryModelInOrder(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKey: "k", SupportedModels: "model-a,model-b,model-c"}
+	p := db.LLMProvider{Name: "AnyProvider", BaseUrl: srv.URL, ApiKeyEncrypted: sealKey("k"), SupportedModels: "model-a,model-b,model-c"}
 	database.Create(&p)
 	group := db.ModelGroup{Name: "Any Group", Slug: "any-group"}
 	database.Create(&group)

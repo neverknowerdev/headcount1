@@ -8,20 +8,22 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 	projects, err := api.q.ListProjectsByCompany(r.Context(), int32(compID))
@@ -46,6 +48,11 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+
 	// External projects require a git URL to clone from.
 	if req.IsExternal && req.RepositoryUrl == "" {
 		api.respondError(w, http.StatusBadRequest, "external projects require repository_url")
@@ -54,8 +61,9 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
+		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		defer cleanup()
+		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -106,14 +114,10 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
 
-	// Write project metadata to filesystem
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteProject(comp, proj); err != nil {
-		log.Printf("Warning: failed to write project metadata: %v", err)
-	}
-
 	if req.RepositoryUrl != "" {
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, repoKey); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -153,26 +157,10 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	project, err := api.q.GetProject(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
-	api.respondJSON(w, http.StatusOK, project)
+	api.respondJSON(w, http.StatusOK, api.projectFromCtx(r)) // loaded + authorized by LoadProject
 }
 
 func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name            string `json:"name"`
 		Description     string `json:"description"`
@@ -184,11 +172,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	project, err := api.q.GetProject(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
 
 	if req.Name != "" {
 		project.Name = req.Name
@@ -202,8 +186,9 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
+		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		defer cleanup()
+		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -213,7 +198,9 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
 		fsManager := filesystem.NewManager(settings.BasePath)
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project); err != nil {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, repoKey); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -254,25 +241,21 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		api.StartProjectMemoryInit(project.ID)
 	}
 
-	project, err = api.q.UpdateProject(r.Context(), project)
+	saved, err := api.q.UpdateProject(r.Context(), project)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.logActivity(project.CompanyID, "project_updated", int32(project.ID), "project", "")
-	api.respondJSON(w, http.StatusOK, project)
+	api.logActivity(saved.CompanyID, "project_updated", int32(saved.ID), "project", "")
+	api.respondJSON(w, http.StatusOK, saved)
 }
 
 // GetProjectCodegraph returns the codegraph MCP server record for a project,
 // including its init_status so the frontend can poll for readiness.
 func (api *API) GetProjectCodegraph(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	srv, err := api.q.GetCodegraphServerForProject(r.Context(), int32(id))
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
+	srv, err := api.q.GetCodegraphServerForProject(r.Context(), project.ID)
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "no codegraph server for this project")
 		return
@@ -390,17 +373,16 @@ func validateGitURL(url string) error {
 
 // validateAndConnectRepo normalizes the URL, validates its format, then tests
 // remote connectivity. Returns the normalized URL on success.
-func validateAndConnectRepo(ctx context.Context, rawURL, sshDir string) (string, error) {
+func validateAndConnectRepo(ctx context.Context, rawURL, sshKeyPath string) (string, error) {
 	normalized := normalizeGitURL(rawURL)
 	if err := validateGitURL(normalized); err != nil {
 		return "", err
 	}
 
-	sshKeyPath := filepath.Join(sshDir, "id_rsa")
 	_, sshKeyStatErr := os.Stat(sshKeyPath)
 	sshKeyExists := sshKeyStatErr == nil
 
-	gitMgr := git.NewGitManager("", sshDir)
+	gitMgr := git.NewGitManager("", sshKeyPath)
 	if err := gitMgr.ValidateRemote(ctx, normalized); err != nil {
 		if strings.HasPrefix(err.Error(), "[auth]") {
 			if !sshKeyExists {

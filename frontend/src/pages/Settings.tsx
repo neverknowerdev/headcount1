@@ -1,11 +1,13 @@
+import { SecretLabel } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
     const { selectedCompanyId, companies, setCompanies } = useStore();
+    const isOwner = useIsOwner();
 
     const [companyShortName, setCompanyShortName] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -20,10 +22,7 @@ export const Settings: React.FC = () => {
     }, [selectedCompanyId, companies]);
 
     const [basePath, setBasePath] = useState('');
-    const [gitRemoteUrl, setGitRemoteUrl] = useState('');
-    const [githubPat, setGithubPat] = useState('');
     const [saving, setSaving] = useState(false);
-    const [syncing, setSyncing] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
     const sshFileInputRef = useRef<HTMLInputElement>(null);
@@ -34,8 +33,6 @@ export const Settings: React.FC = () => {
                 const res = await axios.get('/api/settings');
                 if (res.data) {
                     setBasePath(res.data.base_path || '');
-                    setGitRemoteUrl(res.data.git_remote_url || '');
-                    setGithubPat(res.data.github_pat || '');
                 }
             } catch (e) {
                 console.error(e);
@@ -48,16 +45,19 @@ export const Settings: React.FC = () => {
         e.preventDefault();
         setSaving(true);
         try {
-            await axios.post('/api/settings', {
-                base_path: basePath,
-                git_remote_url: gitRemoteUrl,
-                github_pat: githubPat
-            });
-
+            // The SSH key is per-user, encrypted at rest under your passkey.
             if (sshKey) {
                 await axios.post('/api/settings/ssh', { key: sshKey });
                 setSshKey('');
-                alert('SSH Key uploaded successfully');
+            }
+
+            // The workspace root is instance-global (operator-managed). Saving it
+            // is only possible when the operator has enabled the global admin API;
+            // a 404 there is expected for regular users, so don't fail the save.
+            try {
+                await axios.post('/api/settings', { base_path: basePath });
+            } catch (err: any) {
+                if (err?.response?.status !== 404) throw err;
             }
 
             const currentCompany = companies.find(c => c.id === selectedCompanyId);
@@ -86,19 +86,6 @@ export const Settings: React.FC = () => {
         const reader = new FileReader();
         reader.onload = ev => setSshKey((ev.target?.result as string) || '');
         reader.readAsText(file);
-    };
-
-    const handleSync = async () => {
-        setSyncing(true);
-        try {
-            await axios.post('/api/settings/sync');
-            alert('Sync completed successfully!');
-        } catch (e) {
-            console.error(e);
-            alert('Failed to sync settings from filesystem');
-        } finally {
-            setSyncing(false);
-        }
     };
 
     const handleDeleteCompany = async () => {
@@ -162,31 +149,7 @@ export const Settings: React.FC = () => {
                             value={basePath}
                             onChange={e => setBasePath(e.target.value)}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="/home/user/.paperclip2"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Data Git Remote URL
-                        </label>
-                        <input
-                            type="text"
-                            value={gitRemoteUrl}
-                            onChange={e => setGitRemoteUrl(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="git@github.com:user/paperclip2-data.git"
-                        />
-                    </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            GitHub PAT (Personal Access Token)
-                        </label>
-                        <input
-                            type="password"
-                            value={githubPat}
-                            onChange={e => setGithubPat(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="ghp_..."
+                            placeholder="/home/user/.headcount1"
                         />
                     </div>
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
@@ -194,11 +157,10 @@ export const Settings: React.FC = () => {
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            SSH Private Key
-                        </label>
+                        <SecretLabel>SSH Private Key</SecretLabel>
                         <p className="text-xs text-gray-500 mb-2">
-                            Used to authenticate Git operations for private repositories. Paste the key or upload the file directly.
+                            Your personal key to authenticate Git operations for private repositories.
+                            Encrypted at rest under your passkey; never shared with other users. Paste the key or upload the file directly.
                         </p>
                         <textarea
                             value={sshKey}
@@ -239,15 +201,6 @@ export const Settings: React.FC = () => {
 
                         <button
                             type="button"
-                            onClick={handleSync}
-                            disabled={syncing}
-                            className="bg-green-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-green-700 disabled:bg-green-400"
-                        >
-                            {syncing ? 'Syncing...' : 'Sync from Filesystem'}
-                        </button>
-
-                        <button
-                            type="button"
                             onClick={() => navigate(`/companies/${companyShortName}/backup`)}
                             className="bg-blue-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-blue-700"
                         >
@@ -257,7 +210,7 @@ export const Settings: React.FC = () => {
                 </form>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
+            {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>
                 <div className="flex items-center justify-between">
                     <div>
@@ -274,7 +227,7 @@ export const Settings: React.FC = () => {
                         Delete Company
                     </button>
                 </div>
-            </div>
+            </div>}
 
             {showDeleteConfirm && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">

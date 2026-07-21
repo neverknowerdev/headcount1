@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 )
 
 // schemaState records which Postgres schema the memory backend stores data
@@ -23,7 +24,7 @@ type schemaState struct {
 }
 
 func schemaStatePath() string {
-	return filepath.Join(db.PaperclipHome(), "data", "hindsight", "schema-state.json")
+	return filepath.Join(filesystem.NewPaths(db.Headcount1Home()).HindsightDir(), "schema-state.json")
 }
 
 func loadSchemaState() (schemaState, bool) {

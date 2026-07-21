@@ -179,7 +179,7 @@ export const ProjectSettings: React.FC = () => {
             onChange={e => setWorkspaceFolder(e.target.value)}
             className="w-full border rounded p-2 text-sm"
           />
-          <p className="text-xs text-gray-500 mt-1">Relative to .paperclip2/</p>
+          <p className="text-xs text-gray-500 mt-1">Relative to .headcount1/</p>
         </div>
 
         <div className="flex justify-end">

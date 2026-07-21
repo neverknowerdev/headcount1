@@ -1,6 +1,7 @@
 import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { Layout } from './components/Layout';
 import { SetupGate } from './components/SetupGate';
+import { AuthGate } from './components/AuthGate';
 import { Dashboard } from './pages/Dashboard';
 import { CompanyView } from './pages/CompanyView';
 import { ProjectBoard } from './pages/ProjectBoard';
@@ -18,14 +19,17 @@ import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 import { TaskPage } from './pages/TaskPage';
 import { Memory } from './pages/Memory';
+import { TeamPage } from './pages/TeamPage';
 
 function App() {
   return (
     <BrowserRouter>
       <SetupGate>
-        <Layout>
+        <AuthGate>
+          <Layout>
           <Routes>
             <Route path="/add-company" element={<AddCompany />} />
+            <Route path="/team" element={<TeamPage />} />
             <Route path="/companies/:shortName" element={<Dashboard />} />
             <Route path="/companies/:shortName/tasks" element={<ProjectBoard />} />
             <Route path="/companies/:shortName/tasks/:taskId" element={<TaskPage />} />
@@ -45,7 +49,8 @@ function App() {
             <Route path="/" element={<Dashboard />} />
             <Route path="*" element={<Navigate to="/" replace />} />
           </Routes>
-        </Layout>
+          </Layout>
+        </AuthGate>
       </SetupGate>
     </BrowserRouter>
   );

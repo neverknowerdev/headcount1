@@ -32,15 +32,16 @@ var defaultModelSettingPurposes = []string{
 	PurposeHindsightReflect,
 }
 
-func (q *Queries) GetDefaultModelSetting(ctx context.Context, purpose string) (DefaultModelSetting, error) {
+func (q *Queries) GetDefaultModelSetting(ctx context.Context, userID int32, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
-	err := q.db.WithContext(ctx).Where("purpose = ?", purpose).First(&s).Error
+	err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, purpose).First(&s).Error
 	return s, err
 }
 
-func (q *Queries) ListDefaultModelSettings(ctx context.Context) ([]DefaultModelSetting, error) {
+func (q *Queries) ListDefaultModelSettings(ctx context.Context, userID int32) ([]DefaultModelSetting, error) {
 	var list []DefaultModelSetting
 	err := q.db.WithContext(ctx).
+		Where("user_id = ?", userID).
 		Preload("Provider").
 		Preload("ModelGroup").
 		Preload("ModelGroup.Members", func(db *gorm.DB) *gorm.DB { return db.Order("priority, id") }).
@@ -54,9 +55,9 @@ func (q *Queries) ListDefaultModelSettings(ctx context.Context) ([]DefaultModelS
 // modelGroupID are expected to be mutually exclusive (the caller — the API
 // handler — enforces that); passing both nil clears the override, falling
 // back to the calling session's own LLM.
-func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, purpose string, providerID *int32, model string, modelGroupID *int32) (DefaultModelSetting, error) {
+func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, userID int32, purpose string, providerID *int32, model string, modelGroupID *int32) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
-	if err := q.db.WithContext(ctx).Where("purpose = ?", purpose).First(&s).Error; err != nil {
+	if err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, purpose).First(&s).Error; err != nil {
 		return DefaultModelSetting{}, err
 	}
 	s.ProviderID = providerID
@@ -68,35 +69,36 @@ func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, purpose string,
 	return s, nil
 }
 
-// EnsureDefaultModelSettings seeds an unconfigured row per known purpose if
-// missing, so each purpose falls back to the calling session's own LLM
-// until a user points it at a provider/model or a model group. Idempotent:
-// never overwrites an existing row's configuration.
-func (q *Queries) EnsureDefaultModelSettings(ctx context.Context) error {
+// EnsureDefaultModelSettingsForUser seeds the user's unconfigured row per
+// known purpose if missing, so each purpose falls back to the calling
+// session's own LLM until the user points it at a provider/model or a model
+// group. Idempotent: never overwrites an existing row's configuration.
+func (q *Queries) EnsureDefaultModelSettingsForUser(ctx context.Context, userID int32) error {
+	uid := userID
 	for oldPurpose, newPurpose := range legacyPurposeRenames {
 		var newExisting DefaultModelSetting
-		err := q.db.WithContext(ctx).Where("purpose = ?", newPurpose).First(&newExisting).Error
+		err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, newPurpose).First(&newExisting).Error
 		if err == nil {
 			continue // already migrated (or seeded fresh under the new name)
 		}
 		if err != gorm.ErrRecordNotFound {
 			return err
 		}
-		if err := q.db.WithContext(ctx).Model(&DefaultModelSetting{}).Where("purpose = ?", oldPurpose).Update("purpose", newPurpose).Error; err != nil {
+		if err := q.db.WithContext(ctx).Model(&DefaultModelSetting{}).Where("user_id = ? AND purpose = ?", userID, oldPurpose).Update("purpose", newPurpose).Error; err != nil {
 			return err
 		}
 	}
 
 	for _, purpose := range defaultModelSettingPurposes {
 		var existing DefaultModelSetting
-		err := q.db.WithContext(ctx).Where("purpose = ?", purpose).First(&existing).Error
+		err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, purpose).First(&existing).Error
 		if err == nil {
 			continue
 		}
 		if err != gorm.ErrRecordNotFound {
 			return err
 		}
-		if err := q.db.WithContext(ctx).Create(&DefaultModelSetting{Purpose: purpose}).Error; err != nil {
+		if err := q.db.WithContext(ctx).Create(&DefaultModelSetting{Purpose: purpose, UserID: &uid}).Error; err != nil {
 			return err
 		}
 	}

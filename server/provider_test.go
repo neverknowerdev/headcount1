@@ -1,7 +1,7 @@
 package server
 
 import (
-	"agent-orchestrator/server/controllers"
+	endpoints "agent-orchestrator/server/controllers"
 	"bytes"
 	"encoding/json"
 	"net/http"

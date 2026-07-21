@@ -35,18 +35,12 @@ test.describe.serial('CEO orchestration flow', () => {
     let taskId: number;
     let providerId: number;
 
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+    const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
 
     const cleanFilesystem = () => {
-        for (const subDir of ['data/ceo-co', 'companies/ceo-co', 'workspace/ceo-co', 'data/runs/ceo-co']) {
-            const fullPath = path.join(paperclipBase, subDir);
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, 'ceo-co');
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
-        }
-        // Remove the provider file too: leftover entity files get re-imported by
-        // the filesystem sync tests and collide with their freshly created ids.
-        if (providerId) {
-            const providerFile = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
-            if (fs.existsSync(providerFile)) fs.rmSync(providerFile, { force: true });
         }
     };
 
@@ -347,19 +341,19 @@ test.describe.serial('CEO orchestration flow', () => {
         const qaTask = (ctoSubtasks as any[]).find(t => t.title === 'Verify greeting');
         expect(qaTask.agent_config_name).toBe('QA');
 
-        // ── Filesystem: logs grouped by main run id, one file per session ────
-        const basePath = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
-        const runDir = path.join(basePath, 'data', 'ceo-co', 'logs', String(taskId), `run-${rootRun.id}`);
-        const mainLog = path.join(runDir, 'main.log');
+        // ── Filesystem: JSONL logs grouped by main run id, one file per session ─
+        const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
+        const runDir = path.join(basePath, 'logs', 'ceo-co', String(taskId), `run-${rootRun.id}`);
+        const mainLog = path.join(runDir, 'main.jsonl');
         expect(fs.existsSync(mainLog)).toBeTruthy();
-        const mainContent = fs.readFileSync(mainLog, 'utf8');
-        expect(mainContent).toContain('Session Started');
-        expect(mainContent).toContain('Session Ended');
+        const mainEntries = fs.readFileSync(mainLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+        expect(mainEntries.some(e => e.type === 'session_started')).toBeTruthy();
+        expect(mainEntries.some(e => e.type === 'session_ended')).toBeTruthy();
         for (const child of [ctoRun, ...ctoChildren]) {
-            const sessionLog = path.join(runDir, `session-${child.id}.log`);
+            const sessionLog = path.join(runDir, `session-${child.id}.jsonl`);
             expect(fs.existsSync(sessionLog)).toBeTruthy();
-            const sessionContent = fs.readFileSync(sessionLog, 'utf8');
-            expect(sessionContent).toContain('LLM Request');
+            const sessionEntries = fs.readFileSync(sessionLog, 'utf8').split('\n').filter(l => l.trim()).map(l => JSON.parse(l));
+            expect(sessionEntries.some(e => e.type === 'request')).toBeTruthy();
         }
 
         // The ask_artifact reader exchange got its own log file in the run

@@ -11,7 +11,7 @@ const env = loadE2EEnv();
  *
  *   a. project doc ingestion (.md files of the git repo → the single
  *      per-company bank company-<companyID>)
- *   b. doc change tracking via POST /api/settings/sync (document upsert)
+ *   b. doc change tracking via POST /api/memory/projects/{id}/sync (document upsert)
  *   c. agent experience: CTO fails a task, its error memory surfaces in a
  *      later CMO run via memory_recall; reruns then surface the history and
  *      add success memories (same bank company-<companyID>, tags agent:*)
@@ -24,7 +24,7 @@ const env = loadE2EEnv();
 test.describe.serial('Memory (Hindsight) layer', () => {
     const shortName = 'memco';
     const projectName = 'GM Coin';
-    const paperclipBase = path.join(env.E2E_PAPERCLIP_HOME, '.paperclip2');
+    const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
 
     let companyId: number;
     let projectId: number;
@@ -36,13 +36,9 @@ test.describe.serial('Memory (Hindsight) layer', () => {
     let bank: string;
 
     const cleanFilesystem = () => {
-        for (const subDir of [`data/${shortName}`, `companies/${shortName}`, `workspace/${shortName}`, `data/runs/${shortName}`, `data/artifacts/${shortName}`]) {
-            const fullPath = path.join(paperclipBase, subDir);
+        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
+            const fullPath = path.join(headcount1Base, root, shortName);
             if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
-        }
-        if (providerId) {
-            const providerFile = path.join(paperclipBase, 'data', 'llm-providers', `${providerId}.json`);
-            if (fs.existsSync(providerFile)) fs.rmSync(providerFile, { force: true });
         }
     };
 
@@ -198,9 +194,9 @@ test.describe.serial('Memory (Hindsight) layer', () => {
         expect(directiveNames1).toEqual(['cite-source', 'no-false-completion']);
     });
 
-    test('doc changes are tracked: settings sync upserts the changed document', async ({ request }) => {
+    test('doc changes are tracked: project memory sync upserts the changed document', async ({ request }) => {
         // The server scans the project's cloned working copy on disk.
-        const repoPath = path.join(paperclipBase, 'data', 'artifacts', shortName, projectName);
+        const repoPath = path.join(headcount1Base, 'repos', shortName, projectName);
         const icpDoc = path.join(repoPath, 'docs', 'icp-backend.md');
         expect(fs.existsSync(icpDoc), `expected cloned repo doc at ${icpDoc}`).toBeTruthy();
 
@@ -208,7 +204,7 @@ test.describe.serial('Memory (Hindsight) layer', () => {
             '# ICP backend\n\nThe GM Coin backend now uses Rust canisters on the Internet Computer. ' +
             'Ledger state migrated from Motoko to Rust for performance.\n');
 
-        const syncRes = await request.post('/api/settings/sync');
+        const syncRes = await request.post(`/api/memory/projects/${projectId}/sync`);
         expect(syncRes.ok()).toBeTruthy();
 
         // Upsert: exactly one memory for the document, carrying the new text.

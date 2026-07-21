@@ -22,6 +22,7 @@ const getNavItems = (companyIdentifier: string | null) => {
 export const Sidebar: React.FC = () => {
   const location = useLocation();
   const { selectedCompanyId, companies } = useStore();
+
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
@@ -65,7 +66,6 @@ export const Sidebar: React.FC = () => {
           })}
         </nav>
       </div>
-
 
     </div>
   );

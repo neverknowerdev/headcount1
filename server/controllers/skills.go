@@ -10,13 +10,16 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListSkills(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 	var skills []db.Skill
@@ -38,8 +41,8 @@ func (api *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, req.CompanyID).Error; err != nil {
+	comp, err := api.authorizeCompany(r, req.CompanyID)
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "Company not found")
 		return
 	}
@@ -69,17 +72,7 @@ func (api *API) CreateSkill(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) ListSkillFiles(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	files := make([]string, 0)
 	if _, err := os.Stat(skill.LocalPath); !os.IsNotExist(err) {
@@ -103,23 +96,13 @@ func (api *API) ListSkillFiles(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetSkillFileContent(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	filePath := r.URL.Query().Get("path")
 	if filePath == "" {
 		api.respondError(w, http.StatusBadRequest, "path is required")
 		return
 	}
 
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	fullPath := filepath.Join(skill.LocalPath, filePath)
 	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(skill.LocalPath)) {
@@ -138,12 +121,6 @@ func (api *API) GetSkillFileContent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateSkillFileContent(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Path    string `json:"path"`
 		Content string `json:"content"`
@@ -153,11 +130,7 @@ func (api *API) UpdateSkillFileContent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var skill db.Skill
-	if err := api.db.First(&skill, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Skill not found")
-		return
-	}
+	skill := api.skillFromCtx(r) // loaded + authorized by LoadSkill
 
 	fullPath := filepath.Join(skill.LocalPath, req.Path)
 	if !strings.HasPrefix(filepath.Clean(fullPath), filepath.Clean(skill.LocalPath)) {

@@ -65,7 +65,7 @@ func TestFallbackSchemaName(t *testing.T) {
 }
 
 func TestSchemaStateRoundTrip(t *testing.T) {
-	t.Setenv("E2E_PAPERCLIP_HOME", t.TempDir())
+	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
 
 	// No state file → not found, resolveSchema falls back to public.
 	if _, ok := loadSchemaState(); ok {
@@ -119,14 +119,14 @@ func TestSchemaStateRoundTrip(t *testing.T) {
 
 func TestInstalledVersionFromDistInfo(t *testing.T) {
 	home := t.TempDir()
-	t.Setenv("E2E_PAPERCLIP_HOME", home)
+	t.Setenv("E2E_HEADCOUNT1_HOME", home)
 
 	// No venv → empty.
 	if got := installedVersion(); got != "" {
 		t.Errorf("installedVersion in empty home = %q, want empty", got)
 	}
 
-	distInfo := filepath.Join(home, ".paperclip2", "venv", "lib", "python3.14", "site-packages", "hindsight_api-0.6.1.dist-info")
+	distInfo := filepath.Join(home, ".headcount1", "venv", "lib", "python3.14", "site-packages", "hindsight_api-0.6.1.dist-info")
 	if err := os.MkdirAll(distInfo, 0o755); err != nil {
 		t.Fatal(err)
 	}
