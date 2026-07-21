@@ -9,18 +9,11 @@ jobs:
   test:
     timeout-minutes: 60
     runs-on: ubuntu-latest
-    # Run the whole suite twice: once on the default SQLite backend and once
-    # against a real PostgreSQL, so the cloud (Postgres) path gets the same
-    # end-to-end coverage as local (SQLite). The server picks its backend from
-    # DATABASE_URL (see main.go), so the exact same tests exercise both.
-    strategy:
-      fail-fast: false
-      matrix:
-        database: [ sqlite, postgres ]
 
-    # A Postgres service is always available; the SQLite leg simply ignores it
-    # (DATABASE_URL stays empty). Health-checked so the server never races the
-    # database on boot.
+    # PostgreSQL is the primary (cloud) backend, so the full Playwright suite
+    # runs against it. SQLite is covered by a dedicated, focused spec instead of
+    # a second full run — see the "SQLite backend E2E" step. The server picks its
+    # backend from DATABASE_URL (see main.go).
     services:
       postgres:
         image: postgres:16
@@ -35,10 +28,6 @@ jobs:
           --health-interval 10s
           --health-timeout 5s
           --health-retries 5
-
-    env:
-      # postgres → real DSN; sqlite → empty, which main.go treats as "use SQLite".
-      DATABASE_URL: ${{ matrix.database == 'postgres' && 'postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable' || '' }}
 
     steps:
     - uses: actions/checkout@v4
@@ -55,10 +44,8 @@ jobs:
 
     # Fast dialect-specific signal before the browser suite: the Go integration
     # tests (AutoMigrate, raw-SQL query surface, backup/restore sequence
-    # realignment) run only when TEST_POSTGRES_URL is set, so they no-op on the
-    # SQLite leg and exercise Postgres on the other.
+    # realignment) run only when TEST_POSTGRES_URL is set.
     - name: Run Go Postgres integration tests
-      if: matrix.database == 'postgres'
       run: go test ./db/ ./pkg/backup/ -run TestPostgres -v
       env:
         TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
@@ -75,9 +62,8 @@ jobs:
 
     # Warm the Go module + build cache before the browser suite. globalSetup
     # boots the server with `go run .`, and a cold module download + compile can
-    # exceed its 60s reachability timeout (the SQLite leg has no prior Go step to
-    # prime the cache). Building here (after frontend/dist exists for the embed)
-    # makes the later `go run .` a fast relink.
+    # exceed its 60s reachability timeout. Building here (after frontend/dist
+    # exists for the embed) makes the later `go run .` a fast relink.
     - name: Pre-build Go server (warm cache)
       run: go build -o /tmp/headcount1-server .
 
@@ -91,16 +77,40 @@ jobs:
         cd e2e
         npx playwright install --with-deps chromium
 
-    - name: Run Playwright tests
+    # Primary: the whole suite against PostgreSQL. SQLite-only specs
+    # (sqlite_backend) self-skip here.
+    - name: Run Playwright tests (PostgreSQL — primary)
       run: |
         cd e2e
         npx playwright test
       env:
         E2E_MODE: true
+        DATABASE_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
-    - uses: actions/upload-artifact@v4
+    - name: Upload PostgreSQL report
       if: always()
+      uses: actions/upload-artifact@v4
       with:
-        name: playwright-report-${{ matrix.database }}
+        name: playwright-report-postgres
+        path: e2e/playwright-report/
+        retention-days: 30
+
+    # Dedicated SQLite coverage: the on-disk layout, WAL journaling, and
+    # autoincrement-reset edge cases that only apply with no DATABASE_URL. Runs
+    # even if the Postgres run failed, so both backends give an independent
+    # signal.
+    - name: Run SQLite backend E2E
+      if: always()
+      run: |
+        cd e2e
+        npx playwright test sqlite_backend
+      env:
+        E2E_MODE: true
+
+    - name: Upload SQLite report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report-sqlite
         path: e2e/playwright-report/
         retention-days: 30
