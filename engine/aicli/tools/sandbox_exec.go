@@ -39,13 +39,22 @@ func logSandboxMode() {
 	})
 }
 
-// extraWritableDirs returns paths outside the workspace that sandboxed
-// commands are still allowed to write to: temp dirs (many tools break without
-// a writable TMPDIR) and well-known toolchain caches, so `go build`, npm & co
-// keep working under the write restriction.
+// extraWritableDirs returns the writable dirs computed against the server's own
+// home directory (the default, un-hardened path).
 func extraWritableDirs() []string {
+	home, _ := os.UserHomeDir()
+	return extraWritableDirsForHome(home)
+}
+
+// extraWritableDirsForHome returns paths outside the workspace that sandboxed
+// commands are still allowed to write to: temp dirs (many tools break without a
+// writable TMPDIR) and well-known toolchain caches under `home`, so `go build`,
+// npm & co keep working under the write restriction. When a dedicated sandbox
+// uid is used the caches must resolve against THAT uid's home (not the server's,
+// which the sandbox uid cannot write) — callers pass the target home here.
+func extraWritableDirsForHome(home string) []string {
 	dirs := []string{os.TempDir(), "/tmp", "/var/tmp", "/dev/shm"}
-	if home, err := os.UserHomeDir(); err == nil && home != "" {
+	if home != "" {
 		dirs = append(dirs,
 			filepath.Join(home, ".cache"),    // GOCACHE, pip, uv, ...
 			filepath.Join(home, ".npm"),      // npm cache

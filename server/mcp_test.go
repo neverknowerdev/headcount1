@@ -24,7 +24,11 @@ func setupMCPTestDB(t *testing.T) *gorm.DB {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	err = database.AutoMigrate(
+		&db.User{},
+		&db.Team{},
+		&db.TeamMember{},
 		&db.Company{},
+		&db.Project{},
 		&db.Agent{},
 		&db.MCPServer{},
 		&db.AgentMCPServer{},
@@ -35,17 +39,23 @@ func setupMCPTestDB(t *testing.T) *gorm.DB {
 	return database
 }
 
-func setupMCPRouter(database *gorm.DB) chi.Router {
+func setupMCPRouter(t *testing.T, database *gorm.DB) chi.Router {
 	api := endpoints.NewAPI(database, nil, nil)
 	r := chi.NewRouter()
 	r.Get("/mcp-servers", api.ListMCPServers)
 	r.Post("/mcp-servers", api.CreateMCPServer)
-	r.Get("/mcp-servers/{id}", api.GetMCPServer)
-	r.Put("/mcp-servers/{id}", api.UpdateMCPServer)
-	r.Delete("/mcp-servers/{id}", api.DeleteMCPServer)
-	r.Get("/agents/{id}/mcp-servers", api.GetAgentMCPServers)
-	r.Put("/agents/{id}/mcp-servers", api.SetAgentMCPServers)
-	return r
+	r.Route("/mcp-servers/{id}", func(r chi.Router) {
+		r.Use(api.LoadMCPServer)
+		r.Get("/", api.GetMCPServer)
+		r.Put("/", api.UpdateMCPServer)
+		r.Delete("/", api.DeleteMCPServer)
+	})
+	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
+		r.Use(api.LoadAgent)
+		r.Get("/", api.GetAgentMCPServers)
+		r.Put("/", api.SetAgentMCPServers)
+	})
+	return withTestUser(t, database, r)
 }
 
 func seedMCPTestCompany(t *testing.T, database *gorm.DB) db.Company {
@@ -53,12 +63,15 @@ func seedMCPTestCompany(t *testing.T, database *gorm.DB) db.Company {
 	q := db.New(database)
 	c, err := q.CreateCompany(context.Background(), "Test Co")
 	require.NoError(t, err)
+	// Owned by the fixture user so authorize* checks pass.
+	uid := testSeedUserID(t, q)
+	require.NoError(t, database.Model(&c).Update("user_id", uid).Error)
 	return c
 }
 
 func TestMCPServerCRUD(t *testing.T) {
 	database := setupMCPTestDB(t)
-	r := setupMCPRouter(database)
+	r := setupMCPRouter(t, database)
 
 	// Create
 	payload, _ := json.Marshal(db.MCPServer{
@@ -123,7 +136,7 @@ func TestMCPServerCRUD(t *testing.T) {
 
 func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 	database := setupMCPTestDB(t)
-	r := setupMCPRouter(database)
+	r := setupMCPRouter(t, database)
 
 	// Create the built-in servers and pick one to test deletion protection.
 	q := db.New(database)
@@ -139,7 +152,7 @@ func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 
 func TestAgentMCPAssignments(t *testing.T) {
 	database := setupMCPTestDB(t)
-	r := setupMCPRouter(database)
+	r := setupMCPRouter(t, database)
 	company := seedMCPTestCompany(t, database)
 
 	// Create MCP server (global, no company).
@@ -178,7 +191,7 @@ func TestAgentMCPAssignments(t *testing.T) {
 
 func TestMCPServer_CreateRequiresNameAndTransport(t *testing.T) {
 	database := setupMCPTestDB(t)
-	r := setupMCPRouter(database)
+	r := setupMCPRouter(t, database)
 
 	payload, _ := json.Marshal(map[string]string{"name": "incomplete"})
 	req := httptest.NewRequest(http.MethodPost, "/mcp-servers", bytes.NewReader(payload))

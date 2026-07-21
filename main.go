@@ -7,8 +7,11 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"os/signal"
 	"path/filepath"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -21,8 +24,12 @@ import (
 	"agent-orchestrator/integration"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
+	"agent-orchestrator/pkg/bootkey"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
+	"agent-orchestrator/pkg/mailer"
+	"agent-orchestrator/pkg/runtokens"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -50,6 +57,14 @@ func main() {
 	if err := filesystem.NewManager(basePath).SetupBaseDirectories(); err != nil {
 		log.Printf("Warning: failed to create base directories: %v", err)
 	}
+
+	// Confine the agent's shell to its own task. The kernel sandbox (Landlock /
+	// Seatbelt) hides the entire headcount1 data root from the untrusted shell,
+	// re-granting only the task's own dirs per run (workspace, parent workspace,
+	// project repo, artifacts). So the DB, SSH keys, credentials, backups, the
+	// keyring snapshot, and every OTHER company's/task's files are all invisible,
+	// while system and home toolchains stay readable. See doc/sandbox-hardening.md.
+	tools.SetHiddenReadDirs([]string{basePath})
 
 	dbConnStr := os.Getenv("DATABASE_URL")
 
@@ -90,6 +105,16 @@ func main() {
 
 	log.Println("Running AutoMigrate...")
 	err = database.AutoMigrate(
+		&db.User{},
+		&db.WebAuthnCredential{},
+		&db.WebAuthnSession{},
+		&db.Team{},
+		&db.TeamMember{},
+		&db.TeamInvite{},
+		&db.Session{},
+		&db.RefreshToken{},
+		&db.UserGitCredential{},
+		&db.PasswordResetToken{},
 		&db.Company{},
 		&db.Project{},
 		&db.Sprint{},
@@ -126,26 +151,32 @@ func main() {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
 
-	// Seed the built-in free-model providers (OpenRouter, OpenCode Zen) if not
-	// present. Their model catalog (and DefaultModel) is populated purely
-	// from a live fetch in the background — no hardcoded model list — so a
-	// slow/unreachable host never delays server startup, and a provider is
-	// simply left blank until the first successful fetch completes.
-	if err := db.New(database).EnsureBuiltinLLMProviders(context.Background()); err != nil {
-		log.Printf("Warning: failed to seed built-in LLM providers: %v", err)
+	// Builtin free-model providers (OpenRouter, OpenCode Zen) and the
+	// "Default Models" purposes are per-user: seeded at registration and, for
+	// every existing user, here at startup (covers upgrades adding new
+	// builtins/purposes). Their model catalog is populated purely from a live
+	// fetch in the background — no hardcoded model list.
+	if users, err := db.New(database).ListUsers(context.Background()); err != nil {
+		log.Printf("Warning: failed to list users for builtin seeding: %v", err)
+	} else {
+		for _, u := range users {
+			if err := db.New(database).EnsureTeamForUser(context.Background(), u); err != nil {
+				log.Printf("Warning: failed to ensure team for %s: %v", u.Email, err)
+			}
+			if err := db.New(database).EnsureBuiltinLLMProvidersForUser(context.Background(), u.ID); err != nil {
+				log.Printf("Warning: failed to seed built-in LLM providers for %s: %v", u.Email, err)
+			}
+			if err := db.New(database).EnsureDefaultModelSettingsForUser(context.Background(), u.ID); err != nil {
+				log.Printf("Warning: failed to seed default model settings for %s: %v", u.Email, err)
+			}
+		}
 	}
 	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
-	// pick from a dropdown when adding a provider. Unlike the builtin free
-	// providers above, these don't become actual LLMProvider rows until a
-	// user picks one and supplies an API key.
+	// pick from a dropdown when adding a provider. These are a global catalog;
+	// they don't become actual LLMProvider rows until a user picks one and
+	// supplies an API key.
 	if err := db.New(database).EnsureProviderPresets(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed provider presets: %v", err)
-	}
-	// Seed the "Default Models" purposes (commit messages, ask_artifact) with
-	// no target configured, so they fall back to the calling session's own
-	// LLM until a user points them at a provider/model or a model group.
-	if err := db.New(database).EnsureDefaultModelSettings(context.Background()); err != nil {
-		log.Printf("Warning: failed to seed default model settings: %v", err)
 	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
@@ -160,12 +191,60 @@ func main() {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
-	// Migrate any legacy auth_token fields from MCPServer → MCPAccount.
-	if err := db.New(database).MigrateServerTokensToAccounts(context.Background()); err != nil {
-		log.Printf("Warning: MCP account migration failed: %v", err)
+	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
+	// keys derived from each user's passkey, held only in memory while they're
+	// signed in; the app decrypts only at the point of use.
+	log.Printf("Secrets encrypted at rest with per-user passkey-derived keys.")
+
+	// Restore the graceful-exit keyring snapshot, if a boot key is configured
+	// and a snapshot from a planned shutdown exists — so a deploy re-warms
+	// active users' vaults without a passkey re-tap. The blob is deleted after
+	// loading so an unexpected crash can never replay a stale keyring.
+	bootKey := bootkey.FromEnv()
+	// When no external boot key is configured, an operator can opt into a
+	// self-managed local boot key (HEADCOUNT1_LOCAL_BOOTKEY): a random key held
+	// in memory, written to disk only at graceful shutdown next to the snapshot
+	// and consumed at the next boot — so nothing sits on disk during runtime.
+	// For local/dev only (see doc/boot-key.md); production uses an external key.
+	var localBootKey *bootkey.LocalBootKey
+	if bootKey == nil && bootkey.LocalBootKeyEnabled() {
+		if lk, err := bootkey.LoadOrCreateLocalBootKey(filepath.Join(basePath, "keyring.bootkey")); err != nil {
+			log.Printf("Warning: could not initialize self-managed local boot key: %v", err)
+		} else {
+			localBootKey = lk
+			bootKey = lk
+		}
+	}
+	keyringBlobPath := filepath.Join(basePath, "keyring.sealed")
+	if bootKey != nil {
+		if blob, err := os.ReadFile(keyringBlobPath); err == nil {
+			// Re-warm with the same ceiling a normal unlock grants (the absolute
+			// session cap), not the longer SessionLifetime — a restored DEK must
+			// not outlive the session that could authenticate its owner.
+			if err := secrets.Default().UnsealKeyring(bootKey, blob, db.SessionAbsoluteCap()); err != nil {
+				log.Printf("Warning: could not restore sealed keyring: %v", err)
+			} else {
+				log.Printf("Restored %d unlocked vault(s) from graceful-exit snapshot (boot key: %s)", secrets.DefaultKeyring().Len(), bootKey.Name())
+			}
+			// The snapshot must never survive boot: a lingering blob would let an
+			// unexpected later crash replay a stale keyring. If the unlink fails,
+			// truncate it so it can't be replayed, and refuse to continue if even
+			// that fails rather than leave sealed DEKs on disk.
+			if err := os.Remove(keyringBlobPath); err != nil && !os.IsNotExist(err) {
+				log.Printf("Warning: could not delete keyring snapshot %s: %v — truncating", keyringBlobPath, err)
+				if terr := os.Truncate(keyringBlobPath, 0); terr != nil {
+					log.Fatalf("FATAL: keyring snapshot %s could be neither deleted nor truncated (%v); refusing to run with a replayable snapshot on disk", keyringBlobPath, terr)
+				}
+			}
+		}
 	}
 
+	// Transactional mail (passkey recovery): SMTP_* env vars, or a logging
+	// no-op mailer that prints the link to the server log.
+	endpoints.SetMailer(mailer.FromEnv())
+
 	hub := eventhub.NewHub()
+	hub.SetCompanyRecipientsResolver(newCompanyRecipientsResolver(database))
 
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
@@ -214,14 +293,51 @@ func main() {
 			r.Route("/e2e", func(r chi.Router) {
 				api := endpoints.NewAPI(database, eng, hub)
 				r.Post("/wipe-db", api.WipeDB)
+				r.Post("/register", api.E2ERegister)
+				r.Post("/lock", api.E2ELock)
+				r.Get("/reveal-provider/{id}", api.E2ERevealProviderSecret)
 			})
 		}
 
-		srv.Mount(r)
+		// Public: auth endpoints + the setup-status probe polled pre-login.
+		srv.MountPublic(r)
 
+		// Machine-to-machine: the agent subprocess calls the local LLM proxy
+		// with provider headers, not a user session — user auth must not gate
+		// these routes or every agent run breaks.
 		gw := integration.NewLLMGatewayWithHub(database, hub)
+		// Per-run token enforcement: only live agent runs (engine-issued
+		// tokens) or authenticated sessions may use the proxy.
+		gw.SetRunTokenValidator(runtokens.Default().Validate)
 		gw.Mount(r)
+
+		// Everything else — the human-facing API, including /ws — requires a
+		// logged-in user.
+		r.Group(func(r chi.Router) {
+			r.Use(srv.AuthMiddleware())
+			r.Use(srv.CSRFMiddleware())
+			srv.Mount(r)
+		})
 	})
+
+	// Expired access sessions and spent/expired refresh tokens accumulate
+	// silently; sweep them hourly.
+	go func() {
+		q := db.New(database)
+		for {
+			time.Sleep(time.Hour)
+			if err := q.DeleteExpiredSessions(context.Background()); err != nil {
+				log.Printf("session GC failed: %v", err)
+			}
+			if err := q.DeleteExpiredRefreshTokens(context.Background()); err != nil {
+				log.Printf("refresh token GC failed: %v", err)
+			}
+			// Proactively drop unlocked DEKs whose TTL (the absolute session cap)
+			// has lapsed, so a dead session's key never lingers in memory beyond
+			// the point the user could still authenticate.
+			secrets.DefaultKeyring().EvictExpired()
+		}
+	}()
 
 	distFS, err := fs.Sub(frontendDist, "frontend/dist")
 	if err != nil {
@@ -263,8 +379,81 @@ func main() {
 		port = "8080"
 	}
 
-	log.Printf("Starting server on port %s", port)
-	log.Fatal(http.ListenAndServe(":"+port, r))
+	httpServer := &http.Server{Addr: ":" + port, Handler: r}
+	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
+	defer stop()
+
+	go func() {
+		log.Printf("Starting server on port %s", port)
+		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+			log.Fatalf("server error: %v", err)
+		}
+	}()
+
+	<-ctx.Done()
+	log.Println("Shutting down…")
+	// Seal the in-memory keyring under the boot key so this planned restart
+	// re-warms without a passkey re-tap. Only written on a graceful exit — an
+	// unexpected crash leaves nothing behind (strict zero-knowledge).
+	if bootKey != nil {
+		if blob, err := secrets.Default().SealKeyring(bootKey); err != nil {
+			log.Printf("Warning: could not seal keyring on shutdown: %v", err)
+		} else if len(blob) > 0 {
+			if err := os.WriteFile(keyringBlobPath, blob, 0600); err != nil {
+				log.Printf("Warning: could not persist sealed keyring: %v", err)
+			} else if localBootKey != nil {
+				// Self-managed mode: write the boot key to disk ONLY now, next to
+				// the snapshot it seals. The next boot consumes and deletes both.
+				if err := localBootKey.Persist(); err != nil {
+					log.Printf("Warning: could not persist local boot key: %v", err)
+					_ = os.Remove(keyringBlobPath) // don't leave a snapshot we can't reopen
+				}
+			}
+		}
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	_ = httpServer.Shutdown(shutdownCtx)
+}
+
+// newCompanyRecipientsResolver returns a TTL-cached company → member-users
+// lookup for tenant-scoped WebSocket event delivery: the owning team's
+// members (or, for team-less rows, the creating user). A short TTL keeps
+// newly invited members receiving events promptly.
+func newCompanyRecipientsResolver(database *gorm.DB) func(companyID int32) ([]int32, bool) {
+	type entry struct {
+		users []int32
+		ok    bool
+		at    time.Time
+	}
+	var mu sync.Mutex
+	cache := map[int32]entry{}
+	const ttl = 30 * time.Second
+	q := db.New(database)
+	return func(companyID int32) ([]int32, bool) {
+		mu.Lock()
+		e, hit := cache[companyID]
+		mu.Unlock()
+		if hit && time.Since(e.at) < ttl {
+			return e.users, e.ok
+		}
+		var users []int32
+		ok := false
+		if company, err := q.GetCompany(context.Background(), companyID); err == nil {
+			switch {
+			case company.TeamID != nil:
+				if ids, err := q.ListTeamUserIDs(context.Background(), *company.TeamID); err == nil && len(ids) > 0 {
+					users, ok = ids, true
+				}
+			case company.UserID != nil:
+				users, ok = []int32{*company.UserID}, true
+			}
+		}
+		mu.Lock()
+		cache[companyID] = entry{users: users, ok: ok, at: time.Now()}
+		mu.Unlock()
+		return users, ok
+	}
 }
 
 func recoverStaleRuns(database *gorm.DB) {

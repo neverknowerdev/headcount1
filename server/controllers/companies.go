@@ -5,16 +5,13 @@ import (
 	"log"
 	"net/http"
 	"os"
-	"strconv"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
-
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
-	companies, err := api.q.ListCompanies(r.Context())
+	companies, err := api.q.ListCompaniesForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -34,10 +31,15 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uid := api.currentUserID(r)
 	comp := db.Company{
 		Name:      req.Name,
 		ShortName: req.ShortName,
 		Color:     req.Color,
+		UserID:    &uid, // creator (engine resolves their Default Models)
+	}
+	if membership, err := api.requireMembership(r); err == nil {
+		comp.TeamID = &membership.TeamID
 	}
 
 	if err := api.db.Create(&comp).Error; err != nil {
@@ -58,12 +60,6 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
 	var req struct {
 		ShortName string `json:"short_name"`
 	}
@@ -72,11 +68,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
@@ -105,17 +97,7 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteCompany(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "Invalid ID")
-		return
-	}
-
-	var comp db.Company
-	if err := api.db.First(&comp, id).Error; err != nil {
-		api.respondError(w, http.StatusNotFound, "Company not found")
-		return
-	}
+	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	settings := LoadSettings()
 	fsManager := filesystem.NewManager(settings.BasePath)

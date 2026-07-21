@@ -52,7 +52,10 @@ func (m *Manager) GetProjectRepoPath(company db.Company, project db.Project) str
 	return m.paths.RepoDir(company.ShortName, project.Name)
 }
 
-func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project) error {
+// PrepareProjectRepo clones/fetches the project repo using sshKeyPath as the git
+// SSH identity (the owner's per-user key, resolved by the caller via
+// ResolveSSHKeyPathForCompany).
+func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project, sshKeyPath string) error {
 	if project.RepositoryUrl == "" {
 		return nil
 	}
@@ -62,7 +65,7 @@ func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, pr
 		return err
 	}
 
-	gitMgr := git.NewGitManager(repoDir, m.paths.SSHDir())
+	gitMgr := git.NewGitManager(repoDir, sshKeyPath)
 	return gitMgr.CloneOrFetchProject(ctx, project.RepositoryUrl, repoDir)
 }
 

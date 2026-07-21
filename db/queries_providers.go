@@ -27,18 +27,34 @@ const (
 
 func (q *Queries) CreateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	err := q.db.WithContext(ctx).Create(&p).Error
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 
 func (q *Queries) GetLLMProvider(ctx context.Context, id int32) (LLMProvider, error) {
 	var p LLMProvider
 	err := q.db.WithContext(ctx).First(&p, id).Error
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 
 func (q *Queries) ListLLMProviders(ctx context.Context) ([]LLMProvider, error) {
 	var p []LLMProvider
 	err := q.db.WithContext(ctx).Order("id").Find(&p).Error
+	for i := range p {
+		p[i].HasApiKey = p[i].ApiKeyEncrypted != ""
+	}
+	return p, err
+}
+
+// ListLLMProvidersForUser returns only the user's providers (builtins are
+// seeded per user, so this includes their own OpenRouter/OpenCode rows).
+func (q *Queries) ListLLMProvidersForUser(ctx context.Context, userID int32) ([]LLMProvider, error) {
+	var p []LLMProvider
+	err := q.db.WithContext(ctx).Where("user_id = ?", userID).Order("id").Find(&p).Error
+	for i := range p {
+		p[i].HasApiKey = p[i].ApiKeyEncrypted != ""
+	}
 	return p, err
 }
 
@@ -47,17 +63,22 @@ func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
 }
 
 func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
+	// ApiKeyEncrypted is ciphertext: a metadata-only edit round-trips the sealed
+	// value verbatim (a locked read no longer blanks it), and a key change was
+	// re-sealed by the caller. So a plain Save can never destroy the secret.
 	err := q.db.WithContext(ctx).Save(&p).Error
+	p.HasApiKey = p.ApiKeyEncrypted != ""
 	return p, err
 }
 
-// EnsureBuiltinLLMProviders creates the OpenRouter and OpenCode Zen builtin
-// providers if they don't already exist (matched by name). Both are
-// OpenAI-compatible gateways offering free models, so they're seeded with an
-// empty API key — the user only needs to paste in a (free) API key to start
-// using them. Safe to call on every startup; never overwrites a row a user
-// has already customized, beyond flipping Builtin on if it was somehow unset.
-func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
+// EnsureBuiltinLLMProvidersForUser creates the user's own OpenRouter and
+// OpenCode Zen builtin provider rows if missing (matched by provider_name).
+// Builtin providers are per-user in cloud mode: each user activates them with
+// their own (free) API key. Called at registration and at startup for every
+// existing user (so upgrades that add new builtins reach everyone).
+// Idempotent; never overwrites a row the user has customized.
+func (q *Queries) EnsureBuiltinLLMProvidersForUser(ctx context.Context, userID int32) error {
+	uid := userID
 	predefined := []LLMProvider{
 		{
 			Name:         ProviderNameOpenRouter,
@@ -66,6 +87,7 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 			Builtin:      true,
 			Enabled:      true,
 			ProviderName: ProviderVendorOpenRouter,
+			UserID:       &uid,
 		},
 		{
 			Name:         ProviderNameOpenCodeZen,
@@ -74,18 +96,15 @@ func (q *Queries) EnsureBuiltinLLMProviders(ctx context.Context) error {
 			Builtin:      true,
 			Enabled:      true,
 			ProviderName: ProviderVendorOpenCodeZen,
+			UserID:       &uid,
 		},
 	}
 
 	for _, p := range predefined {
 		var existing LLMProvider
-		if q.db.WithContext(ctx).Where("name = ?", p.Name).First(&existing).Error == nil {
-			if !existing.Builtin {
-				q.db.WithContext(ctx).Model(&existing).Update("builtin", true)
-			}
-			if existing.ProviderName == "" {
-				q.db.WithContext(ctx).Model(&existing).Update("provider_name", p.ProviderName)
-			}
+		if q.db.WithContext(ctx).
+			Where("user_id = ? AND provider_name = ?", userID, p.ProviderName).
+			First(&existing).Error == nil {
 			continue
 		}
 		if err := q.db.WithContext(ctx).Create(&p).Error; err != nil {

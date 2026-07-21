@@ -34,7 +34,15 @@ test.describe.serial('Headcount1 App', () => {
         // builtin free providers (OpenRouter / OpenCode Zen); switch to the
         // custom-provider form to point at the local mock provider server.
         await expect(page.getByText('Setup LLM Provider')).toBeVisible();
-        await page.click('button:has-text("Use a custom provider instead")');
+        // The onboarding lands on the free-providers picker (builtin OpenRouter /
+        // OpenCode Zen cards plus a "Custom provider" escape hatch). Switch to the
+        // custom form; if no builtins are available the form is already shown, so
+        // the escape hatch is optional.
+        const customProviderCard = page.locator('button:has-text("Custom provider")');
+        await customProviderCard.waitFor({ state: 'visible', timeout: 30_000 }).catch(() => {});
+        if (await customProviderCard.isVisible().catch(() => false)) {
+            await customProviderCard.click();
+        }
         await page.fill('input[type="text"]', env.E2E_MOCK_PROVIDER_URL);
         await page.fill('input[type="password"]', 'test-api-key');
         await page.locator('label:has-text("Model Name") + input').fill('e2e-mock-model');
@@ -175,15 +183,21 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
     });
 
-    test('can add a second company using existing provider', async ({ page }) => {
+    test('can add a second company reusing the existing provider', async ({ page }) => {
         // Navigate to dashboard
         await page.goto('/companies/nw');
 
         // Wait for dashboard and company switcher to load
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
 
-        // Click the Add Workspace button
+        // Opening the form triggers GET /api/providers; wait for it so the
+        // already-configured provider is detected before we advance and the
+        // provider-setup step is auto-skipped.
+        const providersLoaded = page.waitForResponse(
+            r => r.url().includes('/api/providers') && r.request().method() === 'GET'
+        );
         await page.click('button[title="Add Workspace"]');
+        await providersLoaded;
 
         // Step 1: Create second Company
         await expect(page.getByText('Add Workspace')).toBeVisible();
@@ -191,16 +205,9 @@ test.describe.serial('Headcount1 App', () => {
         await page.fill('input[placeholder="acme"]', 'second-co');
         await page.click('button:has-text("Next Step")');
 
-        // Step 2: Use existing Provider. Wait for the provider list fetch to
-        // finish (button enabled) before clicking — the button starts out
-        // disabled until GET /api/providers resolves, so clicking immediately
-        // on a slow connection would otherwise silently do nothing.
-        await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
-        const nextStepButton = page.getByRole('button', { name: 'Next Step' });
-        await expect(nextStepButton).toBeEnabled({ timeout: 10000 });
-        await nextStepButton.click();
-
-        // Step 3: Hire new CEO
+        // Provider setup (step 2) is skipped automatically because a provider is
+        // already configured from the first company — the flow jumps straight to
+        // the CEO step and reuses that provider.
         await expect(page.getByText('Hire your CEO')).toBeVisible();
         await page.fill('input[type="text"]', 'Second CEO');
         await page.click('button:has-text("Finish & Launch")');
@@ -212,41 +219,6 @@ test.describe.serial('Headcount1 App', () => {
         // Verify we are on the second company
         const companyButtons = page.locator('button[title="Playwright Inc"], button[title="Second Company"]');
         await expect(companyButtons).toHaveCount(2);
-    });
-
-    test('existing-provider step does not let you proceed before providers finish loading', async ({ page }) => {
-        // Regression test: on a slow connection, clicking "Next Step" before
-        // GET /api/providers resolves used to hit native <select required>
-        // validation with no options yet, silently blocking the form forever
-        // (Hire your CEO never appeared). The button must stay disabled
-        // until the fetch completes.
-        await page.route('**/api/providers', async route => {
-            if (route.request().method() === 'GET') {
-                await new Promise(r => setTimeout(r, 1500));
-            }
-            await route.continue();
-        });
-
-        await page.goto('/companies/nw');
-        await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
-        await page.click('button[title="Add Workspace"]');
-
-        await expect(page.getByText('Add Workspace')).toBeVisible();
-        await page.fill('input[placeholder="Acme Corp"]', 'Third Company');
-        await page.fill('input[placeholder="acme"]', 'third-co');
-        await page.click('button:has-text("Next Step")');
-
-        await expect(page.getByText('Please select an existing LLM Provider')).toBeVisible();
-        const nextStepButton = page.getByRole('button', { name: 'Next Step' });
-
-        // While the (delayed) fetch is still in flight, the button must be
-        // disabled rather than silently no-op on click.
-        await expect(nextStepButton).toBeDisabled();
-
-        // Once it resolves, the button becomes usable and the flow proceeds.
-        await expect(nextStepButton).toBeEnabled({ timeout: 10000 });
-        await nextStepButton.click();
-        await expect(page.getByText('Hire your CEO')).toBeVisible({ timeout: 10000 });
     });
 });
 

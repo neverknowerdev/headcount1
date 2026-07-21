@@ -4,11 +4,180 @@ import (
 	"time"
 )
 
-type Company struct {
+// User is an account in cloud multi-user mode. Authentication is passwordless
+// (WebAuthn passkeys — see WebAuthnCredential); the email identifies the
+// account for login and for passkey recovery. Secrets are protected per-user
+// via the passkey PRF-derived key, never a password (see pkg/secrets).
+type User struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	Email     string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+	// ReenrollTokenHash / ReenrollExpiresAt bind the re-enrollment that follows a
+	// passkey recovery to the browser that performed it. Recovery crypto-shreds
+	// the account's credentials, leaving it momentarily credential-less; without
+	// this ticket anyone who knows the email could race in and enroll their own
+	// passkey onto the (data-bearing) account. Set by RecoverConfirm, verified by
+	// RegisterBegin, cleared on a successful RegisterFinish. Empty for accounts
+	// that were never recovered (e.g. an abandoned first registration).
+	ReenrollTokenHash string     `json:"-"`
+	ReenrollExpiresAt *time.Time `json:"-"`
+}
+
+// Session is a server-side login session. The cookie carries an opaque random
+// token; only its SHA-256 is stored, so a DB dump never yields live sessions.
+type Session struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	TokenHash string    `json:"-" gorm:"uniqueIndex;not null"`
+	UserID    int32     `json:"user_id" gorm:"not null;index"`
+	User      User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt time.Time `json:"expires_at" gorm:"not null"`
+	// AbsoluteExpiresAt is the hard ceiling on this access session, carried from
+	// the refresh-token family it was minted under. The 1h ExpiresAt slides
+	// forward on activity, but it can never slide past this — so an access
+	// cookie used hourly still dies at the family's absolute cap instead of
+	// renewing forever. Zero means unbounded (legacy rows only).
+	AbsoluteExpiresAt time.Time `json:"-"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+}
+
+// RefreshToken is the long-lived half of the access/refresh pair. Access
+// sessions are short (~1h); the browser exchanges a refresh token for a new
+// pair at /auth/refresh. Tokens rotate on every use and belong to a family:
+// replaying an already-used token signals theft and revokes the whole family.
+// Only the SHA-256 is stored. Auth only — never carries the encryption DEK.
+type RefreshToken struct {
+	ID                int32      `json:"-" gorm:"primaryKey"`
+	FamilyID          string     `json:"-" gorm:"index;not null"`
+	TokenHash         string     `json:"-" gorm:"uniqueIndex;not null"`
+	UserID            int32      `json:"-" gorm:"not null;index"`
+	User              User       `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt         time.Time  `json:"-" gorm:"not null"`
+	AbsoluteExpiresAt time.Time  `json:"-" gorm:"not null"` // hard cap for the whole family
+	UsedAt            *time.Time `json:"-"`
+	RevokedAt         *time.Time `json:"-"`
+	CreatedAt         time.Time  `json:"-"`
+}
+
+// PasswordResetToken is a single-use, short-lived token mailed to a user for
+// the forgot-password flow. Like sessions, only the SHA-256 is stored.
+type PasswordResetToken struct {
+	ID        int32      `json:"id" gorm:"primaryKey"`
+	TokenHash string     `json:"-" gorm:"uniqueIndex;not null"`
+	UserID    int32      `json:"user_id" gorm:"not null;index"`
+	User      User       `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	ExpiresAt time.Time  `json:"expires_at" gorm:"not null"`
+	UsedAt    *time.Time `json:"used_at"`
+	CreatedAt time.Time  `json:"created_at"`
+}
+
+// WebAuthnCredential is one enrolled passkey. Login is passwordless: the
+// credential authenticates the user (assertion), and its WebAuthn PRF output
+// unlocks the user's data-encryption key. The DEK is wrapped once per
+// credential (each passkey's PRF value differs), so WrappedDEK holds this
+// credential's copy; PRFSalt is the constant, non-secret PRF eval input we
+// replay at every login to get a stable PRF output. Deleting a user's
+// credentials (recovery) crypto-shreds their secrets — the DEK is
+// unrecoverable and their "enc:u1:" values become permanently dead.
+type WebAuthnCredential struct {
+	ID           int32  `json:"id" gorm:"primaryKey"`
+	UserID       int32  `json:"user_id" gorm:"index;not null"`
+	User         User   `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	CredentialID []byte `json:"-" gorm:"uniqueIndex;not null"` // raw WebAuthn credential id
+	PublicKey    []byte `json:"-" gorm:"not null"`             // COSE public key
+	SignCount    uint32 `json:"-"`
+	Transports   string `json:"transports" gorm:"type:text"` // JSON array of authenticator transports
+	AAGUID       []byte `json:"-"`
+	// WebAuthn backup flags. BackupEligible (BE) is immutable per credential and
+	// MUST be restored on login — go-webauthn rejects an assertion whose BE flag
+	// differs from the stored one ("Backup Eligible flag inconsistency"). Synced
+	// passkeys (iCloud Keychain, Chrome, 1Password, ...) report BE=true, so a
+	// credential stored without it (BE=false) can never log in. BackupState (BS)
+	// is mutable and refreshed on each successful assertion.
+	BackupEligible bool      `json:"-"`
+	BackupState    bool      `json:"-"`
+	Nickname       string    `json:"nickname"`
+	WrappedDEK     string    `json:"-" gorm:"not null"` // DEK sealed under this credential's PRF-derived key
+	PRFSalt        []byte    `json:"-" gorm:"not null"` // constant PRF eval input for this credential
+	LastUsedAt     time.Time `json:"last_used_at"`
+	CreatedAt      time.Time `json:"created_at"`
+	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// WebAuthnSession stores an in-flight ceremony challenge (registration or
+// login) for the short round-trip between begin and finish. Single-use and
+// short-lived; only the challenge is kept.
+type WebAuthnSession struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	UserID    *int32    `json:"user_id" gorm:"index"`        // nil until the user is known (registration)
+	Purpose   string    `json:"purpose" gorm:"not null"`     // "register" | "login" | "add-credential" | "unlock"
+	Data      string    `json:"-" gorm:"type:text;not null"` // serialized webauthn.SessionData
+	ExpiresAt time.Time `json:"expires_at" gorm:"not null;index"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// Team roles. Designed for growth (admin tiers, per-role permissions) but
+// deliberately flat for now: an owner and a member can do exactly the same
+// things, with a single exception — only the owner can invite (and revoke
+// invites for) new members. Keep new permission checks role-based so future
+// roles slot in without schema changes.
+const (
+	TeamRoleOwner  = "owner"
+	TeamRoleMember = "member"
+)
+
+// Team is the top of the tenancy hierarchy: companies (and everything under
+// them) belong to a team, and every member of the team can work with them.
+// Each user gets a team at registration (as its owner) unless they signed up
+// through an invite, in which case they join the inviting team instead.
+type Team struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Name      string    `json:"name" gorm:"not null"`
-	ShortName string    `json:"short_name" gorm:"not null"`
-	Color     string    `json:"color"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// TeamMember links a user to a team with a role. The schema allows multiple
+// memberships per user; current product behavior keeps it at exactly one.
+type TeamMember struct {
+	ID        int32     `json:"id" gorm:"primaryKey"`
+	TeamID    int32     `json:"team_id" gorm:"not null;uniqueIndex:idx_team_member"`
+	Team      Team      `json:"-" gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE;"`
+	UserID    int32     `json:"user_id" gorm:"not null;uniqueIndex:idx_team_member"`
+	User      User      `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	Role      string    `json:"role" gorm:"not null;default:'member'"`
+	CreatedAt time.Time `json:"created_at"`
+}
+
+// TeamInvite is an owner-issued, emailed invitation. Only the SHA-256 of the
+// token is stored (same discipline as sessions and reset tokens); accepting
+// happens by registering with the raw token, which joins the new account to
+// the team instead of creating a fresh one.
+type TeamInvite struct {
+	ID         int32      `json:"id" gorm:"primaryKey"`
+	TeamID     int32      `json:"team_id" gorm:"not null;index"`
+	Team       Team       `json:"-" gorm:"foreignKey:TeamID;constraint:OnDelete:CASCADE;"`
+	Email      string     `json:"email" gorm:"not null"` // normalized; informational + pre-fill
+	Role       string     `json:"role" gorm:"not null;default:'member'"`
+	TokenHash  string     `json:"-" gorm:"uniqueIndex;not null"`
+	InvitedBy  int32      `json:"invited_by" gorm:"not null"`
+	ExpiresAt  time.Time  `json:"expires_at" gorm:"not null"`
+	AcceptedAt *time.Time `json:"accepted_at"`
+	CreatedAt  time.Time  `json:"created_at"`
+}
+
+type Company struct {
+	ID        int32  `json:"id" gorm:"primaryKey"`
+	Name      string `json:"name" gorm:"not null"`
+	ShortName string `json:"short_name" gorm:"not null"`
+	Color     string `json:"color"`
+	// TeamID is the owning team: everything scoped to a company — projects,
+	// agents, tasks, runs — is visible to every member of that team. UserID
+	// records the member who created the company (and whose per-user Default
+	// Models the engine resolves for its background LLM calls).
+	TeamID    *int32    `json:"team_id" gorm:"index"`
+	UserID    *int32    `json:"user_id" gorm:"index"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
@@ -39,10 +208,17 @@ type Sprint struct {
 }
 
 type LLMProvider struct {
-	ID              int32  `json:"id" gorm:"primaryKey"`
-	Name            string `json:"name" gorm:"not null"`
-	BaseUrl         string `json:"base_url" gorm:"not null"`
-	ApiKey          string `json:"api_key" gorm:"not null"`
+	ID      int32  `json:"id" gorm:"primaryKey"`
+	Name    string `json:"name" gorm:"not null"`
+	BaseUrl string `json:"base_url" gorm:"not null"`
+	// ApiKeyEncrypted holds the SEALED api key (ciphertext) — both at rest and in
+	// memory. It is never serialized to clients (the frontend only sees
+	// HasApiKey). Decrypt at the point of use via secrets.Default().Decrypt().
+	ApiKeyEncrypted string `json:"-" gorm:"column:api_key;not null;serializer:sealed"`
+	HasApiKey       bool   `json:"has_api_key" gorm:"-"` // computed: ApiKeyEncrypted != ""
+	// UserID is the owning user; secrets on owned rows are sealed with that
+	// user's DEK ("enc:u1:"). Nil = ownerless (sealed with the root DEK).
+	UserID          *int32 `json:"user_id" gorm:"index"`
 	ProviderType    string `json:"provider_type"`
 	DefaultModel    string `json:"default_model"`
 	SupportedModels string `json:"supported_models"`
@@ -51,7 +227,7 @@ type LLMProvider struct {
 	// model catalogs are safe to refresh from a live discovery fetch.
 	Builtin bool `json:"builtin" gorm:"not null;default:false"`
 	// Enabled lets a builtin provider be turned off without deleting it —
-	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProviders
+	// deleting a builtin row is pointless anyway, since EnsureBuiltinLLMProvidersForUser
 	// just recreates it (blank) on the next startup. Defaults to true so
 	// existing/freshly-seeded providers stay usable.
 	Enabled bool `json:"enabled" gorm:"not null;default:true"`
@@ -244,8 +420,12 @@ func (s RunTokenStats) IsEmpty() bool {
 // MCPServer stores configuration for an MCP (Model Context Protocol) server.
 // MCP servers are global (not company-scoped), like LLM providers.
 type MCPServer struct {
-	ID            int32        `json:"id" gorm:"primaryKey"`
-	Name          string       `json:"name" gorm:"not null;uniqueIndex"` // unique slug, e.g. "github"
+	ID   int32  `json:"id" gorm:"primaryKey"`
+	Name string `json:"name" gorm:"not null;uniqueIndex"` // unique slug, e.g. "github"
+	// OwnerUserID is set for user-created custom servers only. Builtin rows
+	// (the shared catalog) and codegraph servers (scoped via ProjectID →
+	// Project → Company) stay NULL. Per-user credentials live in MCPAccount.
+	OwnerUserID   *int32       `json:"owner_user_id" gorm:"index"`
 	DisplayName   string       `json:"display_name"`
 	Description   string       `json:"description"`
 	Transport     string       `json:"transport" gorm:"not null"` // "stdio", "http", "builtin"
@@ -253,8 +433,8 @@ type MCPServer struct {
 	Args          string       `json:"args" gorm:"type:text"`
 	URL           string       `json:"url"`
 	Headers       string       `json:"headers" gorm:"type:text"`
-	AuthType      string       `json:"auth_type"`                            // "none", "bearer", "credentials-file"
-	AuthToken     string       `json:"-" gorm:"column:auth_token;type:text"` // legacy; migrated to MCPAccount on startup
+	AuthType      string       `json:"auth_type"`  // "none", "bearer", "credentials-file"
+	AuthToken     string       `json:"-" gorm:"-"` // runtime-only carrier: filled from the per-account token when building a transport client (see engine synthetic servers); tokens live in MCPAccount
 	AuthEnvVar    string       `json:"auth_env_var"`
 	ToolsCache    string       `json:"tools_cache" gorm:"type:text"`
 	LastError     string       `json:"last_error" gorm:"type:text"`
@@ -275,14 +455,15 @@ type MCPServer struct {
 // MCPAccount holds credentials for one identity on an MCPServer.
 // A server can have multiple accounts (e.g., personal + work GitHub tokens).
 type MCPAccount struct {
-	ID          int32     `json:"id" gorm:"primaryKey"`
-	MCPServerID int32     `json:"mcp_server_id" gorm:"not null;index"`
-	Name        string    `json:"name" gorm:"not null"` // user label: "Personal", "Work"
-	AuthToken   string    `json:"-" gorm:"type:text"`   // credential; never sent to clients
-	HasToken    bool      `json:"has_token" gorm:"-"`   // computed: AuthToken != ""
-	LastError   string    `json:"last_error" gorm:"type:text"`
-	CreatedAt   time.Time `json:"created_at"`
-	UpdatedAt   time.Time `json:"updated_at"`
+	ID                 int32     `json:"id" gorm:"primaryKey"`
+	MCPServerID        int32     `json:"mcp_server_id" gorm:"not null;index"`
+	Name               string    `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
+	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
+	HasToken           bool      `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
+	UserID             *int32    `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
+	LastError          string    `json:"last_error" gorm:"type:text"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
@@ -357,9 +538,12 @@ type ActivityLog struct {
 // routes each request to the healthiest member, preferring free models and
 // failing over automatically on errors or rate limits.
 type ModelGroup struct {
-	ID          int32              `json:"id" gorm:"primaryKey"`
-	Name        string             `json:"name" gorm:"not null"`
+	ID   int32  `json:"id" gorm:"primaryKey"`
+	Name string `json:"name" gorm:"not null"`
+	// Slug stays globally unique (not per-user): the machine proxy route
+	// /api/proxy/group/{slug} resolves it without any user context.
 	Slug        string             `json:"slug" gorm:"not null;uniqueIndex"`
+	UserID      *int32             `json:"user_id" gorm:"index"` // owning user
 	Description string             `json:"description"`
 	Members     []ModelGroupMember `json:"members" gorm:"foreignKey:GroupID"`
 	CreatedAt   time.Time          `json:"created_at"`
@@ -416,7 +600,8 @@ type ModelRequestStat struct {
 // own LLM when left unconfigured (both fields nil).
 type DefaultModelSetting struct {
 	ID           int32        `json:"id" gorm:"primaryKey"`
-	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex"`
+	Purpose      string       `json:"purpose" gorm:"not null;uniqueIndex:idx_dms_user_purpose"`
+	UserID       *int32       `json:"user_id" gorm:"uniqueIndex:idx_dms_user_purpose"` // owning user
 	ProviderID   *int32       `json:"provider_id"`
 	Provider     *LLMProvider `json:"provider,omitempty" gorm:"foreignKey:ProviderID;constraint:OnDelete:SET NULL;"`
 	Model        string       `json:"model"`
@@ -424,6 +609,20 @@ type DefaultModelSetting struct {
 	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
 	CreatedAt    time.Time    `json:"created_at"`
 	UpdatedAt    time.Time    `json:"updated_at"`
+}
+
+// UserGitCredential holds a user's own git credentials, encrypted at rest under
+// their per-user DEK (same as provider keys). Each user has their own SSH key so
+// the agent pushes under that user's identity — replacing the single shared key
+// that any account could previously overwrite. SSHPrivateKeyEncrypted is only decryptable
+// while the owner's vault is unlocked.
+type UserGitCredential struct {
+	ID                     int32     `json:"id" gorm:"primaryKey"`
+	UserID                 *int32    `json:"user_id" gorm:"uniqueIndex;not null"`
+	User                   *User     `json:"-" gorm:"foreignKey:UserID;constraint:OnDelete:CASCADE;"`
+	SSHPrivateKeyEncrypted string    `json:"-" gorm:"column:ssh_private_key;type:text;serializer:sealed"` // SEALED PEM; decrypt at use via secrets.Default().Decrypt()
+	CreatedAt              time.Time `json:"created_at"`
+	UpdatedAt              time.Time `json:"updated_at"`
 }
 
 type ProxyRequestLog struct {

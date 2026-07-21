@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -40,6 +41,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(4)
 	require.NoError(t, database.AutoMigrate(
+		&db.User{},
 		&db.Company{},
 		&db.Project{},
 		&db.Sprint{},
@@ -88,12 +90,20 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&sprint, "company_id = ?", company.ID).Error)
 
 	var provider db.LLMProvider
+	// Seal the provider key under a fixed, unlocked fixture user so the sealed
+	// column holds real "enc:u1:" ciphertext the engine can open at point of use.
+	const engineTestUserID int32 = 707070
+	var engineTestDEK [32]byte
+	engineTestDEK[0], engineTestDEK[1] = 0x70, 0x70
+	secrets.Default().UnlockUser(engineTestUserID, engineTestDEK, time.Hour)
+	sealedKey, err := secrets.Default().EncryptForUser(engineTestUserID, "test-key")
+	require.NoError(t, err)
 	require.NoError(t, database.Create(&db.LLMProvider{
-		Name:         "mock-provider",
-		BaseUrl:      mockProviderURL,
-		ApiKey:       "test-key",
-		ProviderType: "openai",
-		DefaultModel: "test-model",
+		Name:            "mock-provider",
+		BaseUrl:         mockProviderURL,
+		ApiKeyEncrypted: sealedKey,
+		ProviderType:    "openai",
+		DefaultModel:    "test-model",
 	}).Error)
 	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
 
@@ -704,8 +714,15 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{
 		{ProviderID: provider.ID, Model: "cheap-model"},
 	}))
+	// Default Models are per-user: give the task's company an owner and
+	// register the setting under that owner.
+	owner, err := q.CreateUser(context.Background(), "owner@test.local")
+	require.NoError(t, err)
+	var comp db.Company
+	require.NoError(t, database.First(&comp, task.CompanyID).Error)
+	require.NoError(t, database.Model(&comp).Update("user_id", owner.ID).Error)
 	require.NoError(t, database.Create(&db.DefaultModelSetting{
-		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID,
+		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID, UserID: &owner.ID,
 	}).Error)
 
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})

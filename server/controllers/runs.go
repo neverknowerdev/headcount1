@@ -68,6 +68,10 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compID, _ := strconv.Atoi(compIDStr)
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	// Fetch all tasks for company
 	var taskIDs []int32
@@ -106,16 +110,7 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	run, err := api.q.GetRun(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
-		return
-	}
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 	resp := toRunResponse(run)
 	// Mark is_latest so the frontend can show the Re-run button only on the
 	// most recent run. Delegated child sessions are never re-runnable entry
@@ -133,22 +128,20 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 // every descendant session in the run's tree (children, grandchildren, …),
 // which the UI uses for whole-tree per-agent token stats.
 func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+	id := run.ID
 	var runs []db.Run
+	var err error
 	if r.URL.Query().Get("deep") == "true" {
 		// Descendants are resolved via root_run_id, which only works for root
 		// runs (they point at themselves); for child sessions fall back to
 		// direct children.
-		runs, err = api.q.ListDescendantRuns(r.Context(), int32(id))
+		runs, err = api.q.ListDescendantRuns(r.Context(), id)
 		if err == nil && len(runs) == 0 {
-			runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+			runs, err = api.q.ListChildRuns(r.Context(), id)
 		}
 	} else {
-		runs, err = api.q.ListChildRuns(r.Context(), int32(id))
+		runs, err = api.q.ListChildRuns(r.Context(), id)
 	}
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -162,16 +155,7 @@ func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	task, err := api.q.GetTask(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "task not found")
-		return
-	}
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 
 	// Subtasks are delegated sessions owned by the orchestrator — re-running
 	// one in isolation would spawn an orphan session outside the main flow.
@@ -203,31 +187,25 @@ func (api *API) GetRunBySessionID(w http.ResponseWriter, r *http.Request) {
 	}
 	run, err := api.q.GetRunBySessionID(r.Context(), sessionID)
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
+		api.respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+	if _, err := api.authorizeRun(r, run.ID); err != nil {
+		api.respondError(w, http.StatusNotFound, "run not found")
 		return
 	}
 	api.respondJSON(w, http.StatusOK, toRunResponse(run))
 }
 
 func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	run, err := api.q.GetRun(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Run not found")
-		return
-	}
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 
 	if run.Status != "running" {
 		api.respondError(w, http.StatusBadRequest, "Run is not in progress")
 		return
 	}
 
-	api.engine.StopRun(r.Context(), int32(id))
+	api.engine.StopRun(r.Context(), run.ID)
 
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
 }

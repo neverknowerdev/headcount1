@@ -218,28 +218,52 @@ func RefreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *ht
 	if err != nil {
 		return fmt.Errorf("list providers: %w", err)
 	}
+	return refreshBuiltinProviderModels(ctx, q, client, providers)
+}
 
+// RefreshBuiltinProviderModelsForUser refreshes just one user's builtin
+// provider rows. Called synchronously at registration so a brand-new user's
+// OpenRouter/OpenCode Zen rows carry a populated catalog (and default model)
+// by the time they reach the "Setup LLM Provider" screen — the startup and
+// daily refreshes only cover users that already existed when they ran, so a
+// user created between those ticks would otherwise see an empty catalog and a
+// "test connection" that sends an empty model.
+func RefreshBuiltinProviderModelsForUser(ctx context.Context, q *db.Queries, client *http.Client, userID int32) error {
+	providers, err := q.ListLLMProvidersForUser(ctx, userID)
+	if err != nil {
+		return fmt.Errorf("list providers: %w", err)
+	}
+	return refreshBuiltinProviderModels(ctx, q, client, providers)
+}
+
+func refreshBuiltinProviderModels(ctx context.Context, q *db.Queries, client *http.Client, providers []db.LLMProvider) error {
+	// Builtin providers are per-user rows sharing a vendor catalog — fetch
+	// each vendor once and fan the result out to every matching row.
+	catalogs := map[string][]string{}
 	var errs []string
 	for _, p := range providers {
 		if !p.Builtin {
 			continue
 		}
 
-		var models []string
-		var fetchErr error
-		switch p.ProviderName {
-		case db.ProviderVendorOpenRouter:
-			models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
-		case db.ProviderVendorOpenCodeZen:
-			models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
-		default:
-			continue
+		models, fetched := catalogs[p.ProviderName]
+		if !fetched {
+			var fetchErr error
+			switch p.ProviderName {
+			case db.ProviderVendorOpenRouter:
+				models, fetchErr = FetchOpenRouterFreeModels(ctx, client)
+			case db.ProviderVendorOpenCodeZen:
+				models, fetchErr = FetchOpenCodeZenFreeModels(ctx, client)
+			default:
+				continue
+			}
+			if fetchErr != nil {
+				log.Printf("llmdiscovery: %v — leaving %s's model catalog untouched", fetchErr, p.Name)
+				catalogs[p.ProviderName] = nil
+				continue
+			}
+			catalogs[p.ProviderName] = models
 		}
-		if fetchErr != nil {
-			log.Printf("llmdiscovery: %v — leaving %s's model catalog untouched", fetchErr, p.Name)
-			continue
-		}
-
 		if len(models) == 0 {
 			continue
 		}

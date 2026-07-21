@@ -227,6 +227,9 @@ export const AgentDetails: React.FC = () => {
                                     <p className="font-mono text-sm bg-gray-100 p-2 rounded break-all">
                                         {window.location.protocol}//{window.location.host}/api/proxy/agent/{agent.id}/v1/chat/completions
                                     </p>
+                                    <p className="mt-1 text-xs text-gray-400">
+                                        Requests must carry your login session (cookie) or an agent run token — anonymous calls are rejected.
+                                    </p>
                                 </div>
                             </div>
                         </div>

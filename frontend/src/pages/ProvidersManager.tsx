@@ -1,3 +1,4 @@
+import { SecretLabel } from '../components/SecretField';
 import React, { useState, useEffect, useRef } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
@@ -304,9 +305,9 @@ export const ProvidersManager: React.FC = () => {
         setActivateTestResult(null);
         try {
             // An empty api_key here is fine when the provider already has one
-            // saved (activateProvider.api_key) — the backend falls back to
-            // the stored key for a known provider_id, so this also works to
-            // re-test with the existing key without retyping it.
+            // saved (activateProvider.has_api_key) — the backend falls back
+            // to the stored key for a known provider_id, so this also works
+            // to re-test with the existing key without retyping it.
             const res = await testSingleModel(modelToTest, activateProvider.base_url, activateApiKey, activateProvider.provider_type, activateProvider.id);
             setActivateTestResult(res);
         } catch (e: any) {
@@ -417,7 +418,7 @@ export const ProvidersManager: React.FC = () => {
                                     a default-model dropdown, never free-text model editing. A builtin
                                     provider with no key yet uses the "Activate" banner below instead.
                                     Fully custom providers keep the original unrestricted edit modal. */}
-                                {(!p.builtin || p.api_key) && (
+                                {(!p.builtin || p.has_api_key) && (
                                     <button
                                         onClick={() => (p.builtin || p.preset_key) ? openActivateModal(p) : handleOpenModal(p)}
                                         className="text-gray-500 hover:text-gray-700"
@@ -442,7 +443,7 @@ export const ProvidersManager: React.FC = () => {
                                 onToggle={() => toggleModelsExpanded(p.id)}
                             />
                         )}
-                        {p.builtin && !p.api_key && (
+                        {p.builtin && !p.has_api_key && (
                             <div className="mt-3">
                                 <p className="text-xs text-amber-600 mb-2">Free to use — activate with a free API key to enable this provider.</p>
                                 <button
@@ -504,7 +505,7 @@ export const ProvidersManager: React.FC = () => {
                         {!editingId && selectedPresetKey !== 'custom' ? (
                             <>
                                 <div className="flex-1 overflow-y-auto pr-2">
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                                    <SecretLabel>API Key</SecretLabel>
                                     <input
                                         type="password"
                                         autoFocus
@@ -544,7 +545,7 @@ export const ProvidersManager: React.FC = () => {
                                 <input required type="text" value={formData.base_url} onChange={e => setFormData({...formData, base_url: e.target.value})} className="w-full border rounded p-2" />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">API Key {editingId && '(Leave blank to keep existing)'}</label>
+                                <SecretLabel>API Key {editingId && '(Leave blank to keep existing)'}</SecretLabel>
                                 <input type="password" required={!editingId} value={formData.api_key} onChange={e => setFormData({...formData, api_key: e.target.value})} className="w-full border rounded p-2" />
                             </div>
                             <div>
@@ -608,19 +609,19 @@ export const ProvidersManager: React.FC = () => {
                 <div className="fixed inset-0 bg-black/50 flex justify-center items-center z-50">
                     <div className="bg-white p-6 rounded-lg shadow-xl w-full max-w-lg max-h-[90vh] flex flex-col">
                         <h2 className="text-xl font-bold mb-1">
-                            {activateProvider.api_key ? 'Update' : 'Activate'} {activateProvider.name}
+                            {activateProvider.has_api_key ? 'Update' : 'Activate'} {activateProvider.name}
                         </h2>
                         <p className="text-sm text-gray-500 mb-4">{activateProvider.base_url}</p>
 
                         <div className="space-y-4 overflow-y-auto flex-1 pr-2">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">API Key</label>
+                                <SecretLabel>API Key</SecretLabel>
                                 <input
                                     type="password"
                                     autoFocus
                                     value={activateApiKey}
                                     onChange={e => setActivateApiKey(e.target.value)}
-                                    placeholder={activateProvider.api_key ? 'Leave blank to keep the existing key' : 'Paste your free API key'}
+                                    placeholder={activateProvider.has_api_key ? 'Leave blank to keep the existing key' : 'Paste your free API key'}
                                     className="w-full border rounded p-2"
                                 />
                             </div>
@@ -644,7 +645,7 @@ export const ProvidersManager: React.FC = () => {
                             <button
                                 type="button"
                                 onClick={handleTestActivate}
-                                disabled={isActivateTesting || (!activateApiKey && !activateProvider.api_key)}
+                                disabled={isActivateTesting || (!activateApiKey && !activateProvider.has_api_key)}
                                 className="w-full bg-gray-100 text-gray-800 py-2 px-4 rounded-md border font-medium hover:bg-gray-200 disabled:opacity-50"
                             >
                                 {isActivateTesting ? 'Testing...' : 'Test Connection'}

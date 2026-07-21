@@ -148,6 +148,52 @@ test.describe.serial('Backup & Restore', () => {
         expect(comments[0].content).toBe('Test comment for backup');
     });
 
+    test('encrypted provider secret survives backup + restore and is decryptable', async ({ request }) => {
+        // A provider API key is sealed at rest as enc:u1:<userID>:… under the
+        // fixture user's data key (in E2E the DEK is deterministic — the stand-in
+        // for a passkey PRF unlock). This proves the ciphertext round-trips
+        // through backup + restore and is still decryptable afterwards.
+        const secret = 'sk-roundtrip-' + Date.now();
+        const createRes = await request.post('/api/providers', {
+            data: {
+                name: 'Secret Roundtrip Provider',
+                base_url: 'https://example.test/v1',
+                api_key: secret,
+                provider_type: 'openai',
+                default_model: 'e2e-model',
+            },
+        });
+        expect(createRes.ok(), await createRes.text()).toBeTruthy();
+        const provider = await createRes.json();
+        // The API never echoes the raw key back — only a boolean flag.
+        expect(provider.api_key).not.toBe(secret);
+        expect(provider.has_api_key).toBe(true);
+
+        // Sanity: while unlocked, the E2E reveal endpoint decrypts it correctly.
+        const revealBefore = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealBefore.ok()).toBeTruthy();
+        expect((await revealBefore.json()).api_key).toBe(secret);
+
+        // Back up, wipe, restore.
+        const backupRes = await request.post('/api/backup');
+        expect(backupRes.ok()).toBeTruthy();
+        const archivePath = (await backupRes.json()).archive_path;
+
+        expect((await request.post('/api/e2e/wipe-db')).ok()).toBeTruthy();
+
+        const restoreRes = await request.post('/api/backup/restore', {
+            data: { archive_path: archivePath },
+        });
+        expect(restoreRes.ok(), await restoreRes.text()).toBeTruthy();
+
+        // After restore the fixture user is re-unlocked with the same
+        // deterministic DEK; the enc:u1 ciphertext (carried verbatim in the
+        // backup) must decrypt back to the exact original secret.
+        const revealAfter = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealAfter.ok(), await revealAfter.text()).toBeTruthy();
+        expect((await revealAfter.json()).api_key).toBe(secret);
+    });
+
     test('backup via Settings UI button', async ({ page }) => {
         // Navigate to settings for 'bt' company (exists after restore from roundtrip test)
         await page.goto('/companies/bt/settings');

@@ -130,7 +130,11 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		return fmt.Errorf("archive has no entities/ tree (unsupported backup version?): %w", err)
 	}
 
-	// Wipe existing data (children before parents for FK enforcement).
+	// Wipe existing data (children before parents for FK enforcement). The
+	// identity graph is wiped last of all — companies (and their per-user
+	// providers) reference users/teams, so they must go first; the ephemeral
+	// auth tables (sessions, reset tokens, invites) are cleared too since
+	// they FK to users and are not part of the archive.
 	tables := []string{
 		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
 		"mcp_accounts", "mcp_servers",
@@ -139,6 +143,8 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		"attachments", "tasks", "skills", "agents",
 		"model_group_members", "model_groups", "default_model_settings",
 		"llm_providers", "sprints", "projects", "companies",
+		"team_invites", "password_reset_tokens", "sessions",
+		"web_authn_sessions", "web_authn_credentials", "team_members", "teams", "users",
 	}
 	for _, table := range tables {
 		database.Exec("DELETE FROM " + table)
@@ -152,6 +158,10 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 
 	// Global tables.
 	for _, g := range []struct{ file, table string }{
+		{"users.json", "users"},
+		{"teams.json", "teams"},
+		{"team-members.json", "team_members"},
+		{"webauthn-credentials.json", "web_authn_credentials"},
 		{"llm-providers.json", "llm_providers"},
 		{"model-groups.json", "model_groups"},
 		{"model-group-members.json", "model_group_members"},
@@ -231,6 +241,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	// Insert in dependency order, each table's rows sorted by id so
 	// self-references (task parent_id) resolve before their children.
 	insertOrder := []string{
+		"users", "teams", "team_members", "web_authn_credentials",
 		"companies", "llm_providers", "model_groups", "model_group_members",
 		"default_model_settings", "sprints", "projects", "agents", "skills",
 		"tasks", "comments", "attachments", "artifacts", "runs",
