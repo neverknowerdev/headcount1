@@ -17,11 +17,9 @@ import (
 // RequireTeamOwner: it covers every company visible to the whole team, so
 // only the owner may pull it, the same bar as creating/deleting a company.
 func (api *API) ExportMyData(w http.ResponseWriter, r *http.Request) {
+	// RequireAuth + RequireTeamOwner guard this route, so the user is always
+	// present and non-zero here.
 	userID := api.currentUserID(r)
-	if userID == 0 {
-		api.respondError(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
 
 	basePath := backupBasePath()
 	filename := fmt.Sprintf("headcount1-export_%s.tar.gz", time.Now().Format("2006-01-02_150405"))
@@ -43,11 +41,9 @@ func (api *API) ExportMyData(w http.ResponseWriter, r *http.Request) {
 // binds new companies onto the whole team, a structural action reserved for
 // the owner.
 func (api *API) ImportMyData(w http.ResponseWriter, r *http.Request) {
+	// RequireAuth + RequireTeamOwner guard this route, so the user is always
+	// present and non-zero here.
 	userID := api.currentUserID(r)
-	if userID == 0 {
-		api.respondError(w, http.StatusUnauthorized, "not authenticated")
-		return
-	}
 
 	// Resolve the importer's team so the restored subtree is bound to it.
 	membership, err := api.q.GetTeamMembership(r.Context(), userID)

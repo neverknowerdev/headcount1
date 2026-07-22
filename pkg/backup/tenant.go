@@ -580,9 +580,11 @@ func (imp *tenantImporter) resolveOrInsertRow(tx *gorm.DB, table string, r row, 
 func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64, bool) {
 	switch table {
 	case "companies":
+		// Tenancy is the TEAM, not the individual user: a company is deduped
+		// (and re-owned) through team_id. team_id is always set on import (see
+		// reowner), so this covers every imported company.
 		return imp.existingID(tx, "companies",
-			"short_name = ? AND (team_id = ? OR user_id = ?)",
-			strVal(r["short_name"]), imp.dstTeam, imp.dstUser)
+			"short_name = ? AND team_id = ?", strVal(r["short_name"]), imp.dstTeam)
 	case "projects", "sprints", "agents", "skills":
 		return imp.byParentName(tx, table, "company_id", r["company_id"], strVal(r["name"]))
 	case "tasks":
@@ -765,6 +767,10 @@ func (imp *tenantImporter) reowner(table string, r row) {
 	setUser := func() { r["user_id"] = imp.dstUser }
 	switch table {
 	case "companies":
+		// team_id is the tenancy anchor — that's what the company is scoped and
+		// deduped by. user_id is only the "creating member" pointer the engine
+		// uses to resolve that company's default models, so it's bound to the
+		// importer too (but is never used as the tenancy key).
 		r["team_id"] = imp.dstTeam
 		r["user_id"] = imp.dstUser
 	case "llm_providers", "model_groups", "default_model_settings", "mcp_accounts":
