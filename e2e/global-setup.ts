@@ -89,7 +89,12 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     console.log(`[globalSetup] wiped database via /api/e2e/wipe-db`);
 }
 
-async function waitForServer(url: string, timeoutMs = 60_000): Promise<void> {
+// `go run .` compiles the whole server (a large native dep tree: chromedp,
+// webauthn, sqlite, landlock, ...) on first invocation, and on CI the module
+// cache is cold, so the build alone can take a couple of minutes before the
+// server ever binds a port. Allow generously for that first cold compile; the
+// overall job still has the workflow's 60-minute cap as a backstop.
+async function waitForServer(url: string, timeoutMs = 240_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {
