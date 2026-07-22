@@ -58,7 +58,7 @@ export const Backup: React.FC = () => {
             alert('Please choose an export archive to import');
             return;
         }
-        if (!confirm('This will import the data from the selected archive into your team, creating new copies of every company, project and task it contains. Continue?')) {
+        if (!confirm('This will import the data from the selected archive into your team. Companies, tasks and other items you already have are matched and left untouched; only items you don\'t yet have are added. Continue?')) {
             return;
         }
 
@@ -135,8 +135,9 @@ export const Backup: React.FC = () => {
             <div className="bg-white p-6 rounded-lg shadow-sm border mb-6">
                 <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Import data</h2>
                 <p className="text-sm text-gray-600 mb-4">
-                    Import an export archive into your team. New companies, projects and tasks are created
-                    with fresh IDs and bound to your team — nothing that already exists is overwritten.
+                    Import an export archive into your team. Items are matched by their name/key, so
+                    re-importing the same archive won't create duplicates — anything you already have is
+                    left as-is, and only new items are added (with fresh IDs, bound to your team).
                 </p>
 
                 <div className="space-y-4">
@@ -160,7 +161,7 @@ export const Backup: React.FC = () => {
             {importResult && (
                 <div className="bg-green-50 border border-green-200 p-6 rounded-lg shadow-sm">
                     <h2 className="text-lg font-medium text-green-800 border-b border-green-200 pb-2 mb-4">
-                        Import Complete
+                        Import Complete — newly added
                     </h2>
                     <div className="grid grid-cols-2 gap-3 text-sm">
                         <div><span className="font-medium">Companies:</span> {importResult.companies_restored}</div>

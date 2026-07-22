@@ -15,6 +15,7 @@ import (
 	"strings"
 	"time"
 
+	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 
 	"gorm.io/gorm"
@@ -299,13 +300,15 @@ func ImportTenantFromReader(ctx context.Context, r io.Reader, basePath string, d
 	}
 
 	imp := &tenantImporter{
-		basePath: basePath,
-		tempDir:  tempDir,
-		srcUser:  data.Manifest.SourceUserID,
-		dstUser:  targetUserID,
-		dstTeam:  targetTeamID,
-		data:     &data,
-		idMap:    map[string]map[int64]int64{},
+		basePath:    basePath,
+		tempDir:     tempDir,
+		srcUser:     data.Manifest.SourceUserID,
+		dstUser:     targetUserID,
+		dstTeam:     targetTeamID,
+		data:        &data,
+		idMap:       map[string]map[int64]int64{},
+		insertedIDs: map[string]map[int64]bool{},
+		taskWasNew:  map[int64]bool{},
 	}
 
 	var stats TenantImportStats
@@ -334,7 +337,19 @@ type tenantImporter struct {
 	dstTeam  int32
 	data     *tenantData
 
-	idMap map[string]map[int64]int64 // table -> oldID -> newID
+	idMap map[string]map[int64]int64 // table -> oldID -> newID (existing OR freshly inserted)
+
+	// insertedIDs[table][newID] is true only for rows this import actually
+	// inserted (not the ones it reused via dedup). Path-column rewrites and file
+	// copies key off this so a merge never rewrites or clobbers an entity that
+	// already existed in the target.
+	insertedIDs map[string]map[int64]bool
+
+	// taskWasNew[newTaskID] reports whether that task row was freshly inserted
+	// (true) or reused via dedup (false). Comments — which have no stable domain
+	// key of their own — are imported only under freshly-inserted tasks, so a
+	// re-import doesn't duplicate them.
+	taskWasNew map[int64]bool
 
 	// Resolved during import, used for path rewriting.
 	companyShort map[int64]shortNames // old companyID -> {old, new} short name
@@ -342,10 +357,6 @@ type tenantImporter struct {
 	taskRoot     map[int64]int64      // old taskID -> old root taskID
 	runRoot      map[int64]int64      // old runID -> old root runID
 	runTask      map[int64]int64      // old runID -> old taskID
-
-	// pendingShort collects old→new company short-name pairs in company insert
-	// order (aligned with the companies id map order) for path rewriting.
-	pendingShort []shortNames
 
 	// Snapshots of path-bearing rows, captured BEFORE insertion mutates the row
 	// maps (insert deletes the old id, remaps FKs, and backfills the new id), so
@@ -391,17 +402,27 @@ func (imp *tenantImporter) run(tx *gorm.DB) (TenantImportStats, error) {
 		rows := imp.data.Tables[table]
 		sortRowsByID(rows)
 		imp.idMap[table] = map[int64]int64{}
+		imp.insertedIDs[table] = map[int64]bool{}
+		insertedCount := 0
 		for _, r := range rows {
 			oldID := toID(r)
-			newID, ok, err := imp.insertRow(tx, table, r)
+			newID, mapped, inserted, err := imp.resolveOrInsertRow(tx, table, r, oldID)
 			if err != nil {
 				return stats, fmt.Errorf("import %s (old id %d): %w", table, oldID, err)
 			}
-			if ok && oldID != 0 {
+			if mapped && oldID != 0 {
 				imp.idMap[table][oldID] = newID
 			}
+			if inserted {
+				insertedCount++
+				if newID != 0 {
+					imp.insertedIDs[table][newID] = true
+				}
+			}
 		}
-		imp.tally(&stats, table, len(imp.idMap[table]))
+		// Stats report only freshly-imported rows, not the ones deduped onto
+		// entities the importer already had.
+		imp.tally(&stats, table, insertedCount)
 	}
 
 	// Path columns depend on the newly-assigned ids/short names; rewrite them
@@ -478,11 +499,13 @@ func (imp *tenantImporter) buildGraphs() {
 	}
 }
 
-// insertRow rewrites one row (FKs, owner, secret labels, uniqueness) and inserts
-// it with a DB-assigned id. Returns the new id. ok is false for rows that were
-// intentionally skipped (e.g. a default-model-setting that collides with one the
-// importer already has).
-func (imp *tenantImporter) insertRow(tx *gorm.DB, table string, r row) (int64, bool, error) {
+// resolveOrInsertRow rewrites a row (FKs, owner, secret labels) and then either
+// reuses an existing row that shares its domain key (dedup / merge) or inserts a
+// fresh one. Returns:
+//   - id:       the resolved primary key (existing or new); 0 for join tables
+//   - mapped:   whether id should be recorded in the old→new id map
+//   - inserted: whether a NEW row was actually inserted (vs reused/skipped)
+func (imp *tenantImporter) resolveOrInsertRow(tx *gorm.DB, table string, r row, oldID int64) (id int64, mapped, inserted bool, err error) {
 	// Drop the archive's primary key so the DB assigns a fresh one. Original
 	// created_at/updated_at are kept verbatim to preserve history.
 	delete(r, "id")
@@ -491,36 +514,167 @@ func (imp *tenantImporter) insertRow(tx *gorm.DB, table string, r row) (int64, b
 	imp.reowner(table, r)
 	imp.relabelSecrets(r)
 
+	// Comments have no stable domain key of their own. Import them only under a
+	// freshly-inserted task; on a task the importer already had, skip them so a
+	// re-import never duplicates a discussion.
+	if table == "comments" {
+		if newTask := asInt64(r["task_id"]); newTask != 0 && !imp.taskWasNew[newTask] {
+			return 0, false, false, nil
+		}
+	}
+
+	// Dedup: if an entity with the same domain key already exists in the
+	// importer's scope, reuse it (merge) instead of creating a duplicate.
+	if existing, found := imp.findExisting(tx, table, r); found {
+		if table == "companies" {
+			imp.recordCompanyShort(oldID, strVal(r["short_name"]))
+		}
+		if table == "tasks" {
+			imp.taskWasNew[existing] = false
+		}
+		return existing, existing != 0, false, nil
+	}
+
+	// No match → a brand-new row. For globally-named entities, make the name
+	// unique so the new row never shares a directory/slug with another tenant.
 	switch table {
 	case "companies":
 		imp.ensureUniqueCompanyShort(tx, r)
+		imp.recordCompanyShort(oldID, strVal(r["short_name"]))
 	case "model_groups":
 		imp.ensureUnique(tx, table, "slug", r)
 	case "mcp_servers":
 		imp.ensureUnique(tx, table, "name", r)
-	case "default_model_settings":
-		// (purpose, user_id) is unique; skip if the importer already has one.
-		if imp.rowExists(tx, table, "purpose = ? AND user_id = ?", r["purpose"], imp.dstUser) {
-			return 0, false, nil
-		}
 	}
 
-	// Join tables (composite primary key, no auto-increment id) are inserted
-	// without a RETURNING clause and contribute no id mapping.
+	// Join tables (composite primary key, no auto-increment id) insert without a
+	// RETURNING clause and contribute no id mapping.
 	if joinTables[table] {
 		if err := tx.Table(table).Create(r).Error; err != nil {
-			return 0, false, err
+			return 0, false, false, err
 		}
-		return 0, true, nil
+		return 0, false, true, nil
 	}
 
 	if err := tx.Table(table).
 		Clauses(clause.Returning{Columns: []clause.Column{{Name: "id"}}}).
 		Create(r).Error; err != nil {
-		return 0, false, err
+		return 0, false, false, err
 	}
+	newID := asInt64(r["id"])
+	if table == "tasks" {
+		imp.taskWasNew[newID] = true
+	}
+	return newID, newID != 0, true, nil
+}
 
-	return asInt64(r["id"]), true, nil
+// findExisting looks up a row already present in the target DB that shares this
+// row's domain key, scoped to the importing user/team. The row's foreign keys
+// are already remapped, so scoping columns (company_id, task_id, …) hold the
+// target-side ids. Returns the existing primary key and true on a hit.
+//
+// Identity is the domain-level slug/key, never the archive's DB id: companies by
+// short_name, tasks by ref_key, runs/agents/skills/… by name within their
+// parent, providers by their derived slug, model groups / MCP servers by their
+// unique slug/name. Rows without a stable key (comments) never match here.
+func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64, bool) {
+	switch table {
+	case "companies":
+		return imp.existingID(tx, "companies",
+			"short_name = ? AND (team_id = ? OR user_id = ?)",
+			strVal(r["short_name"]), imp.dstTeam, imp.dstUser)
+	case "projects", "sprints", "agents", "skills":
+		return imp.byParentName(tx, table, "company_id", r["company_id"], strVal(r["name"]))
+	case "tasks":
+		refKey := strVal(r["ref_key"])
+		if refKey == "" {
+			return 0, false
+		}
+		return imp.existingID(tx, "tasks", "company_id = ? AND ref_key = ?", r["company_id"], refKey)
+	case "runs":
+		name := strVal(r["name"])
+		if name == "" {
+			return 0, false
+		}
+		return imp.existingID(tx, "runs", "task_id = ? AND name = ?", r["task_id"], name)
+	case "artifacts":
+		return imp.existingID(tx, "artifacts", "task_id = ? AND filename = ?", r["task_id"], strVal(r["filename"]))
+	case "attachments":
+		return imp.existingID(tx, "attachments", "task_id = ? AND filename = ?", r["task_id"], strVal(r["filename"]))
+	case "llm_providers":
+		slug := strVal(r["slug"])
+		if slug == "" {
+			slug = db.ProviderSlug(providerFromRow(r)) // older archives lack the slug column
+		}
+		return imp.existingID(tx, "llm_providers", "slug = ? AND user_id = ?", slug, imp.dstUser)
+	case "model_groups":
+		return imp.existingID(tx, "model_groups", "slug = ? AND user_id = ?", strVal(r["slug"]), imp.dstUser)
+	case "model_group_members":
+		return imp.existingID(tx, "model_group_members",
+			"group_id = ? AND provider_id = ? AND model = ?", r["group_id"], r["provider_id"], strVal(r["model"]))
+	case "default_model_settings":
+		return imp.existingID(tx, "default_model_settings", "purpose = ? AND user_id = ?", strVal(r["purpose"]), imp.dstUser)
+	case "mcp_servers":
+		if owner := asInt64(r["owner_user_id"]); owner != 0 {
+			return imp.existingID(tx, "mcp_servers", "name = ? AND owner_user_id = ?", strVal(r["name"]), imp.dstUser)
+		}
+		// Codegraph servers (no owner) are scoped by their project.
+		return imp.existingID(tx, "mcp_servers", "name = ? AND project_id = ?", strVal(r["name"]), r["project_id"])
+	case "mcp_accounts":
+		return imp.existingID(tx, "mcp_accounts", "mcp_server_id = ? AND name = ?", r["mcp_server_id"], strVal(r["name"]))
+	case "agent_mcp_servers":
+		return imp.existingID(tx, "agent_mcp_servers", "agent_id = ? AND mcp_server_id = ?", r["agent_id"], r["mcp_server_id"])
+	case "agent_mcp_accounts":
+		return imp.existingID(tx, "agent_mcp_accounts", "agent_id = ? AND mcp_account_id = ?", r["agent_id"], r["mcp_account_id"])
+	case "agent_mcp_tool_filters":
+		return imp.existingID(tx, "agent_mcp_tool_filters",
+			"agent_id = ? AND mcp_server_id = ? AND tool_name = ?", r["agent_id"], r["mcp_server_id"], strVal(r["tool_name"]))
+	}
+	return 0, false
+}
+
+// byParentName finds a row by (parentCol, name) — the dedup key for entities
+// that are unique-by-name within their company (projects, sprints, agents,
+// skills). A missing parent id or name never matches.
+func (imp *tenantImporter) byParentName(tx *gorm.DB, table, parentCol string, parentVal interface{}, name string) (int64, bool) {
+	if asInt64(parentVal) == 0 || name == "" {
+		return 0, false
+	}
+	return imp.existingID(tx, table, parentCol+" = ? AND name = ?", parentVal, name)
+}
+
+// existingID returns the id of the first row matching where, and whether one was
+// found. A join table (no id column) returns a non-zero sentinel on a match so
+// callers can still detect "already present" and skip the insert.
+func (imp *tenantImporter) existingID(tx *gorm.DB, table, where string, args ...interface{}) (int64, bool) {
+	if joinTables[table] {
+		return -1, imp.rowExists(tx, table, where, args...)
+	}
+	var id int64
+	if err := tx.Table(table).Where(where, args...).Select("id").Limit(1).Scan(&id).Error; err != nil {
+		return 0, false
+	}
+	return id, id != 0
+}
+
+// recordCompanyShort stores the final on-disk short name chosen for a company
+// (unchanged on a dedup reuse, possibly suffixed on a fresh insert) so path
+// rewriting and file copying target the right directory.
+func (imp *tenantImporter) recordCompanyShort(oldID int64, finalShort string) {
+	sn := imp.companyShort[oldID]
+	sn.new = finalShort
+	imp.companyShort[oldID] = sn
+}
+
+// providerFromRow builds a minimal LLMProvider from an archive row so
+// db.ProviderSlug can derive a slug for archives predating the slug column.
+func providerFromRow(r row) db.LLMProvider {
+	return db.LLMProvider{
+		Name:         strVal(r["name"]),
+		BaseUrl:      strVal(r["base_url"]),
+		PresetKey:    strVal(r["preset_key"]),
+		ProviderName: strVal(r["provider_name"]),
+	}
 }
 
 // joinTables have a composite primary key and no auto-increment id column.
@@ -670,16 +824,13 @@ func (imp *tenantImporter) ensureUnique(tx *gorm.DB, table, col string, r row) {
 	r[col] = candidate
 }
 
-// ensureUniqueCompanyShort keeps company short names unique in the target DB so
-// their on-disk directories (artifacts/{short}, logs/{short}, …) never collide
-// with an existing tenant's. The chosen new short name is recorded for path
-// rewriting.
+// ensureUniqueCompanyShort keeps a freshly-inserted company's short name unique
+// in the target DB so its on-disk directories (artifacts/{short}, logs/{short},
+// …) never collide with another tenant's. Only called on a dedup MISS; a reused
+// company keeps its (matched) short name.
 func (imp *tenantImporter) ensureUniqueCompanyShort(tx *gorm.DB, r row) {
 	base, _ := r["short_name"].(string)
 	if base == "" {
-		// Keep pendingShort aligned 1:1 with company insert order even for the
-		// (schema-forbidden) empty case.
-		imp.pendingShort = append(imp.pendingShort, shortNames{})
 		return
 	}
 	candidate := base
@@ -687,10 +838,6 @@ func (imp *tenantImporter) ensureUniqueCompanyShort(tx *gorm.DB, r row) {
 		candidate = fmt.Sprintf("%s-%d", base, n)
 	}
 	r["short_name"] = candidate
-	// Companies are inserted sorted by original id and pendingShort is appended
-	// in that same order, so rewritePathColumns can pair each entry back to its
-	// old company id via the companies id map.
-	imp.pendingShort = append(imp.pendingShort, shortNames{old: base, new: candidate})
 }
 
 // ---------------------------------------------------------------------------
@@ -698,14 +845,13 @@ func (imp *tenantImporter) ensureUniqueCompanyShort(tx *gorm.DB, r row) {
 // ---------------------------------------------------------------------------
 
 // rewritePathColumns updates the absolute *_path columns of restored rows to
-// point at their remapped on-disk locations.
+// point at their remapped on-disk locations. Only freshly-inserted rows are
+// touched; a row reused via dedup keeps its existing (already-correct) path.
 func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
-	imp.resolveNewShortNames()
-
 	// attachments.file_path -> uploads/{newTaskID}/<basename>
 	for _, s := range imp.attSnaps {
 		newAttID, ok := imp.idMap["attachments"][s.oldID]
-		if !ok || s.oldPath == "" {
+		if !ok || s.oldPath == "" || !imp.insertedIDs["attachments"][newAttID] {
 			continue
 		}
 		newTask, ok := imp.idMap["tasks"][s.oldTask]
@@ -719,7 +865,7 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 	// artifacts.file_path -> artifacts/{newShort}/{newRootTaskID}/<basename>
 	for _, s := range imp.artSnaps {
 		newArtID, ok := imp.idMap["artifacts"][s.oldID]
-		if !ok || s.oldPath == "" {
+		if !ok || s.oldPath == "" || !imp.insertedIDs["artifacts"][newArtID] {
 			continue
 		}
 		newShort, newRoot, ok := imp.taskPathTarget(s.oldTask)
@@ -733,7 +879,7 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 	// runs.log_file_path -> logs/{newShort}/{newRootTaskID}/run-{newRootRunID}/<basename>
 	for _, s := range imp.runSnaps {
 		newRunID, ok := imp.idMap["runs"][s.oldID]
-		if !ok || s.oldPath == "" {
+		if !ok || s.oldPath == "" || !imp.insertedIDs["runs"][newRunID] {
 			continue
 		}
 		newShort, newRoot, ok := imp.taskPathTarget(s.oldTask)
@@ -751,7 +897,7 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 	// skills.local_path -> skills/{newShort}/{name}
 	for _, s := range imp.skillSnaps {
 		newSkillID, ok := imp.idMap["skills"][s.oldID]
-		if !ok || s.oldPath == "" {
+		if !ok || s.oldPath == "" || !imp.insertedIDs["skills"][newSkillID] {
 			continue
 		}
 		sn, ok := imp.companyShort[s.oldCompany]
@@ -762,24 +908,6 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 		tx.Table("skills").Where("id = ?", newSkillID).Update("local_path", np)
 	}
 	return nil
-}
-
-// resolveNewShortNames aligns the collision-adjusted short names (collected in
-// company insert order) with the companies id map, producing old companyID →
-// {old, new} short name used by every path helper.
-func (imp *tenantImporter) resolveNewShortNames() {
-	// Company rows were inserted sorted by original id; pendingShort was appended
-	// in that same order. Pair them up.
-	companies := imp.data.Tables["companies"]
-	sortRowsByID(companies)
-	for i, c := range companies {
-		oldID := toID(c)
-		sn := imp.companyShort[oldID]
-		if i < len(imp.pendingShort) {
-			sn.new = imp.pendingShort[i].new
-		}
-		imp.companyShort[oldID] = sn
-	}
 }
 
 // taskPathTarget returns the new company short name and new root-task id used to
@@ -898,10 +1026,43 @@ func (imp *tenantImporter) copyLogsDir(from, to string) {
 	}
 }
 
+// copyInto copies from → to WITHOUT overwriting files that already exist at the
+// destination. Merge semantics: new files (e.g. a new run's logs under a reused
+// task's directory) are added, while anything already present — including files
+// the user may have changed since the export — is left untouched.
 func (imp *tenantImporter) copyInto(from, to string) {
-	if err := copyDir(from, to); err != nil {
+	if err := copyDirNoClobber(from, to); err != nil {
 		log.Printf("Warning: import tenant: copy %s -> %s: %v", from, to, err)
 	}
+}
+
+// copyDirNoClobber is copyDir but skips any destination file that already
+// exists, so an import merges into existing directories instead of overwriting.
+func copyDirNoClobber(src, dst string) error {
+	return filepath.Walk(src, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(src, path)
+		if err != nil {
+			return err
+		}
+		dstPath := filepath.Join(dst, rel)
+		if info.IsDir() {
+			return os.MkdirAll(dstPath, 0755)
+		}
+		if _, err := os.Stat(dstPath); err == nil {
+			return nil // already present — do not clobber
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		if err := os.MkdirAll(filepath.Dir(dstPath), 0755); err != nil {
+			return err
+		}
+		return os.WriteFile(dstPath, data, info.Mode().Perm())
+	})
 }
 
 func (imp *tenantImporter) uniqueShortNames() []shortNames {

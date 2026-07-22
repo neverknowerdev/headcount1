@@ -336,3 +336,166 @@ func TestTenantImportJoinTablesAndLinks(t *testing.T) {
 		t.Errorf("mcp server not imported / re-owned")
 	}
 }
+
+// TestTenantImportDedupNoDuplication verifies that exporting a tenant and
+// importing it back into the SAME account does not create duplicate copies:
+// entities are deduped by their domain key (short_name, ref_key, provider slug,
+// …) and reused, while genuinely new child rows still merge in.
+func TestTenantImportDedupNoDuplication(t *testing.T) {
+	srcBase := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+
+	user := db.User{Email: "solo@dedup.io"}
+	database.Create(&user)
+	team := db.Team{Name: "Solo"}
+	database.Create(&team)
+	database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner})
+
+	comp := db.Company{Name: "Acme", ShortName: "acme", TeamID: &team.ID, UserID: &user.ID}
+	database.Create(&comp)
+	proj := db.Project{CompanyID: comp.ID, Name: "web"}
+	database.Create(&proj)
+	sprint := db.Sprint{CompanyID: comp.ID, Name: "S1"}
+	database.Create(&sprint)
+	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", UserID: &user.ID}
+	// Give it a slug like the app's BeforeCreate hook would.
+	prov.Slug = db.ProviderSlug(prov)
+	database.Create(&prov)
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, Title: "root", RefKey: "ACME-1", Status: "backlog", Priority: "Normal"}
+	database.Create(&task)
+
+	countAll := func() (companies, projects, tasks, providers, sprints int64) {
+		database.Model(&db.Company{}).Count(&companies)
+		database.Model(&db.Project{}).Count(&projects)
+		database.Model(&db.Task{}).Count(&tasks)
+		database.Model(&db.LLMProvider{}).Count(&providers)
+		database.Model(&db.Sprint{}).Count(&sprints)
+		return
+	}
+	c0, p0, t0, pr0, s0 := countAll()
+
+	exportAndImport := func() TenantImportStats {
+		var buf bytes.Buffer
+		if err := ExportTenant(ctx, &buf, srcBase, database, user.ID); err != nil {
+			t.Fatalf("ExportTenant: %v", err)
+		}
+		archivePath := filepath.Join(t.TempDir(), "t.tar.gz")
+		os.WriteFile(archivePath, buf.Bytes(), 0644)
+		stats, err := ImportTenant(ctx, archivePath, srcBase, database, user.ID, team.ID)
+		if err != nil {
+			t.Fatalf("ImportTenant: %v", err)
+		}
+		return stats
+	}
+
+	// First import: everything already exists (we exported our own live data),
+	// so nothing new should be created.
+	stats := exportAndImport()
+	if stats.Companies != 0 || stats.Projects != 0 || stats.Tasks != 0 || stats.Providers != 0 || stats.Sprints != 0 {
+		t.Errorf("re-import created new rows, expected all deduped: %+v", stats)
+	}
+	c1, p1, t1, pr1, s1 := countAll()
+	if c1 != c0 || p1 != p0 || t1 != t0 || pr1 != pr0 || s1 != s0 {
+		t.Errorf("row counts changed after re-import: companies %d->%d, projects %d->%d, tasks %d->%d, providers %d->%d, sprints %d->%d",
+			c0, c1, p0, p1, t0, t1, pr0, pr1, s0, s1)
+	}
+
+	// A second import is likewise a no-op — proving idempotency.
+	exportAndImport()
+	c2, p2, t2, pr2, s2 := countAll()
+	if c2 != c0 || p2 != p0 || t2 != t0 || pr2 != pr0 || s2 != s0 {
+		t.Errorf("second re-import duplicated rows: companies=%d projects=%d tasks=%d providers=%d sprints=%d", c2, p2, t2, pr2, s2)
+	}
+
+	// Now add a genuinely new task, re-import, and confirm ONLY it is added
+	// (merge of new children onto the existing, deduped subtree).
+	newTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "second", RefKey: "ACME-2", Status: "backlog", Priority: "Normal"}
+	database.Create(&newTask)
+	stats = exportAndImport()
+	if stats.Tasks != 0 {
+		// The new task already lives in this DB (we just created it), so exporting
+		// then importing into the same DB still finds it by ref_key → deduped.
+		t.Errorf("expected the new task to dedup on re-import, got %+v", stats)
+	}
+	var taskCount int64
+	database.Model(&db.Task{}).Where("company_id = ?", comp.ID).Count(&taskCount)
+	if taskCount != 2 {
+		t.Errorf("task count = %d, want 2 (no duplication)", taskCount)
+	}
+}
+
+// TestTenantImportMergeChildren verifies "merge children only": when a company
+// already exists in the target (matched by short_name), it is reused rather than
+// duplicated, and only the tasks/runs the target lacks are added.
+func TestTenantImportMergeChildren(t *testing.T) {
+	srcBase := t.TempDir()
+	srcDB := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+
+	// Source: company "acme" with two tasks.
+	sUser := db.User{Email: "src@merge.io"}
+	srcDB.Create(&sUser)
+	sTeam := db.Team{Name: "S"}
+	srcDB.Create(&sTeam)
+	srcDB.Create(&db.TeamMember{TeamID: sTeam.ID, UserID: sUser.ID, Role: db.TeamRoleOwner})
+	sComp := db.Company{Name: "Acme", ShortName: "acme", TeamID: &sTeam.ID, UserID: &sUser.ID}
+	srcDB.Create(&sComp)
+	sSprint := db.Sprint{CompanyID: sComp.ID, Name: "S1"}
+	srcDB.Create(&sSprint)
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "shared", RefKey: "ACME-1", Status: "backlog", Priority: "Normal"})
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "only-in-source", RefKey: "ACME-2", Status: "backlog", Priority: "Normal"})
+
+	var buf bytes.Buffer
+	if err := ExportTenant(ctx, &buf, srcBase, srcDB, sUser.ID); err != nil {
+		t.Fatalf("ExportTenant: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "m.tar.gz")
+	os.WriteFile(archivePath, buf.Bytes(), 0644)
+
+	// Target: a DIFFERENT db + account that ALREADY has an "acme" company with
+	// only ACME-1. Import should reuse that company and add only ACME-2.
+	tgtDB := openTestDB(t, t.TempDir())
+	tUser := db.User{Email: "tgt@merge.io"}
+	tgtDB.Create(&tUser)
+	tTeam := db.Team{Name: "T"}
+	tgtDB.Create(&tTeam)
+	tgtDB.Create(&db.TeamMember{TeamID: tTeam.ID, UserID: tUser.ID, Role: db.TeamRoleOwner})
+	tComp := db.Company{Name: "Acme", ShortName: "acme", TeamID: &tTeam.ID, UserID: &tUser.ID}
+	tgtDB.Create(&tComp)
+	tSprint := db.Sprint{CompanyID: tComp.ID, Name: "S1"}
+	tgtDB.Create(&tSprint)
+	tgtDB.Create(&db.Task{CompanyID: tComp.ID, SprintID: tSprint.ID, Title: "shared (target copy)", RefKey: "ACME-1", Status: "done", Priority: "Normal"})
+
+	stats, err := ImportTenant(ctx, archivePath, t.TempDir(), tgtDB, tUser.ID, tTeam.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant: %v", err)
+	}
+	if stats.Companies != 0 {
+		t.Errorf("existing company should be reused, not re-created: %+v", stats)
+	}
+	if stats.Tasks != 1 {
+		t.Errorf("expected exactly 1 new task merged in, got %d", stats.Tasks)
+	}
+
+	// Still exactly ONE acme company, owned by the target user.
+	var acmeCount int64
+	tgtDB.Model(&db.Company{}).Where("short_name = ?", "acme").Count(&acmeCount)
+	if acmeCount != 1 {
+		t.Errorf("acme company count = %d, want 1 (reused, not duplicated)", acmeCount)
+	}
+
+	// Both ACME-1 (pre-existing, untouched) and ACME-2 (merged) present, no dup.
+	var refKeys []string
+	tgtDB.Model(&db.Task{}).Where("company_id = ?", tComp.ID).Order("ref_key").Pluck("ref_key", &refKeys)
+	if len(refKeys) != 2 || refKeys[0] != "ACME-1" || refKeys[1] != "ACME-2" {
+		t.Errorf("task ref_keys = %v, want [ACME-1 ACME-2]", refKeys)
+	}
+
+	// The pre-existing ACME-1 kept its own title/status (not overwritten).
+	var shared db.Task
+	tgtDB.Where("company_id = ? AND ref_key = ?", tComp.ID, "ACME-1").First(&shared)
+	if shared.Status != "done" || shared.Title != "shared (target copy)" {
+		t.Errorf("existing task was clobbered by merge: %+v", shared)
+	}
+}

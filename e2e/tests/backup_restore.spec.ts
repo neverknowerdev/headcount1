@@ -5,9 +5,10 @@ import { loadE2EEnv } from '../helpers/env';
 
 test.describe.serial('Backup & Restore', () => {
     // Tenant-scoped, per-user export/import (the real user-facing feature): a
-    // signed-in user exports only their own subtree and re-imports it, getting
-    // fresh IDs and re-owned copies — with encrypted secrets still decryptable.
-    test('per-user export + import round-trip keeps secrets decryptable', async ({ request }) => {
+    // team owner exports their subtree and re-imports it. Re-importing into the
+    // same account dedups by domain key (short_name, provider slug, …) instead
+    // of duplicating, and secrets stay decryptable throughout.
+    test('per-user export + import round-trip dedups and keeps secrets decryptable', async ({ request }) => {
         // A company + a task + a provider with a known key.
         const companyRes = await request.post('/api/companies', {
             data: { name: 'Export Test Co', short_name: 'dx' },
@@ -50,8 +51,9 @@ test.describe.serial('Backup & Restore', () => {
         const archive = await exportRes.body();
         expect(archive.length).toBeGreaterThan(0);
 
-        // Import it back into the same account: fresh copies alongside the
-        // originals, nothing overwritten.
+        // Import it back into the same account. Everything in the archive already
+        // exists here (we just exported our own live data), so dedup should reuse
+        // it all and create nothing new.
         const importRes = await request.post('/api/data/import', {
             multipart: {
                 file: { name: 'export.tar.gz', mimeType: 'application/gzip', buffer: archive },
@@ -59,26 +61,25 @@ test.describe.serial('Backup & Restore', () => {
         });
         expect(importRes.ok(), await importRes.text()).toBeTruthy();
         const importBody = await importRes.json();
-        expect(importBody.result.companies_restored).toBeGreaterThanOrEqual(1);
+        expect(importBody.result.companies_restored).toBe(0);
+        expect(importBody.result.tasks_restored).toBe(0);
+        expect(importBody.result.providers_restored).toBe(0);
 
-        // A NEW 'dx' company exists (the original is untouched).
+        // Still exactly ONE 'dx' company — not duplicated.
         const companiesRes = await request.get('/api/companies');
         const companies = await companiesRes.json();
         const dxCompanies = companies.filter((c: any) => c.short_name === 'dx' || c.short_name.startsWith('dx-'));
-        expect(dxCompanies.length).toBeGreaterThanOrEqual(2);
+        expect(dxCompanies.length).toBe(1);
 
-        // The imported provider is a new row whose key still decrypts to the
-        // original secret (ciphertext carried verbatim, re-owned to the importer).
+        // Still exactly ONE dx provider, and it still decrypts to the original
+        // secret (ciphertext preserved through the export/import round-trip).
         const provsRes = await request.get('/api/providers');
         const provs = await provsRes.json();
-        const dxProvs = provs
-            .filter((p: any) => p.base_url === 'https://dx.example.test/v1')
-            .sort((a: any, b: any) => b.id - a.id);
-        expect(dxProvs.length).toBeGreaterThanOrEqual(2);
-        const importedProv = dxProvs[0];
-        expect(importedProv.id).not.toBe(provider.id);
+        const dxProvs = provs.filter((p: any) => p.base_url === 'https://dx.example.test/v1');
+        expect(dxProvs.length).toBe(1);
+        expect(dxProvs[0].id).toBe(provider.id);
 
-        const revealAfter = await request.get(`/api/e2e/reveal-provider/${importedProv.id}`);
+        const revealAfter = await request.get(`/api/e2e/reveal-provider/${dxProvs[0].id}`);
         expect(revealAfter.ok(), await revealAfter.text()).toBeTruthy();
         expect((await revealAfter.json()).api_key).toBe(secret);
     });
