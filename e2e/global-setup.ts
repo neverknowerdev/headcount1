@@ -99,7 +99,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     console.log(`[globalSetup] wiped database via /api/e2e/wipe-db`);
 }
 
-async function waitForServer(url: string, timeoutMs = 60_000): Promise<void> {
+// 180s (not 60s): `go run .` has to download and compile the full module
+// graph on a cold build cache — e.g. right after a dependency-heavy merge —
+// before the server's first listener comes up, which alone can exceed a
+// minute in CI even before compilation starts.
+async function waitForServer(url: string, timeoutMs = 180_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {
