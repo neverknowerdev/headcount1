@@ -7,12 +7,13 @@ import { loadE2EEnv } from '../helpers/env';
 const env = loadE2EEnv();
 
 /**
- * The database is the single source of truth, shared by every process
- * pointed at the same BasePath: SQLite lives at {basePath}/db/ with WAL so
- * multiple worktree processes see each other's writes. This spec boots a
- * SECOND server process on another port against the same E2E home and
- * verifies both directions of visibility — replacing the old filesystem
- * JSON mirror + sync mechanism.
+ * The database is the single source of truth, shared by every process pointed
+ * at the same BasePath. This spec boots a SECOND server process on another port
+ * against the same backend and verifies both directions of visibility —
+ * replacing the old filesystem JSON mirror + sync mechanism. It is
+ * backend-agnostic: on SQLite the sharing is via the WAL file, on Postgres via
+ * the shared server, so it runs on both. The SQLite on-disk/WAL specifics live
+ * in sqlite_backend.spec.ts.
  */
 test.describe.serial('Shared database across processes', () => {
     // Unique per run: a stale second server from a previous run must never
@@ -30,17 +31,6 @@ test.describe.serial('Shared database across processes', () => {
         if (secondServer?.pid) {
             try { process.kill(-secondServer.pid, 'SIGKILL'); } catch { /* already gone */ }
         }
-    });
-
-    test('SQLite lives under {basePath}/db with WAL enabled', async () => {
-        const dbFile = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1', 'db', 'headcount1-e2e.db');
-        expect(fs.existsSync(dbFile)).toBe(true);
-        // WAL journaling leaves a -wal sidecar next to the database while
-        // connections are open.
-        expect(fs.existsSync(dbFile + '-wal')).toBe(true);
-        // No CWD-relative database file in the repo root anymore.
-        expect(fs.existsSync(path.join(process.cwd(), '..', 'headcount1-e2e.db'))).toBe(false);
-        expect(fs.existsSync(path.join(process.cwd(), '..', 'orchestrator.db'))).toBe(false);
     });
 
     test('a second server process sees data written by the first, and vice versa', async ({ request }) => {

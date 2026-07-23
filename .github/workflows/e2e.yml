@@ -9,9 +9,29 @@ jobs:
   test:
     timeout-minutes: 60
     runs-on: ubuntu-latest
+
+    # PostgreSQL is the primary (cloud) backend, so the full Playwright suite
+    # runs against it. SQLite is covered by a dedicated, focused spec instead of
+    # a second full run — see the "SQLite backend E2E" step. The server picks its
+    # backend from DATABASE_URL (see main.go).
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: orchestrator
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
     steps:
     - uses: actions/checkout@v4
-    
+
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
@@ -27,6 +47,16 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: 20
+
+    # Fast dialect-specific signal before the browser suite: the Go integration
+    # tests (AutoMigrate, raw-SQL query surface, backup/restore sequence
+    # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
+    # two packages: they share one Postgres database and each DROP SCHEMAs +
+    # AutoMigrates it, so running them concurrently races on type creation.
+    - name: Run Go Postgres integration tests
+      run: go test ./db/ ./pkg/backup/ -run TestPostgres -p 1 -v
+      env:
+        TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
     - name: Install Frontend Dependencies
       run: |
@@ -50,22 +80,46 @@ jobs:
       run: |
         cd e2e
         npm install
-        
+
     - name: Install Playwright Browsers
       run: |
         cd e2e
         npx playwright install --with-deps chromium
-        
-    - name: Run Playwright tests
+
+    # Primary: the whole suite against PostgreSQL. SQLite-only specs
+    # (sqlite_backend) self-skip here.
+    - name: Run Playwright tests (PostgreSQL — primary)
       run: |
         cd e2e
         npx playwright test
       env:
         E2E_MODE: true
-        
-    - uses: actions/upload-artifact@v4
+        DATABASE_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
+
+    - name: Upload PostgreSQL report
       if: always()
+      uses: actions/upload-artifact@v4
       with:
-        name: playwright-report
+        name: playwright-report-postgres
+        path: e2e/playwright-report/
+        retention-days: 30
+
+    # Dedicated SQLite coverage: the on-disk layout, WAL journaling, and
+    # autoincrement-reset edge cases that only apply with no DATABASE_URL. Runs
+    # even if the Postgres run failed, so both backends give an independent
+    # signal.
+    - name: Run SQLite backend E2E
+      if: always()
+      run: |
+        cd e2e
+        npx playwright test sqlite_backend
+      env:
+        E2E_MODE: true
+
+    - name: Upload SQLite report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: playwright-report-sqlite
         path: e2e/playwright-report/
         retention-days: 30
