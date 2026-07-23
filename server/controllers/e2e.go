@@ -27,7 +27,6 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// teams, users) is wiped LAST — companies, providers, model groups and
 	// default-model settings all reference users/teams and must go first.
 	tables := []string{
-		"run_log_entries",
 		"activity_logs",
 		"proxy_request_logs",
 		"model_request_stats",
@@ -66,8 +65,29 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	for _, table := range tables {
 		api.db.Exec("DELETE FROM " + table)
 	}
-	// Reset SQLite autoincrement so test IDs start at 1
-	api.db.Exec("DELETE FROM sqlite_sequence")
+	// Reset autoincrement so test IDs start at 1. SQLite keeps its counters in
+	// sqlite_sequence; Postgres realigns each table's serial sequence instead.
+	if api.db.Dialector.Name() == "sqlite" {
+		api.db.Exec("DELETE FROM sqlite_sequence")
+	} else {
+		for _, table := range tables {
+			// Skip tables without an id column (composite-key join tables) — on
+			// those pg_get_serial_sequence raises rather than returning NULL.
+			var hasID bool
+			if err := api.db.Raw(
+				`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+				 WHERE table_schema = current_schema() AND table_name = ? AND column_name = 'id')`,
+				table,
+			).Scan(&hasID).Error; err != nil || !hasID {
+				continue
+			}
+			var seq *string
+			if err := api.db.Raw(`SELECT pg_get_serial_sequence(?, 'id')`, table).Scan(&seq).Error; err != nil || seq == nil {
+				continue
+			}
+			api.db.Exec(`SELECT setval(?, 1, false)`, *seq)
+		}
+	}
 
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
 	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
