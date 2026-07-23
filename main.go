@@ -191,6 +191,12 @@ func main() {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
 	}
 
+	// Backfill the provider domain slug for rows created before the column
+	// existed, so tenant export/import can dedup providers by slug.
+	if err := db.New(database).BackfillProviderSlugs(context.Background()); err != nil {
+		log.Printf("Warning: provider slug backfill: %v", err)
+	}
+
 	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
 	// keys derived from each user's passkey, held only in memory while they're
 	// signed in; the app decrypts only at the point of use.

@@ -62,6 +62,23 @@ func (q *Queries) DeleteLLMProvider(ctx context.Context, id int32) error {
 	return q.db.WithContext(ctx).Delete(&LLMProvider{}, id).Error
 }
 
+// BackfillProviderSlugs assigns the derived domain slug to any provider row that
+// predates the slug column (or was inserted without one). Idempotent: rows that
+// already have a slug are skipped. Called once at startup.
+func (q *Queries) BackfillProviderSlugs(ctx context.Context) error {
+	var provs []LLMProvider
+	if err := q.db.WithContext(ctx).Where("slug = '' OR slug IS NULL").Find(&provs).Error; err != nil {
+		return err
+	}
+	for _, p := range provs {
+		slug := ProviderSlug(p)
+		if err := q.db.WithContext(ctx).Model(&LLMProvider{}).Where("id = ?", p.ID).Update("slug", slug).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
 func (q *Queries) UpdateLLMProvider(ctx context.Context, p LLMProvider) (LLMProvider, error) {
 	// ApiKeyEncrypted is ciphertext: a metadata-only edit round-trips the sealed
 	// value verbatim (a locked read no longer blanks it), and a key change was
