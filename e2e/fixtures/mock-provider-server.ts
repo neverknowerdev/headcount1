@@ -90,6 +90,14 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         received: [] as ReceivedRequest[],
         requestCount: 0,
         scenario: null as ScenarioState | null,
+        // Hold support (used by the auto-update drain/resume test): while active,
+        // every /chat/completions request blocks after being logged and before
+        // responding, until POST /__test/release resolves it. This lets a test
+        // catch an agent run provably mid-turn (blocked on its LLM call) so it
+        // can SIGTERM the server and exercise graceful drain deterministically.
+        holdActive: false,
+        holdWaiters: [] as Array<() => void>,
+        completionsReceived: 0,
     };
 
     const server = http.createServer(async (req, res) => {
@@ -100,6 +108,18 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
 
         if (handleTestRoutes(req, res, body, state)) return;
         if (handleModelsRoute(req, res)) return;
+
+        // Block a chat-completions call while a hold is active. Logged above
+        // first, so /__test/requests reflects that the call arrived even while
+        // it's held.
+        const isCompletions = (req.url?.includes('/chat/completions') ?? false) && req.method === 'POST';
+        if (isCompletions) {
+            state.completionsReceived++;
+            if (state.holdActive) {
+                await new Promise<void>((resolve) => state.holdWaiters.push(resolve));
+            }
+        }
+
         if (handleChatCompletionsRoute(req, res, body, state)) return;
 
         res.writeHead(404, { 'Content-Type': 'application/json' });
@@ -131,21 +151,54 @@ async function parseRequestBody(req: http.IncomingMessage): Promise<unknown> {
     }
 }
 
+interface MockState {
+    received: ReceivedRequest[];
+    requestCount: number;
+    scenario: ScenarioState | null;
+    holdActive: boolean;
+    holdWaiters: Array<() => void>;
+    completionsReceived: number;
+}
+
 function handleTestRoutes(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     body: unknown,
-    state: { received: ReceivedRequest[]; requestCount: number; scenario: ScenarioState | null }
+    state: MockState
 ): boolean {
     if (req.url?.startsWith('/__test/requests') && req.method === 'GET') {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ count: state.requestCount, requests: state.received }));
+        res.end(JSON.stringify({
+            count: state.requestCount,
+            completionsReceived: state.completionsReceived,
+            requests: state.received,
+        }));
+        return true;
+    }
+    // Activate hold: subsequent chat-completions calls block until released.
+    if (req.url === '/__test/hold' && req.method === 'POST') {
+        state.holdActive = true;
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', hold: true }));
+        return true;
+    }
+    // Release: deactivate hold and unblock every currently-waiting call.
+    if (req.url === '/__test/release' && req.method === 'POST') {
+        state.holdActive = false;
+        const waiters = state.holdWaiters.splice(0);
+        for (const resolve of waiters) resolve();
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', released: waiters.length }));
         return true;
     }
     if (req.url === '/__test/reset' && req.method === 'POST') {
         state.received.length = 0;
         state.requestCount = 0;
+        state.completionsReceived = 0;
         state.scenario = null;
+        state.holdActive = false;
+        const waiters = state.holdWaiters.splice(0);
+        for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
         return true;
@@ -181,7 +234,7 @@ function handleChatCompletionsRoute(
     req: http.IncomingMessage,
     res: http.ServerResponse,
     body: unknown,
-    state: { received: ReceivedRequest[]; requestCount: number; scenario: ScenarioState | null }
+    state: MockState
 ): boolean {
     if (!req.url?.includes('/chat/completions') || req.method !== 'POST') {
         return false;

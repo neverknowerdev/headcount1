@@ -49,6 +49,13 @@ var (
 	Branch     = "main"
 )
 
+// runDrainTimeout bounds how long a graceful shutdown waits for active agent
+// runs to reach a pausable turn boundary (see NativeEngine.BeginDrain) before
+// giving up and proceeding anyway. Generous enough to cover a slow LLM
+// response; a run wedged in a long tool call won't fit in this window
+// regardless of size, so there's little value in waiting much longer.
+const runDrainTimeout = 5 * time.Minute
+
 //go:embed all:frontend/dist
 var frontendDist embed.FS
 
@@ -264,6 +271,11 @@ func main() {
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
 
+	// Pick back up any run a previous graceful shutdown (e.g. applying an
+	// auto-update) paused mid-flight — see NativeEngine.BeginDrain. Runs in
+	// the background so a large backlog never delays server startup.
+	go eng.ResumeInterruptedRuns(context.Background())
+
 	// The repo is public, so release lookups/downloads run unauthenticated
 	// (the 60 req/hr anonymous GitHub limit is ample for a 60-minute poll).
 	upd := updater.New(Branch, CommitHash, BuildDate, func() string { return "" })
@@ -436,6 +448,25 @@ func main() {
 
 	<-ctx.Done()
 	log.Println("Shutting down…")
+
+	// Stop accepting new agent runs and let every run still in flight reach
+	// its next safe pause point (right after its current turn's LLM response
+	// arrives) instead of continuing — see NativeEngine.BeginDrain. Paused
+	// runs persist their conversation and resume automatically on the next
+	// boot (ResumeInterruptedRuns, called above). Bounded: a run stuck inside
+	// a long-running or blocking tool call (shell command, ask_human,
+	// delegation, ...) won't reach a turn boundary in time and is abandoned
+	// here — it's recovered the same way any ungraceful crash is, via the
+	// ordinary stale-run cleanup on the next boot.
+	eng.BeginDrain()
+	// Logged AFTER BeginDrain so the line is proof that draining is already in
+	// effect (new runs refused, active runs will pause at their next turn) —
+	// the e2e drain/resume test gates on exactly this ordering.
+	log.Println("Draining active agent runs...")
+	drainCtx, drainCancel := context.WithTimeout(context.Background(), runDrainTimeout)
+	eng.WaitForActiveRuns(drainCtx)
+	drainCancel()
+
 	// Seal the in-memory keyring under the boot key so this planned restart
 	// re-warms without a passkey re-tap. Only written on a graceful exit — an
 	// unexpected crash leaves nothing behind (strict zero-knowledge).
