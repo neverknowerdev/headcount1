@@ -23,13 +23,38 @@ import (
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
+	// tenant is the Hindsight tenant path segment (/v1/<tenant>/...). Each
+	// tenant is an isolated Postgres schema in the backend, so this is the
+	// per-team boundary: the app uses "team-<id>" per team. Empty behaves as
+	// "default" (the base schema) for backward compatibility.
+	tenant string
 }
 
 func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTP:    &http.Client{Timeout: 120 * time.Second},
+		tenant:  "default",
 	}
+}
+
+// WithTenant returns a shallow copy of the client routing to /v1/<tenant>/...
+// (the underlying *http.Client is shared). Cheap and safe to call per request;
+// callers pass the team tenant resolved from the company being addressed.
+func (c *Client) WithTenant(tenant string) *Client {
+	cp := *c
+	if tenant == "" {
+		tenant = "default"
+	}
+	cp.tenant = tenant
+	return &cp
+}
+
+func (c *Client) tenantSeg() string {
+	if c.tenant == "" {
+		return "default"
+	}
+	return c.tenant
 }
 
 // MemoryItem is one unit of content for retain.
@@ -169,8 +194,8 @@ func (c *Client) doRaw(ctx context.Context, method, path string, in interface{})
 	return io.ReadAll(resp.Body)
 }
 
-func bankPath(bankID, suffix string) string {
-	return "/v1/default/banks/" + url.PathEscape(bankID) + suffix
+func (c *Client) bankPath(bankID, suffix string) string {
+	return "/v1/" + url.PathEscape(c.tenantSeg()) + "/banks/" + url.PathEscape(bankID) + suffix
 }
 
 func (c *Client) Health(ctx context.Context) error {
@@ -181,12 +206,12 @@ func (c *Client) Retain(ctx context.Context, bankID string, items []MemoryItem, 
 	if len(items) == 0 {
 		return nil
 	}
-	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/memories"), retainRequest{Items: items, Async: async}, nil)
+	return c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/memories"), retainRequest{Items: items, Async: async}, nil)
 }
 
 func (c *Client) Recall(ctx context.Context, bankID string, req RecallRequest) (RecallResponse, error) {
 	var out RecallResponse
-	err := c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/memories/recall"), req, &out)
+	err := c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/memories/recall"), req, &out)
 	return out, err
 }
 
@@ -201,7 +226,7 @@ func (c *Client) Reflect(ctx context.Context, bankID, query, budget string, tags
 	if len(tags) > 0 {
 		req["tags"] = tags
 	}
-	err := c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/reflect"), req, &out)
+	err := c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/reflect"), req, &out)
 	return out, err
 }
 
@@ -214,82 +239,82 @@ func (c *Client) ListBanks(ctx context.Context) ([]BankInfo, error) {
 	var out struct {
 		Banks []BankInfo `json:"banks"`
 	}
-	err := c.doJSON(ctx, http.MethodGet, "/v1/default/banks", nil, &out)
+	err := c.doJSON(ctx, http.MethodGet, "/v1/"+url.PathEscape(c.tenantSeg())+"/banks", nil, &out)
 	return out.Banks, err
 }
 
 func (c *Client) DeleteBank(ctx context.Context, bankID string) error {
-	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, ""), nil, nil)
+	return c.doJSON(ctx, http.MethodDelete, c.bankPath(bankID, ""), nil, nil)
 }
 
 // CreateBank makes sure the bank row exists. Hindsight creates banks lazily
 // on retain, but PATCH /config is a no-op UPDATE against a missing bank and
 // POST /directives fails its foreign key — so bank setup must start here.
 func (c *Client) CreateBank(ctx context.Context, bankID string) error {
-	return c.doJSON(ctx, http.MethodPut, bankPath(bankID, ""), map[string]interface{}{}, nil)
+	return c.doJSON(ctx, http.MethodPut, c.bankPath(bankID, ""), map[string]interface{}{}, nil)
 }
 
 // UpdateBankConfig applies per-bank configuration overrides (mission,
 // disposition, etc). Keys use Hindsight's Python field names, e.g.
 // "reflect_mission", "disposition_skepticism".
 func (c *Client) UpdateBankConfig(ctx context.Context, bankID string, updates map[string]interface{}) error {
-	return c.doJSON(ctx, http.MethodPatch, bankPath(bankID, "/config"), map[string]interface{}{"updates": updates}, nil)
+	return c.doJSON(ctx, http.MethodPatch, c.bankPath(bankID, "/config"), map[string]interface{}{"updates": updates}, nil)
 }
 
 func (c *Client) GetBankConfigRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/config"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/config"), nil)
 }
 
 // CreateDirective adds a hard rule enforced during reflect (as opposed to
 // disposition, which only softly influences it).
 func (c *Client) CreateDirective(ctx context.Context, bankID, name, content string) error {
-	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/directives"),
+	return c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/directives"),
 		map[string]string{"name": name, "content": content}, nil)
 }
 
 func (c *Client) ListDirectivesRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/directives"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/directives"), nil)
 }
 
 // ListMemoriesRaw proxies GET /memories/list (params: q, type, document_id, limit, offset).
 func (c *Client) ListMemoriesRaw(ctx context.Context, bankID string, params url.Values) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/memories/list")+"?"+params.Encode(), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/memories/list")+"?"+params.Encode(), nil)
 }
 
 func (c *Client) GetMemoryRaw(ctx context.Context, bankID, memoryID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/memories/"+url.PathEscape(memoryID)), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/memories/"+url.PathEscape(memoryID)), nil)
 }
 
 // UpdateMemory curates a memory: patch may contain text, context and/or
 // state ("invalidated" to soft-delete, "active" to restore).
 func (c *Client) UpdateMemory(ctx context.Context, bankID, memoryID string, patch map[string]interface{}) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodPatch, bankPath(bankID, "/memories/"+url.PathEscape(memoryID)), patch)
+	return c.doRaw(ctx, http.MethodPatch, c.bankPath(bankID, "/memories/"+url.PathEscape(memoryID)), patch)
 }
 
 func (c *Client) GraphRaw(ctx context.Context, bankID string, params url.Values) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/graph")+"?"+params.Encode(), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/graph")+"?"+params.Encode(), nil)
 }
 
 func (c *Client) EntitiesGraphRaw(ctx context.Context, bankID string, params url.Values) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/entities/graph")+"?"+params.Encode(), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/entities/graph")+"?"+params.Encode(), nil)
 }
 
 func (c *Client) StatsRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/stats"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/stats"), nil)
 }
 
 func (c *Client) ListDocumentsRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/documents"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/documents"), nil)
 }
 
 func (c *Client) DeleteDocument(ctx context.Context, bankID, documentID string) error {
-	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, "/documents/"+url.PathEscape(documentID)), nil, nil)
+	return c.doJSON(ctx, http.MethodDelete, c.bankPath(bankID, "/documents/"+url.PathEscape(documentID)), nil, nil)
 }
 
 // ExportDocuments downloads the bank's document-transfer ZIP archive
 // (documents, chunks, facts, entities; embeddings are rebuilt on import).
 func (c *Client) ExportDocuments(ctx context.Context, bankID string) ([]byte, error) {
-	resp, err := c.do(ctx, http.MethodGet, bankPath(bankID, "/document-transfer?include_observations=true"), nil, "")
+	resp, err := c.do(ctx, http.MethodGet, c.bankPath(bankID, "/document-transfer?include_observations=true"), nil, "")
 	if err != nil {
 		return nil, err
 	}
@@ -313,7 +338,7 @@ func (c *Client) ImportDocuments(ctx context.Context, bankID string, archive []b
 	}
 	mw.Close()
 	resp, err := c.do(ctx, http.MethodPost,
-		bankPath(bankID, "/document-transfer?on_conflict="+url.QueryEscape(onConflict)),
+		c.bankPath(bankID, "/document-transfer?on_conflict="+url.QueryEscape(onConflict)),
 		&buf, mw.FormDataContentType())
 	if err != nil {
 		return err
@@ -360,52 +385,52 @@ func (c *Client) CreateMentalModel(ctx context.Context, bankID string, req Creat
 	var out struct {
 		MentalModelID string `json:"mental_model_id"`
 	}
-	if err := c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/mental-models"), body, &out); err != nil {
+	if err := c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/mental-models"), body, &out); err != nil {
 		return "", err
 	}
 	return out.MentalModelID, nil
 }
 
 func (c *Client) GetMentalModelRaw(ctx context.Context, bankID, id string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil)
 }
 
 func (c *Client) ListMentalModelsRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/mental-models"), nil)
 }
 
 // CreateMentalModelRaw creates a mental model from an arbitrary user-supplied
 // payload (the Memory UI's "new mental model" form) and returns Hindsight's
 // raw JSON response ({mental_model_id, operation_id}).
 func (c *Client) CreateMentalModelRaw(ctx context.Context, bankID string, body map[string]interface{}) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodPost, bankPath(bankID, "/mental-models"), body)
+	return c.doRaw(ctx, http.MethodPost, c.bankPath(bankID, "/mental-models"), body)
 }
 
 // UpdateMentalModel edits a mental model's name/source_query/tags/max_tokens/
 // trigger. Only fields present in patch are changed.
 func (c *Client) UpdateMentalModel(ctx context.Context, bankID, id string, patch map[string]interface{}) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodPatch, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), patch)
+	return c.doRaw(ctx, http.MethodPatch, c.bankPath(bankID, "/mental-models/"+url.PathEscape(id)), patch)
 }
 
 func (c *Client) RefreshMentalModel(ctx context.Context, bankID, id string) error {
-	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/refresh"), nil, nil)
+	return c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/refresh"), nil, nil)
 }
 
 func (c *Client) DeleteMentalModel(ctx context.Context, bankID, id string) error {
-	return c.doJSON(ctx, http.MethodDelete, bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil, nil)
+	return c.doJSON(ctx, http.MethodDelete, c.bankPath(bankID, "/mental-models/"+url.PathEscape(id)), nil, nil)
 }
 
 // GetMentalModelHistoryRaw returns the model's refresh history — content
 // snapshots over time, the closest thing to "past LLM runs" for a model
 // that the Memory UI can show without a full LLM-trace viewer.
 func (c *Client) GetMentalModelHistoryRaw(ctx context.Context, bankID, id string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/history"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/mental-models/"+url.PathEscape(id)+"/history"), nil)
 }
 
 // ListTagsRaw lists a bank's known tags with usage counts, used by the
 // Memory UI to suggest tags when creating/editing a mental model.
 func (c *Client) ListTagsRaw(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/tags"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/tags"), nil)
 }
 
 // ExportBankTemplate exports a bank's config, mental models and directives
@@ -413,7 +438,7 @@ func (c *Client) ListTagsRaw(ctx context.Context, bankID string) ([]byte, error)
 // this does NOT carry memories — the two exports are complementary and both
 // needed for a lossless bank backup once EnsureBank/mental models are in use.
 func (c *Client) ExportBankTemplate(ctx context.Context, bankID string) ([]byte, error) {
-	return c.doRaw(ctx, http.MethodGet, bankPath(bankID, "/export"), nil)
+	return c.doRaw(ctx, http.MethodGet, c.bankPath(bankID, "/export"), nil)
 }
 
 // ImportBankTemplate applies a previously exported manifest to a bank,
@@ -425,5 +450,5 @@ func (c *Client) ImportBankTemplate(ctx context.Context, bankID string, manifest
 	if err := json.Unmarshal(manifest, &body); err != nil {
 		return fmt.Errorf("invalid bank template manifest: %w", err)
 	}
-	return c.doJSON(ctx, http.MethodPost, bankPath(bankID, "/import"), body, nil)
+	return c.doJSON(ctx, http.MethodPost, c.bankPath(bankID, "/import"), body, nil)
 }

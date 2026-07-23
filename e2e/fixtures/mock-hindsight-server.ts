@@ -91,6 +91,11 @@ export async function startMockHindsightServer(): Promise<{ baseUrl: string; por
     const bankDirectives: BankDirectives = new Map();
     const bankModels: BankMentalModels = new Map();
     const lastRecalls: LastRecalls = new Map();
+    // Records which tenant (the /v1/<tenant>/ path segment — an isolated
+    // Postgres schema in real Hindsight) each bank was created under, so tests
+    // can assert per-team isolation. Bank ids are globally unique (company-<id>),
+    // so state stays keyed by bank; this just remembers the owning tenant.
+    const bankTenants: Map<string, string> = new Map();
 
     const getBank = (bank: string): Memory[] => {
         if (!banks.has(bank)) banks.set(bank, []);
@@ -120,7 +125,7 @@ export async function startMockHindsightServer(): Promise<{ baseUrl: string; por
     const server = http.createServer(async (req, res) => {
         try {
             const rawBody = await readBody(req);
-            handle(req, res, rawBody, banks, getBank, bankConfigs, bankDirectives, getDirectives, bankModels, getModels, refreshModelsAfterRetain, lastRecalls);
+            handle(req, res, rawBody, banks, getBank, bankConfigs, bankDirectives, getDirectives, bankModels, getModels, refreshModelsAfterRetain, lastRecalls, bankTenants);
         } catch (err: any) {
             json(res, 500, { error: err?.message || 'internal error' });
         }
@@ -163,6 +168,7 @@ function handle(
     getModels: (b: string) => Map<string, MentalModel>,
     refreshModelsAfterRetain: (bank: string, tags: string[]) => void,
     lastRecalls: LastRecalls,
+    bankTenants: Map<string, string>,
 ): void {
     const method = req.method || 'GET';
     const u = new URL(req.url || '/', 'http://mock');
@@ -181,7 +187,9 @@ function handle(
         for (const k of banks.keys()) mentalModels[k] = [...getModels(k).values()];
         const lastRecall: Record<string, Record<string, unknown>> = {};
         for (const [k, v] of lastRecalls.entries()) lastRecall[k] = v;
-        return json(res, 200, { banks: dump, configs, directives, mental_models: mentalModels, last_recall: lastRecall });
+        const tenants: Record<string, string> = {};
+        for (const [k, v] of bankTenants.entries()) tenants[k] = v;
+        return json(res, 200, { banks: dump, configs, directives, mental_models: mentalModels, last_recall: lastRecall, tenants });
     }
     if (method === 'POST' && p === '/__admin/reset') {
         banks.clear();
@@ -189,18 +197,28 @@ function handle(
         bankDirectives.clear();
         bankModels.clear();
         lastRecalls.clear();
+        bankTenants.clear();
         return json(res, 200, { status: 'ok' });
     }
 
-    // ── banks list ──────────────────────────────────────────────────────
-    if (method === 'GET' && p === '/v1/default/banks') {
-        return json(res, 200, { banks: [...banks.keys()].map((b) => ({ bank_id: b })) });
+    // ── banks list (tenant-scoped) ──────────────────────────────────────
+    const listMatch = p.match(/^\/v1\/([^/]+)\/banks$/);
+    if (method === 'GET' && listMatch) {
+        const tenant = decodeURIComponent(listMatch[1]);
+        const list = [...banks.keys()]
+            .filter((b) => (bankTenants.get(b) || 'default') === tenant)
+            .map((b) => ({ bank_id: b }));
+        return json(res, 200, { banks: list });
     }
 
-    const m = p.match(/^\/v1\/default\/banks\/([^/]+)(\/.*)?$/);
+    // /v1/<tenant>/banks/<bank>/<rest...> — tenant is a real isolation
+    // dimension in Hindsight; we record it per bank (see bankTenants).
+    const m = p.match(/^\/v1\/([^/]+)\/banks\/([^/]+)(\/.*)?$/);
     if (!m) return json(res, 404, { error: 'not found', path: p });
-    const bank = decodeURIComponent(m[1]);
-    const rest = m[2] || '';
+    const tenant = decodeURIComponent(m[1]);
+    const bank = decodeURIComponent(m[2]);
+    const rest = m[3] || '';
+    if (!bankTenants.has(bank)) bankTenants.set(bank, tenant);
     const body = parseJSON(rawBody);
 
     // ── create bank (hindsight.Client.CreateBank) ───────────────────────

@@ -32,14 +32,20 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	}
 
 	uid := api.currentUserID(r)
+	// Every company must belong to a team (the memory layer's tenant boundary
+	// derives from it). EnsureTeamForUser guarantees a membership at
+	// registration/startup, so this cannot legitimately fail.
+	membership, err := api.requireMembership(r)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "no team membership for user")
+		return
+	}
 	comp := db.Company{
 		Name:      req.Name,
 		ShortName: req.ShortName,
 		Color:     req.Color,
 		UserID:    &uid, // creator (engine resolves their Default Models)
-	}
-	if membership, err := api.requireMembership(r); err == nil {
-		comp.TeamID = &membership.TeamID
+		TeamID:    &membership.TeamID,
 	}
 
 	if err := api.db.Create(&comp).Error; err != nil {

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -69,6 +70,9 @@ type Service struct {
 	// docSyncs serializes SyncProjectDocs per project, so a startup sync and
 	// a repo-update sync of the same project never interleave.
 	docSyncs sync.Map // projectID -> *sync.Mutex
+	// ensuredTenants guards EnsureTenant so per-tenant schema provisioning
+	// runs at most once per tenant per process.
+	ensuredTenants sync.Map // tenant -> struct{}
 }
 
 func NewService(q *db.Queries, client func() *Client) *Service {
@@ -85,7 +89,7 @@ func (s *Service) EnsureBank(ctx context.Context, company db.Company) {
 	if _, done := s.ensuredBanks.LoadOrStore(company.ID, struct{}{}); done {
 		return
 	}
-	c := s.client()
+	c := s.tenantClient(ctx, company)
 	if c == nil {
 		s.ensuredBanks.Delete(company.ID) // retry next call once available
 		return
@@ -154,6 +158,76 @@ func (s *Service) Available() bool {
 // BankID returns the single memory bank for a company.
 func BankID(companyID int32) string { return fmt.Sprintf("company-%d", companyID) }
 
+// TenantID is the Hindsight tenant (an isolated Postgres schema) for a team.
+// Every company's bank lives under its team's tenant, so no two teams' memory
+// can relate — the isolation boundary is the schema, not just the bank.
+func TenantID(teamID int32) string { return fmt.Sprintf("team-%d", teamID) }
+
+// CompanyIDFromBankID parses a "company-<id>" bank id. ok is false for any
+// non-conforming id, so callers can reject foreign/garbage bank ids (used by
+// the memory-endpoint authorization).
+func CompanyIDFromBankID(bankID string) (int32, bool) {
+	s, ok := strings.CutPrefix(bankID, "company-")
+	if !ok {
+		return 0, false
+	}
+	n, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, false
+	}
+	return int32(n), true
+}
+
+// tenantForCompany resolves the tenant a company's memory lives under. Every
+// company must belong to a team (enforced at creation + backfilled at
+// startup); a nil team is a defensive error rather than a silent "default".
+func tenantForCompany(c db.Company) (string, error) {
+	if c.TeamID == nil {
+		return "", fmt.Errorf("company %d has no team; cannot resolve memory tenant", c.ID)
+	}
+	return TenantID(*c.TeamID), nil
+}
+
+// EnsureTenant makes sure a tenant's backing schema is ready, guarded once per
+// tenant per process. hindsight-api (with migrations enabled) provisions a
+// tenant's schema on first write, so the create-bank call in EnsureBank is what
+// materializes it; this guard is the single seam where an explicit
+// `hindsight-admin run-db-migration --schema <tenant>` would be added if a real
+// backend turns out not to create it lazily (see plan R1). No-op for the base
+// "default" tenant.
+func (s *Service) EnsureTenant(ctx context.Context, tenant string) {
+	if tenant == "" || tenant == "default" {
+		return
+	}
+	s.ensuredTenants.LoadOrStore(tenant, struct{}{})
+}
+
+// tenantClient scopes the base client to a company's team tenant, ensuring the
+// tenant once. Returns nil when the backend is unavailable or the company has
+// no resolvable team.
+func (s *Service) tenantClient(ctx context.Context, company db.Company) *Client {
+	c := s.client()
+	if c == nil {
+		return nil
+	}
+	tenant, err := tenantForCompany(company)
+	if err != nil {
+		log.Printf("hindsight: %v", err)
+		return nil
+	}
+	s.EnsureTenant(ctx, tenant)
+	return c.WithTenant(tenant)
+}
+
+// tenantClientByID is tenantClient for call sites that only carry a company id.
+func (s *Service) tenantClientByID(ctx context.Context, companyID int32) *Client {
+	company, err := s.q.GetCompany(ctx, companyID)
+	if err != nil {
+		return nil
+	}
+	return s.tenantClient(ctx, company)
+}
+
 func agentTag(role string) string {
 	return "agent:" + slugify(role)
 }
@@ -210,7 +284,7 @@ var skipDirs = map[string]bool{
 // updates (doc files changed), relying on Hindsight's document_id upsert
 // semantics.
 func (s *Service) SyncProjectDocs(ctx context.Context, company db.Company, project db.Project, repoPath string) (added, updated, removed int, err error) {
-	c := s.client()
+	c := s.tenantClient(ctx, company)
 	if c == nil {
 		return 0, 0, 0, fmt.Errorf("hindsight not available")
 	}
@@ -329,7 +403,7 @@ func (s *Service) SyncProjectDocs(ctx context.Context, company db.Company, proje
 // experience bank: what was attempted, how it ended, and any error. Each run
 // is its own document; tags carry the per-agent and per-conversation levels.
 func (s *Service) RetainRunOutcome(ctx context.Context, company db.Company, task db.Task, run db.Run, status, errMsg string) error {
-	c := s.client()
+	c := s.tenantClient(ctx, company)
 	if c == nil {
 		return nil
 	}
@@ -404,7 +478,7 @@ func (s *Service) RetainRunOutcome(ctx context.Context, company db.Company, task
 // both tagged "project:<id>" and rank fusion naturally favors relevant
 // project content. agentRole optionally narrows to one agent's experience.
 func (s *Service) Recall(ctx context.Context, companyID int32, projectID *int32, agentRole, query string, maxTokens int) ([]RecallResult, error) {
-	c := s.client()
+	c := s.tenantClientByID(ctx, companyID)
 	if c == nil {
 		return nil, fmt.Errorf("hindsight not available")
 	}

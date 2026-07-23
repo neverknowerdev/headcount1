@@ -16,17 +16,62 @@ func ourBank(bankID string) bool {
 	return strings.HasPrefix(bankID, "company-")
 }
 
-// ExportAllToDir dumps every app-owned memory bank as a document-transfer ZIP
-// archive ("<bank>.zip") plus a bank-template manifest ("<bank>.template.json"
-// — config, mental models, directives; document-transfer does not carry
-// these) into dir. Called before a backup archive is built so the memory
-// layer travels inside the regular backup tarball.
+// writeBankExport exports one bank (through the given tenant-scoped client)
+// into dir as "<bank>.zip" (documents) + "<bank>.template.json" (config,
+// mental models, directives — document-transfer does not carry these).
+func writeBankExport(ctx context.Context, tc *Client, dir, bank string) error {
+	data, eerr := tc.ExportDocuments(ctx, bank)
+	if eerr != nil {
+		log.Printf("hindsight: export bank %s failed: %v", bank, eerr)
+		return nil // best-effort per bank
+	}
+	if werr := os.WriteFile(filepath.Join(dir, bank+".zip"), data, 0644); werr != nil {
+		return werr
+	}
+	manifest, terr := tc.ExportBankTemplate(ctx, bank)
+	if terr != nil {
+		log.Printf("hindsight: export bank template %s failed (non-fatal, config/mental-models won't restore): %v", bank, terr)
+		return nil
+	}
+	if werr := os.WriteFile(filepath.Join(dir, bank+".template.json"), manifest, 0644); werr != nil {
+		return werr
+	}
+	return nil
+}
+
+// importBank restores one bank (through the given tenant-scoped client) from
+// the "<srcBank>.zip"/".template.json" files in dir into dstBank. The template
+// is applied first so the bank/config/mental-models exist before documents
+// land; documents replace by id (idempotent). Returns false if no archive for
+// srcBank exists in dir.
+func importBank(ctx context.Context, tc *Client, dir, srcBank, dstBank string) bool {
+	data, rerr := os.ReadFile(filepath.Join(dir, srcBank+".zip"))
+	if rerr != nil {
+		return false
+	}
+	if manifest, merr := os.ReadFile(filepath.Join(dir, srcBank+".template.json")); merr == nil {
+		if ierr := tc.ImportBankTemplate(ctx, dstBank, manifest); ierr != nil {
+			log.Printf("hindsight: import bank template %s failed (non-fatal): %v", dstBank, ierr)
+		}
+	}
+	if ierr := tc.ImportDocuments(ctx, dstBank, data, "replace"); ierr != nil {
+		log.Printf("hindsight: import bank %s failed: %v", dstBank, ierr)
+	}
+	return true
+}
+
+// ExportAllToDir dumps every app-owned memory bank (across all teams) into dir
+// for the operator's whole-instance backup. Each company's bank lives in its
+// team's tenant now, so this iterates the app's companies and routes each
+// export through that company's team tenant — a plain ListBanks would only see
+// the empty "default" tenant. Files are flat ("company-<id>.zip"): company ids
+// are globally unique, and import re-derives the tenant from the DB.
 func (s *Service) ExportAllToDir(ctx context.Context, dir string) error {
 	c := s.client()
 	if c == nil {
 		return nil // memory disabled/unreachable — nothing to export
 	}
-	banks, err := c.ListBanks(ctx)
+	companies, err := s.q.ListCompanies(ctx)
 	if err != nil {
 		return err
 	}
@@ -41,37 +86,23 @@ func (s *Service) ExportAllToDir(ctx context.Context, dir string) error {
 			}
 		}
 	}
-	for _, b := range banks {
-		if !ourBank(b.BankID) {
+	for _, comp := range companies {
+		if comp.TeamID == nil {
 			continue
 		}
-		data, eerr := c.ExportDocuments(ctx, b.BankID)
-		if eerr != nil {
-			log.Printf("hindsight: export bank %s failed: %v", b.BankID, eerr)
-			continue
-		}
-		if werr := os.WriteFile(filepath.Join(dir, b.BankID+".zip"), data, 0644); werr != nil {
-			return werr
-		}
-		manifest, terr := c.ExportBankTemplate(ctx, b.BankID)
-		if terr != nil {
-			log.Printf("hindsight: export bank template %s failed (non-fatal, config/mental-models won't restore): %v", b.BankID, terr)
-			continue
-		}
-		if werr := os.WriteFile(filepath.Join(dir, b.BankID+".template.json"), manifest, 0644); werr != nil {
+		tc := c.WithTenant(TenantID(*comp.TeamID))
+		if werr := writeBankExport(ctx, tc, dir, BankID(comp.ID)); werr != nil {
 			return werr
 		}
 	}
 	return nil
 }
 
-// ImportAllFromDir restores every "<bank>.zip" transfer archive found in dir
-// into its bank, replacing documents that share ids, then applies the
-// matching "<bank>.template.json" manifest (config, mental models,
-// directives) if present. The manifest is imported first so the bank and its
-// config exist before documents land — mental models then refresh
-// themselves once retained memories consolidate. Called after a backup
-// archive was extracted.
+// ImportAllFromDir restores every "company-<id>.zip" transfer archive found in
+// dir into its bank, routing each through the tenant of the company's current
+// team (looked up in the app DB), then applies the matching template manifest.
+// Called after a whole-instance backup archive was extracted (IDs preserved,
+// so each archived company still maps to the same team/tenant).
 func (s *Service) ImportAllFromDir(ctx context.Context, dir string) error {
 	c := s.client()
 	if c == nil {
@@ -89,24 +120,57 @@ func (s *Service) ImportAllFromDir(ctx context.Context, dir string) error {
 			continue
 		}
 		bankID := strings.TrimSuffix(e.Name(), ".zip")
-		if !ourBank(bankID) {
+		cid, ok := CompanyIDFromBankID(bankID)
+		if !ok {
 			continue
 		}
-
-		if manifest, rerr := os.ReadFile(filepath.Join(dir, bankID+".template.json")); rerr == nil {
-			if ierr := c.ImportBankTemplate(ctx, bankID, manifest); ierr != nil {
-				log.Printf("hindsight: import bank template %s failed (non-fatal): %v", bankID, ierr)
-			}
-		}
-
-		data, rerr := os.ReadFile(filepath.Join(dir, e.Name()))
-		if rerr != nil {
-			log.Printf("hindsight: read archive %s failed: %v", e.Name(), rerr)
+		comp, cerr := s.q.GetCompany(ctx, cid)
+		if cerr != nil || comp.TeamID == nil {
+			log.Printf("hindsight: skip import of %s: no company/team in DB", bankID)
 			continue
 		}
-		if ierr := c.ImportDocuments(ctx, bankID, data, "replace"); ierr != nil {
-			log.Printf("hindsight: import bank %s failed: %v", bankID, ierr)
+		tenant := TenantID(*comp.TeamID)
+		s.EnsureTenant(ctx, tenant)
+		importBank(ctx, c.WithTenant(tenant), dir, bankID, bankID)
+	}
+	return nil
+}
+
+// ExportTeamBanksToDir exports the given companies' banks (under the team's
+// tenant) into dir, for inclusion in a per-tenant data export. companyIDs must
+// all belong to teamID.
+func (s *Service) ExportTeamBanksToDir(ctx context.Context, dir string, teamID int32, companyIDs []int32) error {
+	c := s.client()
+	if c == nil {
+		return nil
+	}
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return err
+	}
+	tc := c.WithTenant(TenantID(teamID))
+	for _, cid := range companyIDs {
+		if werr := writeBankExport(ctx, tc, dir, BankID(cid)); werr != nil {
+			return werr
 		}
+	}
+	return nil
+}
+
+// ImportTeamBanksFromDir imports memory for a set of companies remapped onto a
+// destination team's tenant. remap maps each archived (source) company id to
+// the new company id in this database, so a bank archived as "company-<old>"
+// is restored as "company-<new>" under team-<dstTeamID> — bridging the
+// company-id remapping the tenant importer performs.
+func (s *Service) ImportTeamBanksFromDir(ctx context.Context, dir string, dstTeamID int32, remap map[int32]int32) error {
+	c := s.client()
+	if c == nil {
+		return nil
+	}
+	tenant := TenantID(dstTeamID)
+	s.EnsureTenant(ctx, tenant)
+	tc := c.WithTenant(tenant)
+	for oldID, newID := range remap {
+		importBank(ctx, tc, dir, BankID(oldID), BankID(newID))
 	}
 	return nil
 }

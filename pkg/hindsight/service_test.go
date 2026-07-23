@@ -15,7 +15,7 @@ import (
 	"gorm.io/gorm"
 )
 
-func testDB(t *testing.T) *db.Queries {
+func testDBAndGorm(t *testing.T) (*db.Queries, *gorm.DB) {
 	t.Helper()
 	gdb, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	if err != nil {
@@ -24,7 +24,28 @@ func testDB(t *testing.T) *db.Queries {
 	if err := gdb.AutoMigrate(&db.Company{}, &db.Project{}, &db.HindsightDocument{}); err != nil {
 		t.Fatalf("automigrate: %v", err)
 	}
-	return db.New(gdb)
+	return db.New(gdb), gdb
+}
+
+func testDB(t *testing.T) *db.Queries {
+	q, _ := testDBAndGorm(t)
+	return q
+}
+
+// testTeamID is the fixed team every test company belongs to; the Service
+// resolves the memory tenant ("team-1") from it. Exposed as a var so tests can
+// take its address for Company.TeamID.
+var testTeamID = int32(1)
+
+// persistCompany inserts a team-owned company so companyID-only Service paths
+// (Recall, FetchModelContent) can resolve its tenant via GetCompany.
+func persistCompany(t *testing.T, gdb *gorm.DB, id int32, name string) db.Company {
+	t.Helper()
+	c := db.Company{ID: id, Name: name, TeamID: &testTeamID}
+	if err := gdb.Create(&c).Error; err != nil {
+		t.Fatalf("persist company: %v", err)
+	}
+	return c
 }
 
 // recordingStub captures every request body so tests can assert on exactly
@@ -50,8 +71,12 @@ func (s *recordingStub) server() *httptest.Server {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/v1/default/banks/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/v1/default/banks/")
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		// /v1/<tenant>/banks/<bank>/<rest...> — tenant-agnostic so tests
+		// exercise the real team tenant the Service now routes to.
+		afterV1 := strings.TrimPrefix(r.URL.Path, "/v1/")
+		_, afterTenant, _ := strings.Cut(afterV1, "/") // "banks/<bank>/<rest>"
+		path := strings.TrimPrefix(afterTenant, "banks/")
 		bank, rest, _ := strings.Cut(path, "/")
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -100,7 +125,7 @@ func TestEnsureBankSetsMissionDispositionAndDirectivesOnce(t *testing.T) {
 
 	q := testDB(t)
 	svc := NewService(q, func() *Client { return NewClient(srv.URL) })
-	company := db.Company{ID: 7, Name: "Acme"}
+	company := db.Company{ID: 7, Name: "Acme", TeamID: &testTeamID}
 
 	svc.EnsureBank(context.Background(), company)
 
@@ -153,7 +178,7 @@ func TestEnsureBankIsIdempotentAcrossProcessRestarts(t *testing.T) {
 	defer srv.Close()
 
 	q := testDB(t)
-	company := db.Company{ID: 3, Name: "Acme"}
+	company := db.Company{ID: 3, Name: "Acme", TeamID: &testTeamID}
 
 	// First "process": directives get created.
 	svc1 := NewService(q, func() *Client { return NewClient(srv.URL) })
@@ -178,7 +203,8 @@ func TestRecallRequestsObservationsAndPrefersThem(t *testing.T) {
 	srv := stub.server()
 	defer srv.Close()
 
-	q := testDB(t)
+	q, gdb := testDBAndGorm(t)
+	persistCompany(t, gdb, 1, "Acme") // Recall resolves the tenant via GetCompany
 	svc := NewService(q, func() *Client { return NewClient(srv.URL) })
 
 	if _, err := svc.Recall(context.Background(), 1, nil, "", "what happened", 0); err != nil {

@@ -41,6 +41,25 @@ func (api *API) memoryClientOr503(w http.ResponseWriter) *hindsight.Client {
 	return memoryManager.Client()
 }
 
+// memoryTenantClientOr returns the memory client scoped to the tenant of the
+// company that owns the addressed bank. LoadMemoryBank (mounted on the
+// /banks/{bankID} routes) has already authorized the caller against that
+// company and stashed it in context, so the tenant is derived from it — a
+// caller can never reach another team's tenant. Writes a 503/404 and returns
+// nil when the backend is down or the company has no team.
+func (api *API) memoryTenantClientOr(w http.ResponseWriter, r *http.Request) *hindsight.Client {
+	c := api.memoryClientOr503(w)
+	if c == nil {
+		return nil
+	}
+	comp := api.companyFromCtx(r)
+	if comp.TeamID == nil {
+		api.respondError(w, http.StatusNotFound, "bank not found")
+		return nil
+	}
+	return c.WithTenant(hindsight.TenantID(*comp.TeamID))
+}
+
 // memoryErrorStatus maps an upstream Hindsight error to the status we serve:
 // 4xx pass through (404 stays a 404, 422 a 422 — the frontend relies on
 // this to distinguish "not there yet" from "backend broken"); everything
@@ -96,8 +115,10 @@ func (api *API) ListMemoryBanks(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
 		return
 	}
-	var comp db.Company
-	if err := api.db.First(&comp, compID).Error; err != nil {
+	// Only a member of the company's team may list its bank (404-hides
+	// foreign/nonexistent companies alike).
+	comp, err := api.authorizeCompany(r, int32(compID))
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
@@ -110,7 +131,7 @@ func (api *API) ListMemoryBanks(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -126,7 +147,7 @@ func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetMemoryEntitiesGraph(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -139,7 +160,7 @@ func (api *API) GetMemoryEntitiesGraph(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) ListMemoryUnits(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -154,7 +175,7 @@ func (api *API) ListMemoryUnits(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetMemoryUnit(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -170,7 +191,7 @@ var memoryPatchKeys = map[string]bool{"text": true, "context": true, "state": tr
 // to soft-delete, "active" to restore). Body: {"text": ..., "context": ...,
 // "state": ..., "reason": ...} — any subset, at least one key.
 func (api *API) UpdateMemoryUnit(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -192,7 +213,7 @@ func (api *API) UpdateMemoryUnit(w http.ResponseWriter, r *http.Request) {
 // DeleteMemoryUnit soft-deletes a memory (Hindsight curation: invalidate —
 // excluded from recall/consolidation but kept for audit and reversible).
 func (api *API) DeleteMemoryUnit(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -203,7 +224,7 @@ func (api *API) DeleteMemoryUnit(w http.ResponseWriter, r *http.Request) {
 
 // RecallMemory queries one bank. Body: {"query": "...", "budget": "mid"}
 func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -237,7 +258,7 @@ func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
 // AskMemory runs a reflect (LLM-reasoned answer) against one bank.
 // Body: {"query": "..."}
 func (api *API) AskMemory(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -258,7 +279,7 @@ func (api *API) AskMemory(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetMemoryStats(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -270,7 +291,7 @@ func (api *API) GetMemoryStats(w http.ResponseWriter, r *http.Request) {
 // disposition, directives applied by Service.EnsureBank) for display/debug
 // in the Memory UI.
 func (api *API) GetMemoryBankConfig(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -280,7 +301,7 @@ func (api *API) GetMemoryBankConfig(w http.ResponseWriter, r *http.Request) {
 
 // ListMemoryDirectives exposes the bank's active directives for display/debug.
 func (api *API) ListMemoryDirectives(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -291,7 +312,7 @@ func (api *API) ListMemoryDirectives(w http.ResponseWriter, r *http.Request) {
 // ListMentalModels lists the bank's mental models (name, source query,
 // last-refreshed time) for the Memory UI's Insights tab.
 func (api *API) ListMentalModels(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -300,7 +321,7 @@ func (api *API) ListMentalModels(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetMentalModel(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -309,7 +330,7 @@ func (api *API) GetMentalModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) RefreshMentalModel(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -321,7 +342,7 @@ func (api *API) RefreshMentalModel(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -337,7 +358,7 @@ func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
 // lowercase alphanumeric with hyphens if provided (Hindsight's constraint);
 // omitting it lets Hindsight assign one.
 func (api *API) CreateMentalModel(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -361,7 +382,7 @@ func (api *API) CreateMentalModel(w http.ResponseWriter, r *http.Request) {
 // UpdateMentalModel edits an existing mental model's name/source_query/tags/
 // max_tokens/trigger. Only fields present in the request body are changed.
 func (api *API) UpdateMentalModel(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -378,7 +399,7 @@ func (api *API) UpdateMentalModel(w http.ResponseWriter, r *http.Request) {
 // snapshots over time — the closest available proxy for "past LLM runs"
 // without a dedicated LLM-trace viewer.
 func (api *API) GetMentalModelHistory(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -390,7 +411,7 @@ func (api *API) GetMentalModelHistory(w http.ResponseWriter, r *http.Request) {
 // Memory UI can suggest existing tags (plus the dynamic agent:/project:
 // suggestions it computes client-side) when creating or editing a model.
 func (api *API) ListMemoryTags(w http.ResponseWriter, r *http.Request) {
-	c := api.memoryClientOr503(w)
+	c := api.memoryTenantClientOr(w, r)
 	if c == nil {
 		return
 	}
@@ -466,13 +487,14 @@ func (api *API) SyncProjectMemory(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid id")
 		return
 	}
-	project, err := api.q.GetProject(r.Context(), int32(id))
+	// Only a member of the project's company/team may trigger a re-sync.
+	project, err := api.authorizeProject(r, int32(id))
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "project not found")
 		return
 	}
-	var comp db.Company
-	if err := api.db.First(&comp, project.CompanyID).Error; err != nil {
+	comp, err := api.authorizeCompany(r, project.CompanyID)
+	if err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}

@@ -29,8 +29,11 @@ func (s *modelStub) server() *httptest.Server {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/v1/default/banks/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/v1/default/banks/")
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		// /v1/<tenant>/banks/<bank>/<rest...> — tenant-agnostic.
+		afterV1 := strings.TrimPrefix(r.URL.Path, "/v1/")
+		_, afterTenant, _ := strings.Cut(afterV1, "/")
+		path := strings.TrimPrefix(afterTenant, "banks/")
 		bank, rest, _ := strings.Cut(path, "/")
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -78,9 +81,9 @@ func TestEnsureProjectStateModelCreatesOnceAndFetchesContent(t *testing.T) {
 	srv := stub.server()
 	defer srv.Close()
 
-	q := testDB(t)
+	q, gdb := testDBAndGorm(t)
+	company := persistCompany(t, gdb, 1, "Acme") // FetchModelContent resolves the tenant via GetCompany
 	svc := NewService(q, func() *Client { return NewClient(srv.URL) })
-	company := db.Company{ID: 1, Name: "Acme"}
 	project := db.Project{ID: 42, Name: "Widgets"}
 
 	svc.EnsureProjectStateModel(context.Background(), company, project)
@@ -126,7 +129,7 @@ func TestEnsureAgentPlaybookAndOpenBlockersModelIDs(t *testing.T) {
 
 	q := testDB(t)
 	svc := NewService(q, func() *Client { return NewClient(srv.URL) })
-	company := db.Company{ID: 9, Name: "Acme"}
+	company := db.Company{ID: 9, Name: "Acme", TeamID: &testTeamID}
 
 	svc.EnsureAgentPlaybookModel(context.Background(), company, "CTO")
 	svc.EnsureOpenBlockersModel(context.Background(), company)

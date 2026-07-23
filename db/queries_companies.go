@@ -30,3 +30,25 @@ func (q *Queries) GetCompany(ctx context.Context, id int32) (Company, error) {
 	err := q.db.WithContext(ctx).First(&c, id).Error
 	return c, err
 }
+
+// BackfillCompanyTeams assigns a team to any legacy company that predates the
+// "every company belongs to a team" invariant: team_id is set from the
+// creator's (user_id) team membership. The memory layer's tenant is derived
+// from a company's team, so a null team_id would leave its memory untenanted.
+// Idempotent — only touches rows where team_id IS NULL.
+func (q *Queries) BackfillCompanyTeams(ctx context.Context) error {
+	var comps []Company
+	if err := q.db.WithContext(ctx).Where("team_id IS NULL AND user_id IS NOT NULL").Find(&comps).Error; err != nil {
+		return err
+	}
+	for _, c := range comps {
+		m, err := q.GetTeamMembership(ctx, *c.UserID)
+		if err != nil {
+			continue // creator has no membership (unexpected after EnsureTeamForUser) — skip
+		}
+		if err := q.db.WithContext(ctx).Model(&Company{}).Where("id = ?", c.ID).Update("team_id", m.TeamID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}

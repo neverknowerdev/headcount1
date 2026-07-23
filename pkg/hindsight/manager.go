@@ -325,8 +325,14 @@ func (m *Manager) buildEnv(ctx context.Context, schema string) []string {
 		"HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API=true",
 		// Stable worker id so background jobs survive restarts.
 		"HINDSIGHT_API_WORKER_ID=paperclip2",
-		// Storage schema — see resolveSchema/fallbackSchemaName. Appended
-		// last so it wins over any inherited value.
+		// Run migrations on startup so the base schema AND every already-created
+		// per-team tenant schema (/v1/team-<id>/) are migrated/kept current. New
+		// tenants materialize on first write (see Service.EnsureTenant).
+		"HINDSIGHT_API_RUN_MIGRATIONS_ON_STARTUP=true",
+		// Base ("default" tenant) storage schema — see resolveSchema/
+		// fallbackSchemaName. This governs only the base schema now; each team's
+		// memory lives in its own tenant schema selected by the request path.
+		// Appended last so it wins over any inherited value.
 		"HINDSIGHT_API_DATABASE_SCHEMA="+schema,
 	)
 	if runtime.GOOS == "darwin" {

@@ -308,6 +308,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/status", api.GetMemoryStatus)
 		r.Get("/banks", api.ListMemoryBanks)
 		r.Route("/banks/{bankID}", func(r chi.Router) {
+			r.Use(api.LoadMemoryBank) // team-membership authz + stashes the company
 			r.Get("/graph", api.GetMemoryGraph)
 			r.Get("/entities-graph", api.GetMemoryEntitiesGraph)
 			r.Get("/memories", api.ListMemoryUnits)

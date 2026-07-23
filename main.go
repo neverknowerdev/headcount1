@@ -201,6 +201,13 @@ func main() {
 		log.Printf("Warning: provider slug backfill: %v", err)
 	}
 
+	// Every company must belong to a team so its memory can live in a
+	// per-team Hindsight tenant. Backfill any legacy team-less rows from
+	// their creator's team (runs after the EnsureTeamForUser loop above).
+	if err := db.New(database).BackfillCompanyTeams(context.Background()); err != nil {
+		log.Printf("Warning: company team backfill: %v", err)
+	}
+
 	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
 	// keys derived from each user's passkey, held only in memory while they're
 	// signed in; the app decrypts only at the point of use.
@@ -300,6 +307,16 @@ func main() {
 		if err := memService.ImportAllFromDir(context.Background(), dir); err != nil {
 			log.Printf("Warning: memory import after restore failed: %v", err)
 		}
+	}
+
+	// Per-tenant (per-team) export/import carries each team's memory inside the
+	// user-facing /data archive, routed to that team's isolated Hindsight
+	// tenant. Import remaps company ids, so memory is restored under the new ids.
+	backup.MemoryExportHook = func(ctx context.Context, dir string, srcTeamID int32, companyIDs []int32) error {
+		return memService.ExportTeamBanksToDir(ctx, dir, srcTeamID, companyIDs)
+	}
+	backup.MemoryImportHook = func(ctx context.Context, dir string, dstTeamID int32, remap map[int32]int32) error {
+		return memService.ImportTeamBanksFromDir(ctx, dir, dstTeamID, remap)
 	}
 
 	// After a schema fallback (the previous schema was migrated by an

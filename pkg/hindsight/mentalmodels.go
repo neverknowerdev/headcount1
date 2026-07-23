@@ -46,14 +46,14 @@ func (s *Service) ensureModelOnce(bank, modelID string, create func()) {
 // current implementation state, decisions and blockers, scoped to that
 // project's tag so it draws on both its docs and its run experience.
 func (s *Service) EnsureProjectStateModel(ctx context.Context, company db.Company, project db.Project) {
-	c := s.client()
+	c := s.tenantClient(ctx, company)
 	if c == nil {
 		return
 	}
 	bank := BankID(company.ID)
 	modelID := projectStateModelID(project.ID)
 	s.ensureModelOnce(bank, modelID, func() {
-		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
+		s.createMentalModelIfMissing(ctx, c, bank, CreateMentalModelRequest{
 			ID:   modelID,
 			Name: fmt.Sprintf("Project state: %s", project.Name),
 			SourceQuery: "What is the current implementation state of this project? Cover: what is implemented " +
@@ -70,14 +70,17 @@ func (s *Service) EnsureProjectStateModel(ctx context.Context, company db.Compan
 // working approaches and recurring mistakes, so an agent stops repeating
 // known failure modes across unrelated tasks.
 func (s *Service) EnsureAgentPlaybookModel(ctx context.Context, company db.Company, role string) {
-	c := s.client()
-	if c == nil || role == "" {
+	if role == "" {
+		return
+	}
+	c := s.tenantClient(ctx, company)
+	if c == nil {
 		return
 	}
 	bank := BankID(company.ID)
 	modelID := agentPlaybookModelID(role)
 	s.ensureModelOnce(bank, modelID, func() {
-		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
+		s.createMentalModelIfMissing(ctx, c, bank, CreateMentalModelRequest{
 			ID:   modelID,
 			Name: fmt.Sprintf("Playbook: %s", role),
 			SourceQuery: "What working approaches, recurring mistakes, and lessons has this agent accumulated " +
@@ -93,13 +96,13 @@ func (s *Service) EnsureAgentPlaybookModel(ctx context.Context, company db.Compa
 // unresolved blockers and recurring failures, useful for orchestration
 // sessions that need to see systemic problems no single task reveals.
 func (s *Service) EnsureOpenBlockersModel(ctx context.Context, company db.Company) {
-	c := s.client()
+	c := s.tenantClient(ctx, company)
 	if c == nil {
 		return
 	}
 	bank := BankID(company.ID)
 	s.ensureModelOnce(bank, openBlockersModelID, func() {
-		s.createMentalModelIfMissing(ctx, bank, CreateMentalModelRequest{
+		s.createMentalModelIfMissing(ctx, c, bank, CreateMentalModelRequest{
 			ID:   openBlockersModelID,
 			Name: "Open blockers",
 			SourceQuery: "What unresolved blockers, failed attempts and recurring errors currently exist across " +
@@ -113,8 +116,7 @@ func (s *Service) EnsureOpenBlockersModel(ctx context.Context, company db.Compan
 // createMentalModelIfMissing avoids duplicate-creation errors across process
 // restarts (the in-process ensuredModels guard only covers one process
 // lifetime): it first checks whether the model already exists server-side.
-func (s *Service) createMentalModelIfMissing(ctx context.Context, bank string, req CreateMentalModelRequest) {
-	c := s.client()
+func (s *Service) createMentalModelIfMissing(ctx context.Context, c *Client, bank string, req CreateMentalModelRequest) {
 	if c == nil { // backend went away between the caller's check and now
 		s.ensuredModels.Delete(bank + "/" + req.ID)
 		return
@@ -133,7 +135,7 @@ func (s *Service) createMentalModelIfMissing(ctx context.Context, bank string, r
 // the model doesn't exist yet, hasn't finished its first generation, or the
 // request fails; callers should simply skip that briefing section.
 func (s *Service) FetchModelContent(ctx context.Context, companyID int32, modelID string) (string, bool) {
-	c := s.client()
+	c := s.tenantClientByID(ctx, companyID)
 	if c == nil {
 		return "", false
 	}

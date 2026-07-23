@@ -27,8 +27,11 @@ func (s *docStub) server() *httptest.Server {
 	mux.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`{"status":"ok"}`))
 	})
-	mux.HandleFunc("/v1/default/banks/", func(w http.ResponseWriter, r *http.Request) {
-		path := strings.TrimPrefix(r.URL.Path, "/v1/default/banks/")
+	mux.HandleFunc("/v1/", func(w http.ResponseWriter, r *http.Request) {
+		// /v1/<tenant>/banks/<bank>/<rest...> — tenant-agnostic.
+		afterV1 := strings.TrimPrefix(r.URL.Path, "/v1/")
+		_, afterTenant, _ := strings.Cut(afterV1, "/")
+		path := strings.TrimPrefix(afterTenant, "banks/")
 		_, rest, _ := strings.Cut(path, "/")
 		s.mu.Lock()
 		defer s.mu.Unlock()
@@ -79,7 +82,7 @@ func newSyncFixture(t *testing.T) (*Service, *docStub, db.Company, db.Project, s
 
 	q := testDB(t)
 	svc := NewService(q, func() *Client { return NewClient(srv.URL) })
-	company := db.Company{ID: 1, Name: "Acme"}
+	company := db.Company{ID: 1, Name: "Acme", TeamID: &testTeamID}
 	project := db.Project{ID: 5, Name: "Widgets"}
 	repo := t.TempDir()
 	return svc, stub, company, project, repo
@@ -224,7 +227,7 @@ func TestResetEnsuredReappliesBankConfig(t *testing.T) {
 	defer srv.Close()
 
 	svc := NewService(testDB(t), func() *Client { return NewClient(srv.URL) })
-	company := db.Company{ID: 1, Name: "Acme"}
+	company := db.Company{ID: 1, Name: "Acme", TeamID: &testTeamID}
 
 	svc.EnsureBank(context.Background(), company)
 	bank := BankID(company.ID)
