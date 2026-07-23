@@ -4,13 +4,13 @@ import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
-interface UpdateStatus {
-    current: { branch: string; commit_hash: string; build_date: string };
-    latest?: { branch: string; commit_hash: string; build_date: string };
-    update_available: boolean;
-    last_checked?: string;
-    checking: boolean;
-    error?: string;
+interface DeployStatus {
+    environment: 'production' | 'staging';
+    deploy_source: 'releases' | 'main';
+    auto_deploy: boolean;
+    current?: { branch: string; commit_hash: string; build_date: string };
+    deploying?: boolean;
+    last_error?: string;
 }
 
 export const Settings: React.FC = () => {
@@ -31,18 +31,14 @@ export const Settings: React.FC = () => {
     }, [selectedCompanyId, companies]);
 
     const [basePath, setBasePath] = useState('');
-    const [updateBranch, setUpdateBranch] = useState('main');
-    const [autoUpdate, setAutoUpdate] = useState(false);
-    const [updateCheckIntervalMins, setUpdateCheckIntervalMins] = useState(60);
+    const [deploySource, setDeploySource] = useState<'releases' | 'main'>('releases');
+    const [autoDeploy, setAutoDeploy] = useState(true);
     const [saving, setSaving] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
     const sshFileInputRef = useRef<HTMLInputElement>(null);
 
-    const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
-    const [checking, setChecking] = useState(false);
-    const [applying, setApplying] = useState(false);
-    const [updateMsg, setUpdateMsg] = useState('');
+    const [deployStatus, setDeployStatus] = useState<DeployStatus | null>(null);
 
     useEffect(() => {
         const fetchSettings = async () => {
@@ -50,9 +46,8 @@ export const Settings: React.FC = () => {
                 const res = await axios.get('/api/settings');
                 if (res.data) {
                     setBasePath(res.data.base_path || '');
-                    setUpdateBranch(res.data.update_branch || 'main');
-                    setAutoUpdate(res.data.auto_update || false);
-                    setUpdateCheckIntervalMins(res.data.update_check_interval_mins || 60);
+                    setDeploySource(res.data.deploy_source === 'main' ? 'main' : 'releases');
+                    setAutoDeploy(res.data.auto_deploy !== false);
                 }
             } catch (e) {
                 console.error(e);
@@ -61,51 +56,18 @@ export const Settings: React.FC = () => {
         fetchSettings();
     }, []);
 
-    const fetchUpdateStatus = useCallback(async () => {
+    const fetchDeployStatus = useCallback(async () => {
         try {
-            const res = await axios.get('/api/updates/status');
-            setUpdateStatus(res.data);
+            const res = await axios.get('/api/deploy/status');
+            setDeployStatus(res.data);
         } catch (e) {
             console.error(e);
         }
     }, []);
 
     useEffect(() => {
-        fetchUpdateStatus();
-    }, [fetchUpdateStatus]);
-
-    const handleCheckUpdate = async () => {
-        setChecking(true);
-        setUpdateMsg('');
-        try {
-            const res = await axios.post('/api/updates/check');
-            setUpdateStatus(res.data);
-            if (res.data.error) {
-                setUpdateMsg('Error: ' + res.data.error);
-            } else if (res.data.update_available) {
-                setUpdateMsg('Update available!');
-            } else {
-                setUpdateMsg('You are on the latest version.');
-            }
-        } catch (e: any) {
-            setUpdateMsg('Check failed: ' + (e.response?.data || e.message));
-        } finally {
-            setChecking(false);
-        }
-    };
-
-    const handleApplyUpdate = async () => {
-        if (!window.confirm('Apply update and restart the server?')) return;
-        setApplying(true);
-        setUpdateMsg('');
-        try {
-            await axios.post('/api/updates/apply');
-            setUpdateMsg('Update applied — server is restarting. Refresh in a moment.');
-        } catch (e: any) {
-            setUpdateMsg('Apply failed: ' + (e.response?.data || e.message));
-            setApplying(false);
-        }
-    };
+        fetchDeployStatus();
+    }, [fetchDeployStatus]);
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
@@ -117,16 +79,15 @@ export const Settings: React.FC = () => {
                 setSshKey('');
             }
 
-            // The workspace root and auto-update config are instance-global
+            // The workspace root and deploy config are instance-global
             // (operator-managed). Saving them is only possible when the operator
             // has enabled the global admin API; a 404 there is expected for
             // regular users, so don't fail the save.
             try {
                 await axios.post('/api/settings', {
                     base_path: basePath,
-                    update_branch: updateBranch,
-                    auto_update: autoUpdate,
-                    update_check_interval_mins: updateCheckIntervalMins,
+                    deploy_source: deploySource,
+                    auto_deploy: autoDeploy,
                 });
             } catch (err: any) {
                 if (err?.response?.status !== 404) throw err;
@@ -285,106 +246,66 @@ export const Settings: React.FC = () => {
             </div>
 
             <div className="bg-white p-6 rounded-lg shadow-sm border mt-8">
-                <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Auto-Update</h2>
+                <div className="flex items-center justify-between border-b pb-2 mb-4">
+                    <h2 className="text-lg font-medium text-gray-900">Deployment</h2>
+                    {deployStatus && (
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${deployStatus.environment === 'production' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                            {deployStatus.environment}
+                        </span>
+                    )}
+                </div>
 
-                {updateStatus && (
+                {deployStatus?.current && (
                     <div className="mb-4 text-sm text-gray-600 space-y-1">
                         <div>
-                            <span className="font-medium">Current version:</span>{' '}
+                            <span className="font-medium">Running version:</span>{' '}
                             <code className="bg-gray-100 px-1 rounded">
-                                {updateStatus.current.branch}+{updateStatus.current.build_date}+{updateStatus.current.commit_hash}
+                                {deployStatus.current.branch}+{deployStatus.current.build_date}+{deployStatus.current.commit_hash}
                             </code>
                         </div>
-                        {updateStatus.latest && (
-                            <div>
-                                <span className="font-medium">Latest available:</span>{' '}
-                                <code className="bg-gray-100 px-1 rounded">
-                                    {updateStatus.latest.branch}+{updateStatus.latest.build_date}+{updateStatus.latest.commit_hash}
-                                </code>
-                            </div>
+                        {deployStatus.deploying && (
+                            <div className="text-xs text-indigo-600">A deploy is in progress — the server will restart shortly.</div>
                         )}
-                        {updateStatus.last_checked && (
-                            <div className="text-xs text-gray-400">
-                                Last checked: {new Date(updateStatus.last_checked).toLocaleString()}
-                            </div>
+                        {deployStatus.last_error && (
+                            <div className="text-xs text-red-600">Last deploy error: {deployStatus.last_error}</div>
                         )}
                     </div>
                 )}
 
-                <div className="space-y-4">
-                    <div className="flex gap-4">
-                        <div className="flex-1">
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Tracked Branch
-                            </label>
-                            <p className="text-xs text-gray-500 mb-2">
-                                Branch to watch for updates. Must have a GitHub release published by CI.
-                            </p>
-                            <input
-                                type="text"
-                                value={updateBranch}
-                                onChange={e => setUpdateBranch(e.target.value)}
-                                className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                                placeholder="main"
-                            />
-                        </div>
+                <p className="text-xs text-gray-500 mb-4">
+                    New builds are deployed to this server automatically by CI. Production servers apply
+                    updates from the source selected below; staging servers deploy any branch/PR pushed to them.
+                </p>
 
-                        <div className="w-40">
-                            <label className="block text-sm font-medium text-gray-700 mb-1">
-                                Poll Interval (mins)
-                            </label>
-                            <p className="text-xs text-gray-500 mb-2">
-                                How often to check automatically.
-                            </p>
-                            <input
-                                type="number"
-                                min={1}
-                                value={updateCheckIntervalMins}
-                                onChange={e => setUpdateCheckIntervalMins(Math.max(1, parseInt(e.target.value) || 60))}
-                                className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            />
-                        </div>
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Update source
+                        </label>
+                        <p className="text-xs text-gray-500 mb-2">
+                            Which builds a production server auto-deploys. (Ignored on staging.)
+                        </p>
+                        <select
+                            value={deploySource}
+                            onChange={e => setDeploySource(e.target.value === 'main' ? 'main' : 'releases')}
+                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
+                        >
+                            <option value="releases">Releases (recommended)</option>
+                            <option value="main">Main branch</option>
+                        </select>
                     </div>
 
                     <div className="flex items-center gap-3">
                         <input
                             type="checkbox"
-                            id="auto_update"
-                            checked={autoUpdate}
-                            onChange={e => setAutoUpdate(e.target.checked)}
+                            id="auto_deploy"
+                            checked={autoDeploy}
+                            onChange={e => setAutoDeploy(e.target.checked)}
                             className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
                         />
-                        <label htmlFor="auto_update" className="text-sm text-gray-700">
-                            Auto-update when a new version is detected (checks every {updateCheckIntervalMins} minutes)
+                        <label htmlFor="auto_deploy" className="text-sm text-gray-700">
+                            Auto-deploy matching builds (uncheck to pause deployments on this server)
                         </label>
-                    </div>
-
-                    {updateMsg && (
-                        <div className={`text-sm px-3 py-2 rounded ${updateStatus?.update_available ? 'bg-yellow-50 text-yellow-800 border border-yellow-200' : 'bg-gray-50 text-gray-700 border border-gray-200'}`}>
-                            {updateMsg}
-                        </div>
-                    )}
-
-                    <div className="flex gap-3 flex-wrap">
-                        <button
-                            type="button"
-                            onClick={handleCheckUpdate}
-                            disabled={checking}
-                            className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
-                        >
-                            {checking ? 'Checking...' : 'Check for Updates'}
-                        </button>
-
-                        {updateStatus?.update_available && (
-                            <button
-                                type="button"
-                                onClick={handleApplyUpdate}
-                                disabled={applying}
-                                className="bg-green-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-green-700 disabled:bg-green-400"
-                            >
-                                {applying ? 'Applying...' : 'Apply Update & Restart'}
-                            </button>
-                        )}
                     </div>
                 </div>
             </div>

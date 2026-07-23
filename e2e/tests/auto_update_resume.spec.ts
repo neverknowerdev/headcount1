@@ -6,12 +6,13 @@ import * as path from 'path';
 import { startMockProviderServer } from '../fixtures/mock-provider-server';
 
 /**
- * Graceful-drain + resume across a restart (the auto-update guarantee).
+ * Graceful-drain + resume across a restart (the deploy-restart guarantee).
  *
- * When the server is asked to shut down for an update, an in-flight agent run
- * must not be lost: it should stop accepting the next turn, persist its
- * conversation mid-flight, and — after the binary restarts — pick that exact
- * conversation back up and run it to completion.
+ * When the server is asked to shut down for a deploy (SIGTERM), an in-flight
+ * agent run must not be lost: it should stop accepting the next turn, persist
+ * its conversation mid-flight, and — after the binary restarts — pick that
+ * exact conversation back up and run it to completion. This is the same
+ * graceful restart a self-replacing deploy triggers (see deploy_webhook.spec).
  *
  * This spec exercises the REAL lifecycle end-to-end against a dedicated,
  * fully-isolated server process (its own headcount1 home + SQLite DB + port)

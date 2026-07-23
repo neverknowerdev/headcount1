@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strings"
-	"time"
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/secrets"
@@ -51,15 +50,9 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Propagate updater-related settings to the live updater immediately.
-	if api.updater != nil {
-		if settings.UpdateBranch != "" {
-			api.updater.SetTrackedBranch(settings.UpdateBranch)
-		}
-		if settings.UpdateCheckIntervalMins > 0 {
-			api.updater.SetCheckInterval(time.Duration(settings.UpdateCheckIntervalMins) * time.Minute)
-		}
-	}
+	// Deploy settings (deploy_source, auto_deploy) are read fresh from the file
+	// by the deploy webhook on each event, so there's no live updater state to
+	// propagate here — saving is enough.
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)

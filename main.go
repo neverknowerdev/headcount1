@@ -276,23 +276,12 @@ func main() {
 	// the background so a large backlog never delays server startup.
 	go eng.ResumeInterruptedRuns(context.Background())
 
-	// The repo is public, so release lookups/downloads run unauthenticated
-	// (the 60 req/hr anonymous GitHub limit is ample for a 60-minute poll).
-	upd := updater.New(Branch, CommitHash, BuildDate, func() string { return "" })
-	// Apply saved settings (branch and poll interval may differ from build defaults).
-	savedSettings := endpoints.LoadSettings()
-	if savedSettings.UpdateBranch != "" {
-		upd.SetTrackedBranch(savedSettings.UpdateBranch)
-	}
-	if savedSettings.UpdateCheckIntervalMins > 0 {
-		upd.SetCheckInterval(time.Duration(savedSettings.UpdateCheckIntervalMins) * time.Minute)
-	}
-	// Consult the live setting on every periodic check so toggling auto-update
-	// takes effect without a restart.
-	upd.SetAutoApplyFn(func() bool { return appsettings.Load().AutoUpdate })
-	upd.StartPeriodicCheck()
-	log.Printf("Auto-updater started (tracking branch: %s, interval: %dm, build: %s)",
-		upd.GetTrackedBranch(), upd.GetCheckIntervalMins(), upd.GetStatus().Current.DisplayString())
+	// Deploys are pushed to this server by CI via the authenticated
+	// /api/deploy/webhook (see the deploy controller); the updater just applies
+	// them (download the release-asset binary, self-replace, graceful restart).
+	// The download token is only needed if the releases repo is private.
+	upd := updater.New(Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
+	log.Printf("Deploy target: env=%s, build=%s", utils.DeployEnv(), upd.Current().DisplayString())
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)

@@ -27,15 +27,10 @@ export const Sidebar: React.FC = () => {
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
   const [versionDisplay, setVersionDisplay] = useState<string>('');
-  const [hasUpdate, setHasUpdate] = useState(false);
 
   useEffect(() => {
     axios.get('/api/version').then(res => {
       setVersionDisplay(res.data.display || 'dev');
-    }).catch(() => {});
-
-    axios.get('/api/updates/status').then(res => {
-      setHasUpdate(res.data.update_available || false);
     }).catch(() => {});
   }, []);
 
@@ -85,11 +80,6 @@ export const Sidebar: React.FC = () => {
           <div className="text-xs text-gray-400 font-mono truncate" title={versionDisplay}>
             {versionDisplay}
           </div>
-          {hasUpdate && (
-            <div className="mt-1 text-xs text-yellow-600 font-medium">
-              Update available
-            </div>
-          )}
         </div>
       )}
     </div>

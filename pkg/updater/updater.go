@@ -1,7 +1,12 @@
+// Package updater applies a server-side deploy: it downloads a prebuilt binary
+// for a given git ref (published by CI as a GitHub release asset) and swaps the
+// running executable for it, then triggers a graceful restart so the new binary
+// takes over. The trigger is an authenticated deploy webhook (see the deploy
+// controller), not client-side polling — the server is the source of truth for
+// what it runs, and CI pushes deploy events to it.
 package updater
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -10,21 +15,13 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
-	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-const (
-	githubAPIBase = "https://api.github.com"
-	repoOwner     = "neverknowerdev"
-	// The repo was renamed from paperclip2 → headcount1; releases are published
-	// under the current name. (GitHub redirects the old path, but track the
-	// canonical one so update checks don't depend on that redirect.)
-	repoName = "headcount1"
-)
-
+// VersionInfo identifies a build. The running build's values are stamped in at
+// compile time via -ldflags; a deploy target's values arrive in the webhook.
 type VersionInfo struct {
 	Branch     string `json:"branch"`
 	CommitHash string `json:"commit_hash"`
@@ -38,216 +35,139 @@ func (v VersionInfo) DisplayString() string {
 	return fmt.Sprintf("%s+%s+%s", v.Branch, v.BuildDate, v.CommitHash)
 }
 
-type UpdateStatus struct {
-	Current         VersionInfo  `json:"current"`
-	Latest          *VersionInfo `json:"latest,omitempty"`
-	UpdateAvailable bool         `json:"update_available"`
-	LastChecked     *time.Time   `json:"last_checked,omitempty"`
-	Checking        bool         `json:"checking"`
-	Error           string       `json:"error,omitempty"`
+// Status is the deploy state exposed to the UI: the build currently running,
+// and whether a deploy is in progress / last failed.
+type Status struct {
+	Current   VersionInfo `json:"current"`
+	Deploying bool        `json:"deploying"`
+	LastError string      `json:"last_error,omitempty"`
+	// LastDeploy is the version the most recent successful deploy switched to.
+	// It's what the NEXT process will report as Current after the restart.
+	LastDeploy *VersionInfo `json:"last_deploy,omitempty"`
 }
-
-type githubRelease struct {
-	TagName string `json:"tag_name"`
-	Body    string `json:"body"`
-	Assets  []struct {
-		Name               string `json:"name"`
-		BrowserDownloadURL string `json:"browser_download_url"`
-	} `json:"assets"`
-}
-
-type releaseMetadata struct {
-	CommitHash string `json:"commit_hash"`
-	BuildDate  string `json:"build_date"`
-	Branch     string `json:"branch"`
-}
-
-const DefaultCheckInterval = 60 * time.Minute
 
 type Updater struct {
-	mu            sync.RWMutex
-	current       VersionInfo
-	trackedBranch string
-	checkInterval time.Duration
-	status        UpdateStatus
-	githubPATFn   func() string
-	autoApplyFn   func() bool
-	stopCh        chan struct{}
+	mu        sync.RWMutex
+	current   VersionInfo
+	status    Status
+	deploying bool
+	// downloadTokenFn returns a bearer token for fetching the binary from a
+	// private release asset, or "" for a public download.
+	downloadTokenFn func() string
 }
 
-func New(branch, commitHash, buildDate string, githubPATFn func() string) *Updater {
-	current := VersionInfo{
-		Branch:     branch,
-		CommitHash: commitHash,
-		BuildDate:  buildDate,
+// New creates an Updater for the running build. downloadTokenFn may be nil.
+func New(branch, commitHash, buildDate string, downloadTokenFn func() string) *Updater {
+	if downloadTokenFn == nil {
+		downloadTokenFn = func() string { return "" }
 	}
-	if branch == "" {
-		branch = "main"
-	}
+	current := VersionInfo{Branch: branch, CommitHash: commitHash, BuildDate: buildDate}
 	return &Updater{
-		current:       current,
-		trackedBranch: branch,
-		checkInterval: DefaultCheckInterval,
-		status:        UpdateStatus{Current: current},
-		githubPATFn:   githubPATFn,
-		stopCh:        make(chan struct{}),
+		current:         current,
+		status:          Status{Current: current},
+		downloadTokenFn: downloadTokenFn,
 	}
 }
 
-// SetAutoApplyFn installs a predicate consulted after each periodic check. When
-// it returns true and an update is available, the periodic loop downloads and
-// applies the new binary automatically (equivalent to the user clicking "Apply").
-func (u *Updater) SetAutoApplyFn(fn func() bool) {
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.autoApplyFn = fn
-}
-
-func (u *Updater) SetCheckInterval(d time.Duration) {
-	if d <= 0 {
-		return
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.checkInterval = d
-}
-
-func (u *Updater) GetCheckIntervalMins() int {
+// Current returns the running build's version.
+func (u *Updater) Current() VersionInfo {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	return int(u.checkInterval.Minutes())
+	return u.current
 }
 
-func (u *Updater) GetStatus() UpdateStatus {
+// GetStatus returns a snapshot of the deploy state.
+func (u *Updater) GetStatus() Status {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
 	return u.status
 }
 
-func (u *Updater) SetTrackedBranch(branch string) {
-	if branch == "" {
-		return
-	}
-	u.mu.Lock()
-	defer u.mu.Unlock()
-	u.trackedBranch = branch
-}
-
-func (u *Updater) GetTrackedBranch() string {
+// IsCurrent reports whether the running build already IS the given target, so a
+// deploy event for the commit we're already on can be ignored (no restart loop).
+func (u *Updater) IsCurrent(target VersionInfo) bool {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
-	return u.trackedBranch
+	return target.CommitHash != "" && target.CommitHash == u.current.CommitHash
 }
 
-func (u *Updater) CheckForUpdate() error {
+// Deploy downloads the binary at downloadURL, replaces the running executable
+// with it, and triggers a graceful restart into the new build. target is used
+// only for status/logging. It returns once the replacement binary has been
+// spawned and this process's shutdown has been signalled; the caller should
+// respond to the webhook before this process exits.
+//
+// Concurrent deploys are rejected: the first one wins and the process is on its
+// way out, so a second is meaningless.
+func (u *Updater) Deploy(downloadURL string, target VersionInfo) error {
 	u.mu.Lock()
-	u.status.Checking = true
-	branch := u.trackedBranch
+	if u.deploying {
+		u.mu.Unlock()
+		return fmt.Errorf("a deploy is already in progress")
+	}
+	u.deploying = true
+	u.status.Deploying = true
+	u.status.LastError = ""
 	u.mu.Unlock()
 
-	defer func() {
+	fail := func(err error) error {
 		u.mu.Lock()
-		u.status.Checking = false
-		u.mu.Unlock()
-	}()
-
-	release, err := u.fetchRelease(branch)
-	if err != nil {
-		now := time.Now()
-		u.mu.Lock()
-		u.status.Error = err.Error()
-		u.status.LastChecked = &now
+		u.deploying = false
+		u.status.Deploying = false
+		u.status.LastError = err.Error()
 		u.mu.Unlock()
 		return err
 	}
 
-	var meta releaseMetadata
-	if err := json.Unmarshal([]byte(release.Body), &meta); err != nil {
-		errMsg := fmt.Sprintf("failed to parse release metadata: %v", err)
-		u.mu.Lock()
-		u.status.Error = errMsg
-		u.mu.Unlock()
-		return fmt.Errorf("%s", errMsg)
-	}
-
-	latest := &VersionInfo{
-		Branch:     meta.Branch,
-		CommitHash: meta.CommitHash,
-		BuildDate:  meta.BuildDate,
-	}
-
-	now := time.Now()
-	u.mu.Lock()
-	u.status.Latest = latest
-	u.status.LastChecked = &now
-	u.status.UpdateAvailable = meta.CommitHash != "" && meta.CommitHash != u.current.CommitHash
-	u.status.Error = ""
-	u.mu.Unlock()
-
-	return nil
-}
-
-func (u *Updater) ApplyUpdate() error {
-	u.mu.RLock()
-	branch := u.trackedBranch
-	u.mu.RUnlock()
-
-	release, err := u.fetchRelease(branch)
-	if err != nil {
-		return fmt.Errorf("fetch release: %w", err)
-	}
-
-	assetName := platformAssetName()
-	var downloadURL string
-	for _, asset := range release.Assets {
-		if asset.Name == assetName {
-			downloadURL = asset.BrowserDownloadURL
-			break
-		}
-	}
 	if downloadURL == "" {
-		return fmt.Errorf("no binary for platform %s in release %q", assetName, branch)
+		return fail(fmt.Errorf("deploy: empty download_url"))
 	}
 
-	tmpFile, err := downloadBinary(downloadURL, u.githubPATFn())
+	log.Printf("Deploy: downloading %s (%s)...", target.DisplayString(), downloadURL)
+	tmpFile, err := downloadBinary(downloadURL, u.downloadTokenFn())
 	if err != nil {
-		return fmt.Errorf("download binary: %w", err)
+		return fail(fmt.Errorf("deploy: download binary: %w", err))
 	}
 
 	execPath, err := os.Executable()
 	if err != nil {
 		os.Remove(tmpFile)
-		return fmt.Errorf("get executable path: %w", err)
+		return fail(fmt.Errorf("deploy: get executable path: %w", err))
 	}
 	execPath, err = filepath.EvalSymlinks(execPath)
 	if err != nil {
 		os.Remove(tmpFile)
-		return fmt.Errorf("eval symlinks: %w", err)
+		return fail(fmt.Errorf("deploy: eval symlinks: %w", err))
 	}
 
 	if err := os.Rename(tmpFile, execPath); err != nil {
-		// Rename may fail cross-device; fall back to copy
+		// Rename fails across filesystems; fall back to an in-place copy.
 		if copyErr := copyFile(tmpFile, execPath); copyErr != nil {
 			os.Remove(tmpFile)
-			return fmt.Errorf("replace binary: %w (copy also failed: %v)", err, copyErr)
+			return fail(fmt.Errorf("deploy: replace binary: %w (copy also failed: %v)", err, copyErr))
 		}
 		os.Remove(tmpFile)
 	}
 
-	log.Printf("Update applied, restarting with new binary...")
+	u.mu.Lock()
+	t := target
+	u.status.LastDeploy = &t
+	u.mu.Unlock()
+
+	log.Printf("Deploy: binary replaced, restarting into %s...", target.DisplayString())
 	cmd := exec.Command(execPath, os.Args[1:]...)
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
 	if err := cmd.Start(); err != nil {
-		return fmt.Errorf("start new process: %w", err)
+		return fail(fmt.Errorf("deploy: start new process: %w", err))
 	}
 
-	// Signal our own graceful shutdown instead of os.Exit(0): main's SIGTERM
-	// handler is what seals the in-memory secrets keyring to disk (so unlocked
-	// vaults survive the restart without a passkey re-tap) and drains in-flight
-	// HTTP requests before exiting. A bare os.Exit here would skip all of that —
-	// every signed-in user's vault would silently re-lock on every auto-update.
+	// Signal our own graceful shutdown (SIGTERM) rather than os.Exit(0): main's
+	// signal handler seals the secrets keyring, drains in-flight agent runs so
+	// they resume in the new process, and drains HTTP — all skipped by a bare
+	// exit. The new process's listenWithRetry covers the brief window where
+	// both processes hold the port. See main.go.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		if p, err := os.FindProcess(os.Getpid()); err == nil {
@@ -260,96 +180,17 @@ func (u *Updater) ApplyUpdate() error {
 	return nil
 }
 
-// StartPeriodicCheck starts a background goroutine that checks for updates.
-// It re-reads the interval before each wait, so changes via SetCheckInterval
-// take effect after the current sleep completes.
-func (u *Updater) StartPeriodicCheck() {
-	go func() {
-		for {
-			u.mu.RLock()
-			interval := u.checkInterval
-			u.mu.RUnlock()
-
-			select {
-			case <-time.After(interval):
-				if err := u.CheckForUpdate(); err != nil {
-					log.Printf("Periodic update check failed: %v", err)
-					continue
-				}
-				u.mu.RLock()
-				available := u.status.UpdateAvailable
-				autoApply := u.autoApplyFn
-				u.mu.RUnlock()
-				if available && autoApply != nil && autoApply() {
-					log.Printf("Auto-update enabled and new version available — applying...")
-					if err := u.ApplyUpdate(); err != nil {
-						log.Printf("Auto-update failed: %v", err)
-					}
-				}
-			case <-u.stopCh:
-				return
-			}
-		}
-	}()
-}
-
-func (u *Updater) Stop() {
-	select {
-	case <-u.stopCh:
-	default:
-		close(u.stopCh)
-	}
-}
-
-// branchToTag converts a branch name to a valid git tag (replaces / with -).
-// The CI workflow applies the same transformation when creating releases.
-func branchToTag(branch string) string {
-	return strings.ReplaceAll(branch, "/", "-")
-}
-
-func (u *Updater) fetchRelease(branch string) (*githubRelease, error) {
-	tag := branchToTag(branch)
-	url := fmt.Sprintf("%s/repos/%s/%s/releases/tags/%s", githubAPIBase, repoOwner, repoName, tag)
-
-	req, err := http.NewRequest("GET", url, nil)
-	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Accept", "application/vnd.github.v3+json")
-	req.Header.Set("User-Agent", "paperclip2-updater")
-	if pat := u.githubPATFn(); pat != "" {
-		req.Header.Set("Authorization", "token "+pat)
-	}
-
-	client := &http.Client{Timeout: 30 * time.Second}
-	resp, err := client.Do(req)
-	if err != nil {
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode == http.StatusNotFound {
-		return nil, fmt.Errorf("no release found for branch %q (tag %q) — make sure CI has published a release", branch, tag)
-	}
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("GitHub API returned %d for release tag %q", resp.StatusCode, tag)
-	}
-
-	var release githubRelease
-	if err := json.NewDecoder(resp.Body).Decode(&release); err != nil {
-		return nil, err
-	}
-	return &release, nil
-}
-
-func downloadBinary(url, pat string) (string, error) {
+func downloadBinary(url, token string) (string, error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", err
 	}
-	req.Header.Set("User-Agent", "paperclip2-updater")
-	if pat != "" {
-		req.Header.Set("Authorization", "token "+pat)
+	req.Header.Set("User-Agent", "headcount1-updater")
+	// GitHub release-asset API URLs need this Accept header to return the raw
+	// binary; it's harmless for a plain browser_download_url too.
+	req.Header.Set("Accept", "application/octet-stream")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
 	}
 
 	client := &http.Client{Timeout: 10 * time.Minute}
@@ -363,11 +204,10 @@ func downloadBinary(url, pat string) (string, error) {
 		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	tmpFile, err := os.CreateTemp("", "paperclip2-update-*")
+	tmpFile, err := os.CreateTemp("", "headcount1-deploy-*")
 	if err != nil {
 		return "", err
 	}
-
 	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
@@ -379,7 +219,6 @@ func downloadBinary(url, pat string) (string, error) {
 		os.Remove(tmpFile.Name())
 		return "", err
 	}
-
 	return tmpFile.Name(), nil
 }
 
@@ -402,7 +241,10 @@ func copyFile(src, dst string) error {
 	return out.Chmod(0755)
 }
 
-func platformAssetName() string {
+// PlatformAssetName is the release-asset filename for the running OS/arch, e.g.
+// "agent-orchestrator-linux-amd64". CI publishes assets under these names and
+// the deploy webhook selects the matching one.
+func PlatformAssetName() string {
 	name := fmt.Sprintf("agent-orchestrator-%s-%s", runtime.GOOS, runtime.GOARCH)
 	if runtime.GOOS == "windows" {
 		name += ".exe"

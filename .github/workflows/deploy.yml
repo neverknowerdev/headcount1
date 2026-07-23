@@ -1,0 +1,195 @@
+name: Deploy
+
+# Server-side deploy pipeline. CI builds the Linux server binary, publishes it
+# as a GitHub release asset, and notifies the target server's authenticated
+# /api/deploy/webhook. The SERVER decides whether to apply the event (based on
+# its HEADCOUNT1_ENV and its deploy_source/auto_deploy settings); CI just routes:
+#
+#   - push to main            -> notify PRODUCTION with event_type=main
+#   - a published release      -> notify PRODUCTION with event_type=release
+#   - push to a branch whose PR carries the "auto-deploy" label -> STAGING
+#   - manual run (any ref)     -> STAGING
+#
+# Required repo config:
+#   secrets.DEPLOY_API_KEY   - shared secret; must equal each server's
+#                              HEADCOUNT1_DEPLOY_API_KEY.
+#   vars.PROD_DEPLOY_URL     - e.g. https://app.headcount1.ai
+#   vars.STAGING_DEPLOY_URL  - e.g. https://stagingapp.headcount1.ai
+# If the releases repo is private, each server also needs
+# HEADCOUNT1_DEPLOY_DOWNLOAD_TOKEN set to a PAT that can read release assets.
+
+on:
+  push:
+    branches: ['**']
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: 'Branch or tag to deploy to STAGING'
+        required: true
+
+concurrency:
+  group: deploy-${{ github.event_name }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # create/update release assets
+      pull-requests: read # read the auto-deploy label on a branch's PR
+      issues: write # ensure the auto-deploy label exists
+    steps:
+      - uses: actions/checkout@v4
+
+      # Self-provision the "auto-deploy" label (idempotent) so it's available to
+      # put on PRs. Runs only on main so it isn't attempted on every branch push.
+      - name: Ensure auto-deploy label exists
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh label create auto-deploy \
+            --color 1D76DB \
+            --description "Deploy this PR's branch to staging on every push" \
+            --force
+
+      - name: Decide target
+        id: decide
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          EVENT="${{ github.event_name }}"
+          COMMIT=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y-%m-%d)
+          deploy=false; env=""; event_type=""; ref=""; tag=""
+
+          if [ "$EVENT" = "release" ]; then
+            deploy=true; env=production; event_type=release
+            ref="${{ github.event.release.tag_name }}"
+            tag="$ref"
+          elif [ "$EVENT" = "workflow_dispatch" ]; then
+            deploy=true; env=staging; event_type=branch
+            ref="${{ github.event.inputs.ref }}"
+            tag="staging-$(echo "$ref" | tr '/' '-')"
+          elif [ "$EVENT" = "push" ]; then
+            ref="${GITHUB_REF#refs/heads/}"
+            if [ "$ref" = "main" ]; then
+              deploy=true; env=production; event_type=main; tag=main
+            else
+              # A feature branch deploys to staging only if its open PR is
+              # labelled "auto-deploy" — so every push to that branch redeploys.
+              labels=$(gh pr list --head "$ref" --state open --json labels --jq '.[].labels[].name' 2>/dev/null || true)
+              if printf '%s\n' "$labels" | grep -qx "auto-deploy"; then
+                deploy=true; env=staging; event_type=branch
+                tag="staging-$(echo "$ref" | tr '/' '-')"
+              fi
+            fi
+          fi
+
+          {
+            echo "deploy=$deploy"
+            echo "env=$env"
+            echo "event_type=$event_type"
+            echo "ref=$ref"
+            echo "tag=$tag"
+            echo "commit=$COMMIT"
+            echo "date=$DATE"
+          } >> "$GITHUB_OUTPUT"
+          echo "Decision: deploy=$deploy env=$env event_type=$event_type ref=$ref tag=$tag"
+
+      - name: Set up Go
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+
+      - name: Set up Node.js
+        if: steps.decide.outputs.deploy == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build frontend
+        if: steps.decide.outputs.deploy == 'true'
+        run: |
+          cd frontend
+          npm install
+          npm run build
+
+      - name: Build server binary (linux/amd64)
+        if: steps.decide.outputs.deploy == 'true'
+        run: |
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.CommitHash=${{ steps.decide.outputs.commit }} -X main.BuildDate=${{ steps.decide.outputs.date }} -X main.Branch=${{ steps.decide.outputs.ref }}" \
+            -o agent-orchestrator-linux-amd64 \
+            main.go
+
+      - name: Publish release asset
+        id: publish
+        if: steps.decide.outputs.deploy == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          TAG="${{ steps.decide.outputs.tag }}"
+          if [ "${{ github.event_name }}" = "release" ]; then
+            # The release already exists — just attach/refresh the built binary.
+            gh release upload "$TAG" agent-orchestrator-linux-amd64 --clobber
+          else
+            # Rolling prerelease per tag (main / staging-<branch>): recreate so
+            # the asset always reflects the latest push.
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+            gh release create "$TAG" \
+              --prerelease \
+              --target "${{ github.sha }}" \
+              --title "deploy $TAG @ ${{ steps.decide.outputs.commit }}" \
+              --notes "Automated deploy build for ${{ steps.decide.outputs.ref }} (${{ steps.decide.outputs.commit }})." \
+              agent-orchestrator-linux-amd64
+          fi
+          # Use the asset API URL (not browser_download_url): it serves the raw
+          # binary with Accept: application/octet-stream and works with a bearer
+          # token, so it also covers a private releases repo.
+          ASSET_URL=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+            --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')
+          test -n "$ASSET_URL"
+          echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+
+      - name: Notify server
+        if: steps.decide.outputs.deploy == 'true'
+        env:
+          PROD_URL: ${{ vars.PROD_DEPLOY_URL }}
+          STAGING_URL: ${{ vars.STAGING_DEPLOY_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ "${{ steps.decide.outputs.env }}" = "production" ]; then
+            BASE="$PROD_URL"
+          else
+            BASE="$STAGING_URL"
+          fi
+          if [ -z "$BASE" ]; then
+            echo "No deploy URL configured for ${{ steps.decide.outputs.env }} (set PROD_DEPLOY_URL / STAGING_DEPLOY_URL vars)."
+            exit 1
+          fi
+          payload=$(jq -nc \
+            --arg et "${{ steps.decide.outputs.event_type }}" \
+            --arg ref "${{ steps.decide.outputs.ref }}" \
+            --arg commit "${{ steps.decide.outputs.commit }}" \
+            --arg date "${{ steps.decide.outputs.date }}" \
+            --arg url "${{ steps.publish.outputs.asset_url }}" \
+            --arg target "${{ steps.decide.outputs.env }}" \
+            '{event_type:$et, ref:$ref, commit:$commit, build_date:$date, download_url:$url, target:$target}')
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Key: $DEPLOY_KEY" \
+            -d "$payload")
+          echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
+          # 202 = deploying, 200 = accepted-but-ignored (wrong env/source, or
+          # already current). Both are successful outcomes for CI.
+          case "$code" in
+            200|202) echo "notify ok" ;;
+            *) echo "deploy notify failed"; exit 1 ;;
+          esac
