@@ -37,6 +37,12 @@ jobs:
       with:
         go-version: '1.24.3'
 
+    # Fetches Go module dependencies as early as possible (independent of the
+    # frontend build below), so the "Build Go server" step further down is
+    # mostly just compilation.
+    - name: Download Go module dependencies
+      run: go mod download
+
     - name: Set up Node.js
       uses: actions/setup-node@v4
       with:
@@ -44,9 +50,11 @@ jobs:
 
     # Fast dialect-specific signal before the browser suite: the Go integration
     # tests (AutoMigrate, raw-SQL query surface, backup/restore sequence
-    # realignment) run only when TEST_POSTGRES_URL is set.
+    # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
+    # two packages: they share one Postgres database and each DROP SCHEMAs +
+    # AutoMigrates it, so running them concurrently races on type creation.
     - name: Run Go Postgres integration tests
-      run: go test ./db/ ./pkg/backup/ -run TestPostgres -v
+      run: go test ./db/ ./pkg/backup/ -run TestPostgres -p 1 -v
       env:
         TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
@@ -60,12 +68,13 @@ jobs:
         cd frontend
         npm run build
 
-    # Warm the Go module + build cache before the browser suite. globalSetup
-    # boots the server with `go run .`, and a cold module download + compile can
-    # exceed its 60s reachability timeout. Building here (after frontend/dist
-    # exists for the embed) makes the later `go run .` a fast relink.
-    - name: Pre-build Go server (warm cache)
-      run: go build -o /tmp/headcount1-server .
+    # Compiles the server ahead of the Playwright run (after the frontend
+    # build, since main.go embeds frontend/dist) so module download + build —
+    # which can take longer than the e2e harness's 60s server-ready timeout on
+    # a cold module cache — happen here, where a real failure is a clear build
+    # error instead of a "server never became reachable" timeout.
+    - name: Build Go server
+      run: go build -o agent-orchestrator .
 
     - name: Install E2E Dependencies
       run: |
