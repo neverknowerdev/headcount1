@@ -12,6 +12,7 @@ import (
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -242,9 +243,18 @@ func (u *Updater) ApplyUpdate() error {
 		return fmt.Errorf("start new process: %w", err)
 	}
 
+	// Signal our own graceful shutdown instead of os.Exit(0): main's SIGTERM
+	// handler is what seals the in-memory secrets keyring to disk (so unlocked
+	// vaults survive the restart without a passkey re-tap) and drains in-flight
+	// HTTP requests before exiting. A bare os.Exit here would skip all of that —
+	// every signed-in user's vault would silently re-lock on every auto-update.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
-		os.Exit(0)
+		if p, err := os.FindProcess(os.Getpid()); err == nil {
+			_ = p.Signal(syscall.SIGTERM)
+		} else {
+			os.Exit(0)
+		}
 	}()
 
 	return nil

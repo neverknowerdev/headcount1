@@ -5,6 +5,7 @@ import (
 	"embed"
 	"io/fs"
 	"log"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -197,6 +198,12 @@ func main() {
 	// Add FK constraint from mcp_servers.project_id → projects.id (SQLite table rebuild).
 	if err := db.New(database).MigrateAddProjectFKToMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: mcp_servers FK migration: %v", err)
+	}
+
+	// Backfill the provider domain slug for rows created before the column
+	// existed, so tenant export/import can dedup providers by slug.
+	if err := db.New(database).BackfillProviderSlugs(context.Background()); err != nil {
+		log.Printf("Warning: provider slug backfill: %v", err)
 	}
 
 	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
@@ -412,7 +419,17 @@ func main() {
 
 	go func() {
 		log.Printf("Starting server on port %s", port)
-		if err := httpServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		// A self-update spawns the new binary right after the old one is asked to
+		// shut down, but the old process still holds the port until it finishes
+		// sealing the secrets keyring and closes its listener — so the very first
+		// bind attempt here can lose that race. Retry briefly instead of dying
+		// immediately; a genuinely occupied port (unrelated process) still fails
+		// once the deadline passes.
+		listener, err := listenWithRetry(httpServer.Addr, 10*time.Second)
+		if err != nil {
+			log.Fatalf("server error: %v", err)
+		}
+		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			log.Fatalf("server error: %v", err)
 		}
 	}()
@@ -441,6 +458,26 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+}
+
+// listenWithRetry binds addr, retrying on "address already in use" until
+// deadline elapses. Covers the brief window during a self-update restart
+// where the outgoing process still holds the port while it seals its secrets
+// keyring and drains in-flight requests before closing its listener.
+func listenWithRetry(addr string, deadline time.Duration) (net.Listener, error) {
+	giveUpAt := time.Now().Add(deadline)
+	var lastErr error
+	for {
+		listener, err := net.Listen("tcp", addr)
+		if err == nil {
+			return listener, nil
+		}
+		lastErr = err
+		if time.Now().After(giveUpAt) {
+			return nil, lastErr
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
 }
 
 // newCompanyRecipientsResolver returns a TTL-cached company → member-users

@@ -55,7 +55,14 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     env.E2E_HEADCOUNT1_HOME = e2eHome;
 
     const projectRoot = path.resolve(__dirname, '..');
-    serverProcess = spawn('go', ['run', '.'], {
+    // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module
+    // download + compilation happen in their own step instead of racing the
+    // 60s server-ready timeout below on a cold module cache. Local runs (no
+    // prebuilt binary) fall back to `go run .`.
+    const prebuiltBinary = path.join(projectRoot, 'agent-orchestrator');
+    const usePrebuilt = fs.existsSync(prebuiltBinary);
+    console.log(`[globalSetup] starting server via ${usePrebuilt ? prebuiltBinary : 'go run .'}`);
+    serverProcess = spawn(usePrebuilt ? prebuiltBinary : 'go', usePrebuilt ? [] : ['run', '.'], {
         cwd: projectRoot,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -89,12 +96,10 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     console.log(`[globalSetup] wiped database via /api/e2e/wipe-db`);
 }
 
-// `go run .` compiles the whole server (a large native dep tree: chromedp,
-// webauthn, sqlite, landlock, ...) on first invocation, and on CI the module
-// cache is cold, so the build alone can take a couple of minutes before the
-// server ever binds a port. Allow generously for that first cold compile; the
-// overall job still has the workflow's 60-minute cap as a backstop.
-async function waitForServer(url: string, timeoutMs = 240_000): Promise<void> {
+// 120s: generous enough to cover a `go run .` cold-compile fallback (no
+// prebuilt binary) on a slow machine, while the CI-prebuilt-binary path
+// above starts in well under a second.
+async function waitForServer(url: string, timeoutMs = 120_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {
