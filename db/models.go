@@ -1,7 +1,10 @@
 package db
 
 import (
+	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // User is an account in cloud multi-user mode. Authentication is passwordless
@@ -242,9 +245,61 @@ type LLMProvider struct {
 	// discovery logic instead of matching the user-facing Name field, which
 	// UpdateProvider allows changing. Empty for presets and fully custom
 	// providers, which use PresetKey/BaseUrl matching instead.
-	ProviderName string    `json:"provider_name" gorm:"default:''"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ProviderName string `json:"provider_name" gorm:"default:''"`
+	// Slug is the provider's stable, portable domain identity — deterministically
+	// derived from the fields that make one provider "the same" as another
+	// (builtin vendor name, preset key, or name+base URL). Unlike the DB id it
+	// survives an export/import into a different database, so tenant restore can
+	// dedup providers by slug instead of duplicating them. Set by BeforeCreate
+	// and backfilled for existing rows (BackfillProviderSlugs); deterministic so
+	// two independently-seeded accounts share a slug for the same builtin.
+	Slug      string    `json:"slug" gorm:"index;default:''"`
+	CreatedAt time.Time `json:"created_at"`
+	UpdatedAt time.Time `json:"updated_at"`
+}
+
+// ProviderSlug derives an LLMProvider's stable domain slug from the fields that
+// define provider identity. Deterministic (no random component) so the same
+// provider seeded in two different databases resolves to the same slug — which
+// is what lets tenant import dedup providers across accounts.
+func ProviderSlug(p LLMProvider) string {
+	switch {
+	case p.ProviderName != "":
+		return "builtin:" + slugify(p.ProviderName)
+	case p.PresetKey != "":
+		return "preset:" + slugify(p.PresetKey)
+	default:
+		return "custom:" + slugify(p.Name) + ":" + slugify(p.BaseUrl)
+	}
+}
+
+// BeforeCreate stamps the derived slug on any struct-based provider insert (all
+// app create paths use api.db.Create(&p)). Map-based inserts — the tenant
+// importer replaying archived rows — skip GORM hooks and keep the archive's
+// slug verbatim, which is exactly what dedup needs.
+func (p *LLMProvider) BeforeCreate(tx *gorm.DB) error {
+	if p.Slug == "" {
+		p.Slug = ProviderSlug(*p)
+	}
+	return nil
+}
+
+// slugify lowercases s and collapses every run of non-alphanumeric characters
+// into a single '-', trimming leading/trailing dashes. Stable across platforms.
+func slugify(s string) string {
+	s = strings.ToLower(strings.TrimSpace(s))
+	var b strings.Builder
+	prevDash := false
+	for _, r := range s {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			b.WriteRune(r)
+			prevDash = false
+		} else if !prevDash {
+			b.WriteByte('-')
+			prevDash = true
+		}
+	}
+	return strings.Trim(b.String(), "-")
 }
 
 // ProviderPreset is a known third-party LLM gateway a user can pick from a

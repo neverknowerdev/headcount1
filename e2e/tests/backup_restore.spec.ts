@@ -42,6 +42,86 @@ test.describe.serial('Backup & Restore', () => {
         expect(resetRes.ok).toBeTruthy();
     });
 
+    // Tenant-scoped, per-user export/import (the real user-facing feature): a
+    // team owner exports their subtree and re-imports it. Re-importing into the
+    // same account dedups by domain key (short_name, provider slug, …) instead
+    // of duplicating, and secrets stay decryptable throughout.
+    test('per-user export + import round-trip dedups and keeps secrets decryptable', async ({ request }) => {
+        // A company + a task + a provider with a known key.
+        const companyRes = await request.post('/api/companies', {
+            data: { name: 'Export Test Co', short_name: 'dx' },
+        });
+        expect(companyRes.ok(), await companyRes.text()).toBeTruthy();
+        const company = await companyRes.json();
+
+        const sprintRes = await request.post('/api/sprints', {
+            data: { company_id: company.id, name: 'DX Sprint' },
+        });
+        expect(sprintRes.ok()).toBeTruthy();
+        const sprint = await sprintRes.json();
+
+        const taskRes = await request.post('/api/tasks', {
+            data: { company_id: company.id, sprint_id: sprint.id, title: 'DX Task', priority: 'Normal' },
+        });
+        expect(taskRes.ok()).toBeTruthy();
+
+        const secret = 'sk-export-' + Date.now();
+        const provRes = await request.post('/api/providers', {
+            data: {
+                name: 'DX Provider',
+                base_url: 'https://dx.example.test/v1',
+                api_key: secret,
+                provider_type: 'openai',
+                default_model: 'dx-model',
+            },
+        });
+        expect(provRes.ok(), await provRes.text()).toBeTruthy();
+        const provider = await provRes.json();
+
+        // Sanity: the key decrypts before export.
+        const revealBefore = await request.get(`/api/e2e/reveal-provider/${provider.id}`);
+        expect(revealBefore.ok()).toBeTruthy();
+        expect((await revealBefore.json()).api_key).toBe(secret);
+
+        // Export the current user's subtree (streamed tar.gz).
+        const exportRes = await request.get('/api/data/export');
+        expect(exportRes.ok(), await exportRes.text()).toBeTruthy();
+        const archive = await exportRes.body();
+        expect(archive.length).toBeGreaterThan(0);
+
+        // Import it back into the same account. Everything in the archive already
+        // exists here (we just exported our own live data), so dedup should reuse
+        // it all and create nothing new.
+        const importRes = await request.post('/api/data/import', {
+            multipart: {
+                file: { name: 'export.tar.gz', mimeType: 'application/gzip', buffer: archive },
+            },
+        });
+        expect(importRes.ok(), await importRes.text()).toBeTruthy();
+        const importBody = await importRes.json();
+        expect(importBody.result.companies_restored).toBe(0);
+        expect(importBody.result.tasks_restored).toBe(0);
+        expect(importBody.result.providers_restored).toBe(0);
+
+        // Still exactly ONE 'dx' company — not duplicated.
+        const companiesRes = await request.get('/api/companies');
+        const companies = await companiesRes.json();
+        const dxCompanies = companies.filter((c: any) => c.short_name === 'dx' || c.short_name.startsWith('dx-'));
+        expect(dxCompanies.length).toBe(1);
+
+        // Still exactly ONE dx provider, and it still decrypts to the original
+        // secret (ciphertext preserved through the export/import round-trip).
+        const provsRes = await request.get('/api/providers');
+        const provs = await provsRes.json();
+        const dxProvs = provs.filter((p: any) => p.base_url === 'https://dx.example.test/v1');
+        expect(dxProvs.length).toBe(1);
+        expect(dxProvs[0].id).toBe(provider.id);
+
+        const revealAfter = await request.get(`/api/e2e/reveal-provider/${dxProvs[0].id}`);
+        expect(revealAfter.ok(), await revealAfter.text()).toBeTruthy();
+        expect((await revealAfter.json()).api_key).toBe(secret);
+    });
+
     test('can create backup via API', async ({ request }) => {
         const res = await request.post('/api/backup');
         expect(res.ok()).toBeTruthy();
@@ -329,42 +409,30 @@ test.describe.serial('Backup & Restore', () => {
         expect((await revealAfter.json()).api_key).toBe(secret);
     });
 
-    test('backup via Settings UI button', async ({ page }) => {
+    test('Export & Import page reachable from Settings UI', async ({ page }) => {
         // Navigate to settings for 'bt' company (exists after restore from roundtrip test)
         await page.goto('/companies/bt/settings');
         await expect(page.getByRole('heading', { name: 'Settings', exact: true })).toBeVisible({ timeout: 10000 });
 
-        // Click Backup & Restore button and wait for navigation
+        // Click Export & Import and wait for navigation to the page.
         await Promise.all([
             page.waitForURL(/\/backup$/),
-            page.click('button:has-text("Backup & Restore")'),
+            page.click('button:has-text("Export & Import")'),
         ]);
-        await expect(page.getByRole('heading', { name: 'Backup & Restore' })).toBeVisible();
+        await expect(page.getByRole('heading', { name: 'Export & Import' })).toBeVisible();
 
-        // Wait for the page to finish loading (the "Backup Now" button only renders after the
-        // async status fetch completes, so waiting for it ensures the backup list is populated).
-        await expect(page.getByRole('button', { name: 'Backup Now' })).toBeVisible({ timeout: 10000 });
-
-        // Count how many backups exist before clicking so we can wait for a NEW one.
-        const countBefore = await page.locator('li', { hasText: /backup_.*\.tar\.gz/ }).count();
-
-        // Click Backup Now and accept the success dialog in parallel.
-        const [dialog] = await Promise.all([
-            page.waitForEvent('dialog'),
-            page.click('button:has-text("Backup Now")'),
-        ]);
-        await dialog.accept();
-
-        // Wait for the backup list to grow (a new entry appears after the dialog is dismissed).
-        await expect(page.locator('li', { hasText: /backup_.*\.tar\.gz/ })).toHaveCount(countBefore + 1, { timeout: 30000 });
+        // The per-user export control is present.
+        await expect(page.getByRole('button', { name: 'Export my data' })).toBeVisible({ timeout: 10000 });
     });
 
     test.afterAll(async () => {
-        // Remove bt's filesystem footprint so later specs start clean.
+        // Remove the specs' filesystem footprint so later specs start clean.
         const headcount1Base = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
-        for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills']) {
-            const fullPath = path.join(headcount1Base, root, 'bt');
-            if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+        for (const short of ['bt', 'dx']) {
+            for (const root of ['repos', 'workspace', 'artifacts', 'logs', 'skills', 'uploads']) {
+                const fullPath = path.join(headcount1Base, root, short);
+                if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
+            }
         }
         // Leave the mock memory backend clean for the specs that follow.
         await fetch(`${env.E2E_HINDSIGHT_URL}/__admin/reset`, { method: 'POST' });

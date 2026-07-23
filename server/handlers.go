@@ -331,9 +331,23 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/projects/{id}/sync", api.SyncProjectMemory)
 	})
 
-	// Backup/restore act on the WHOLE multi-tenant instance (a restore wipes and
-	// replaces every tenant), so the HTTP surface is operator-gated. Off by
-	// default; scheduled server-side backups still run regardless.
+	// Per-user, tenant-scoped export/import: exports the caller's team's
+	// subtree and re-imports it into any database (ID-remapped, re-owned to the
+	// importer), with zero impact on other tenants. Team-owner-only: the
+	// archive covers every company visible to the whole team (and import
+	// re-owners a subtree onto it), which is a structural, team-wide action —
+	// the same bar as creating/deleting a company.
+	r.Route("/data", func(r chi.Router) {
+		r.Use(api.RequireTeamOwner)
+		r.Get("/export", api.ExportMyData)
+		r.Post("/import", api.ImportMyData)
+	})
+
+	// The legacy /backup path acts on the WHOLE multi-tenant instance (a restore
+	// wipes and replaces every tenant). It is now an operator-only disaster-
+	// recovery tool, kept behind the global-admin gate (off by default) and
+	// separate from the user-facing /data export/import above. Scheduled
+	// server-side backups still run regardless of this HTTP surface.
 	r.Route("/backup", func(r chi.Router) {
 		r.Use(api.RequireGlobalAdminAPI)
 		r.Post("/", api.CreateBackup)
