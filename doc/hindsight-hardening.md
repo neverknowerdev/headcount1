@@ -107,45 +107,56 @@ curl -s -o /dev/null -w '%{http_code}\n' localhost:8888/v1/default/banks   # -> 
 
 ---
 
-## 3. Proposed: an app-managed service user
+## 3. App-managed service user (implemented)
 
-Doing section 2 by hand is fine for one operator and bad for everyone else. The
-app already needs a non-root identity for hindsight, and the agent sandbox would
-benefit from one too (a dedicated uid is the only way to fully separate the
-agent from the server's memory and `/proc`). That argues for making it a
-first-class app concept rather than a README step.
+Doing section 2 by hand is fine for one operator and bad for everyone else, so
+the account is now a first-class app concept: you still *create* it yourself
+(step 1 above), but the app *uses* it.
 
-**Shape.**
+**Setting**: `service_user` in `appsettings.Settings` (`settings.yaml`), env
+override `HEADCOUNT1_SERVICE_USER`. Empty — the default — means "run children as
+this process", i.e. exactly the previous behaviour.
 
-- **Setting**: `service_user` in `appsettings.Settings` (env override
-  `HEADCOUNT1_SERVICE_USER`). Empty = current behaviour (run as self).
-- **New package `pkg/procuser`**, a small helper over `os/exec`:
-  ```go
-  // Resolve looks up the configured service account once at startup.
-  func Resolve(name string) (*User, error)   // uid/gid/home, or a clear error
-  // Apply makes cmd run as u. No-op when u is nil or already that uid.
-  func (u *User) Apply(cmd *exec.Cmd)        // SysProcAttr.Credential + HOME=
-  // EnsureOwned makes a directory writable by the service user.
-  func (u *User) EnsureOwned(path string, mode os.FileMode) error
-  ```
-  Switching uid needs the parent to be root (or hold `CAP_SETUID`). When the app
-  is **not** root, `Apply` must be a documented no-op with one warning line —
-  never a hard failure, or every dev machine breaks.
-- **Callers**: `hindsight.Manager.startWithSchema` (first user), and later the
-  agent sandbox exec. Both already build an `exec.Cmd`, so this is a one-line
-  change at each site.
-- **Setup scripts** (`pkg/setup/scripts/setup-*.sh`) create the account when run
-  with privileges and print the manual commands otherwise.
-- **Ownership**: `filesystem.Paths.HindsightDir()` (memory exports) and the venv
-  need group access; `Manager` calls `EnsureOwned` on the former at startup.
+```yaml
+# ~/.headcount1/settings.yaml
+service_user: headcount1-memory
+```
 
-**Deliberately out of scope**: the app should never create users implicitly on a
-machine it does not own. Creating the account stays an explicit setup action;
-the app only *uses* a configured one and fails loudly if it is missing.
+**Package `pkg/procuser`**:
 
-**Platform note**: `SysProcAttr.Credential` is POSIX-only. Windows needs a
-different mechanism entirely, so `procuser` should build to a no-op stub there
-(mirroring how `reclaim.go` / `reclaim_stub.go` already split by build tag).
+```go
+func Configured(fromSettings string) string        // env wins over settings
+func Resolve(name string) (*User, error)           // uid/gid/home; ("" -> nil, nil)
+func (u *User) Apply(cmd *exec.Cmd)                // SysProcAttr.Credential + HOME/USER/LOGNAME
+func (u *User) EnsureOwned(path string, os.FileMode) error
+```
+
+Behaviour worth knowing:
+
+- **Missing account is a hard, visible error**, not a silent fallback —
+  `Resolve` fails and `Manager` logs it, because "quietly ran as root anyway"
+  is the failure mode that leaves an operator believing they are isolated.
+- **Not root ⇒ no-op with one warning.** Switching uid needs root (or
+  `CAP_SETUID`). On a dev machine `Apply` logs once and leaves the command
+  alone rather than refusing to start.
+- **`Apply` composes with `setProcAttrs`** — it adds `Credential` to whatever
+  `SysProcAttr` is already there (Linux `Pdeathsig`), it does not replace it.
+- **`HOME` is rewritten** to the account's home so pg0's cluster (`~/.pg0`) and
+  the model cache land somewhere the child can actually write.
+
+**Wiring**: `hindsight.NewManager` resolves the account once; `startWithSchema`
+calls `EnsureOwned(HindsightDir(), 0750)` (memory exports are written by the app
+and read by the backend) and then `Apply(cmd)`. The agent sandbox exec is the
+natural next caller — a dedicated uid is the only thing that fully separates the
+agent from the server's `/proc`.
+
+**Deliberately out of scope**: the app never creates users implicitly on a
+machine it does not own. Creating the account stays an explicit setup action.
+
+**Platform note**: `SysProcAttr.Credential` is POSIX-only, so `procuser` splits
+by build tag (`procuser_unix.go` / `procuser_stub.go`, mirroring `reclaim.go` /
+`reclaim_stub.go`). On the stub a *configured* service user is an error rather
+than a lie about isolation; the unconfigured default works everywhere.
 
 ---
 

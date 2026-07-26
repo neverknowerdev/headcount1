@@ -16,6 +16,9 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/procuser"
 )
 
 // LLMConfig is the model Hindsight uses for one operation (retain,
@@ -89,6 +92,12 @@ type Manager struct {
 	// web_fetch and browser tools run in-process (unsandboxed), and the shell
 	// sandbox restricts filesystem paths, not sockets. See doc/hindsight-hardening.md.
 	apiKey string
+
+	// svcUser, when configured, is the unprivileged account the child runs as.
+	// It closes the /proc/<pid>/environ path to apiKey above (Landlock cannot
+	// exclude one process's /proc entry, only a separate uid can) and gives
+	// pg0 the non-root uid it insists on. nil = run as this process.
+	svcUser *procuser.User
 }
 
 func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
@@ -96,7 +105,16 @@ func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
 	if port == "" {
 		port = "8888"
 	}
-	return &Manager{llm: llm, port: port, apiKey: resolveAPIKey()}
+	m := &Manager{llm: llm, port: port, apiKey: resolveAPIKey()}
+	name := procuser.Configured(appsettings.Load().ServiceUser)
+	u, err := procuser.Resolve(name)
+	if err != nil {
+		// Configured but unusable: keep the app running (memory is optional)
+		// and make the reason visible instead of silently running as self.
+		log.Printf("hindsight: %v — memory backend will run as the current user", err)
+	}
+	m.svcUser = u
+	return m
 }
 
 // resolveAPIKey returns the credential used to talk to hindsight-api. An
@@ -279,6 +297,16 @@ func (m *Manager) startWithSchema(ctx context.Context, schema string) error {
 	cmd.Stdout = out
 	cmd.Stderr = out
 	setProcAttrs(cmd) // on Linux: die with the parent, never orphan embedded Postgres
+	// After setProcAttrs: Apply adds a Credential to the SysProcAttr it set,
+	// and rewrites HOME so pg0's cluster and the model cache land in the
+	// service account's home. No-op when no service user is configured, or
+	// when we are not root (dev machines must keep working).
+	if m.svcUser != nil {
+		if err := m.svcUser.EnsureOwned(filesystem.NewPaths(appsettings.Load().BasePath).HindsightDir(), 0o750); err != nil {
+			log.Printf("hindsight: could not hand the export directory to %s: %v", m.svcUser, err)
+		}
+	}
+	m.svcUser.Apply(cmd)
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("start hindsight-api: %w", err)
 	}
