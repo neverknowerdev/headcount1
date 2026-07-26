@@ -43,14 +43,29 @@ type Client struct {
 	// It does NOT change the URL (see apiTenantSegment) — it is kept as the
 	// seam a future credential-based tenancy would hang off, and for logging.
 	tenant string
+	// apiKey authenticates to hindsight-api. The backend listens on loopback
+	// with no auth of its own by default, and agents have several ways to reach
+	// loopback (the web_fetch/browser tools run in-process, and the shell
+	// sandbox restricts paths, not sockets) — so without this an agent could
+	// bypass /api/memory's team checks and read every tenant's banks directly.
+	// Empty means "send no credential" (an external backend that has none).
+	apiKey string
 }
 
 func NewClient(baseURL string) *Client {
 	return &Client{
 		BaseURL: strings.TrimRight(baseURL, "/"),
 		HTTP:    &http.Client{Timeout: 120 * time.Second},
-		tenant:  "default",
+		tenant:  apiTenantSegment,
 	}
+}
+
+// WithAPIKey returns a copy of the client that authenticates with key. Paired
+// with the backend running ApiKeyTenantExtension (see Manager.buildEnv).
+func (c *Client) WithAPIKey(key string) *Client {
+	cp := *c
+	cp.apiKey = key
+	return &cp
 }
 
 // WithTenant returns a shallow copy of the client tagged with the team's
@@ -161,6 +176,9 @@ func (c *Client) do(ctx context.Context, method, path string, body io.Reader, co
 	}
 	if contentType != "" {
 		req.Header.Set("Content-Type", contentType)
+	}
+	if c.apiKey != "" {
+		req.Header.Set("Authorization", "Bearer "+c.apiKey)
 	}
 	resp, err := c.HTTP.Do(req)
 	if err != nil {

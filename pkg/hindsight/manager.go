@@ -2,6 +2,8 @@ package hindsight
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"io"
 	"log"
@@ -79,6 +81,14 @@ type Manager struct {
 	// Hindsight's own import API, and returns a user-facing summary. Called
 	// after a schema fallback succeeds.
 	RecoverFromExport func(ctx context.Context) string
+
+	// apiKey is the credential hindsight-api requires on every request. It is
+	// minted per process (never persisted) and handed to the child through its
+	// environment, so only this server can talk to the backend. Without it the
+	// backend answers anyone who can reach loopback — and agents can: the
+	// web_fetch and browser tools run in-process (unsandboxed), and the shell
+	// sandbox restricts filesystem paths, not sockets. See doc/hindsight-hardening.md.
+	apiKey string
 }
 
 func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
@@ -86,7 +96,26 @@ func NewManager(llm func(ctx context.Context) OpLLMConfigs) *Manager {
 	if port == "" {
 		port = "8888"
 	}
-	return &Manager{llm: llm, port: port}
+	return &Manager{llm: llm, port: port, apiKey: resolveAPIKey()}
+}
+
+// resolveAPIKey returns the credential used to talk to hindsight-api. An
+// external backend (HINDSIGHT_API_URL, e.g. the e2e mock or a shared
+// deployment) may bring its own key via HINDSIGHT_API_TENANT_API_KEY; a
+// spawned backend gets a fresh random one that never leaves this process
+// except through the child's environment.
+func resolveAPIKey() string {
+	if k := os.Getenv("HINDSIGHT_API_TENANT_API_KEY"); k != "" {
+		return k
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		// Never run unauthenticated because entropy hiccuped; a failure here
+		// is fatal to the memory layer, not silently degrading.
+		log.Printf("hindsight: could not generate an API key: %v", err)
+		return ""
+	}
+	return hex.EncodeToString(buf)
 }
 
 // Client returns the API client once the backend is healthy, else nil.
@@ -320,6 +349,15 @@ func (m *Manager) buildEnv(ctx context.Context, schema string) []string {
 		)
 	}
 	env = append(env,
+		// Require a credential on every request. hindsight-api's default tenant
+		// extension authenticates nobody, so the loopback port would otherwise
+		// be an unauthenticated read/write API over EVERY team's memory — and
+		// agents can reach loopback (web_fetch/browser run in-process; the shell
+		// sandbox restricts paths, not sockets). ApiKeyTenantExtension is
+		// hindsight's built-in check; the key is minted per process by
+		// resolveAPIKey and only this server knows it.
+		"HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension",
+		"HINDSIGHT_API_TENANT_API_KEY="+m.apiKey,
 		// Memory export/import rides the app backup path.
 		"HINDSIGHT_API_ENABLE_DOCUMENT_EXPORT_API=true",
 		"HINDSIGHT_API_ENABLE_DOCUMENT_IMPORT_API=true",
@@ -362,7 +400,7 @@ func (m *Manager) lastTail() string {
 // spawned process exits, so a startup crash fails in seconds instead of
 // burning the whole timeout polling a dead port.
 func (m *Manager) adopt(ctx context.Context, url string, timeout time.Duration, procDead <-chan struct{}) error {
-	c := NewClient(url)
+	c := NewClient(url).WithAPIKey(m.apiKey)
 	deadline := time.Now().Add(timeout)
 	for {
 		hctx, cancel := context.WithTimeout(ctx, 5*time.Second)

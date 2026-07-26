@@ -176,6 +176,22 @@ function handle(
 
     // ── admin / health ──────────────────────────────────────────────────
     if (method === 'GET' && p === '/health') return json(res, 200, { status: 'ok' });
+
+    // Credential check, mirroring hindsight-api's ApiKeyTenantExtension: every
+    // route except /health requires "Authorization: Bearer <key>". The app
+    // enables that extension on the real backend so an agent that reaches the
+    // loopback port cannot read other teams' banks; asserting it here means a
+    // regression that drops the header fails the suite instead of silently
+    // leaving the real backend wide open. /__admin/* is the mock's own test
+    // surface and stays unauthenticated.
+    const expectedKey = process.env.HINDSIGHT_API_TENANT_API_KEY || '';
+    if (expectedKey && !p.startsWith('/__admin/')) {
+        const auth = (req.headers['authorization'] || '') as string;
+        const got = auth.toLowerCase().startsWith('bearer ') ? auth.slice(7).trim() : auth.trim();
+        if (got !== expectedKey) {
+            return json(res, 401, { detail: 'Authentication failed: Invalid API key' });
+        }
+    }
     if (method === 'GET' && p === '/__admin/dump') {
         const dump: Record<string, Memory[]> = {};
         for (const [k, v] of banks.entries()) dump[k] = v;

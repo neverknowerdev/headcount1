@@ -79,6 +79,55 @@ func TestWithTenantDoesNotAlterRequestPath(t *testing.T) {
 	}
 }
 
+// TestClientSendsAPIKey asserts the credential reaches the wire on every
+// request. hindsight-api listens on loopback and its default tenant extension
+// authenticates nobody, so this header is what stops an agent (web_fetch and
+// the browser tool run in-process; the shell sandbox restricts paths, not
+// sockets) from reading every team's banks directly.
+func TestClientSendsAPIKey(t *testing.T) {
+	var mu sync.Mutex
+	var gotAuth string
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		gotAuth = r.Header.Get("Authorization")
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	c := NewClient(srv.URL).WithAPIKey("s3cret")
+	// The tenant-scoped copy must keep the credential.
+	_ = c.WithTenant(TenantID(3)).CreateBank(context.Background(), "company-1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if gotAuth != "Bearer s3cret" {
+		t.Errorf("Authorization = %q, want %q", gotAuth, "Bearer s3cret")
+	}
+}
+
+// TestClientWithoutAPIKeySendsNoHeader keeps an un-keyed external backend
+// working (no stray empty Bearer).
+func TestClientWithoutAPIKeySendsNoHeader(t *testing.T) {
+	var mu sync.Mutex
+	seen := true
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		_, seen = r.Header["Authorization"]
+		mu.Unlock()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	_ = NewClient(srv.URL).CreateBank(context.Background(), "company-1")
+
+	mu.Lock()
+	defer mu.Unlock()
+	if seen {
+		t.Error("expected no Authorization header when no API key is configured")
+	}
+}
+
 // TestClientSendsLiteralTenantInPath asserts the real URL on the wire, so a
 // regression that reintroduces path-based tenancy is caught here.
 func TestClientSendsLiteralTenantInPath(t *testing.T) {
