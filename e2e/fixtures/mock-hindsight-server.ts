@@ -202,20 +202,24 @@ function handle(
     }
 
     // ── banks list (tenant-scoped) ──────────────────────────────────────
+    // The tenant segment is a LITERAL in real hindsight-api (verified against
+    // 0.6.1: every route is mounted under /v1/default/ and any other value
+    // 404s, with or without a TenantExtension — its multi-tenancy is
+    // credential-based, not path-based). The mock enforces that, so a change
+    // that starts addressing /v1/<something-else>/ fails here instead of
+    // silently passing the suite and 404-ing against a real backend.
     const listMatch = p.match(/^\/v1\/([^/]+)\/banks$/);
     if (method === 'GET' && listMatch) {
-        const tenant = decodeURIComponent(listMatch[1]);
-        const list = [...banks.keys()]
-            .filter((b) => (bankTenants.get(b) || 'default') === tenant)
-            .map((b) => ({ bank_id: b }));
-        return json(res, 200, { banks: list });
+        if (decodeURIComponent(listMatch[1]) !== 'default') {
+            return json(res, 404, { detail: 'Not Found' });
+        }
+        return json(res, 200, { banks: [...banks.keys()].map((b) => ({ bank_id: b })) });
     }
 
-    // /v1/<tenant>/banks/<bank>/<rest...> — tenant is a real isolation
-    // dimension in Hindsight; we record it per bank (see bankTenants).
     const m = p.match(/^\/v1\/([^/]+)\/banks\/([^/]+)(\/.*)?$/);
     if (!m) return json(res, 404, { error: 'not found', path: p });
     const tenant = decodeURIComponent(m[1]);
+    if (tenant !== 'default') return json(res, 404, { detail: 'Not Found' });
     const bank = decodeURIComponent(m[2]);
     const rest = m[3] || '';
     if (!bankTenants.has(bank)) bankTenants.set(bank, tenant);

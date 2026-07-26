@@ -50,30 +50,38 @@ func TestCompanyIDFromBankID(t *testing.T) {
 	}
 }
 
-func TestWithTenantRoutesBankPath(t *testing.T) {
+// The request path must ALWAYS use hindsight-api's literal tenant segment.
+// Verified against a real hindsight-api 0.6.1: its OpenAPI spec mounts all 49
+// routes under /v1/default/ (only {bank_id} is a path parameter) and any other
+// value 404s — with or without a TenantExtension, since its multi-tenancy is
+// credential-based. WithTenant records the team identity but must not alter
+// the URL; if it ever does, every memory call breaks against a real backend.
+func TestWithTenantDoesNotAlterRequestPath(t *testing.T) {
 	c := NewClient("http://example.test")
-	if c.tenantSeg() != "default" {
-		t.Errorf("new client tenant = %q, want default", c.tenantSeg())
-	}
-	if got := c.bankPath("company-3", "/memories"); got != "/v1/default/banks/company-3/memories" {
-		t.Errorf("default bankPath = %q", got)
+	const want = "/v1/default/banks/company-3/memories"
+	if got := c.bankPath("company-3", "/memories"); got != want {
+		t.Errorf("base bankPath = %q, want %q", got, want)
 	}
 	tc := c.WithTenant(TenantID(7))
-	if got := tc.bankPath("company-3", "/memories"); got != "/v1/team-7/banks/company-3/memories" {
-		t.Errorf("tenant bankPath = %q, want /v1/team-7/banks/company-3/memories", got)
+	if got := tc.bankPath("company-3", "/memories"); got != want {
+		t.Errorf("tenant-scoped bankPath = %q, want %q (hindsight hardcodes the segment)", got, want)
+	}
+	// The team identity is still carried, for logging / future credential use.
+	if tc.Tenant() != "team-7" {
+		t.Errorf("Tenant() = %q, want team-7", tc.Tenant())
 	}
 	// WithTenant must not mutate the original client.
-	if c.tenantSeg() != "default" {
-		t.Errorf("WithTenant mutated the base client tenant to %q", c.tenantSeg())
+	if c.Tenant() != "default" {
+		t.Errorf("WithTenant mutated the base client to %q", c.Tenant())
 	}
-	if c.WithTenant("").tenantSeg() != "default" {
+	if c.WithTenant("").Tenant() != "default" {
 		t.Error("empty tenant should fall back to default")
 	}
 }
 
-// TestClientSendsTenantInPath asserts the real request URL a tenant-scoped
-// client sends carries the tenant segment (end-to-end through the http path).
-func TestClientSendsTenantInPath(t *testing.T) {
+// TestClientSendsLiteralTenantInPath asserts the real URL on the wire, so a
+// regression that reintroduces path-based tenancy is caught here.
+func TestClientSendsLiteralTenantInPath(t *testing.T) {
 	var mu sync.Mutex
 	var gotPath string
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -89,7 +97,7 @@ func TestClientSendsTenantInPath(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if !strings.HasPrefix(gotPath, "/v1/team-42/banks/company-9") {
-		t.Errorf("request path = %q, want /v1/team-42/banks/company-9...", gotPath)
+	if !strings.HasPrefix(gotPath, "/v1/default/banks/company-9") {
+		t.Errorf("request path = %q, want /v1/default/banks/company-9...", gotPath)
 	}
 }

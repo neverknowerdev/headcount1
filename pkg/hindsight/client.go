@@ -20,13 +20,28 @@ import (
 	"time"
 )
 
+// apiTenantSegment is the tenant path segment every Hindsight route is mounted
+// under. It is a LITERAL in hindsight-api (verified against 0.6.1: its OpenAPI
+// spec lists 49 routes all under "/v1/default/", with only {bank_id} as a real
+// path parameter — any other value 404s, with or without a TenantExtension
+// configured).
+//
+// Hindsight's multi-tenancy is therefore NOT path-based: a TenantExtension
+// resolves the tenant from request CREDENTIALS (its interface is
+// authenticate(RequestContext) -> TenantContext) and maps it to a Postgres
+// schema, while the URL keeps saying "default". Per-team schema isolation would
+// mean shipping such an extension and sending per-team credentials — see
+// docs/memory-layer-design-review.md. Until then the isolation boundary is the
+// bank (Hindsight banks are fully isolated: no cross-bank entity resolution,
+// graph traversal or rank fusion) plus this app's own authorization.
+const apiTenantSegment = "default"
+
 type Client struct {
 	BaseURL string
 	HTTP    *http.Client
-	// tenant is the Hindsight tenant path segment (/v1/<tenant>/...). Each
-	// tenant is an isolated Postgres schema in the backend, so this is the
-	// per-team boundary: the app uses "team-<id>" per team. Empty behaves as
-	// "default" (the base schema) for backward compatibility.
+	// tenant records which team's memory this client instance is acting for.
+	// It does NOT change the URL (see apiTenantSegment) — it is kept as the
+	// seam a future credential-based tenancy would hang off, and for logging.
 	tenant string
 }
 
@@ -38,24 +53,32 @@ func NewClient(baseURL string) *Client {
 	}
 }
 
-// WithTenant returns a shallow copy of the client routing to /v1/<tenant>/...
-// (the underlying *http.Client is shared). Cheap and safe to call per request;
-// callers pass the team tenant resolved from the company being addressed.
+// WithTenant returns a shallow copy of the client tagged with the team's
+// tenant identity (the underlying *http.Client is shared). Cheap and safe to
+// call per request. NOTE: this does not currently affect the request URL —
+// hindsight-api hardcodes the tenant segment (see apiTenantSegment); it exists
+// so callers already resolve and carry the right team identity for when
+// credential-based tenancy is added.
 func (c *Client) WithTenant(tenant string) *Client {
 	cp := *c
 	if tenant == "" {
-		tenant = "default"
+		tenant = apiTenantSegment
 	}
 	cp.tenant = tenant
 	return &cp
 }
 
-func (c *Client) tenantSeg() string {
+// Tenant reports the team tenant identity this client is acting for.
+func (c *Client) Tenant() string {
 	if c.tenant == "" {
-		return "default"
+		return apiTenantSegment
 	}
 	return c.tenant
 }
+
+// tenantSeg is the segment used in the request path — always the literal
+// hindsight-api tenant, never the team identity.
+func (c *Client) tenantSeg() string { return apiTenantSegment }
 
 // MemoryItem is one unit of content for retain.
 type MemoryItem struct {

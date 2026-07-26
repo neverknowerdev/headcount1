@@ -119,13 +119,18 @@ test.describe.serial('Memory multi-team isolation', () => {
         }
     });
 
-    test('the two banks are recorded under different tenants', async () => {
+    test('each team gets its own bank, addressed under hindsight\'s literal tenant', async () => {
         const d = await dump();
-        // The own-bank reads above created each bank in the mock under its
-        // team's tenant.
-        expect(d.tenants[bankA()]).toBe(`team-${companyA.team_id}`);
-        expect(d.tenants[bankB()]).toBe(`team-${companyB.team_id}`);
-        expect(d.tenants[bankA()]).not.toBe(d.tenants[bankB()]);
+        // Isolation is per BANK, not per URL tenant: hindsight-api hardcodes the
+        // tenant segment (verified against 0.6.1 — any other value 404s, since
+        // its multi-tenancy is credential-based, not path-based). So both banks
+        // are addressed under "default", and what keeps teams apart is the
+        // distinct bank per company plus this app's authorization (asserted
+        // above). Hindsight banks share nothing: no cross-bank entity
+        // resolution, graph traversal or rank fusion.
+        expect(d.tenants[bankA()]).toBe('default');
+        expect(d.tenants[bankB()]).toBe('default');
+        expect(bankA()).not.toBe(bankB());
     });
 });
 

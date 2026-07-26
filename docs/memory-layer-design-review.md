@@ -172,3 +172,43 @@ everything in one archive.
 5. **#7 export of config/mental models** — must land in the same release as #3/#4.
 6. Update the e2e mock + memory spec alongside each step (mock needs `PUT /banks/{id}`,
    mental-model CRUD, and observation-type results for #3–#5).
+
+---
+
+## Addendum: how tenancy actually works (measured, hindsight-api 0.6.1)
+
+We considered giving each team its own Hindsight *tenant* on the assumption that the
+`/v1/<tenant>/` path segment selects an isolated Postgres schema. **That is wrong**, and
+the mistake is easy to make because the docs discuss "tenant schemas" at length. Measured
+directly against a locally installed hindsight-api 0.6.1:
+
+- **The tenant segment is a literal, not a parameter.** The server's own OpenAPI spec
+  lists 49 routes, all under `/v1/default/`; only `{bank_id}` is a real path parameter.
+  `GET /v1/team_1/banks` (and `team-1`, and any other value) returns **404 Not Found**.
+- **Configuring a `TenantExtension` does not change this.** Booting with
+  `HINDSIGHT_API_TENANT_EXTENSION=hindsight_api.extensions.builtin.tenant:ApiKeyTenantExtension`
+  leaves every route under `/v1/default/`; non-`default` values still 404. What the
+  extension changes is *authentication*: `/v1/default/banks` starts returning 401 without
+  a key and 200 with `Authorization: Bearer <HINDSIGHT_API_TENANT_API_KEY>`.
+- **Hindsight's multi-tenancy is credential-based.** The extension interface is
+  `authenticate(RequestContext) -> TenantContext`; the tenant (and its schema, e.g.
+  `tenant_<id>`) is derived from the caller's credentials while the URL keeps saying
+  `default`. Per-team schemas therefore require shipping a custom `TenantExtension` and
+  sending per-team credentials — not a different URL.
+
+**What this means for us.** The isolation boundary in the current design is the **bank**
+(`company-<id>`), which Hindsight documents as fully isolated: no cross-bank entity
+resolution, graph traversal, or rank fusion. Combined with the app-side authorization on
+`/api/memory/*` (team-membership check that 404-hides foreign banks), a team can neither
+read nor address another team's memory. What we do *not* currently get is storage-level
+(schema) separation.
+
+To get schema-level isolation later: ship a `TenantExtension` in the app venv that maps a
+per-team credential to `tenant_<teamID>` and calls `ctx.run_migration(schema)` on first
+use, wire it via `HINDSIGHT_API_TENANT_EXTENSION`, and have the client send that team's
+credential per request. `Client.WithTenant`/`Service.tenantForCompany` already resolve and
+carry the team identity, so that is the seam to build on.
+
+The e2e mock enforces the literal segment (non-`default` → 404) so a change that
+reintroduces path-based tenancy fails the suite instead of passing it and 404-ing in
+production.
