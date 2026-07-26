@@ -10,6 +10,9 @@ name: Deploy
 #   - push to a branch whose PR carries the "auto-deploy" label -> STAGING
 #   - manual run (any ref)     -> STAGING
 #
+# Every trigger is gated to the repository owner (see the `if:` on `decide`), so
+# a collaborator or an outside contributor cannot cause a deploy.
+#
 # Required repo config:
 #   secrets.DEPLOY_API_KEY   - shared secret; must equal each server's
 #                              HEADCOUNT1_DEPLOY_API_KEY.
@@ -17,6 +20,10 @@ name: Deploy
 #   vars.STAGING_DEPLOY_URL  - e.g. https://stagingapp.headcount1.ai
 # If the releases repo is private, each server also needs
 # HEADCOUNT1_DEPLOY_DOWNLOAD_TOKEN set to a PAT that can read release assets.
+#
+# The `deploy` job runs in the GitHub Environment named for its target
+# ("production"/"staging"), so required reviewers or wait timers configured on
+# that environment gate the deploy as well.
 
 on:
   push:
@@ -34,12 +41,29 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  deploy:
+  # Cheap routing job: works out whether this event deploys anywhere, and where.
+  # Kept separate from the build so an ordinary branch push (the common case,
+  # which deploys nothing) costs one tiny job instead of a full Go+Node setup.
+  decide:
     runs-on: ubuntu-latest
+    # Deploys are owner-only. github.actor is the identity that triggered this
+    # run (pusher, release publisher, or dispatcher); anyone else gets no job.
+    # NOTE: if this repo ever moves to an organization, repository_owner becomes
+    # the org name and will never equal a username — switch this to an explicit
+    # actor allowlist or rely on Environment required-reviewers instead.
+    if: github.actor == github.repository_owner
     permissions:
-      contents: write # create/update release assets
+      contents: read
       pull-requests: read # read the auto-deploy label on a branch's PR
       issues: write # ensure the auto-deploy label exists
+    outputs:
+      deploy: ${{ steps.decide.outputs.deploy }}
+      env: ${{ steps.decide.outputs.env }}
+      event_type: ${{ steps.decide.outputs.event_type }}
+      ref: ${{ steps.decide.outputs.ref }}
+      tag: ${{ steps.decide.outputs.tag }}
+      commit: ${{ steps.decide.outputs.commit }}
+      date: ${{ steps.decide.outputs.date }}
     steps:
       - uses: actions/checkout@v4
 
@@ -69,22 +93,26 @@ jobs:
           if [ "$EVENT" = "release" ]; then
             deploy=true; env=production; event_type=release
             ref="${{ github.event.release.tag_name }}"
+            # Upload into the existing release, so reuse its real tag.
             tag="$ref"
           elif [ "$EVENT" = "workflow_dispatch" ]; then
             deploy=true; env=staging; event_type=branch
             ref="${{ github.event.inputs.ref }}"
-            tag="staging-$(echo "$ref" | tr '/' '-')"
+            tag="deploy-staging-$(echo "$ref" | tr '/' '-')"
           elif [ "$EVENT" = "push" ]; then
             ref="${GITHUB_REF#refs/heads/}"
             if [ "$ref" = "main" ]; then
-              deploy=true; env=production; event_type=main; tag=main
+              # NOT "main": a release tag named "main" would collide with the
+              # branch ref and make `git checkout main` / `git describe`
+              # ambiguous. All rolling deploy tags carry a deploy- prefix.
+              deploy=true; env=production; event_type=main; tag=deploy-main
             else
               # A feature branch deploys to staging only if its open PR is
               # labelled "auto-deploy" — so every push to that branch redeploys.
               labels=$(gh pr list --head "$ref" --state open --json labels --jq '.[].labels[].name' 2>/dev/null || true)
               if printf '%s\n' "$labels" | grep -qx "auto-deploy"; then
                 deploy=true; env=staging; event_type=branch
-                tag="staging-$(echo "$ref" | tr '/' '-')"
+                tag="deploy-staging-$(echo "$ref" | tr '/' '-')"
               fi
             fi
           fi
@@ -100,55 +128,65 @@ jobs:
           } >> "$GITHUB_OUTPUT"
           echo "Decision: deploy=$deploy env=$env event_type=$event_type ref=$ref tag=$tag"
 
+  deploy:
+    needs: decide
+    if: needs.decide.outputs.deploy == 'true'
+    runs-on: ubuntu-latest
+    # Binds the run to the target GitHub Environment, so any protection rules
+    # (required reviewers, wait timer) configured there apply to this deploy.
+    environment: ${{ needs.decide.outputs.env }}
+    permissions:
+      contents: write # create/update release assets
+    steps:
+      - uses: actions/checkout@v4
+
       - name: Set up Go
-        if: steps.decide.outputs.deploy == 'true'
         uses: actions/setup-go@v5
         with:
           go-version: '1.24.3'
 
       - name: Set up Node.js
-        if: steps.decide.outputs.deploy == 'true'
         uses: actions/setup-node@v4
         with:
           node-version: 20
 
       - name: Build frontend
-        if: steps.decide.outputs.deploy == 'true'
         run: |
           cd frontend
           npm install
           npm run build
 
       - name: Build server binary (linux/amd64)
-        if: steps.decide.outputs.deploy == 'true'
         run: |
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.CommitHash=${{ steps.decide.outputs.commit }} -X main.BuildDate=${{ steps.decide.outputs.date }} -X main.Branch=${{ steps.decide.outputs.ref }}" \
+            -ldflags "-X main.CommitHash=${{ needs.decide.outputs.commit }} -X main.BuildDate=${{ needs.decide.outputs.date }} -X main.Branch=${{ needs.decide.outputs.ref }}" \
             -o agent-orchestrator-linux-amd64 \
             main.go
 
       - name: Publish release asset
         id: publish
-        if: steps.decide.outputs.deploy == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           set -euo pipefail
-          TAG="${{ steps.decide.outputs.tag }}"
+          TAG="${{ needs.decide.outputs.tag }}"
           if [ "${{ github.event_name }}" = "release" ]; then
             # The release already exists — just attach/refresh the built binary.
             gh release upload "$TAG" agent-orchestrator-linux-amd64 --clobber
           else
-            # Rolling prerelease per tag (main / staging-<branch>): recreate so
-            # the asset always reflects the latest push.
+            # Rolling prerelease per tag (deploy-main / deploy-staging-<branch>):
+            # recreate so the asset always reflects the latest push.
             gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$TAG" \
               --prerelease \
               --target "${{ github.sha }}" \
-              --title "deploy $TAG @ ${{ steps.decide.outputs.commit }}" \
-              --notes "Automated deploy build for ${{ steps.decide.outputs.ref }} (${{ steps.decide.outputs.commit }})." \
+              --title "deploy $TAG @ ${{ needs.decide.outputs.commit }}" \
+              --notes "Automated deploy build for ${{ needs.decide.outputs.ref }} (${{ needs.decide.outputs.commit }})." \
               agent-orchestrator-linux-amd64
           fi
+          # The server pins the artifact by digest, so publish the digest of the
+          # exact bytes we just uploaded.
+          SHA256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')
           # Use the asset API URL (not browser_download_url): it serves the raw
           # binary with Accept: application/octet-stream and works with a bearer
           # token, so it also covers a private releases repo.
@@ -156,32 +194,33 @@ jobs:
             --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')
           test -n "$ASSET_URL"
           echo "asset_url=$ASSET_URL" >> "$GITHUB_OUTPUT"
+          echo "sha256=$SHA256" >> "$GITHUB_OUTPUT"
 
       - name: Notify server
-        if: steps.decide.outputs.deploy == 'true'
         env:
           PROD_URL: ${{ vars.PROD_DEPLOY_URL }}
           STAGING_URL: ${{ vars.STAGING_DEPLOY_URL }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
         run: |
           set -euo pipefail
-          if [ "${{ steps.decide.outputs.env }}" = "production" ]; then
+          if [ "${{ needs.decide.outputs.env }}" = "production" ]; then
             BASE="$PROD_URL"
           else
             BASE="$STAGING_URL"
           fi
           if [ -z "$BASE" ]; then
-            echo "No deploy URL configured for ${{ steps.decide.outputs.env }} (set PROD_DEPLOY_URL / STAGING_DEPLOY_URL vars)."
+            echo "No deploy URL configured for ${{ needs.decide.outputs.env }} (set PROD_DEPLOY_URL / STAGING_DEPLOY_URL vars)."
             exit 1
           fi
           payload=$(jq -nc \
-            --arg et "${{ steps.decide.outputs.event_type }}" \
-            --arg ref "${{ steps.decide.outputs.ref }}" \
-            --arg commit "${{ steps.decide.outputs.commit }}" \
-            --arg date "${{ steps.decide.outputs.date }}" \
+            --arg et "${{ needs.decide.outputs.event_type }}" \
+            --arg ref "${{ needs.decide.outputs.ref }}" \
+            --arg commit "${{ needs.decide.outputs.commit }}" \
+            --arg date "${{ needs.decide.outputs.date }}" \
             --arg url "${{ steps.publish.outputs.asset_url }}" \
-            --arg target "${{ steps.decide.outputs.env }}" \
-            '{event_type:$et, ref:$ref, commit:$commit, build_date:$date, download_url:$url, target:$target}')
+            --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            --arg target "${{ needs.decide.outputs.env }}" \
+            '{event_type:$et, ref:$ref, commit:$commit, build_date:$date, download_url:$url, sha256:$sha, target:$target}')
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
             -H "Content-Type: application/json" \
             -H "X-Deploy-Key: $DEPLOY_KEY" \

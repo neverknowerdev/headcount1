@@ -39,7 +39,11 @@ func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var settings Settings
+	// Decode ON TOP of the current settings so a caller that sends only some
+	// fields doesn't silently reset the rest. Decoding into a zero value would
+	// wipe workspace_folders and — because AutoDeploy defaults to true — turn
+	// an omitted auto_deploy into "deploys disabled".
+	settings := LoadSettings()
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return

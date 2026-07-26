@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"encoding/json"
 	"net/http"
+	"strings"
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/updater"
@@ -20,15 +21,17 @@ const (
 )
 
 // DeployWebhookPayload is what CI POSTs to /api/deploy/webhook. download_url is
-// the direct URL of the platform binary asset for this build (the server also
-// re-checks it matches its own platform via the asset name convention, but CI
-// is expected to send the right one).
+// the URL of the built binary asset for this build, and sha256 pins its exact
+// contents — the server rejects a URL outside its allowed deploy sources and a
+// binary whose digest doesn't match (see updater.Deploy), so the shared deploy
+// key alone cannot make it run arbitrary code.
 type DeployWebhookPayload struct {
 	EventType   string `json:"event_type"` // release | main | branch
 	Ref         string `json:"ref"`        // branch or tag name
 	Commit      string `json:"commit"`     // short commit hash
 	BuildDate   string `json:"build_date"`
 	DownloadURL string `json:"download_url"`
+	SHA256      string `json:"sha256"` // hex digest of the binary at DownloadURL
 	// Target is the environment CI intends this for (production | staging). The
 	// server also enforces its own env, so a mismatched target is ignored — this
 	// is a belt-and-suspenders guard against a staging event reaching prod.
@@ -65,7 +68,13 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		st := api.updater.GetStatus()
 		resp["current"] = st.Current
 		resp["deploying"] = st.Deploying
-		if st.LastError != "" {
+		if st.Deploying && st.LastDeploy != nil {
+			resp["deploy_target"] = st.LastDeploy
+		}
+		// A deploy failure message can carry internal detail (download URLs,
+		// filesystem paths), so it goes only to the operator — same gate as the
+		// instance-global fields in GetSettings.
+		if st.LastError != "" && (utils.IsE2E() || globalAdminAPIEnabled()) {
 			resp["last_error"] = st.LastError
 		}
 	}
@@ -96,8 +105,15 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
-	if payload.DownloadURL == "" {
-		api.respondError(w, http.StatusBadRequest, "download_url is required")
+	// Reject a malformed/disallowed artifact reference up front, with a real
+	// error, rather than letting it fail asynchronously inside Deploy where only
+	// the server log would show it. Deploy re-validates regardless.
+	if err := updater.ValidateDownloadURL(payload.DownloadURL); err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if strings.TrimSpace(payload.SHA256) == "" {
+		api.respondError(w, http.StatusBadRequest, "sha256 is required")
 		return
 	}
 
@@ -126,7 +142,7 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	// replaces the binary and signals this process to shut down, so we must
 	// answer the webhook before that shutdown races the response out.
 	go func() {
-		if err := api.updater.Deploy(payload.DownloadURL, target); err != nil {
+		if err := api.updater.Deploy(payload.DownloadURL, payload.SHA256, target); err != nil {
 			// Deploy records the error in its status; nothing else to do here
 			// (the webhook has already been answered).
 			_ = err

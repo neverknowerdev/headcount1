@@ -1,24 +1,33 @@
 // Package updater applies a server-side deploy: it downloads a prebuilt binary
-// for a given git ref (published by CI as a GitHub release asset) and swaps the
-// running executable for it, then triggers a graceful restart so the new binary
-// takes over. The trigger is an authenticated deploy webhook (see the deploy
-// controller), not client-side polling — the server is the source of truth for
-// what it runs, and CI pushes deploy events to it.
+// for a given git ref (published by CI as a GitHub release asset), verifies it,
+// and swaps the running executable for it, then asks the process to shut down
+// gracefully so it can exec into the new build. The trigger is an authenticated
+// deploy webhook (see the deploy controller), not client-side polling — the
+// server is the source of truth for what it runs, and CI pushes deploy events
+// to it.
 package updater
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
+	"net/url"
 	"os"
-	"os/exec"
 	"path/filepath"
-	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
+
+// defaultDeployRepo is the repository a deploy binary must come from. A deploy
+// URL that points anywhere else is rejected, so a leaked deploy key cannot make
+// the server fetch and execute a binary from an attacker's repository.
+const defaultDeployRepo = "neverknowerdev/headcount1"
 
 // VersionInfo identifies a build. The running build's values are stamped in at
 // compile time via -ldflags; a deploy target's values arrive in the webhook.
@@ -41,8 +50,9 @@ type Status struct {
 	Current   VersionInfo `json:"current"`
 	Deploying bool        `json:"deploying"`
 	LastError string      `json:"last_error,omitempty"`
-	// LastDeploy is the version the most recent successful deploy switched to.
-	// It's what the NEXT process will report as Current after the restart.
+	// LastDeploy is the version the in-progress (or most recent) deploy is
+	// switching to — what this server will report as Current once it has
+	// exec'd into the new binary.
 	LastDeploy *VersionInfo `json:"last_deploy,omitempty"`
 }
 
@@ -51,6 +61,11 @@ type Updater struct {
 	current   VersionInfo
 	status    Status
 	deploying bool
+	// restartPending/pendingExecPath are set once a deploy has successfully
+	// replaced the executable on disk. main's shutdown sequence reads them via
+	// RestartPending and execs the new binary as its final act.
+	restartPending  bool
+	pendingExecPath string
 	// downloadTokenFn returns a bearer token for fetching the binary from a
 	// private release asset, or "" for a public download.
 	downloadTokenFn func() string
@@ -91,19 +106,34 @@ func (u *Updater) IsCurrent(target VersionInfo) bool {
 	return target.CommitHash != "" && target.CommitHash == u.current.CommitHash
 }
 
-// Deploy downloads the binary at downloadURL, replaces the running executable
-// with it, and triggers a graceful restart into the new build. target is used
-// only for status/logging. It returns once the replacement binary has been
-// spawned and this process's shutdown has been signalled; the caller should
-// respond to the webhook before this process exits.
+// RestartPending reports whether a deploy has already replaced this process's
+// executable on disk, and the absolute path to exec. main calls it at the end
+// of its shutdown sequence.
+func (u *Updater) RestartPending() (string, bool) {
+	u.mu.RLock()
+	defer u.mu.RUnlock()
+	return u.pendingExecPath, u.restartPending
+}
+
+// Deploy downloads the binary at downloadURL, verifies it against sha256Hex,
+// replaces the running executable with it, and requests a graceful shutdown by
+// signalling SIGTERM to this process. target is used for status and logging.
+//
+// It deliberately does NOT start the successor process. main's shutdown handler
+// execs the new binary as its final act — after in-flight agent runs have been
+// drained and persisted, the keyring sealed, and the HTTP listener closed (see
+// RestartPending). Spawning a successor here instead would (a) race the
+// outgoing process for the listening port, which it holds for the whole drain
+// window, and (b) run the successor's interrupted-run resume scan before the
+// outgoing process had written the runs it paused, stranding them.
 //
 // Concurrent deploys are rejected: the first one wins and the process is on its
 // way out, so a second is meaningless.
-func (u *Updater) Deploy(downloadURL string, target VersionInfo) error {
+func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) error {
 	u.mu.Lock()
 	if u.deploying {
 		u.mu.Unlock()
-		return fmt.Errorf("a deploy is already in progress")
+		return errors.New("a deploy is already in progress")
 	}
 	u.deploying = true
 	u.status.Deploying = true
@@ -119,14 +149,26 @@ func (u *Updater) Deploy(downloadURL string, target VersionInfo) error {
 		return err
 	}
 
-	if downloadURL == "" {
-		return fail(fmt.Errorf("deploy: empty download_url"))
+	// Validate BEFORE fetching: the deploy key is a shared secret, so the URL
+	// it authorizes must still be constrained to our own release artifacts.
+	if err := ValidateDownloadURL(downloadURL); err != nil {
+		return fail(fmt.Errorf("deploy: %w", err))
+	}
+	// Pin the exact artifact. Without this, anything ever published to the repo
+	// (including an older, vulnerable build) would be a valid deploy target.
+	expected := strings.ToLower(strings.TrimSpace(sha256Hex))
+	if expected == "" {
+		return fail(errors.New("deploy: sha256 is required"))
 	}
 
 	log.Printf("Deploy: downloading %s (%s)...", target.DisplayString(), downloadURL)
-	tmpFile, err := downloadBinary(downloadURL, u.downloadTokenFn())
+	tmpFile, gotSum, err := downloadBinary(downloadURL, u.downloadTokenFn())
 	if err != nil {
 		return fail(fmt.Errorf("deploy: download binary: %w", err))
+	}
+	if gotSum != expected {
+		os.Remove(tmpFile)
+		return fail(fmt.Errorf("deploy: sha256 mismatch: expected %s, got %s", expected, gotSum))
 	}
 
 	execPath, err := os.Executable()
@@ -152,22 +194,15 @@ func (u *Updater) Deploy(downloadURL string, target VersionInfo) error {
 	u.mu.Lock()
 	t := target
 	u.status.LastDeploy = &t
+	u.restartPending = true
+	u.pendingExecPath = execPath
 	u.mu.Unlock()
 
-	log.Printf("Deploy: binary replaced, restarting into %s...", target.DisplayString())
-	cmd := exec.Command(execPath, os.Args[1:]...)
-	cmd.Stdout = os.Stdout
-	cmd.Stderr = os.Stderr
-	cmd.Stdin = os.Stdin
-	if err := cmd.Start(); err != nil {
-		return fail(fmt.Errorf("deploy: start new process: %w", err))
-	}
+	log.Printf("Deploy: binary replaced; draining and restarting into %s...", target.DisplayString())
 
-	// Signal our own graceful shutdown (SIGTERM) rather than os.Exit(0): main's
-	// signal handler seals the secrets keyring, drains in-flight agent runs so
-	// they resume in the new process, and drains HTTP — all skipped by a bare
-	// exit. The new process's listenWithRetry covers the brief window where
-	// both processes hold the port. See main.go.
+	// Hand off to main's SIGTERM handler, which seals the secrets keyring,
+	// drains in-flight agent runs so they resume in the new build, closes the
+	// listener, and finally execs the binary we just wrote.
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		if p, err := os.FindProcess(os.Getpid()); err == nil {
@@ -180,10 +215,77 @@ func (u *Updater) Deploy(downloadURL string, target VersionInfo) error {
 	return nil
 }
 
-func downloadBinary(url, token string) (string, error) {
+// allowedDownloadHosts is the set of hosts a deploy binary may be fetched from.
+// Operators can override it with HEADCOUNT1_DEPLOY_ALLOWED_HOSTS (comma
+// separated) to point at a private mirror; overriding also relaxes the
+// repository-path check below, since a mirror's layout is its own.
+func allowedDownloadHosts() (hosts map[string]bool, overridden bool) {
+	if custom := strings.TrimSpace(os.Getenv("HEADCOUNT1_DEPLOY_ALLOWED_HOSTS")); custom != "" {
+		hosts = map[string]bool{}
+		for _, h := range strings.Split(custom, ",") {
+			if h = strings.ToLower(strings.TrimSpace(h)); h != "" {
+				hosts[h] = true
+			}
+		}
+		return hosts, true
+	}
+	return map[string]bool{
+		"api.github.com":                       true,
+		"github.com":                           true,
+		"objects.githubusercontent.com":        true,
+		"release-assets.githubusercontent.com": true,
+	}, false
+}
+
+// deployRepo is the "owner/name" a deploy URL must reference.
+func deployRepo() string {
+	if r := strings.TrimSpace(os.Getenv("HEADCOUNT1_DEPLOY_REPO")); r != "" {
+		return r
+	}
+	return defaultDeployRepo
+}
+
+// ValidateDownloadURL enforces that a deploy binary comes from an allowed host
+// and, on GitHub, from our own repository. The deploy webhook's shared key
+// authenticates the CALLER; this constrains what that caller can make the
+// server execute, so a leaked key is not by itself remote code execution.
+func ValidateDownloadURL(raw string) error {
+	if strings.TrimSpace(raw) == "" {
+		return errors.New("download_url is required")
+	}
+	u, err := url.Parse(raw)
+	if err != nil {
+		return fmt.Errorf("unparseable download_url: %w", err)
+	}
+	hosts, overridden := allowedDownloadHosts()
+	// Plain http is only tolerated for an explicitly configured host (a local
+	// mirror or a test fixture); the GitHub defaults are https-only.
+	if u.Scheme != "https" && !(u.Scheme == "http" && overridden) {
+		return fmt.Errorf("download_url must use https (got %q)", u.Scheme)
+	}
+	host := strings.ToLower(u.Hostname())
+	if !hosts[host] {
+		return fmt.Errorf("download host %q is not an allowed deploy source", host)
+	}
+	// api.github.com and github.com URLs name the repository in their path
+	// (/repos/{owner}/{repo}/... and /{owner}/{repo}/... respectively), so pin
+	// it. The githubusercontent CDN hosts opaque signed blob paths and is only
+	// ever reached by following a redirect from an already-validated API URL.
+	if !overridden && (host == "api.github.com" || host == "github.com") {
+		if !strings.Contains(u.Path, "/"+deployRepo()+"/") {
+			return fmt.Errorf("download_url does not belong to %s", deployRepo())
+		}
+	}
+	return nil
+}
+
+// downloadBinary fetches url to a temp file, returning the path and the file's
+// hex-encoded sha256 (computed in the same pass, so the bytes are never read
+// twice and the digest is of exactly what was written).
+func downloadBinary(url, token string) (path string, sha256Hex string, err error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	req.Header.Set("User-Agent", "headcount1-updater")
 	// GitHub release-asset API URLs need this Accept header to return the raw
@@ -196,30 +298,31 @@ func downloadBinary(url, token string) (string, error) {
 	client := &http.Client{Timeout: 10 * time.Minute}
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
+		return "", "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
 	tmpFile, err := os.CreateTemp("", "headcount1-deploy-*")
 	if err != nil {
-		return "", err
+		return "", "", err
 	}
-	if _, err := io.Copy(tmpFile, resp.Body); err != nil {
+	hasher := sha256.New()
+	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body); err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
-		return "", err
+		return "", "", err
 	}
 	tmpFile.Close()
 
 	if err := os.Chmod(tmpFile.Name(), 0755); err != nil {
 		os.Remove(tmpFile.Name())
-		return "", err
+		return "", "", err
 	}
-	return tmpFile.Name(), nil
+	return tmpFile.Name(), hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
 func copyFile(src, dst string) error {
@@ -239,15 +342,4 @@ func copyFile(src, dst string) error {
 		return err
 	}
 	return out.Chmod(0755)
-}
-
-// PlatformAssetName is the release-asset filename for the running OS/arch, e.g.
-// "agent-orchestrator-linux-amd64". CI publishes assets under these names and
-// the deploy webhook selects the matching one.
-func PlatformAssetName() string {
-	name := fmt.Sprintf("agent-orchestrator-%s-%s", runtime.GOOS, runtime.GOARCH)
-	if runtime.GOOS == "windows" {
-		name += ".exe"
-	}
-	return name
 }

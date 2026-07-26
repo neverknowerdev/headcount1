@@ -420,12 +420,9 @@ func main() {
 
 	go func() {
 		log.Printf("Starting server on port %s", port)
-		// A self-update spawns the new binary right after the old one is asked to
-		// shut down, but the old process still holds the port until it finishes
-		// sealing the secrets keyring and closes its listener — so the very first
-		// bind attempt here can lose that race. Retry briefly instead of dying
-		// immediately; a genuinely occupied port (unrelated process) still fails
-		// once the deadline passes.
+		// Tolerate a briefly-busy port (see listenWithRetry) instead of dying on
+		// the first bind attempt; a genuinely occupied port still fails once the
+		// deadline passes.
 		listener, err := listenWithRetry(httpServer.Addr, 10*time.Second)
 		if err != nil {
 			log.Fatalf("server error: %v", err)
@@ -478,12 +475,30 @@ func main() {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
+
+	// A deploy replaced our executable on disk (see updater.Deploy): exec it
+	// now, as the very last thing this process does. Everything the new build
+	// depends on has already happened — in-flight agent runs are drained and
+	// persisted (so its resume scan finds them), the keyring is sealed, and the
+	// listener is closed (so it can bind the port immediately). syscall.Exec
+	// replaces this process image in place, keeping the same PID, so there is
+	// never a window with two servers competing for the port.
+	if execPath, pending := upd.RestartPending(); pending {
+		log.Printf("Deploy: exec into new binary %s", execPath)
+		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
+			// Exec only returns on failure; the old image is still running but
+			// has already shut down its listener, so there is nothing to serve.
+			log.Fatalf("deploy: exec into new binary failed: %v", err)
+		}
+	}
 }
 
 // listenWithRetry binds addr, retrying on "address already in use" until
-// deadline elapses. Covers the brief window during a self-update restart
-// where the outgoing process still holds the port while it seals its secrets
-// keyring and drains in-flight requests before closing its listener.
+// deadline elapses. A deploy restart no longer contends for the port (the
+// outgoing process closes its listener and then execs in place, so only one
+// server ever holds it), but an external restart — a process manager relaunching
+// us, or a socket still winding down — can briefly find the port busy, and
+// dying immediately on that is worse than waiting a moment.
 func listenWithRetry(addr string, deadline time.Duration) (net.Listener, error) {
 	giveUpAt := time.Now().Add(deadline)
 	var lastErr error

@@ -4,12 +4,21 @@ import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
+interface BuildVersion {
+    branch: string;
+    commit_hash: string;
+    build_date: string;
+}
+
 interface DeployStatus {
     environment: 'production' | 'staging';
     deploy_source: 'releases' | 'main';
     auto_deploy: boolean;
-    current?: { branch: string; commit_hash: string; build_date: string };
+    current?: BuildVersion;
     deploying?: boolean;
+    /** The build an in-progress deploy is switching to. */
+    deploy_target?: BuildVersion;
+    /** Only returned to the operator (global admin API enabled). */
     last_error?: string;
 }
 
@@ -264,7 +273,15 @@ export const Settings: React.FC = () => {
                             </code>
                         </div>
                         {deployStatus.deploying && (
-                            <div className="text-xs text-indigo-600">A deploy is in progress — the server will restart shortly.</div>
+                            <div className="text-xs text-indigo-600">
+                                Deploying
+                                {deployStatus.deploy_target && (
+                                    <> to <code className="bg-indigo-50 px-1 rounded">
+                                        {deployStatus.deploy_target.branch}+{deployStatus.deploy_target.build_date}+{deployStatus.deploy_target.commit_hash}
+                                    </code></>
+                                )}
+                                {' '}— in-flight runs are draining, then the server restarts.
+                            </div>
                         )}
                         {deployStatus.last_error && (
                             <div className="text-xs text-red-600">Last deploy error: {deployStatus.last_error}</div>

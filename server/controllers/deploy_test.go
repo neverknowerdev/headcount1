@@ -68,7 +68,11 @@ func TestDeployWebhookAuth(t *testing.T) {
 		return w
 	}
 
-	validBody := DeployWebhookPayload{EventType: deployEventBranch, DownloadURL: "http://example/bin"}
+	validBody := DeployWebhookPayload{
+		EventType:   deployEventBranch,
+		DownloadURL: "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1",
+		SHA256:      "abc123",
+	}
 
 	// No key configured on the server: the endpoint is hidden entirely.
 	require.Equal(t, http.StatusNotFound, post("secret", validBody).Code)
@@ -88,4 +92,41 @@ func TestDeployWebhookAuth(t *testing.T) {
 	var resp map[string]string
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
 	require.Equal(t, "ignored", resp["status"])
+}
+
+// TestDeployWebhookRejectsUntrustedArtifact ensures the webhook refuses a
+// deploy whose artifact it cannot trust, with a real 400 — rather than
+// accepting it and only failing asynchronously in the updater. Authentication
+// alone must not be enough to make the server run arbitrary code.
+func TestDeployWebhookRejectsUntrustedArtifact(t *testing.T) {
+	t.Setenv("HEADCOUNT1_DEPLOY_API_KEY", "secret")
+	api := &API{}
+	post := func(body any) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(body)
+		r := httptest.NewRequest(http.MethodPost, "/deploy/webhook", bytes.NewReader(b))
+		r.Header.Set("X-Deploy-Key", "secret")
+		w := httptest.NewRecorder()
+		api.DeployWebhook(w, r)
+		return w
+	}
+	const ourAsset = "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1"
+
+	// A binary hosted anywhere but our own release assets.
+	require.Equal(t, http.StatusBadRequest, post(DeployWebhookPayload{
+		EventType: deployEventBranch, DownloadURL: "https://evil.example.com/backdoor", SHA256: "abc123",
+	}).Code)
+
+	// Someone else's repository on GitHub.
+	require.Equal(t, http.StatusBadRequest, post(DeployWebhookPayload{
+		EventType: deployEventBranch, DownloadURL: "https://api.github.com/repos/attacker/evil/releases/assets/1", SHA256: "abc123",
+	}).Code)
+
+	// Missing URL, and missing digest (which would otherwise allow deploying any
+	// artifact ever published, including an old vulnerable build).
+	require.Equal(t, http.StatusBadRequest, post(DeployWebhookPayload{
+		EventType: deployEventBranch, SHA256: "abc123",
+	}).Code)
+	require.Equal(t, http.StatusBadRequest, post(DeployWebhookPayload{
+		EventType: deployEventBranch, DownloadURL: ourAsset,
+	}).Code)
 }
