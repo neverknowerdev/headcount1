@@ -60,6 +60,16 @@ func (api *API) memoryTenantClientOr(w http.ResponseWriter, r *http.Request) *hi
 	return c.WithTenant(hindsight.TenantID(*comp.TeamID))
 }
 
+// memoryBankFromCtx returns the CANONICAL bank id of the company LoadMemoryBank
+// authorized, rather than echoing the caller's {bankID} path param. The param
+// only has to authorize; proxying it verbatim would let a non-canonical spelling
+// (e.g. "company-007") pass the company check and then address a different bank
+// upstream. Always pair with memoryTenantClientOr, which resolves the tenant
+// from the same company.
+func (api *API) memoryBankFromCtx(r *http.Request) string {
+	return hindsight.BankID(api.companyFromCtx(r).ID)
+}
+
 // memoryErrorStatus maps an upstream Hindsight error to the status we serve:
 // 4xx pass through (404 stays a 404, 422 a 422 — the frontend relies on
 // this to distinguish "not there yet" from "backend broken"); everything
@@ -135,7 +145,7 @@ func (api *API) GetMemoryGraph(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	bank := chi.URLParam(r, "bankID")
+	bank := api.memoryBankFromCtx(r)
 	params := url.Values{}
 	for _, k := range []string{"limit", "q", "type", "tags", "tags_match", "document_id"} {
 		if v := r.URL.Query().Get(k); v != "" {
@@ -155,7 +165,7 @@ func (api *API) GetMemoryEntitiesGraph(w http.ResponseWriter, r *http.Request) {
 	if v := r.URL.Query().Get("limit"); v != "" {
 		params.Set("limit", v)
 	}
-	data, err := c.EntitiesGraphRaw(r.Context(), chi.URLParam(r, "bankID"), params)
+	data, err := c.EntitiesGraphRaw(r.Context(), api.memoryBankFromCtx(r), params)
 	api.respondRawJSON(w, data, err)
 }
 
@@ -170,7 +180,7 @@ func (api *API) ListMemoryUnits(w http.ResponseWriter, r *http.Request) {
 			params.Set(k, v)
 		}
 	}
-	data, err := c.ListMemoriesRaw(r.Context(), chi.URLParam(r, "bankID"), params)
+	data, err := c.ListMemoriesRaw(r.Context(), api.memoryBankFromCtx(r), params)
 	api.respondRawJSON(w, data, err)
 }
 
@@ -179,7 +189,7 @@ func (api *API) GetMemoryUnit(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.GetMemoryRaw(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "memoryID"))
+	data, err := c.GetMemoryRaw(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "memoryID"))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -206,7 +216,7 @@ func (api *API) UpdateMemoryUnit(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	data, err := c.UpdateMemory(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "memoryID"), patch)
+	data, err := c.UpdateMemory(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "memoryID"), patch)
 	api.respondRawJSON(w, data, err)
 }
 
@@ -217,7 +227,7 @@ func (api *API) DeleteMemoryUnit(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.UpdateMemory(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "memoryID"),
+	data, err := c.UpdateMemory(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "memoryID"),
 		map[string]interface{}{"state": "invalidated", "reason": "deleted from Memory UI"})
 	api.respondRawJSON(w, data, err)
 }
@@ -244,7 +254,7 @@ func (api *API) RecallMemory(w http.ResponseWriter, r *http.Request) {
 	if len(req.Tags) > 0 && req.TagsMatch == "" {
 		req.TagsMatch = "all_strict"
 	}
-	resp, err := c.Recall(r.Context(), chi.URLParam(r, "bankID"), hindsight.RecallRequest{
+	resp, err := c.Recall(r.Context(), api.memoryBankFromCtx(r), hindsight.RecallRequest{
 		Query: req.Query, Budget: req.Budget, MaxTokens: 4096,
 		Tags: req.Tags, TagsMatch: req.TagsMatch,
 	})
@@ -270,7 +280,7 @@ func (api *API) AskMemory(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "query is required")
 		return
 	}
-	resp, err := c.Reflect(r.Context(), chi.URLParam(r, "bankID"), req.Query, "low", req.Tags)
+	resp, err := c.Reflect(r.Context(), api.memoryBankFromCtx(r), req.Query, "low", req.Tags)
 	if err != nil {
 		api.respondMemoryError(w, err)
 		return
@@ -283,7 +293,7 @@ func (api *API) GetMemoryStats(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.StatsRaw(r.Context(), chi.URLParam(r, "bankID"))
+	data, err := c.StatsRaw(r.Context(), api.memoryBankFromCtx(r))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -295,7 +305,7 @@ func (api *API) GetMemoryBankConfig(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.GetBankConfigRaw(r.Context(), chi.URLParam(r, "bankID"))
+	data, err := c.GetBankConfigRaw(r.Context(), api.memoryBankFromCtx(r))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -305,7 +315,7 @@ func (api *API) ListMemoryDirectives(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.ListDirectivesRaw(r.Context(), chi.URLParam(r, "bankID"))
+	data, err := c.ListDirectivesRaw(r.Context(), api.memoryBankFromCtx(r))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -316,7 +326,7 @@ func (api *API) ListMentalModels(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.ListMentalModelsRaw(r.Context(), chi.URLParam(r, "bankID"))
+	data, err := c.ListMentalModelsRaw(r.Context(), api.memoryBankFromCtx(r))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -325,7 +335,7 @@ func (api *API) GetMentalModel(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.GetMentalModelRaw(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"))
+	data, err := c.GetMentalModelRaw(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "modelID"))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -334,7 +344,7 @@ func (api *API) RefreshMentalModel(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	if err := c.RefreshMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
+	if err := c.RefreshMentalModel(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "modelID")); err != nil {
 		api.respondMemoryError(w, err)
 		return
 	}
@@ -346,7 +356,7 @@ func (api *API) DeleteMentalModel(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	if err := c.DeleteMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID")); err != nil {
+	if err := c.DeleteMentalModel(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "modelID")); err != nil {
 		api.respondMemoryError(w, err)
 		return
 	}
@@ -375,7 +385,7 @@ func (api *API) CreateMentalModel(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "source_query is required")
 		return
 	}
-	data, err := c.CreateMentalModelRaw(r.Context(), chi.URLParam(r, "bankID"), body)
+	data, err := c.CreateMentalModelRaw(r.Context(), api.memoryBankFromCtx(r), body)
 	api.respondRawJSON(w, data, err)
 }
 
@@ -391,7 +401,7 @@ func (api *API) UpdateMentalModel(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
 	}
-	data, err := c.UpdateMentalModel(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"), patch)
+	data, err := c.UpdateMentalModel(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "modelID"), patch)
 	api.respondRawJSON(w, data, err)
 }
 
@@ -403,7 +413,7 @@ func (api *API) GetMentalModelHistory(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.GetMentalModelHistoryRaw(r.Context(), chi.URLParam(r, "bankID"), chi.URLParam(r, "modelID"))
+	data, err := c.GetMentalModelHistoryRaw(r.Context(), api.memoryBankFromCtx(r), chi.URLParam(r, "modelID"))
 	api.respondRawJSON(w, data, err)
 }
 
@@ -415,7 +425,7 @@ func (api *API) ListMemoryTags(w http.ResponseWriter, r *http.Request) {
 	if c == nil {
 		return
 	}
-	data, err := c.ListTagsRaw(r.Context(), chi.URLParam(r, "bankID"))
+	data, err := c.ListTagsRaw(r.Context(), api.memoryBankFromCtx(r))
 	api.respondRawJSON(w, data, err)
 }
 

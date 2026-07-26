@@ -31,6 +31,16 @@ func TestCompanyIDFromBankID(t *testing.T) {
 		{"team-3", 0, false},
 		{"foreign-x", 0, false},
 		{"", 0, false},
+		// Non-canonical spellings must be rejected: each of these parses to 7
+		// with a naive Atoi, which would authorize company 7 while the handler
+		// addressed a different bank id upstream.
+		{"company-+7", 0, false},
+		{"company-007", 0, false},
+		{"company-4294967303", 0, false}, // int32 truncation -> 7
+		{"company--0", 0, false},
+		{"company- 7", 0, false},
+		{"company-7 ", 0, false},
+		{"company-9223372036854775808", 0, false}, // int64 overflow
 	}
 	for _, c := range cases {
 		got, ok := CompanyIDFromBankID(c.in)

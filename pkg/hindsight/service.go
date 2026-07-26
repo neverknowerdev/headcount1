@@ -166,13 +166,21 @@ func TenantID(teamID int32) string { return fmt.Sprintf("team-%d", teamID) }
 // CompanyIDFromBankID parses a "company-<id>" bank id. ok is false for any
 // non-conforming id, so callers can reject foreign/garbage bank ids (used by
 // the memory-endpoint authorization).
+//
+// Only the CANONICAL form is accepted: the id must round-trip through
+// formatting, and must fit in an int32. Without that, "company-+7",
+// "company-007" and "company-4294967303" (int32 truncation) would all
+// authorize as company 7 while addressing a different bank upstream.
 func CompanyIDFromBankID(bankID string) (int32, bool) {
 	s, ok := strings.CutPrefix(bankID, "company-")
 	if !ok {
 		return 0, false
 	}
-	n, err := strconv.Atoi(s)
+	n, err := strconv.ParseInt(s, 10, 32)
 	if err != nil {
+		return 0, false
+	}
+	if strconv.FormatInt(n, 10) != s { // rejects "+7", "007", "-0"
 		return 0, false
 	}
 	return int32(n), true

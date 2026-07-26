@@ -103,10 +103,19 @@ test.describe.serial('Memory multi-team isolation', () => {
         expect(listForeign.status()).toBe(404);
     });
 
-    test('a malformed bank id is 404 (never proxied to the backend)', async ({ request }) => {
-        for (const bad of ['not-a-bank', 'team-1', 'company-', 'company-abc']) {
-            const res = await request.get(`/api/memory/banks/${bad}/stats`);
-            expect(res.status(), `bank ${bad}`).toBe(404);
+    test('a malformed or non-canonical bank id is 404 (never proxied to the backend)', async ({ request }) => {
+        const bad = [
+            'not-a-bank', 'team-1', 'company-', 'company-abc',
+            // Non-canonical spellings of an id the caller DOES own: each parses
+            // to the same company under a naive Atoi, but names a different
+            // bank upstream — they must not authorize.
+            `company-+${companyA.id}`,
+            `company-00${companyA.id}`,
+            `company-${4294967296 + companyA.id}`, // int32 truncation
+        ];
+        for (const b of bad) {
+            const res = await request.get(`/api/memory/banks/${encodeURIComponent(b)}/stats`);
+            expect(res.status(), `bank ${b}`).toBe(404);
         }
     });
 
