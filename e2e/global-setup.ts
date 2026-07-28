@@ -6,6 +6,7 @@ import * as path from 'path';
 import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
+import { startMockHindsightServer } from './fixtures/mock-hindsight-server';
 
 const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '.e2e-env.json');
 const pidFile = process.env.E2E_PID_FILE || path.join(__dirname, '.e2e-server.pid');
@@ -37,15 +38,29 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const mock = await startMockProviderServer();
     console.log(`[globalSetup] mock provider: ${mock.baseUrl}`);
 
+    // 4b. Mock Hindsight memory server (the Go server uses HINDSIGHT_API_URL
+    // in e2e mode instead of spawning a real hindsight-api process).
+    // Both sides share a generated API key so the mock can enforce the same
+    // credential the real backend requires (ApiKeyTenantExtension) — see
+    // mock-hindsight-server.ts. Set before starting the mock so it is in the
+    // mock's own process env.
+    process.env.HINDSIGHT_API_TENANT_API_KEY =
+        process.env.HINDSIGHT_API_TENANT_API_KEY || require('crypto').randomBytes(24).toString('hex');
+    const hindsight = await startMockHindsightServer();
+    console.log(`[globalSetup] mock hindsight: ${hindsight.baseUrl}`);
+    (globalThis as any).__e2eMockHindsightStop = hindsight.stop;
+
     // 5. Persist env for tests
     const envData = {
         E2E_MOCK_PROVIDER_URL: mock.baseUrl,
         E2E_TEST_REPO_URL: repoUrl,
         E2E_HEADCOUNT1_HOME: e2eHome,
+        E2E_HINDSIGHT_URL: hindsight.baseUrl,
     };
     fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
     process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
     process.env.E2E_TEST_REPO_URL = repoUrl;
+    process.env.E2E_HINDSIGHT_URL = hindsight.baseUrl;
     process.env.E2E_MODE = 'true';
 
     // 6. Spawn the Go server with the right env (native engine by default).
@@ -53,6 +68,10 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
     env.E2E_HEADCOUNT1_HOME = e2eHome;
+    env.HINDSIGHT_API_URL = hindsight.baseUrl;
+    // The Go server authenticates to the mock with the same key (Manager
+    // picks it up via resolveAPIKey for an external backend).
+    env.HINDSIGHT_API_TENANT_API_KEY = process.env.HINDSIGHT_API_TENANT_API_KEY!;
 
     const projectRoot = path.resolve(__dirname, '..');
     // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module

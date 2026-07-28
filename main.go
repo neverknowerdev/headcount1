@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net/http"
@@ -26,6 +27,7 @@ import (
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/bootkey"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/hindsight"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/runtokens"
@@ -139,6 +141,8 @@ func main() {
 		&db.AgentMCPAccount{},
 		&db.MCPToolStat{},
 		&db.AgentMCPToolFilter{},
+		&db.HindsightDocument{},
+		&db.SystemLLMLog{},
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
@@ -195,6 +199,13 @@ func main() {
 	// existed, so tenant export/import can dedup providers by slug.
 	if err := db.New(database).BackfillProviderSlugs(context.Background()); err != nil {
 		log.Printf("Warning: provider slug backfill: %v", err)
+	}
+
+	// Every company must belong to a team so its memory can live in a
+	// per-team Hindsight tenant. Backfill any legacy team-less rows from
+	// their creator's team (runs after the EnsureTeamForUser loop above).
+	if err := db.New(database).BackfillCompanyTeams(context.Background()); err != nil {
+		log.Printf("Warning: company team backfill: %v", err)
 	}
 
 	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
@@ -258,6 +269,65 @@ func main() {
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
 
+	// Hindsight long-term memory layer. The manager runs a bare-metal
+	// hindsight-api process (installed into the app venv by the setup script)
+	// whose LLMs come from the "Default Models" hindsight purposes, routed
+	// through this server's own LLM gateway (see resolveHindsightLLMConfig);
+	// HINDSIGHT_API_URL overrides with an external server (also used by e2e
+	// tests).
+	memManager := hindsight.NewManager(func(ctx context.Context) hindsight.OpLLMConfigs {
+		q := db.New(database)
+		retain, hasRetain := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightRetain)
+		consolidation, hasConsolidation := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightConsolidation)
+		reflect, hasReflect := resolveHindsightLLMConfig(ctx, q, db.PurposeHindsightReflect)
+		return hindsight.OpLLMConfigs{
+			Retain:           retain,
+			HasRetain:        hasRetain,
+			Consolidation:    consolidation,
+			HasConsolidation: hasConsolidation,
+			Reflect:          reflect,
+			HasReflect:       hasReflect,
+		}
+	})
+	memService := hindsight.NewService(db.New(database), memManager.Client)
+	eng.SetMemoryService(memService)
+	endpoints.SetMemoryService(memService, memManager)
+
+	// Memory rides the backup archive: banks are exported to the hindsight/
+	// directory (a backed-up fileDirs entry — see pkg/backup) before each
+	// backup and re-imported after a restore.
+	backup.PreBackupHook = func(ctx context.Context) {
+		dir := filesystem.NewPaths(endpoints.LoadSettings().BasePath).HindsightDir()
+		if err := memService.ExportAllToDir(ctx, dir); err != nil {
+			log.Printf("Warning: memory export before backup failed: %v", err)
+		}
+	}
+	backup.PostRestoreHook = func() {
+		dir := filesystem.NewPaths(endpoints.LoadSettings().BasePath).HindsightDir()
+		if err := memService.ImportAllFromDir(context.Background(), dir); err != nil {
+			log.Printf("Warning: memory import after restore failed: %v", err)
+		}
+	}
+
+	// Per-tenant (per-team) export/import carries each team's memory inside the
+	// user-facing /data archive, routed to that team's isolated Hindsight
+	// tenant. Import remaps company ids, so memory is restored under the new ids.
+	backup.MemoryExportHook = func(ctx context.Context, dir string, srcTeamID int32, companyIDs []int32) error {
+		return memService.ExportTeamBanksToDir(ctx, dir, srcTeamID, companyIDs)
+	}
+	backup.MemoryImportHook = func(ctx context.Context, dir string, dstTeamID int32, remap map[int32]int32) error {
+		return memService.ImportTeamBanksFromDir(ctx, dir, dstTeamID, remap)
+	}
+
+	// After a schema fallback (the previous schema was migrated by an
+	// incompatible hindsight-api build), memories are recovered through the
+	// same export/import path: the newest backup export on disk is imported
+	// into the fresh schema via Hindsight's own API.
+	memManager.RecoverFromExport = func(ctx context.Context) string {
+		dir := filesystem.NewPaths(endpoints.LoadSettings().BasePath).HindsightDir()
+		return memService.RecoverFromExportDir(ctx, dir)
+	}
+
 	// Run setup script and npm installs in the background so the HTTP server starts immediately.
 	go func() {
 		if err := setup.Run(); err != nil {
@@ -265,6 +335,26 @@ func main() {
 		}
 		srv.InstallMCPNpmDeps(context.Background())
 		srv.CacheMCPTools(context.Background())
+
+		// Bring the memory backend up (after setup so hindsight-api is
+		// installed), then feed every project's docs into it. Hindsight's
+		// LLM traffic routes through this server's own gateway, so wait for
+		// our HTTP listener to come up first — otherwise hindsight-api's
+		// early requests would hit a connection refused.
+		waitForOwnServer(60 * time.Second)
+		if err := memManager.Start(context.Background()); err != nil {
+			log.Printf("WARNING: memory layer unavailable: %v", err)
+			return
+		}
+		srv.SyncAllProjectMemory(context.Background())
+
+		// Refresh the on-disk memory export right after a successful start,
+		// so the recovery material a future schema fallback imports from is
+		// at most as stale as the last boot (not just the last daily backup).
+		exportDir := filesystem.NewPaths(endpoints.LoadSettings().BasePath).HindsightDir()
+		if err := memService.ExportAllToDir(context.Background(), exportDir); err != nil {
+			log.Printf("Warning: post-start memory export failed: %v", err)
+		}
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())
 
@@ -482,6 +572,111 @@ func recoverStaleRuns(database *gorm.DB) {
 		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
 		_ = q.UnlockTaskRun(ctx, run.TaskID)
 	}
+}
+
+// waitForOwnServer polls this server's own /api/ping until the HTTP listener
+// answers, so components that call back into the server (hindsight-api's LLM
+// traffic rides our gateway) don't race the listener at startup. Gives up
+// after the timeout with a warning rather than blocking forever.
+func waitForOwnServer(timeout time.Duration) {
+	url := gatewayBaseURL() + "/ping"
+	client := &http.Client{Timeout: 2 * time.Second}
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		resp, err := client.Get(url)
+		if err == nil {
+			resp.Body.Close()
+			if resp.StatusCode == http.StatusOK {
+				return
+			}
+		}
+		time.Sleep(200 * time.Millisecond)
+	}
+	log.Printf("Warning: own HTTP server not reachable at %s after %v; starting memory backend anyway", url, timeout)
+}
+
+// gatewayBaseURL is the loopback address of this server's own LLM gateway,
+// used as the base for the /api/proxy/... URLs handed to hindsight-api.
+func gatewayBaseURL() string {
+	port := os.Getenv("PORT")
+	if port == "" {
+		port = "8080"
+	}
+	return "http://127.0.0.1:" + port + "/api"
+}
+
+// resolveHindsightLLMConfig resolves the provider+model configured for one
+// hindsight purpose (db.PurposeHindsightRetain/Consolidation/Reflect, i.e.
+// retain/consolidation/reflect) via the "Default Models" settings — an
+// unconfigured purpose means that operation has no override (retain: no LLM
+// at all; consolidation/reflect: hindsight-api falls back to the retain LLM
+// itself). Rather than the provider's own URL, hindsight is pointed at this
+// server's LLM gateway (/api/proxy/group/... or /api/proxy/provider/...), so
+// its traffic gets the gateway's proxy logging and token stats, and a model
+// group keeps its live failover/health routing instead of being flattened to
+// one member at hindsight-api startup.
+// firstConfiguredDefaultModelSetting finds the first user with a configured
+// (provider or model-group) Default Models setting for purpose. Default
+// Model Settings are per-user, but the Hindsight memory backend is one
+// shared bare-metal process for the whole instance (its LLM routing is
+// baked into env vars at process spawn, not resolved per request) — so
+// there is no single company/task to scope this to. Picking the first
+// configured user's setting matches the common single-operator deployment
+// and is deterministic when several users have configured it.
+func firstConfiguredDefaultModelSetting(ctx context.Context, q *db.Queries, purpose string) (db.DefaultModelSetting, bool) {
+	users, err := q.ListUsers(ctx)
+	if err != nil {
+		return db.DefaultModelSetting{}, false
+	}
+	for _, u := range users {
+		setting, err := q.GetDefaultModelSetting(ctx, u.ID, purpose)
+		if err != nil {
+			continue
+		}
+		if setting.ProviderID != nil || setting.ModelGroupID != nil {
+			return setting, true
+		}
+	}
+	return db.DefaultModelSetting{}, false
+}
+
+func resolveHindsightLLMConfig(ctx context.Context, q *db.Queries, purpose string) (hindsight.LLMConfig, bool) {
+	setting, ok := firstConfiguredDefaultModelSetting(ctx, q, purpose)
+	if !ok {
+		return hindsight.LLMConfig{}, false
+	}
+
+	if setting.ModelGroupID != nil {
+		group, gErr := q.GetModelGroup(ctx, *setting.ModelGroupID)
+		if gErr != nil || len(db.ExpandModelGroupMembers(group.Members)) == 0 {
+			return hindsight.LLMConfig{}, false
+		}
+		// The group's slug is a routable pseudo-model: the group router
+		// substitutes each attempted member's real model into the body.
+		return hindsight.LLMConfig{
+			BaseURL: fmt.Sprintf("%s/proxy/group/%d/v1", gatewayBaseURL(), group.ID),
+			APIKey:  "internal", // gateway injects the real provider key per attempt
+			Model:   group.Slug,
+		}, true
+	}
+
+	if setting.ProviderID != nil {
+		provider, pErr := q.GetLLMProvider(ctx, *setting.ProviderID)
+		if pErr != nil {
+			return hindsight.LLMConfig{}, false
+		}
+		model := setting.Model
+		if model == "" {
+			model = provider.DefaultModel
+		}
+		return hindsight.LLMConfig{
+			BaseURL: fmt.Sprintf("%s/proxy/provider/%d/v1", gatewayBaseURL(), provider.ID),
+			APIKey:  "internal", // gateway swaps in the provider's real key
+			Model:   model,
+		}, true
+	}
+
+	return hindsight.LLMConfig{}, false
 }
 
 // refreshBuiltinLLMProviderModels fetches the current free-model catalog for

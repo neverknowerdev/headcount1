@@ -43,6 +43,10 @@ func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 
 	repairWorktrees(basePath)
 
+	if PostRestoreHook != nil {
+		PostRestoreHook()
+	}
+
 	log.Printf("Restore completed successfully")
 	return nil
 }

@@ -26,9 +26,21 @@ export function setupBareRepo(): string {
     run('git', ['-C', workDir, 'config', 'user.email', 'e2e@headcount1.local']);
     run('git', ['-C', workDir, 'config', 'user.name', 'headcount1 e2e']);
 
-    // Create an initial commit so the repo isn't empty
-    fs.writeFileSync(path.join(workDir, 'README.md'), '# headcount1 e2e repo\n');
-    run('git', ['-C', workDir, 'add', 'README.md']);
+    // Create an initial commit so the repo isn't empty. The .md files double
+    // as documentation for the Hindsight memory ingestion e2e tests: every
+    // .md file becomes one memory document ("doc:<relpath>").
+    fs.writeFileSync(path.join(workDir, 'README.md'), '# paperclip e2e repo\n');
+    fs.mkdirSync(path.join(workDir, 'docs'), { recursive: true });
+    fs.writeFileSync(
+        path.join(workDir, 'docs', 'gm-coin.md'),
+        '# GM Coin\n\nGM Coin is a community token. The GM Coin product rewards users for daily greetings.\n',
+    );
+    fs.writeFileSync(
+        path.join(workDir, 'docs', 'icp-backend.md'),
+        '# ICP backend\n\nThe backend for GM Coin runs on the Internet Computer (ICP). ' +
+        'Canisters written in Motoko store balances and process GM Coin transactions.\n',
+    );
+    run('git', ['-C', workDir, 'add', '.']);
     run('git', ['-C', workDir, 'commit', '-m', 'initial commit']);
 
     // Convert the working repo into a bare one at bareDir

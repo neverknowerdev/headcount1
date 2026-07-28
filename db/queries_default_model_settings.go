@@ -10,11 +10,27 @@ import (
 // a sensible zero-value default in EnsureDefaultModelSettings) whenever a
 // new internal one-shot LLM use case is added.
 const (
-	PurposeCommitMessages = "commit_messages"
-	PurposeAskArtifact    = "ask_artifact"
+	PurposeCommitMessages         = "commit_messages"
+	PurposeAskArtifact            = "ask_artifact"
+	PurposeHindsightRetain        = "hindsight_retain"
+	PurposeHindsightConsolidation = "hindsight_consolidation"
+	PurposeHindsightReflect       = "hindsight_reflect"
 )
 
-var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeAskArtifact}
+// legacyPurposeRenames maps a superseded purpose string to its current name,
+// applied once by EnsureDefaultModelSettings so an existing row's
+// configuration survives the rename instead of being orphaned.
+var legacyPurposeRenames = map[string]string{
+	"hindsight_memory": PurposeHindsightRetain,
+}
+
+var defaultModelSettingPurposes = []string{
+	PurposeCommitMessages,
+	PurposeAskArtifact,
+	PurposeHindsightRetain,
+	PurposeHindsightConsolidation,
+	PurposeHindsightReflect,
+}
 
 func (q *Queries) GetDefaultModelSetting(ctx context.Context, userID int32, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
@@ -59,6 +75,20 @@ func (q *Queries) UpdateDefaultModelSetting(ctx context.Context, userID int32, p
 // group. Idempotent: never overwrites an existing row's configuration.
 func (q *Queries) EnsureDefaultModelSettingsForUser(ctx context.Context, userID int32) error {
 	uid := userID
+	for oldPurpose, newPurpose := range legacyPurposeRenames {
+		var newExisting DefaultModelSetting
+		err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, newPurpose).First(&newExisting).Error
+		if err == nil {
+			continue // already migrated (or seeded fresh under the new name)
+		}
+		if err != gorm.ErrRecordNotFound {
+			return err
+		}
+		if err := q.db.WithContext(ctx).Model(&DefaultModelSetting{}).Where("user_id = ? AND purpose = ?", userID, oldPurpose).Update("purpose", newPurpose).Error; err != nil {
+			return err
+		}
+	}
+
 	for _, purpose := range defaultModelSettingPurposes {
 		var existing DefaultModelSetting
 		err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, purpose).First(&existing).Error

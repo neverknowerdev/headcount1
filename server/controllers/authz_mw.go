@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/hindsight"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -91,6 +92,28 @@ func (api *API) LoadCompany(next http.Handler) http.Handler {
 		c, err := api.authorizeCompany(r, id)
 		if err != nil {
 			api.respondError(w, http.StatusNotFound, "company not found")
+			return
+		}
+		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), companyKey, c)))
+	})
+}
+
+// LoadMemoryBank authorizes a memory-bank route whose {bankID} param is
+// "company-<id>": it parses the company id out of the bank id, runs the same
+// team-membership check as LoadCompany, and stashes the company under
+// companyKey so handlers read it via companyFromCtx (and derive the tenant).
+// A malformed bank id or a foreign/nonexistent company is a 404 — so a caller
+// can neither reach nor probe another team's memory.
+func (api *API) LoadMemoryBank(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		cid, ok := hindsight.CompanyIDFromBankID(chi.URLParam(r, "bankID"))
+		if !ok {
+			api.respondError(w, http.StatusNotFound, "bank not found")
+			return
+		}
+		c, err := api.authorizeCompany(r, cid)
+		if err != nil {
+			api.respondError(w, http.StatusNotFound, "bank not found")
 			return
 		}
 		next.ServeHTTP(w, r.WithContext(context.WithValue(r.Context(), companyKey, c)))

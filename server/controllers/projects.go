@@ -147,6 +147,10 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		api.startCodegraphInit(proj.ID, newCGServer.ID, repoPath)
 	}
 
+	// Feed the project's documentation (.md files only — code exploration is
+	// CodeGraph's job) into the Hindsight memory layer in the background.
+	api.StartProjectMemoryInit(proj.ID)
+
 	api.logActivity(req.CompanyID, "project_created", int32(proj.ID), "project", "")
 
 	api.respondJSON(w, http.StatusCreated, proj)
@@ -232,6 +236,9 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		if cgErr == nil {
 			api.startCodegraphInit(project.ID, cgSrv.ID, repoPath)
 		}
+
+		// Re-sync doc files into the memory layer after the repo update.
+		api.StartProjectMemoryInit(project.ID)
 	}
 
 	saved, err := api.q.UpdateProject(r.Context(), project)

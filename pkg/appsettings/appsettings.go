@@ -16,6 +16,20 @@ import (
 type Settings struct {
 	BasePath         string   `json:"base_path" yaml:"base_path"`
 	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
+	// MemoryRecallMaxTokens / MemoryBriefingMaxTokens override the memory
+	// layer's default recall token budgets (0 = use the built-in defaults:
+	// 6144 for the memory_recall tool, 4096 for the automatic pre-task
+	// briefing — see pkg/hindsight defaultRecallMaxTokens/defaultBriefingMaxTokens).
+	MemoryRecallMaxTokens   int `json:"memory_recall_max_tokens" yaml:"memory_recall_max_tokens"`
+	MemoryBriefingMaxTokens int `json:"memory_briefing_max_tokens" yaml:"memory_briefing_max_tokens"`
+	// ServiceUser is an existing unprivileged OS account that long-running
+	// child processes (currently the memory backend) run under, so the agent
+	// sandbox cannot read their environment via /proc/<pid>/environ — and so
+	// hindsight's embedded Postgres has a non-root uid when the app runs as
+	// root. Empty = run children as this process. The account is never created
+	// by the app; see doc/hindsight-hardening.md. Env override:
+	// HEADCOUNT1_SERVICE_USER.
+	ServiceUser string `json:"service_user" yaml:"service_user"`
 }
 
 // Load reads settings.yaml from its bootstrap location (db.Headcount1Home()).

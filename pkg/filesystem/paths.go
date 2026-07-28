@@ -20,6 +20,7 @@ import (
 //	  artifacts/{company}/{rootTaskID}/...   agent deliverables
 //	  logs/{company}/{rootTaskID}/run-{id}/  run logs (JSONL)
 //	  skills/{company}/{skill}/
+//	  hindsight/                             memory-layer bank exports (backup/restore + schema-fallback recovery)
 //	  ssh/id_rsa
 //	  credentials/
 //	  venv/
@@ -94,6 +95,12 @@ func (p Paths) CompanySkillsDir(companyShortName string) string {
 func (p Paths) SkillDir(companyShortName, skillName string) string {
 	return filepath.Join(p.CompanySkillsDir(companyShortName), skillName)
 }
+
+// HindsightDir holds the memory layer's on-disk exports: document-transfer
+// ZIPs and bank-template manifests written before every backup (so memory
+// travels inside the archive), plus schema-fallback state used to recover
+// from an incompatible hindsight-api migration.
+func (p Paths) HindsightDir() string { return filepath.Join(p.Base, "hindsight") }
 
 // CompanyDirs lists every company-scoped directory root. Used by company
 // archive/delete to cover the whole footprint of a company on disk.

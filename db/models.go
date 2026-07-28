@@ -588,6 +588,21 @@ type ActivityLog struct {
 	CreatedAt  time.Time `json:"created_at"`
 }
 
+// HindsightDocument tracks a doc file (.md) fed into the Hindsight memory
+// layer for a project, so sync can detect changed/removed files by hash.
+// DocumentID is the stable Hindsight document id ("doc:<projectID>/<relative path>");
+// retaining with the same id upserts, replacing the old extracted memories.
+type HindsightDocument struct {
+	ID         int32     `json:"id" gorm:"primaryKey"`
+	ProjectID  int32     `json:"project_id" gorm:"not null;uniqueIndex:idx_hindsight_doc"`
+	Project    Project   `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	Path       string    `json:"path" gorm:"not null;uniqueIndex:idx_hindsight_doc"` // relative to the project repo root
+	DocumentID string    `json:"document_id" gorm:"not null"`
+	SHA256     string    `json:"sha256" gorm:"not null"`
+	CreatedAt  time.Time `json:"created_at"`
+	UpdatedAt  time.Time `json:"updated_at"`
+}
+
 // ModelGroup is a named set of provider+model pairs exposed behind a single
 // OpenAI-compatible proxy URL (/api/proxy/group/{slug}/v1). The gateway
 // routes each request to the healthiest member, preferring free models and
@@ -664,6 +679,31 @@ type DefaultModelSetting struct {
 	ModelGroup   *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
 	CreatedAt    time.Time    `json:"created_at"`
 	UpdatedAt    time.Time    `json:"updated_at"`
+}
+
+// SystemLLMLog records one LLM call made outside any agent session: memory
+// layer operations (Hindsight retain/reflect/consolidation, routed through
+// the gateway's /proxy/memory endpoint), artifact Q&A reader calls, commit
+// message generation. Request/response bodies live on the filesystem
+// (LogFilePath, under data/logs/system-llm/); the DB row holds the metadata
+// the Run Logs UI lists and filters on.
+type SystemLLMLog struct {
+	ID     int32  `json:"id" gorm:"primaryKey"`
+	Source string `json:"source" gorm:"not null;index"` // "memory", "ask_artifact", "commit_message"
+	// Detail is a short human-readable label: the artifact filename, the
+	// task ref, or empty when nothing more specific is known.
+	Detail           string    `json:"detail"`
+	ProviderID       int32     `json:"provider_id"`
+	ProviderName     string    `json:"provider_name"`
+	Model            string    `json:"model"`
+	PromptTokens     int       `json:"prompt_tokens"`
+	CompletionTokens int       `json:"completion_tokens"`
+	TotalTokens      int       `json:"total_tokens"`
+	DurationMs       int64     `json:"duration_ms"`
+	Status           string    `json:"status"` // "ok" | "error"
+	Error            string    `json:"error" gorm:"type:text"`
+	LogFilePath      string    `json:"log_file_path"`
+	CreatedAt        time.Time `json:"created_at" gorm:"index"`
 }
 
 // UserGitCredential holds a user's own git credentials, encrypted at rest under

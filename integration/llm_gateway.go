@@ -68,6 +68,13 @@ func (g *LLMGateway) Mount(r chi.Router) {
 			r.Get("/v1/models", g.getModelsForGroup)
 		})
 	})
+	// Path-addressed provider proxy for clients that can't set custom
+	// headers (e.g. hindsight-api's OpenAI client, which only takes a base
+	// URL and bearer token).
+	r.Route("/proxy/provider/{provider_id}", func(r chi.Router) {
+		r.Post("/v1/chat/completions", g.proxyChatCompletionsForProviderPath)
+		r.Get("/v1/models", g.getModelsForProviderPath)
+	})
 }
 
 // chatCompletionsRequest is the subset of an OpenAI chat-completions body the
@@ -99,6 +106,11 @@ type directProxyRequest struct {
 	runID       int
 	agentID     int32           // owner of the ProxyRequestLog rows; 0 to skip
 	skipHeaders map[string]bool // request headers not forwarded upstream
+	// systemSource labels a caller that belongs to no agent run (e.g. the
+	// Hindsight memory engine → "memory"). When set and the request carries
+	// no run, the exchange is recorded as a SystemLLMLog (full bodies on
+	// disk) so non-session LLM traffic is visible in the Run Logs UI.
+	systemSource string
 }
 
 // proxyChatCompletionsForProvider proxies to the provider named by the
@@ -143,6 +155,77 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 		agentID:     g.runAgentID(r.Context(), runID),
 		skipHeaders: map[string]bool{"x-provider-id": true, "x-run-id": true},
 	})
+}
+
+// proxyChatCompletionsForProviderPath proxies to the provider named by the
+// {provider_id} URL param instead of the X-Provider-ID header, for clients
+// that can only configure a base URL. Stats are attributed to the request's
+// run (if any), same as the header-based entrypoint.
+func (g *LLMGateway) proxyChatCompletionsForProviderPath(w http.ResponseWriter, r *http.Request) {
+	providerID, err := strconv.Atoi(chi.URLParam(r, "provider_id"))
+	if err != nil {
+		http.Error(w, "Invalid provider ID", http.StatusBadRequest)
+		return
+	}
+	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
+	if err != nil {
+		http.Error(w, "Provider not found", http.StatusNotFound)
+		return
+	}
+
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		http.Error(w, "Failed to read body", http.StatusBadRequest)
+		return
+	}
+
+	req := parseChatCompletionsRequest(bodyBytes)
+	runID := parseRunID(r)
+	logger := g.loggerForRun(r.Context(), runID, req.Model, "llm-proxy", provider.Name, bodyBytes, req.Messages)
+	if logger != nil {
+		defer logger.Close()
+	}
+
+	g.relayProviderResponse(w, r, directProxyRequest{
+		provider:    provider,
+		sourceName:  "llm-proxy",
+		model:       req.Model,
+		stream:      req.Stream,
+		bodyBytes:   bodyBytes,
+		logger:      logger,
+		runID:       runID,
+		agentID:     g.runAgentID(r.Context(), runID),
+		skipHeaders: map[string]bool{"authorization": true, "x-run-id": true, "content-length": true},
+		// The path-addressed proxy exists for headerless clients — today
+		// that's the Hindsight memory engine, so runless calls here are
+		// memory-layer traffic (retain/reflect/consolidation).
+		systemSource: "memory",
+	})
+}
+
+// getModelsForProviderPath answers /v1/models for a path-addressed provider.
+func (g *LLMGateway) getModelsForProviderPath(w http.ResponseWriter, r *http.Request) {
+	providerID, err := strconv.Atoi(chi.URLParam(r, "provider_id"))
+	if err != nil {
+		http.Error(w, "Invalid provider ID", http.StatusBadRequest)
+		return
+	}
+	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
+	if err != nil {
+		http.Error(w, "Provider not found", http.StatusNotFound)
+		return
+	}
+
+	resp, err := sendProviderRequest(r.Context(), r.Method, provider, "/models", nil, r.Header, map[string]bool{"authorization": true})
+	if err != nil {
+		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	copyResponseHeaders(w, resp.Header)
+	w.WriteHeader(resp.StatusCode)
+	io.Copy(w, resp.Body)
 }
 
 // agentProxyTarget is where an agent's LLM traffic should go: a model group
@@ -245,10 +328,18 @@ func (g *LLMGateway) proxyChatCompletionsForAgent(w http.ResponseWriter, r *http
 // generic and per-agent entrypoints; only provider resolution and stat
 // attribution differ between them, and those arrive on p.
 func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Request, p directProxyRequest) {
+	started := time.Now()
+	// A call with a system source and no run is non-session traffic (memory
+	// layer): record it as a SystemLLMLog on every exit path.
+	logSystem := p.systemSource != "" && p.runID <= 0
+
 	resp, err := sendProviderRequest(r.Context(), r.Method, p.provider, "/chat/completions", p.bodyBytes, r.Header, p.skipHeaders)
 	if err != nil {
 		if p.logger != nil {
 			p.logger.LogError(p.model, p.sourceName, p.provider.Name, err)
+		}
+		if logSystem {
+			g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, nil, normalizedUsage{}, time.Since(started), err)
 		}
 		http.Error(w, "Failed to contact provider", http.StatusBadGateway)
 		return
@@ -271,6 +362,9 @@ func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Reques
 		if p.logger != nil {
 			p.logger.LogResponse(p.model, p.provider.Name, resp.StatusCode, respBodyBytes, reasoning, usage)
 		}
+		if logSystem {
+			g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, respBodyBytes, usage, time.Since(started), statusError(resp.StatusCode))
+		}
 		w.Write(respBodyBytes)
 		return
 	}
@@ -289,12 +383,15 @@ func (g *LLMGateway) relayProviderResponse(w http.ResponseWriter, r *http.Reques
 	if lastUsage != nil {
 		g.recordProxyStats(r.Context(), p.provider, p.model, p.runID, p.agentID, *lastUsage)
 	}
+	var usage normalizedUsage
+	if lastUsage != nil {
+		usage = *lastUsage
+	}
 	if p.logger != nil {
-		var usage normalizedUsage
-		if lastUsage != nil {
-			usage = *lastUsage
-		}
 		p.logger.LogStreamResponse(p.model, p.provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
+	}
+	if logSystem {
+		g.recordSystemCall(p.systemSource, p.provider, p.model, p.bodyBytes, rawBody, usage, time.Since(started), statusError(resp.StatusCode))
 	}
 }
 

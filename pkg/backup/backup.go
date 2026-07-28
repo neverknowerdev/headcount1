@@ -32,14 +32,28 @@ type BackupManifest struct {
 // unencrypted archive. Per-user SSH keys survive a backup as ciphertext in the
 // database (UserGitCredential.SSHPrivateKeyEncrypted); the shared key is
 // re-provisioned by the operator on restore.
-var fileDirs = []string{"repos", "workspace", "uploads", "artifacts", "logs", "skills"}
+var fileDirs = []string{"repos", "workspace", "uploads", "artifacts", "logs", "skills", "hindsight"}
 
 func CreateBackup(basePath string, database *gorm.DB) (string, error) {
 	return CreateBackupWithContext(context.Background(), basePath, database)
 }
 
+// PreBackupHook, when set, runs before the archive is built. Used by the
+// Hindsight memory layer to export memory banks into {basePath}/data/hindsight
+// so they travel inside the archive. Errors are logged, never fatal — a
+// backup without memory beats no backup.
+var PreBackupHook func(ctx context.Context)
+
+// PostRestoreHook, when set, runs after an archive has been extracted and the
+// DB rebuilt. Used to import memory bank archives back into Hindsight.
+var PostRestoreHook func()
+
 func CreateBackupWithContext(ctx context.Context, basePath string, database *gorm.DB) (string, error) {
 	log.Println("Starting backup...")
+
+	if PreBackupHook != nil {
+		PreBackupHook(ctx)
+	}
 
 	backupDir := filepath.Join(basePath, "backups")
 	if err := os.MkdirAll(backupDir, 0755); err != nil {

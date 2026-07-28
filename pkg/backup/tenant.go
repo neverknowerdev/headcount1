@@ -57,6 +57,17 @@ const (
 	TenantArchiveVersion = 1
 )
 
+// MemoryExportHook, when set, writes the given team's companies' memory banks
+// into dir (carried in the archive under memory/) so a tenant export includes
+// the Hindsight memory. Wired from main over the memory Service; nil (memory
+// disabled) is a no-op. companyIDs all belong to srcTeamID.
+var MemoryExportHook func(ctx context.Context, dir string, srcTeamID int32, companyIDs []int32) error
+
+// MemoryImportHook, when set, restores memory for the imported companies onto
+// the destination team's tenant. remap maps each archived (source) company id
+// to its new id in this database (from the tenant importer's id map).
+var MemoryImportHook func(ctx context.Context, dir string, dstTeamID int32, remap map[int32]int32) error
+
 // TenantManifest is the archive's self-describing header (entities/manifest is
 // carried inside tenant.json; this is the top-level marker).
 type TenantManifest struct {
@@ -137,7 +148,44 @@ func ExportTenant(ctx context.Context, w io.Writer, basePath string, database *g
 			log.Printf("Warning: export tenant: %s: %v", dir, err)
 		}
 	}
+
+	// Hindsight memory for the exported companies, under memory/ (only when a
+	// memory service is wired). Best-effort — a memory-less export still
+	// restores the DB subtree.
+	if MemoryExportHook != nil {
+		if err := exportTenantMemory(ctx, tw, database, userID, data, &count); err != nil {
+			log.Printf("Warning: export tenant memory: %v", err)
+		}
+	}
 	return nil
+}
+
+// exportTenantMemory invokes MemoryExportHook for the exported team's companies
+// and tars the result under memory/.
+func exportTenantMemory(ctx context.Context, tw *tar.Writer, database *gorm.DB, userID int32, data *tenantData, count *int) error {
+	var srcTeamID int32
+	database.WithContext(ctx).Table("team_members").Where("user_id = ?", userID).
+		Select("team_id").Limit(1).Scan(&srcTeamID)
+	if srcTeamID == 0 {
+		return nil // no team → nothing tenant-scoped to export
+	}
+	companyIDs64 := ids(data.Tables["companies"])
+	if len(companyIDs64) == 0 {
+		return nil
+	}
+	companyIDs := make([]int32, 0, len(companyIDs64))
+	for _, id := range companyIDs64 {
+		companyIDs = append(companyIDs, int32(id))
+	}
+	tmp, err := os.MkdirTemp("", "headcount1-tenant-mem-*")
+	if err != nil {
+		return err
+	}
+	defer os.RemoveAll(tmp)
+	if err := MemoryExportHook(ctx, tmp, srcTeamID, companyIDs); err != nil {
+		return err
+	}
+	return addDirectoryToTar(tw, tmp, "memory", count)
 }
 
 // collectTenant reads the user's subtree into a tenantData payload and returns
@@ -325,6 +373,21 @@ func ImportTenantFromReader(ctx context.Context, r io.Reader, basePath string, d
 	// transactional; a failure here is logged, never fatal — the DB is the
 	// source of truth and its paths already point at the new locations).
 	imp.restoreFiles()
+
+	// Restore Hindsight memory onto the destination team's tenant, mapping each
+	// archived company id to its new id. Runs after commit so the new company
+	// ids are final. Best-effort.
+	if MemoryImportHook != nil {
+		remap := map[int32]int32{}
+		for old, nw := range imp.idMap["companies"] {
+			remap[int32(old)] = int32(nw)
+		}
+		if len(remap) > 0 {
+			if err := MemoryImportHook(ctx, filepath.Join(tempDir, "memory"), targetTeamID, remap); err != nil {
+				log.Printf("Warning: import tenant memory: %v", err)
+			}
+		}
+	}
 
 	return stats, nil
 }

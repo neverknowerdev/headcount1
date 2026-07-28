@@ -43,11 +43,195 @@ const InfoItem: React.FC<{ label: string; value: React.ReactNode; className?: st
     </div>
 );
 
+interface SystemLLMLog {
+    id: number;
+    source: string;
+    detail: string;
+    provider_name: string;
+    model: string;
+    prompt_tokens: number;
+    completion_tokens: number;
+    total_tokens: number;
+    duration_ms: number;
+    status: string;
+    error: string;
+    created_at: string;
+}
+
+const SYSTEM_LOG_PAGE_SIZE = 50;
+
+const SOURCE_BADGE_CLASSES: Record<string, string> = {
+    memory: 'bg-violet-100 text-violet-700',
+    ask_artifact: 'bg-sky-100 text-sky-700',
+    commit_message: 'bg-emerald-100 text-emerald-700',
+};
+
+const SystemLLMLogs: React.FC = () => {
+    const [logs, setLogs] = useState<SystemLLMLog[]>([]);
+    const [total, setTotal] = useState(0);
+    const [source, setSource] = useState('');
+    const [loading, setLoading] = useState(false);
+    const [error, setError] = useState<string | null>(null);
+    const [expandedId, setExpandedId] = useState<number | null>(null);
+    const [detail, setDetail] = useState<{ log: SystemLLMLog; file?: string } | null>(null);
+    const [detailLoading, setDetailLoading] = useState(false);
+    const [detailError, setDetailError] = useState<string | null>(null);
+
+    const fetchLogs = useCallback(async (offset: number, src: string) => {
+        setLoading(true);
+        setError(null);
+        try {
+            const params = new URLSearchParams({ limit: String(SYSTEM_LOG_PAGE_SIZE), offset: String(offset) });
+            if (src) params.set('source', src);
+            const res = await axios.get(`/api/system-llm-logs?${params.toString()}`);
+            const items: SystemLLMLog[] = res.data?.items || [];
+            setTotal(res.data?.total || 0);
+            setLogs((prev) => (offset === 0 ? items : [...prev, ...items]));
+        } catch (e: any) {
+            setError(e?.response?.data?.error || 'Failed to load system LLM logs');
+        } finally {
+            setLoading(false);
+        }
+    }, []);
+
+    useEffect(() => {
+        setExpandedId(null);
+        setDetail(null);
+        fetchLogs(0, source);
+    }, [source, fetchLogs]);
+
+    const openDetail = useCallback(async (id: number) => {
+        if (expandedId === id) {
+            setExpandedId(null);
+            setDetail(null);
+            return;
+        }
+        setExpandedId(id);
+        setDetail(null);
+        setDetailError(null);
+        setDetailLoading(true);
+        try {
+            const res = await axios.get(`/api/system-llm-logs/${id}`);
+            setDetail({ log: res.data?.log, file: res.data?.file });
+        } catch (e: any) {
+            setDetailError(e?.response?.data?.error || 'Failed to load log detail');
+        } finally {
+            setDetailLoading(false);
+        }
+    }, [expandedId]);
+
+    return (
+        <div className="flex flex-col h-full">
+            <div className="flex items-center gap-1 mb-4 flex-wrap">
+                {([
+                    ['', 'All'],
+                    ['memory', 'memory'],
+                    ['ask_artifact', 'ask_artifact'],
+                    ['commit_message', 'commit_message'],
+                ] as [string, string][]).map(([value, label]) => (
+                    <button key={value} onClick={() => setSource(value)}
+                        className={`px-3 py-1.5 text-sm font-medium rounded-md ${
+                            source === value ? 'bg-indigo-50 text-indigo-600' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                        }`}>
+                        {label}
+                    </button>
+                ))}
+            </div>
+            {error && <div className="text-red-600 text-sm mb-3">{error}</div>}
+            {logs.length === 0 && !loading ? (
+                <div className="text-gray-500 italic flex items-center justify-center h-full font-mono text-sm">No system LLM calls recorded yet...</div>
+            ) : (
+                <div className="overflow-x-auto">
+                    <table className="w-full text-sm" data-testid="system-llm-logs-table">
+                        <thead>
+                            <tr className="text-left text-xs text-gray-500 border-b">
+                                <th className="px-3 py-2 font-medium">Time</th>
+                                <th className="px-3 py-2 font-medium">Source</th>
+                                <th className="px-3 py-2 font-medium">Detail</th>
+                                <th className="px-3 py-2 font-medium">Model</th>
+                                <th className="px-3 py-2 font-medium">Provider</th>
+                                <th className="px-3 py-2 font-medium text-right">Tokens (p/c/t)</th>
+                                <th className="px-3 py-2 font-medium text-right">Duration</th>
+                                <th className="px-3 py-2 font-medium">Status</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {logs.map((l) => (
+                                <React.Fragment key={l.id}>
+                                    <tr onClick={() => openDetail(l.id)}
+                                        className={`border-b cursor-pointer hover:bg-gray-50 ${expandedId === l.id ? 'bg-indigo-50/50' : ''}`}
+                                        data-testid="system-llm-log-row">
+                                        <td className="px-3 py-2 whitespace-nowrap text-gray-600">{new Date(l.created_at).toLocaleString()}</td>
+                                        <td className="px-3 py-2">
+                                            <span className={`text-xs px-2 py-0.5 rounded-full ${SOURCE_BADGE_CLASSES[l.source] || 'bg-gray-100 text-gray-700'}`}>
+                                                {l.source}
+                                            </span>
+                                        </td>
+                                        <td className="px-3 py-2 text-gray-700 max-w-[16rem] truncate" title={l.detail}>{l.detail || ''}</td>
+                                        <td className="px-3 py-2 font-mono text-xs text-gray-700">{l.model}</td>
+                                        <td className="px-3 py-2 text-gray-600">{l.provider_name}</td>
+                                        <td className="px-3 py-2 text-right font-mono text-xs text-gray-700 whitespace-nowrap">
+                                            {l.prompt_tokens} / {l.completion_tokens} / {l.total_tokens}
+                                        </td>
+                                        <td className="px-3 py-2 text-right font-mono text-xs text-gray-700 whitespace-nowrap">{l.duration_ms} ms</td>
+                                        <td className="px-3 py-2">
+                                            {l.status === 'error' ? (
+                                                <span className="text-red-600 text-xs font-medium" title={l.error}>
+                                                    error{l.error ? `: ${l.error.length > 60 ? l.error.slice(0, 59) + '…' : l.error}` : ''}
+                                                </span>
+                                            ) : (
+                                                <span className="text-green-600 text-xs font-medium">ok</span>
+                                            )}
+                                        </td>
+                                    </tr>
+                                    {expandedId === l.id && (
+                                        <tr className="border-b bg-gray-50">
+                                            <td colSpan={8} className="px-3 py-3">
+                                                {detailLoading ? (
+                                                    <div className="text-gray-500 italic text-sm">Loading…</div>
+                                                ) : detailError ? (
+                                                    <div className="text-red-600 text-sm">{detailError}</div>
+                                                ) : detail ? (
+                                                    <div className="space-y-2">
+                                                        {detail.log?.status === 'error' && detail.log.error && (
+                                                            <div className="text-sm text-red-600 whitespace-pre-wrap bg-red-50 border border-red-200 rounded-md p-2">
+                                                                {detail.log.error}
+                                                            </div>
+                                                        )}
+                                                        {detail.file ? (
+                                                            <pre className="text-xs bg-gray-900 text-gray-100 rounded-md p-3 overflow-auto max-h-96 whitespace-pre">{detail.file}</pre>
+                                                        ) : (
+                                                            <div className="text-gray-500 italic text-sm">Log file not available.</div>
+                                                        )}
+                                                    </div>
+                                                ) : null}
+                                            </td>
+                                        </tr>
+                                    )}
+                                </React.Fragment>
+                            ))}
+                        </tbody>
+                    </table>
+                    {logs.length < total && (
+                        <div className="flex justify-center py-3">
+                            <button onClick={() => fetchLogs(logs.length, source)} disabled={loading}
+                                className="px-3 py-1.5 text-sm border rounded-md bg-white hover:bg-gray-50 text-gray-700 disabled:opacity-50">
+                                {loading ? 'Loading…' : `Load more (${logs.length} of ${total})`}
+                            </button>
+                        </div>
+                    )}
+                </div>
+            )}
+        </div>
+    );
+};
+
 export const RunLogs: React.FC = () => {
     const { selectedCompanyId } = useStore();
     const { shortName } = useParams<{shortName: string}>();
     const [runs, setRuns] = useState<any[]>([]);
     const [loading, setLoading] = useState(true);
+    const [view, setView] = useState<'runs' | 'system'>('runs');
 
     const fetchRuns = useCallback(async () => {
         if (!selectedCompanyId) return;
@@ -117,9 +301,26 @@ export const RunLogs: React.FC = () => {
 
     return (
         <div className="h-full flex flex-col">
-            <h1 className="text-2xl font-bold mb-6">Run Logs</h1>
+            <div className="flex items-center justify-between mb-6 flex-wrap gap-3">
+                <h1 className="text-2xl font-bold">Run Logs</h1>
+                <div className="flex items-center gap-1">
+                    {([
+                        ['runs', 'Agent runs'],
+                        ['system', 'System LLM calls'],
+                    ] as ['runs' | 'system', string][]).map(([v, label]) => (
+                        <button key={v} onClick={() => setView(v)}
+                            className={`px-3 py-1.5 text-sm font-medium rounded-md ${
+                                view === v ? 'bg-indigo-50 text-indigo-600' : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
+                            }`}>
+                            {label}
+                        </button>
+                    ))}
+                </div>
+            </div>
             <div className="flex-1 bg-white p-6 rounded-lg shadow border overflow-y-auto">
-                {runs.length === 0 ? (
+                {view === 'system' ? (
+                    <SystemLLMLogs />
+                ) : runs.length === 0 ? (
                     <div className="text-gray-500 italic flex items-center justify-center h-full font-mono text-sm">
                         {loading ? 'Loading runs…' : 'No agent runs recorded yet...'}
                     </div>
