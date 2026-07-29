@@ -1,0 +1,173 @@
+name: Deploy Staging
+
+# Staging deploys, ON REQUEST ONLY. Nothing here runs on a push.
+#
+# To deploy a pull request to staging, comment on it:
+#
+#     /deploy
+#
+# That builds the PR's current head commit and ships it to stagingapp. The
+# comment gets a rocket reaction as an ack — a run triggered by issue_comment is
+# attached to the default branch, so it does NOT appear in the PR's own checks
+# and would otherwise look ignored.
+#
+# Actions -> Deploy Staging -> Run workflow does the same for any branch.
+#
+# Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
+# protection rules configured there (required reviewers, wait timer) apply on
+# top of the request, and the deploy is recorded with a link to the live URL.
+#
+# Config lives ON THE ENVIRONMENT (Settings -> Environments -> Preview):
+#   vars.DEPLOY_URL        - https://stagingapp.headcount1.ai
+#   secrets.DEPLOY_API_KEY - must equal that server's HEADCOUNT1_DEPLOY_API_KEY
+#
+# Production is a separate workflow (deploy-production.yml) so it can never be
+# triggered from here, and so a PR only ever offers a staging deploy.
+
+on:
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+concurrency:
+  # A newer request for the same PR/branch supersedes an in-flight one.
+  group: deploy-staging-${{ github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # Owner-only, and for a comment only a "/deploy" on a PULL REQUEST — so
+    # ordinary discussion never starts a runner.
+    # NOTE: if this repo moves to an organization, repository_owner becomes the
+    # org name and will never equal a username; switch to an actor allowlist or
+    # rely on the Preview environment's required reviewers instead.
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event.issue.pull_request != null &&
+         startsWith(github.event.comment.body, '/deploy')))
+    runs-on: ubuntu-latest
+    environment:
+      name: Preview
+      url: ${{ vars.DEPLOY_URL }}
+    permissions:
+      contents: write # create/update the rolling release asset
+      pull-requests: read # resolve the PR's head commit
+      issues: write # react to the /deploy comment
+    steps:
+      - name: Acknowledge the request
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket --silent || true
+
+      - name: Resolve what to deploy
+        id: target
+        # Event data goes through the environment rather than being interpolated
+        # into the script: a branch name is attacker-influenced text and `${{ }}`
+        # inside run: would splice it straight into the shell.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "issue_comment" ]; then
+            # The comment carries no head info; deploy the PR as it stands now.
+            read -r ref sha < <(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+              --jq '"\(.head.ref) \(.head.sha)"')
+          else
+            ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+          fi
+          {
+            echo "ref=$ref"
+            echo "sha=$sha"
+            echo "commit=${sha:0:7}"
+            echo "date=$(date -u +%Y-%m-%d)"
+            echo "tag=deploy-staging-$(printf '%s' "$ref" | tr '/' '-')"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying $ref @ ${sha:0:7} to staging"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Build
+        run: |
+          set -euo pipefail
+          cd frontend && npm install && npm run build && cd ..
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
+            -o agent-orchestrator-linux-amd64 \
+            main.go
+
+      - name: Publish release asset
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.tag }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Rolling prerelease per branch: recreate so the asset always reflects
+          # the commit being deployed.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --prerelease \
+            --target "$SHA" \
+            --title "staging ${{ steps.target.outputs.ref }} @ ${{ steps.target.outputs.commit }}" \
+            --notes "Staging deploy build for ${{ steps.target.outputs.ref }} (${{ steps.target.outputs.commit }})." \
+            agent-orchestrator-linux-amd64
+          # The server pins the artifact by digest, so publish the digest of the
+          # exact bytes we uploaded. The asset API URL (not browser_download_url)
+          # serves the raw binary with a bearer token, covering a private repo.
+          {
+            echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
+            echo "asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+              --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify staging server
+        env:
+          BASE: ${{ vars.DEPLOY_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "No DEPLOY_URL variable set on the 'Preview' environment."
+            exit 1
+          fi
+          payload=$(jq -nc \
+            --arg ref "${{ steps.target.outputs.ref }}" \
+            --arg commit "${{ steps.target.outputs.commit }}" \
+            --arg date "${{ steps.target.outputs.date }}" \
+            --arg url "${{ steps.publish.outputs.asset_url }}" \
+            --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            '{event_type:"branch", ref:$ref, commit:$commit, build_date:$date,
+              download_url:$url, sha256:$sha, target:"staging"}')
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Key: $DEPLOY_KEY" \
+            -d "$payload")
+          echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
+          # 202 = deploying, 200 = accepted-but-ignored (auto_deploy paused, or
+          # already running this commit). Both are successful outcomes for CI.
+          case "$code" in
+            200|202) echo "notify ok" ;;
+            *) echo "deploy notify failed"; exit 1 ;;
+          esac
