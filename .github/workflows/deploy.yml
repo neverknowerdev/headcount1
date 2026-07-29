@@ -5,18 +5,30 @@ name: Deploy
 # /api/deploy/webhook. The SERVER decides whether to apply the event (based on
 # its HEADCOUNT1_ENV and its deploy_source/auto_deploy settings); CI just routes:
 #
-#   - push to main            -> notify PRODUCTION with event_type=main
-#   - a published release      -> notify PRODUCTION with event_type=release
-#   - push to a branch whose PR carries the "auto-deploy" label -> STAGING
-#   - manual run (any ref)     -> STAGING
+#   - push to main        -> PRODUCTION (event_type=main)
+#   - published release   -> PRODUCTION (event_type=release)
+#   - an open pull request -> STAGING    (event_type=branch)
+#   - manual run          -> STAGING, on whichever branch you pick
 #
 # Every trigger is gated to the repository owner (see the `if:` on `decide`), so
 # a collaborator or an outside contributor cannot cause a deploy.
 #
+# DEPLOYING A PR TO STAGING
+# There is no label to add. Every push to an open PR queues a staging deploy in
+# the "Preview" GitHub Environment, and how it proceeds is decided entirely by
+# that environment's protection rules:
+#   - Preview HAS required reviewers  -> the deploy waits, and GitHub shows a
+#     "Review deployments" button on the PR itself. Click it, approve, and that
+#     PR's build goes to staging. This is the on-demand, one-click flow.
+#   - Preview has NO required reviewers -> every push to the PR deploys to
+#     staging automatically (continuous preview).
+# Switching between the two is a setting in Settings -> Environments, not a
+# change to this file.
+#
 # The `deploy` job runs in a GitHub Environment — "production" for production
-# and "Preview" for staging — so required reviewers or wait timers configured on
-# that environment gate the deploy as well, and each deploy shows up (with a
-# link to the live URL) under the repo's Environments/Deployments UI.
+# and "Preview" for staging — so those protection rules gate the deploy, and
+# each deploy shows up (with a link to the live URL) under the repo's
+# Environments/Deployments UI and on the PR.
 #
 # Required config, set ON EACH ENVIRONMENT (Settings -> Environments), so one
 # name covers both stages and the workflow never branches on the target:
@@ -33,17 +45,17 @@ name: Deploy
 
 on:
   push:
-    branches: ['**']
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
   release:
     types: [published]
+  # No input: GitHub's own branch picker chooses what to deploy to staging.
   workflow_dispatch:
-    inputs:
-      ref:
-        description: 'Branch or tag to deploy to STAGING'
-        required: true
 
 concurrency:
-  group: deploy-${{ github.event_name }}-${{ github.ref }}
+  # One in-flight deploy per PR (or per target ref); a newer push supersedes it.
+  group: deploy-${{ github.event.pull_request.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -58,10 +70,9 @@ jobs:
     # the org name and will never equal a username — switch this to an explicit
     # actor allowlist or rely on Environment required-reviewers instead.
     if: github.actor == github.repository_owner
-    permissions:
-      contents: read
-      pull-requests: read # read the auto-deploy label on a branch's PR
-      issues: write # ensure the auto-deploy label exists
+    # No checkout, no API calls — pure routing, so this costs a couple of seconds
+    # on events that deploy nothing.
+    permissions: {}
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
       env: ${{ steps.decide.outputs.env }}
@@ -69,60 +80,61 @@ jobs:
       event_type: ${{ steps.decide.outputs.event_type }}
       ref: ${{ steps.decide.outputs.ref }}
       tag: ${{ steps.decide.outputs.tag }}
+      sha: ${{ steps.decide.outputs.sha }}
       commit: ${{ steps.decide.outputs.commit }}
       date: ${{ steps.decide.outputs.date }}
     steps:
-      - uses: actions/checkout@v4
-
-      # Self-provision the "auto-deploy" label (idempotent) so it's available to
-      # put on PRs. Runs only on main so it isn't attempted on every branch push.
-      - name: Ensure auto-deploy label exists
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh label create auto-deploy \
-            --color 1D76DB \
-            --description "Deploy this PR's branch to staging on every push" \
-            --force
-
       - name: Decide target
         id: decide
+        # Event data is passed through the environment rather than interpolated
+        # into the script: a branch or tag name is attacker-influenced text, and
+        # `${{ }}` inside run: would splice it straight into the shell.
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref_name }}
+          PUSH_SHA: ${{ github.sha }}
+          PR_REF: ${{ github.event.pull_request.head.ref }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
-          EVENT="${{ github.event_name }}"
-          COMMIT=$(git rev-parse --short HEAD)
           DATE=$(date -u +%Y-%m-%d)
-          deploy=false; env=""; event_type=""; ref=""; tag=""
+          deploy=false; env=""; event_type=""; ref=""; tag=""; sha=""
 
-          if [ "$EVENT" = "release" ]; then
-            deploy=true; env=production; event_type=release
-            ref="${{ github.event.release.tag_name }}"
-            # Upload into the existing release, so reuse its real tag.
-            tag="$ref"
-          elif [ "$EVENT" = "workflow_dispatch" ]; then
-            deploy=true; env=staging; event_type=branch
-            ref="${{ github.event.inputs.ref }}"
-            tag="deploy-staging-$(echo "$ref" | tr '/' '-')"
-          elif [ "$EVENT" = "push" ]; then
-            ref="${GITHUB_REF#refs/heads/}"
-            if [ "$ref" = "main" ]; then
-              # NOT "main": a release tag named "main" would collide with the
-              # branch ref and make `git checkout main` / `git describe`
+          case "$EVENT" in
+            release)
+              deploy=true; env=production; event_type=release
+              ref="$RELEASE_TAG"; sha="$PUSH_SHA"
+              # Upload into the existing release, so reuse its real tag.
+              tag="$ref"
+              ;;
+            pull_request)
+              # Every open PR is a staging candidate. Whether this actually
+              # deploys now or waits for a click is decided by the "Preview"
+              # environment's protection rules, not here.
+              deploy=true; env=staging; event_type=branch
+              # Build the PR's own head commit, not the ephemeral merge commit
+              # GitHub synthesises for pull_request events — the deployed build
+              # should be exactly what the PR contains.
+              ref="$PR_REF"; sha="$PR_SHA"
+              tag="deploy-staging-$(printf '%s' "$ref" | tr '/' '-')"
+              ;;
+            workflow_dispatch)
+              deploy=true; env=staging; event_type=branch
+              ref="$PUSH_REF"; sha="$PUSH_SHA"
+              tag="deploy-staging-$(printf '%s' "$ref" | tr '/' '-')"
+              ;;
+            push)
+              # Only main reaches here (see the push filter in `on:`).
+              # Tag is NOT "main": a release tag named "main" would collide with
+              # the branch ref and make `git checkout main` / `git describe`
               # ambiguous. All rolling deploy tags carry a deploy- prefix.
-              deploy=true; env=production; event_type=main; tag=deploy-main
-            else
-              # A feature branch deploys to staging only if its open PR is
-              # labelled "auto-deploy" — so every push to that branch redeploys.
-              labels=$(gh pr list --head "$ref" --state open --json labels --jq '.[].labels[].name' 2>/dev/null || true)
-              if printf '%s\n' "$labels" | grep -qx "auto-deploy"; then
-                deploy=true; env=staging; event_type=branch
-                tag="deploy-staging-$(echo "$ref" | tr '/' '-')"
-              fi
-            fi
-          fi
+              deploy=true; env=production; event_type=main
+              ref="$PUSH_REF"; sha="$PUSH_SHA"; tag=deploy-main
+              ;;
+          esac
+
+          COMMIT="${sha:0:7}"
 
           # GitHub Environment name for this target. "production" is special-cased
           # by GitHub (it marks the deployment as a production deployment);
@@ -140,10 +152,11 @@ jobs:
             echo "event_type=$event_type"
             echo "ref=$ref"
             echo "tag=$tag"
+            echo "sha=$sha"
             echo "commit=$COMMIT"
             echo "date=$DATE"
           } >> "$GITHUB_OUTPUT"
-          echo "Decision: deploy=$deploy env=$env event_type=$event_type ref=$ref tag=$tag"
+          echo "Decision: deploy=$deploy env=$env event_type=$event_type ref=$ref tag=$tag sha=$sha"
 
   deploy:
     needs: decide
@@ -158,7 +171,13 @@ jobs:
     permissions:
       contents: write # create/update release assets
     steps:
+      # Check out the exact commit `decide` resolved. For a pull_request event
+      # that is the PR's head commit, not the merge commit GitHub would check
+      # out by default — the artifact we ship must be what the PR contains, and
+      # the release tag must point at a commit that actually exists on a branch.
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.decide.outputs.sha }}
 
       - name: Set up Go
         uses: actions/setup-go@v5
@@ -199,7 +218,7 @@ jobs:
             gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
             gh release create "$TAG" \
               --prerelease \
-              --target "${{ github.sha }}" \
+              --target "${{ needs.decide.outputs.sha }}" \
               --title "deploy $TAG @ ${{ needs.decide.outputs.commit }}" \
               --notes "Automated deploy build for ${{ needs.decide.outputs.ref }} (${{ needs.decide.outputs.commit }})." \
               agent-orchestrator-linux-amd64
