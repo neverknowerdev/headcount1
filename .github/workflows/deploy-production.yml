@@ -4,11 +4,14 @@ name: Deploy Production
 # release — never from a pull request, which can only reach staging (see
 # deploy-staging.yml).
 #
-#   push to main       -> event_type=main,    version 2026.07.29[.N] (CalVer)
-#   published release  -> event_type=release, version = the release's tag
+#   push to main       -> event_type=main
+#   published release  -> event_type=release
 #
-# Every production build is tagged with its own version and gets its own release,
-# so the version the app reports names an artifact that can be re-deployed.
+# Both get a CalVer version from scripts/version.sh (2026.07.29, then .1/.2 for
+# further builds the same day) — a release's own tag names the release, it does
+# not name the build. Every production build tags the commit it was built from
+# with its version, which both reserves the number and makes the version the app
+# reports point at an artifact that can be re-deployed.
 #
 # The SERVER decides whether to apply the event: a production server tracks
 # either releases (default) or main, per its deploy_source setting, and
@@ -89,23 +92,13 @@ jobs:
 
       - name: Build
         id: build
-        env:
-          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
         run: |
           set -euo pipefail
-          # A published release already carries the name a human chose for it, so
-          # that tag IS the version. A push to main has no name yet, so mint the
-          # next free CalVer. Either way version == tag == release, so the version
-          # the app reports always identifies a release you can roll back to.
-          if [ -n "$RELEASE_TAG" ]; then
-            VERSION="$RELEASE_TAG"
-          else
-            VERSION=$(./scripts/version.sh production)
-          fi
-          {
-            echo "version=$VERSION"
-            echo "tag=$VERSION"
-          } >> "$GITHUB_OUTPUT"
+          # Versions are always minted here, for every trigger — never taken from
+          # whatever tag a release happens to carry. One scheme, so "2026.07.29"
+          # means the same thing however the deploy was started.
+          VERSION=$(./scripts/version.sh production)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
           cd frontend && npm install && npm run build && cd ..
           GOOS=linux GOARCH=amd64 go build \
@@ -117,31 +110,42 @@ jobs:
         id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.build.outputs.tag }}
+          VERSION: ${{ steps.build.outputs.version }}
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
+          SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "${{ github.event_name }}" = "release" ]; then
-            # The release already exists — attach/refresh the built binary.
-            gh release upload "$TAG" agent-orchestrator-linux-amd64 --clobber
+          if [ -n "$RELEASE_TAG" ]; then
+            # Reserve the version by tagging the commit it was built from.
+            # version.sh mints the next number by reading these tags, so without
+            # this a second release the same day would be handed the same one.
+            git tag "$VERSION" "$SHA"
+            git push origin "refs/tags/$VERSION"
+            # The release itself already exists under the tag a human chose —
+            # attach the binary there rather than opening a competing release.
+            gh release upload "$RELEASE_TAG" agent-orchestrator-linux-amd64 --clobber
+            asset_tag="$RELEASE_TAG"
           else
-            # One release per production build, tagged with its version. Not
-            # rolling: every build stays downloadable, so a bad deploy can be
-            # rolled back to the exact bytes of the previous one.
+            # One release per production build, tagged with its version (which
+            # also reserves the number). Not rolling: every build stays
+            # downloadable, so a bad deploy can be rolled back to the exact bytes
+            # of the previous one.
             # Marked prerelease so "latest release" keeps meaning a release a
             # human published, which is what the releases deploy_source tracks.
-            gh release create "$TAG" \
+            gh release create "$VERSION" \
               --prerelease \
-              --target "${{ github.sha }}" \
-              --title "$TAG (main @ ${{ steps.target.outputs.commit }})" \
+              --target "$SHA" \
+              --title "$VERSION (main @ ${{ steps.target.outputs.commit }})" \
               --notes "Production deploy build for main (${{ steps.target.outputs.commit }})." \
               agent-orchestrator-linux-amd64
+            asset_tag="$VERSION"
           fi
           # The server pins the artifact by digest, so publish the digest of the
           # exact bytes we uploaded. The asset API URL (not browser_download_url)
           # serves the raw binary with a bearer token, covering a private repo.
           {
             echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
-            echo "asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+            echo "asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$asset_tag" \
               --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')"
           } >> "$GITHUB_OUTPUT"
 
