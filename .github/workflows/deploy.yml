@@ -13,22 +13,24 @@ name: Deploy
 # Every trigger is gated to the repository owner (see the `if:` on `decide`), so
 # a collaborator or an outside contributor cannot cause a deploy.
 #
-# DEPLOYING A PR TO STAGING
-# There is no label to add. Every push to an open PR queues a staging deploy in
-# the "Preview" GitHub Environment, and how it proceeds is decided entirely by
-# that environment's protection rules:
-#   - Preview HAS required reviewers  -> the deploy waits, and GitHub shows a
-#     "Review deployments" button on the PR itself. Click it, approve, and that
-#     PR's build goes to staging. This is the on-demand, one-click flow.
-#   - Preview has NO required reviewers -> every push to the PR deploys to
-#     staging automatically (continuous preview).
-# Switching between the two is a setting in Settings -> Environments, not a
-# change to this file.
+# DEPLOYING A PR TO STAGING — ON REQUEST ONLY
+# Nothing deploys to staging on its own. Pushing to a PR builds and tests it as
+# usual but never touches staging. To deploy a PR, comment on it:
+#
+#     /deploy
+#
+# That builds the PR's head commit and sends it to staging. No label to add, and
+# no deployment is queued (or left pending) unless you ask for one. The comment
+# gets a rocket reaction as an ack; the deploy then shows up under the repo's
+# Environments/Deployments UI.
+#
+# `workflow_dispatch` (Actions tab -> Run workflow -> pick a branch) does the
+# same thing when you'd rather not go through a PR.
 #
 # The `deploy` job runs in a GitHub Environment — "production" for production
-# and "Preview" for staging — so those protection rules gate the deploy, and
-# each deploy shows up (with a link to the live URL) under the repo's
-# Environments/Deployments UI and on the PR.
+# and "Preview" for staging — so protection rules configured there (required
+# reviewers, wait timer) apply on top of the explicit request, and each deploy
+# is recorded with a link to the live URL.
 #
 # Required config, set ON EACH ENVIRONMENT (Settings -> Environments), so one
 # name covers both stages and the workflow never branches on the target:
@@ -46,16 +48,20 @@ name: Deploy
 on:
   push:
     branches: [main]
-  pull_request:
-    types: [opened, synchronize, reopened]
+  # A "/deploy" comment on a pull request — the on-request staging deploy.
+  # Deliberately NOT `pull_request`: that would queue a deployment on every
+  # push, which is not a request.
+  issue_comment:
+    types: [created]
   release:
     types: [published]
   # No input: GitHub's own branch picker chooses what to deploy to staging.
   workflow_dispatch:
 
 concurrency:
-  # One in-flight deploy per PR (or per target ref); a newer push supersedes it.
-  group: deploy-${{ github.event.pull_request.number || github.ref }}
+  # One in-flight deploy per PR (or per target ref); a newer request supersedes
+  # an in-flight one for the same PR.
+  group: deploy-${{ github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -65,14 +71,23 @@ jobs:
   decide:
     runs-on: ubuntu-latest
     # Deploys are owner-only. github.actor is the identity that triggered this
-    # run (pusher, release publisher, or dispatcher); anyone else gets no job.
+    # run (pusher, release publisher, commenter, or dispatcher); anyone else
+    # gets no job at all.
     # NOTE: if this repo ever moves to an organization, repository_owner becomes
     # the org name and will never equal a username — switch this to an explicit
     # actor allowlist or rely on Environment required-reviewers instead.
-    if: github.actor == github.repository_owner
-    # No checkout, no API calls — pure routing, so this costs a couple of seconds
-    # on events that deploy nothing.
-    permissions: {}
+    #
+    # For issue_comment the job only starts for a "/deploy" comment on a PULL
+    # REQUEST, so ordinary discussion on issues and PRs never spins up a runner.
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name != 'issue_comment' ||
+        (github.event.issue.pull_request != null &&
+         startsWith(github.event.comment.body, '/deploy')))
+    permissions:
+      contents: read
+      pull-requests: read # resolve the PR's head commit for a /deploy comment
+      issues: write # react to the /deploy comment so the request is acknowledged
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
       env: ${{ steps.decide.outputs.env }}
@@ -84,17 +99,32 @@ jobs:
       commit: ${{ steps.decide.outputs.commit }}
       date: ${{ steps.decide.outputs.date }}
     steps:
+      # Immediate feedback that the request was accepted: a run triggered by
+      # issue_comment is attached to the default branch, not the PR, so it does
+      # NOT appear in the PR's checks — without this the comment would look
+      # ignored.
+      - name: Acknowledge the /deploy request
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket --silent || true
+
       - name: Decide target
         id: decide
         # Event data is passed through the environment rather than interpolated
         # into the script: a branch or tag name is attacker-influenced text, and
         # `${{ }}` inside run: would splice it straight into the shell.
         env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PUSH_REF: ${{ github.ref_name }}
           PUSH_SHA: ${{ github.sha }}
-          PR_REF: ${{ github.event.pull_request.head.ref }}
-          PR_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.issue.number }}
           RELEASE_TAG: ${{ github.event.release.tag_name }}
         run: |
           set -euo pipefail
@@ -108,15 +138,14 @@ jobs:
               # Upload into the existing release, so reuse its real tag.
               tag="$ref"
               ;;
-            pull_request)
-              # Every open PR is a staging candidate. Whether this actually
-              # deploys now or waits for a click is decided by the "Preview"
-              # environment's protection rules, not here.
+            issue_comment)
+              # Someone asked for this one explicitly with "/deploy" on a PR.
+              # The comment carries no head info, so resolve the PR's current
+              # head commit — the deployed build is exactly what the PR contains
+              # at the moment the deploy was requested.
               deploy=true; env=staging; event_type=branch
-              # Build the PR's own head commit, not the ephemeral merge commit
-              # GitHub synthesises for pull_request events — the deployed build
-              # should be exactly what the PR contains.
-              ref="$PR_REF"; sha="$PR_SHA"
+              read -r ref sha < <(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+                --jq '"\(.head.ref) \(.head.sha)"')
               tag="deploy-staging-$(printf '%s' "$ref" | tr '/' '-')"
               ;;
             workflow_dispatch)
