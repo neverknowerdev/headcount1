@@ -13,18 +13,23 @@ name: Deploy
 # Every trigger is gated to the repository owner (see the `if:` on `decide`), so
 # a collaborator or an outside contributor cannot cause a deploy.
 #
-# Required repo config:
-#   secrets.DEPLOY_API_KEY   - shared secret; must equal each server's
-#                              HEADCOUNT1_DEPLOY_API_KEY.
-#   vars.PROD_DEPLOY_URL     - e.g. https://app.headcount1.ai
-#   vars.STAGING_DEPLOY_URL  - e.g. https://stagingapp.headcount1.ai
-# If the releases repo is private, each server also needs
-# HEADCOUNT1_DEPLOY_DOWNLOAD_TOKEN set to a PAT that can read release assets.
-#
 # The `deploy` job runs in a GitHub Environment — "production" for production
 # and "Preview" for staging — so required reviewers or wait timers configured on
 # that environment gate the deploy as well, and each deploy shows up (with a
 # link to the live URL) under the repo's Environments/Deployments UI.
+#
+# Required config, set ON EACH ENVIRONMENT (Settings -> Environments), so one
+# name covers both stages and the workflow never branches on the target:
+#   vars.DEPLOY_URL         - production: https://app.headcount1.ai
+#                             Preview:    https://stagingapp.headcount1.ai
+#   secrets.DEPLOY_API_KEY  - must equal that server's HEADCOUNT1_DEPLOY_API_KEY.
+#                             Defining it per environment lets production and
+#                             staging hold DIFFERENT keys, so a leaked staging
+#                             key cannot deploy production. A single
+#                             repository-level secret also works if you'd rather
+#                             share one key.
+# If the releases repo is private, each server also needs
+# HEADCOUNT1_DEPLOY_DOWNLOAD_TOKEN set to a PAT that can read release assets.
 
 on:
   push:
@@ -149,7 +154,7 @@ jobs:
     # apply to this deploy. url makes the deployment clickable in that UI.
     environment:
       name: ${{ needs.decide.outputs.gh_env }}
-      url: ${{ needs.decide.outputs.env == 'production' && vars.PROD_DEPLOY_URL || vars.STAGING_DEPLOY_URL }}
+      url: ${{ vars.DEPLOY_URL }}
     permissions:
       contents: write # create/update release assets
     steps:
@@ -213,18 +218,16 @@ jobs:
 
       - name: Notify server
         env:
-          PROD_URL: ${{ vars.PROD_DEPLOY_URL }}
-          STAGING_URL: ${{ vars.STAGING_DEPLOY_URL }}
+          # Both resolve per-environment: this job runs in the "production" or
+          # "Preview" Environment, and variables/secrets defined there override
+          # the repository-level ones of the same name. So there is one name for
+          # each, and no branching on the target here.
+          BASE: ${{ vars.DEPLOY_URL }}
           DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
         run: |
           set -euo pipefail
-          if [ "${{ needs.decide.outputs.env }}" = "production" ]; then
-            BASE="$PROD_URL"
-          else
-            BASE="$STAGING_URL"
-          fi
           if [ -z "$BASE" ]; then
-            echo "No deploy URL configured for ${{ needs.decide.outputs.env }} (set PROD_DEPLOY_URL / STAGING_DEPLOY_URL vars)."
+            echo "No DEPLOY_URL variable set on the '${{ needs.decide.outputs.gh_env }}' environment."
             exit 1
           fi
           payload=$(jq -nc \
