@@ -3,9 +3,12 @@ package aicli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 // Tool is the interface every agent tool must implement.
@@ -38,13 +41,24 @@ func (r *Registry) Defs() []ToolDef {
 	return defs
 }
 
-// Execute runs the named tool with the given JSON arguments.
+// Execute runs the named tool with the given JSON arguments. The tool's
+// output (and any error text) is scrubbed of known and pattern-detected
+// secrets before it is returned, so a secret an agent encounters — a
+// workspace .env, a key file, an MCP response — never enters the message
+// history sent to the LLM provider or any log derived from it.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	t, ok := r.tools[name]
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-	return t.Execute(ctx, args)
+	out, err := t.Execute(ctx, args)
+	out = redact.Scrub(out)
+	if err != nil {
+		if scrubbed := redact.Scrub(err.Error()); scrubbed != err.Error() {
+			err = errors.New(scrubbed)
+		}
+	}
+	return out, err
 }
 
 // Filter returns a new Registry containing only tools whose names appear in

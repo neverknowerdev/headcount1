@@ -10,6 +10,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/secrets/redact"
 	"agent-orchestrator/pkg/tokens"
 )
 
@@ -200,7 +201,10 @@ func (a *Agent) reasoningEffort() string {
 func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, initialMessages []Message, reasoningEffort string) (string, error) {
 	history := []Message{}
 	if systemPrompt != "" {
-		history = append(history, Message{Role: "system", Content: systemPrompt})
+		// Cheap insurance: the system prompt is assembled from many sources
+		// (agent config, MCP listings, task text) — make sure no secret rides
+		// along into the provider request or the persisted request logs.
+		history = append(history, Message{Role: "system", Content: redact.Scrub(systemPrompt)})
 	}
 	history = append(history, initialMessages...)
 

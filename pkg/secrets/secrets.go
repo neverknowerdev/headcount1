@@ -24,6 +24,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 // secretNamespace is the reserved prefix for every sealed-value format this
@@ -106,6 +108,9 @@ func (s *SecretManager) Decrypt(stored string) (string, error) {
 	if strings.HasPrefix(stored, secretNamespace) {
 		return "", fmt.Errorf("secrets: unrecognized sealed format, refusing to use as plaintext")
 	}
+	// Legacy plaintext values are still secrets — register them for
+	// log/history redaction just like freshly decrypted ones.
+	redact.Register("secret", stored)
 	return stored, nil
 }
 

@@ -30,6 +30,7 @@ import (
 	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
+	"agent-orchestrator/pkg/secrets/redact"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
 	"agent-orchestrator/server"
@@ -65,6 +66,17 @@ func main() {
 	// keyring snapshot, and every OTHER company's/task's files are all invisible,
 	// while system and home toolchains stay readable. See doc/sandbox-hardening.md.
 	tools.SetHiddenReadDirs([]string{basePath})
+
+	// Register the server's own env-held credentials for redaction so they can
+	// never surface in LLM message history or run logs (e.g. an agent that
+	// tricks a subprocess into echoing them, or an error string that embeds a
+	// connection URL). The env scrubber already hides them from the agent's
+	// shell; this covers every other path into logged content.
+	for _, name := range []string{"SMTP_PASSWORD", "VAULT_TOKEN", "HEADCOUNT1_BOOT_KEY", "DATABASE_URL", "REDIS_URL"} {
+		if v := os.Getenv(name); v != "" {
+			redact.Register("server-credential", v)
+		}
+	}
 
 	dbConnStr := os.Getenv("DATABASE_URL")
 

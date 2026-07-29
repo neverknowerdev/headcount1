@@ -56,6 +56,10 @@ The design is deliberately **zero-knowledge**: a user's DEK exists only in an **
 
 Because DEKs live only in memory, a plain restart would force every active user to re-tap their passkey. An optional **boot key** seals the in-memory keyring on a graceful shutdown and restores it on the next boot, avoiding the re-tap — it protects only that transient restart snapshot and never decrypts secrets at rest. It's off by default (safe); `make run-dev` and `scripts/run.sh` enable a zero-config local boot key. See [`doc/boot-key.md`](doc/boot-key.md).
 
+### Secrets never enter LLM message history
+
+Decrypted secrets are kept out of the conversation sent to LLM providers and out of every persisted copy of it. Each secret the server decrypts (and each gateway run token it mints) is registered with a redaction registry (`pkg/secrets/redact`); tool outputs are scrubbed **before** they enter the agent's message history, and every run-log sink — the JSONL trajectory files, the `runs.log_entries` column, and the live WebSocket stream — scrubs again on write. Registered values are caught in raw, base64, URL-escaped, and JSON-escaped forms, and high-precision patterns additionally redact secrets the server never saw (PEM private keys, well-known API-token shapes, `Authorization` headers, passwords in connection URLs, `.env`-style assignments an agent might read from a workspace).
+
 ### Hardening the agent sandbox
 
 The agent's shell tool runs as the server's user by default and can read the server's at-rest files. For shared/multi-tenant hosts, run the agent under a dedicated uid and/or hide the data directory from it — see [`doc/sandbox-hardening.md`](doc/sandbox-hardening.md).

@@ -6,6 +6,8 @@ import (
 	"time"
 
 	"gorm.io/gorm"
+
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
@@ -19,6 +21,7 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	if err != nil {
 		return err
 	}
+	content = redact.Scrub(content)
 	r.LogContent = content
 	r.Status = status
 	if status == "completed" || status == "failed" {
@@ -62,7 +65,7 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 
 // UpdateRunCurrentStatus stores the agent's self-reported progress line.
 func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", redact.Scrub(status)).Error
 }
 
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
@@ -74,6 +77,10 @@ func (q *Queries) UpdateRunLogFilePath(ctx context.Context, id int32, filePath s
 }
 
 func (q *Queries) AppendRunLogEntry(ctx context.Context, id int32, entry map[string]interface{}) error {
+	// Belt-and-suspenders: every entry is scrubbed of secrets before it is
+	// persisted, covering writers that don't go through ProxyLogger (the
+	// agent's appendRunLog, the gateway router's routing events).
+	entry = redact.ScrubEntry(entry)
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var r Run
 		err := tx.First(&r, id).Error
@@ -241,8 +248,8 @@ func (q *Queries) AddRunTokenStats(ctx context.Context, runID int32, delta RunTo
 func (q *Queries) UpdateRunResult(ctx context.Context, runID int32, description, explanation string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
 		Updates(map[string]interface{}{
-			"result_description": description,
-			"result_explanation": explanation,
+			"result_description": redact.Scrub(description),
+			"result_explanation": redact.Scrub(explanation),
 		}).Error
 }
 
