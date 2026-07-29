@@ -92,6 +92,7 @@ func TestCryptoShredUserWipesSecretsKeepsAccount(t *testing.T) {
 	require.NoError(t, database.AutoMigrate(
 		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
 		&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}, &db.UserGitCredential{},
+		&db.Company{}, &db.Environment{}, &db.EnvironmentSecret{},
 	))
 	q := db.New(database)
 	ctx := context.Background()

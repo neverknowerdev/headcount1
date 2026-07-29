@@ -82,10 +82,25 @@ func (r *Registry) Filter(allowed []string) *Registry {
 	return filtered
 }
 
+// legacyToolAliases maps historical tool names still used in agent configs
+// (builtin and user TOML alike) to the names the tools actually register
+// under. Without this an allowed_tools list saying "exec_command" silently
+// filtered out the shell tool, which registers as "bash".
+var legacyToolAliases = map[string]string{
+	"read_file":    "read",
+	"write_file":   "write",
+	"list_dir":     "ls",
+	"exec_command": "bash",
+}
+
 // nameMatchesFilter reports whether a tool name matches any filter entry.
-// An entry ending in "*" matches by prefix (e.g. "codegraph_*").
+// An entry ending in "*" matches by prefix (e.g. "codegraph_*"); legacy
+// aliases (exec_command → bash, …) match the canonical name.
 func nameMatchesFilter(name string, allowed []string) bool {
 	for _, a := range allowed {
+		if alias, ok := legacyToolAliases[a]; ok {
+			a = alias
+		}
 		if a == name {
 			return true
 		}

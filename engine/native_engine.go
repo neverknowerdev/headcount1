@@ -484,10 +484,40 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
+	// Resolve the task's environment and decrypt its secrets for injection
+	// into the agent's shell. Decrypt() registers every value with the
+	// redaction layer, so the agent can USE a secret ($API_KEY in a command)
+	// but never SEE it — any echo into tool output or logs is scrubbed.
+	// A locked owner (vault sealed) skips that secret with a log line rather
+	// than failing the run.
+	envSecrets := map[string]string{}
+	if env, rows, envErr := e.q.EnvironmentSecretsForTask(ctx, task); envErr == nil {
+		for _, row := range rows {
+			plain, decErr := secrets.Default().Decrypt(row.ValueEncrypted)
+			if decErr != nil {
+				e.logInfo(proxyLogger, fmt.Sprintf("Warning: environment secret %s unavailable: %v", row.Name, decErr))
+				continue
+			}
+			envSecrets[row.Name] = plain
+		}
+		if len(envSecrets) > 0 {
+			names := make([]string, 0, len(envSecrets))
+			for name := range envSecrets {
+				names = append(names, "$"+name)
+			}
+			sort.Strings(names)
+			systemPrompt += fmt.Sprintf(
+				"\nEnvironment: %s. Secrets available to your shell as env vars: %s. Use them by reference (e.g. curl -H \"Authorization: Bearer $%s\"); their values are redacted from all output you see.",
+				env.Name, strings.Join(names, ", "), strings.TrimPrefix(names[0], "$"))
+		}
+	} else {
+		e.logInfo(proxyLogger, "Warning: could not resolve task environment: "+envErr.Error())
+	}
+
 	initialMessages := e.buildInitialMessages(ctx, task, mode)
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
-	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
+	registry := tools.DefaultRegistryWithEnv(workspacePath, envSecrets, readOnlyDirs...)
 
 	// Track whether finish_task was called so we can force it if not, plus
 	// the agent's own verdict and summary for the run's outcome log entry.

@@ -125,6 +125,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Priority        string  `json:"priority"`
 		DueDate         *string `json:"due_date"`
 		AgentConfigName string  `json:"agent_config_name"`
+		EnvironmentID   *int32  `json:"environment_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -160,6 +161,10 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
 		return
 	}
+	if err := api.authorizeTaskEnvironment(r, req.CompanyID, req.EnvironmentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "environment not found")
+		return
+	}
 
 	p := db.Task{
 		CompanyID:       req.CompanyID,
@@ -174,6 +179,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Priority:        priority,
 		DueDate:         dueDate,
 		AgentConfigName: req.AgentConfigName,
+		EnvironmentID:   req.EnvironmentID,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
@@ -216,6 +222,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		Status          string  `json:"status"`
 		IsArchived      *bool   `json:"is_archived"`
 		AgentConfigName string  `json:"agent_config_name"`
+		EnvironmentID   *int32  `json:"environment_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -228,6 +235,10 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	// as CreateTask) — a foreign project_id/agent_id must never be bound here.
 	if err := api.authorizeTaskRefs(r, task.CompanyID, req.ProjectID, req.AgentID, req.SprintID, req.ParentID); err != nil {
 		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
+		return
+	}
+	if err := api.authorizeTaskEnvironment(r, task.CompanyID, req.EnvironmentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "environment not found")
 		return
 	}
 
@@ -268,6 +279,14 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.AgentConfigName != "" {
 		task.AgentConfigName = req.AgentConfigName
+	}
+	if req.EnvironmentID != nil {
+		// 0 clears the override (fall back to the company default env).
+		if *req.EnvironmentID == 0 {
+			task.EnvironmentID = nil
+		} else {
+			task.EnvironmentID = req.EnvironmentID
+		}
 	}
 
 	if req.DueDate != nil {

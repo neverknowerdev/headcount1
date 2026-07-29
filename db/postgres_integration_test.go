@@ -50,6 +50,8 @@ func allModels() []any {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.Environment{},
+		&db.EnvironmentSecret{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},

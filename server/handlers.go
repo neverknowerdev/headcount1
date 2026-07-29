@@ -163,7 +163,17 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadCompany)
 			r.Put("/", api.UpdateCompany)
 			r.With(api.RequireTeamOwner).Delete("/", api.DeleteCompany)
+			// Environments: named secret sets for the company's task runs.
+			r.Get("/environments", api.ListEnvironments)
+			r.Post("/environments", api.CreateEnvironment)
 		})
+	})
+
+	r.Route("/environments/{envID}", func(r chi.Router) {
+		r.Put("/", api.UpdateEnvironment)
+		r.Delete("/", api.DeleteEnvironment)
+		r.Put("/secrets", api.UpsertEnvironmentSecret)
+		r.Delete("/secrets/{name}", api.DeleteEnvironmentSecret)
 	})
 
 	r.Route("/team", func(r chi.Router) {
