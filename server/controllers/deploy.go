@@ -30,6 +30,7 @@ type DeployWebhookPayload struct {
 	Ref         string `json:"ref"`        // branch or tag name
 	Commit      string `json:"commit"`     // short commit hash
 	BuildDate   string `json:"build_date"`
+	Version     string `json:"version"` // human-facing version of the incoming build
 	DownloadURL string `json:"download_url"`
 	SHA256      string `json:"sha256"` // hex digest of the binary at DownloadURL
 	// Target is the environment CI intends this for (production | staging). The
@@ -42,12 +43,14 @@ type DeployWebhookPayload struct {
 func (api *API) GetVersion(w http.ResponseWriter, r *http.Request) {
 	if api.updater == nil {
 		api.respondJSON(w, http.StatusOK, map[string]string{
-			"branch": "dev", "commit_hash": "unknown", "build_date": "unknown", "display": "dev",
+			"version": "dev", "branch": "dev", "commit_hash": "unknown",
+			"build_date": "unknown", "display": "dev",
 		})
 		return
 	}
 	v := api.updater.Current()
 	api.respondJSON(w, http.StatusOK, map[string]string{
+		"version":     v.Version,
 		"branch":      v.Branch,
 		"commit_hash": v.CommitHash,
 		"build_date":  v.BuildDate,
@@ -132,7 +135,12 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target := updater.VersionInfo{Branch: payload.Ref, CommitHash: payload.Commit, BuildDate: payload.BuildDate}
+	target := updater.VersionInfo{
+		Version:    payload.Version,
+		Branch:     payload.Ref,
+		CommitHash: payload.Commit,
+		BuildDate:  payload.BuildDate,
+	}
 	if api.updater.IsCurrent(target) {
 		api.respondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "already running this commit"})
 		return

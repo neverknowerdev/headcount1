@@ -42,8 +42,10 @@ import (
 	"gorm.io/gorm"
 )
 
-// These are set at build time via -ldflags.
+// These are set at build time via -ldflags (see scripts/version.sh, which the
+// Makefile and both deploy workflows use to derive Version).
 var (
+	Version    = "dev"
 	CommitHash = "unknown"
 	BuildDate  = "unknown"
 	Branch     = "main"
@@ -280,8 +282,9 @@ func main() {
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
 	// them (download the release-asset binary, self-replace, graceful restart).
 	// The download token is only needed if the releases repo is private.
-	upd := updater.New(Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
-	log.Printf("Deploy target: env=%s, build=%s", utils.DeployEnv(), upd.Current().DisplayString())
+	upd := updater.New(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
+	log.Printf("Deploy target: env=%s, version=%s, build=%s",
+		utils.DeployEnv(), Version, upd.Current().DisplayString())
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)

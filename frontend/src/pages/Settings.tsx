@@ -5,10 +5,18 @@ import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 interface BuildVersion {
+    /** Human-facing version number, e.g. "v1.2.3" or "v1.2.3-5-gabc1234". */
+    version?: string;
     branch: string;
     commit_hash: string;
     build_date: string;
 }
+
+/** "v1.2.3 (branch+date+commit)" — version first, exact build identity after. */
+const describeBuild = (b: BuildVersion): string => {
+    const build = `${b.branch}+${b.build_date}+${b.commit_hash}`;
+    return b.version ? `${b.version} (${build})` : build;
+};
 
 interface DeployStatus {
     environment: 'production' | 'staging';
@@ -266,8 +274,14 @@ export const Settings: React.FC = () => {
 
                 {deployStatus?.current && (
                     <div className="mb-4 text-sm text-gray-600 space-y-1">
-                        <div>
-                            <span className="font-medium">Running version:</span>{' '}
+                        <div className="flex items-baseline gap-2">
+                            <span className="font-medium">Version</span>
+                            <span className="text-base font-semibold text-gray-900 font-mono">
+                                {deployStatus.current.version || 'dev'}
+                            </span>
+                        </div>
+                        <div className="text-xs text-gray-500">
+                            Build{' '}
                             <code className="bg-gray-100 px-1 rounded">
                                 {deployStatus.current.branch}+{deployStatus.current.build_date}+{deployStatus.current.commit_hash}
                             </code>
@@ -277,7 +291,7 @@ export const Settings: React.FC = () => {
                                 Deploying
                                 {deployStatus.deploy_target && (
                                     <> to <code className="bg-indigo-50 px-1 rounded">
-                                        {deployStatus.deploy_target.branch}+{deployStatus.deploy_target.build_date}+{deployStatus.deploy_target.commit_hash}
+                                        {describeBuild(deployStatus.deploy_target)}
                                     </code></>
                                 )}
                                 {' '}— in-flight runs are draining, then the server restarts.

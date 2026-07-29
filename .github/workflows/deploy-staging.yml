@@ -8,7 +8,9 @@ name: Deploy Staging
 #      run starts, so it is a button, not a state — re-add it to deploy again.
 #   2. Comment "/deploy".
 #
-# Either builds the PR's current head commit and ships it to stagingapp.
+# Either builds the PR's current head commit and ships it to stagingapp, versioned
+# staging-<branch>-<commit> — a staging build is not a release, so it is named
+# after what it actually is rather than given a release number.
 #
 # Prefer the label while this workflow is not yet on the default branch: GitHub
 # runs issue_comment (and workflow_dispatch) only from the DEFAULT branch, so
@@ -67,7 +69,7 @@ jobs:
       name: Preview
       url: ${{ vars.DEPLOY_URL }}
     permissions:
-      contents: write # create/update the rolling release asset
+      contents: write # create/update the per-branch rolling release asset
       pull-requests: read # resolve the PR's head commit
       issues: write # react to the /deploy comment
     steps:
@@ -148,11 +150,19 @@ jobs:
           node-version: 20
 
       - name: Build
+        id: build
+        env:
+          REF: ${{ steps.target.outputs.ref }}
         run: |
           set -euo pipefail
+          # The branch has to be passed in: the checkout is a detached HEAD at the
+          # PR's commit, so git here has no branch name to report.
+          VERSION=$(./scripts/version.sh staging "$REF")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
           cd frontend && npm install && npm run build && cd ..
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
+            -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
             -o agent-orchestrator-linux-amd64 \
             main.go
 
@@ -198,8 +208,9 @@ jobs:
             --arg date "${{ steps.target.outputs.date }}" \
             --arg url "${{ steps.publish.outputs.asset_url }}" \
             --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            --arg version "${{ steps.build.outputs.version }}" \
             '{event_type:"branch", ref:$ref, commit:$commit, build_date:$date,
-              download_url:$url, sha256:$sha, target:"staging"}')
+              version:$version, download_url:$url, sha256:$sha, target:"staging"}')
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
             -H "Content-Type: application/json" \
             -H "X-Deploy-Key: $DEPLOY_KEY" \

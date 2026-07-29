@@ -17,7 +17,7 @@ import (
 // against a real server process, where the exec-on-shutdown is the point.
 
 func TestIsCurrent(t *testing.T) {
-	u := New("main", "abc1234", "2026-01-01", nil)
+	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
 
 	// Same commit → already current (a deploy event for it is a no-op).
 	require.True(t, u.IsCurrent(VersionInfo{CommitHash: "abc1234"}))
@@ -29,16 +29,29 @@ func TestIsCurrent(t *testing.T) {
 }
 
 func TestDisplayString(t *testing.T) {
+	// DisplayString stays the exact build identity even when a version number is
+	// present: two builds can share a version, but never this triple.
 	require.Equal(t, "main+2026-01-01+abc1234",
-		VersionInfo{Branch: "main", BuildDate: "2026-01-01", CommitHash: "abc1234"}.DisplayString())
+		VersionInfo{Version: "v1.2.3", Branch: "main", BuildDate: "2026-01-01", CommitHash: "abc1234"}.DisplayString())
 	require.Equal(t, "dev", VersionInfo{}.DisplayString())
 	require.Equal(t, "dev", VersionInfo{Branch: "x", CommitHash: "unknown"}.DisplayString())
+}
+
+// TestCurrentCarriesVersion pins that the version stamped in at build time is
+// what the API and UI report, verbatim — production CalVer and staging names
+// look nothing alike, and neither is parsed or reformatted anywhere.
+func TestCurrentCarriesVersion(t *testing.T) {
+	for _, version := range []string{"2026.07.29", "2026.07.29.2", "staging-my-branch-abc1234", "dev-abc1234"} {
+		cur := New(version, "main", "abc1234", "2026-01-01", nil).Current()
+		require.Equal(t, version, cur.Version)
+		require.Equal(t, "abc1234", cur.CommitHash)
+	}
 }
 
 // TestNewDoesNotArmRestart guards the invariant main relies on: a freshly
 // started server must never think a deploy left a binary to exec.
 func TestNewDoesNotArmRestart(t *testing.T) {
-	_, pending := New("main", "abc1234", "2026-01-01", nil).RestartPending()
+	_, pending := New("v1.2.3", "main", "abc1234", "2026-01-01", nil).RestartPending()
 	require.False(t, pending)
 }
 
@@ -50,7 +63,7 @@ func TestValidateDownloadURL(t *testing.T) {
 
 	valid := []string{
 		"https://api.github.com/repos/" + repo + "/releases/assets/12345",
-		"https://github.com/" + repo + "/releases/download/deploy-main/agent-orchestrator-linux-amd64",
+		"https://github.com/" + repo + "/releases/download/2026.07.29/agent-orchestrator-linux-amd64",
 		// CDN hosts serve opaque signed paths and are only reached by redirect.
 		"https://objects.githubusercontent.com/github-production-release-asset/abc",
 	}
@@ -91,7 +104,7 @@ func TestValidateDownloadURLCustomRepo(t *testing.T) {
 }
 
 func TestDeployRejectsDisallowedHost(t *testing.T) {
-	u := New("main", "abc1234", "2026-01-01", nil)
+	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
 	target := VersionInfo{CommitHash: "def5678"}
 
 	// Fails before anything is fetched, let alone swapped.
@@ -104,7 +117,7 @@ func TestDeployRejectsDisallowedHost(t *testing.T) {
 
 func TestDeployRequiresDigest(t *testing.T) {
 	t.Setenv("HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "127.0.0.1")
-	u := New("main", "abc1234", "2026-01-01", nil)
+	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
 
 	// Without a digest any published artifact — including an old, vulnerable
 	// build — would be a valid deploy target, so it is refused outright.
@@ -126,7 +139,7 @@ func TestDeployRejectsDigestMismatch(t *testing.T) {
 
 	t.Setenv("HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "127.0.0.1")
 
-	u := New("main", "abc1234", "2026-01-01", nil)
+	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
 	emptySum := sha256.Sum256(nil) // a digest the served body cannot match
 	err := u.Deploy(srv.URL+"/server", hex.EncodeToString(emptySum[:]), VersionInfo{CommitHash: "def5678"})
 

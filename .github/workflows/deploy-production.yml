@@ -4,8 +4,11 @@ name: Deploy Production
 # release — never from a pull request, which can only reach staging (see
 # deploy-staging.yml).
 #
-#   push to main       -> event_type=main
-#   published release  -> event_type=release
+#   push to main       -> event_type=main,    version 2026.07.29[.N] (CalVer)
+#   published release  -> event_type=release, version = the release's tag
+#
+# Every production build is tagged with its own version and gets its own release,
+# so the version the app reports names an artifact that can be re-deployed.
 #
 # The SERVER decides whether to apply the event: a production server tracks
 # either releases (default) or main, per its deploy_source setting, and
@@ -43,7 +46,7 @@ jobs:
       name: production
       url: ${{ vars.DEPLOY_URL }}
     permissions:
-      contents: write # create/update the rolling release asset
+      contents: write # tag the build and publish its release asset
     steps:
       - name: Resolve what to deploy
         id: target
@@ -57,25 +60,24 @@ jobs:
           if [ "$EVENT" = "release" ]; then
             event_type=release
             ref="$RELEASE_TAG"
-            # Upload into the existing release, so reuse its real tag.
-            tag="$ref"
           else
             event_type=main
             ref="$PUSH_REF"
-            # NOT "main": a release tag named "main" would collide with the
-            # branch ref and make `git checkout main` / `git describe` ambiguous.
-            tag=deploy-main
           fi
           {
             echo "event_type=$event_type"
             echo "ref=$ref"
-            echo "tag=$tag"
+            echo "release_tag=$RELEASE_TAG"
             echo "commit=${SHA:0:7}"
             echo "date=$(date -u +%Y-%m-%d)"
           } >> "$GITHUB_OUTPUT"
           echo "Deploying $ref @ ${SHA:0:7} to production ($event_type)"
 
       - uses: actions/checkout@v4
+        with:
+          # Tags + full history: scripts/version.sh picks the next free CalVer by
+          # probing existing tags, which a shallow clone cannot see.
+          fetch-depth: 0
 
       - uses: actions/setup-go@v5
         with:
@@ -86,11 +88,28 @@ jobs:
           node-version: 20
 
       - name: Build
+        id: build
+        env:
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
         run: |
           set -euo pipefail
+          # A published release already carries the name a human chose for it, so
+          # that tag IS the version. A push to main has no name yet, so mint the
+          # next free CalVer. Either way version == tag == release, so the version
+          # the app reports always identifies a release you can roll back to.
+          if [ -n "$RELEASE_TAG" ]; then
+            VERSION="$RELEASE_TAG"
+          else
+            VERSION=$(./scripts/version.sh production)
+          fi
+          {
+            echo "version=$VERSION"
+            echo "tag=$VERSION"
+          } >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
           cd frontend && npm install && npm run build && cd ..
           GOOS=linux GOARCH=amd64 go build \
-            -ldflags "-X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
+            -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
             -o agent-orchestrator-linux-amd64 \
             main.go
 
@@ -98,20 +117,22 @@ jobs:
         id: publish
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ steps.target.outputs.tag }}
+          TAG: ${{ steps.build.outputs.tag }}
         run: |
           set -euo pipefail
           if [ "${{ github.event_name }}" = "release" ]; then
             # The release already exists — attach/refresh the built binary.
             gh release upload "$TAG" agent-orchestrator-linux-amd64 --clobber
           else
-            # Rolling prerelease for main: recreate so the asset always reflects
-            # the latest commit on main.
-            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+            # One release per production build, tagged with its version. Not
+            # rolling: every build stays downloadable, so a bad deploy can be
+            # rolled back to the exact bytes of the previous one.
+            # Marked prerelease so "latest release" keeps meaning a release a
+            # human published, which is what the releases deploy_source tracks.
             gh release create "$TAG" \
               --prerelease \
               --target "${{ github.sha }}" \
-              --title "main @ ${{ steps.target.outputs.commit }}" \
+              --title "$TAG (main @ ${{ steps.target.outputs.commit }})" \
               --notes "Production deploy build for main (${{ steps.target.outputs.commit }})." \
               agent-orchestrator-linux-amd64
           fi
@@ -141,8 +162,9 @@ jobs:
             --arg date "${{ steps.target.outputs.date }}" \
             --arg url "${{ steps.publish.outputs.asset_url }}" \
             --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            --arg version "${{ steps.build.outputs.version }}" \
             '{event_type:$et, ref:$ref, commit:$commit, build_date:$date,
-              download_url:$url, sha256:$sha, target:"production"}')
+              version:$version, download_url:$url, sha256:$sha, target:"production"}')
           code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
             -H "Content-Type: application/json" \
             -H "X-Deploy-Key: $DEPLOY_KEY" \

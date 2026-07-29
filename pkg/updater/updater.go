@@ -31,12 +31,22 @@ const defaultDeployRepo = "neverknowerdev/headcount1"
 
 // VersionInfo identifies a build. The running build's values are stamped in at
 // compile time via -ldflags; a deploy target's values arrive in the webhook.
+//
+// Version is the human-facing version number derived from git tags (see
+// scripts/version.sh) — "v1.2.3", or "v1.2.3-5-gabc1234" between releases. The
+// remaining fields are the precise build identity, which is what deploy
+// decisions actually compare.
 type VersionInfo struct {
+	Version    string `json:"version"`
 	Branch     string `json:"branch"`
 	CommitHash string `json:"commit_hash"`
 	BuildDate  string `json:"build_date"`
 }
 
+// DisplayString is the unambiguous build identity used in logs and operator
+// output. It stays branch+date+commit rather than the version number: two
+// builds can share a version (a re-run of the same commit on another branch),
+// but never this triple.
 func (v VersionInfo) DisplayString() string {
 	if v.CommitHash == "" || v.CommitHash == "unknown" {
 		return "dev"
@@ -72,11 +82,11 @@ type Updater struct {
 }
 
 // New creates an Updater for the running build. downloadTokenFn may be nil.
-func New(branch, commitHash, buildDate string, downloadTokenFn func() string) *Updater {
+func New(version, branch, commitHash, buildDate string, downloadTokenFn func() string) *Updater {
 	if downloadTokenFn == nil {
 		downloadTokenFn = func() string { return "" }
 	}
-	current := VersionInfo{Branch: branch, CommitHash: commitHash, BuildDate: buildDate}
+	current := VersionInfo{Version: version, Branch: branch, CommitHash: commitHash, BuildDate: buildDate}
 	return &Updater{
 		current:         current,
 		status:          Status{Current: current},

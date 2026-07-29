@@ -26,11 +26,16 @@ export const Sidebar: React.FC = () => {
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
-  const [versionDisplay, setVersionDisplay] = useState<string>('');
+  // version is the human-facing number (2026.07.29 in production,
+  // staging-<branch>-<commit> on staging); build is the exact build identity,
+  // shown on hover for support and bug reports.
+  const [version, setVersion] = useState<string>('');
+  const [build, setBuild] = useState<string>('');
 
   useEffect(() => {
     axios.get('/api/version').then(res => {
-      setVersionDisplay(res.data.display || 'dev');
+      setVersion(res.data.version || 'dev');
+      setBuild(res.data.display || '');
     }).catch(() => {});
   }, []);
 
@@ -75,10 +80,13 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-      {versionDisplay && (
+      {version && (
         <div className="px-3 py-3 border-t border-gray-100">
-          <div className="text-xs text-gray-400 font-mono truncate" title={versionDisplay}>
-            {versionDisplay}
+          <div
+            className="text-xs text-gray-400 font-mono truncate"
+            title={build ? `${version}\n${build}` : version}
+          >
+            {version}
           </div>
         </div>
       )}
