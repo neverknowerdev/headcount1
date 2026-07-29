@@ -2,16 +2,25 @@ name: Deploy Staging
 
 # Staging deploys, ON REQUEST ONLY. Nothing here runs on a push.
 #
-# To deploy a pull request to staging, comment on it:
+# Two ways to request one from the pull request itself:
 #
-#     /deploy
+#   1. Add the "deploy-staging" label. The label is removed again as soon as the
+#      run starts, so it is a button, not a state — re-add it to deploy again.
+#   2. Comment "/deploy".
 #
-# That builds the PR's current head commit and ships it to stagingapp. The
-# comment gets a rocket reaction as an ack — a run triggered by issue_comment is
-# attached to the default branch, so it does NOT appear in the PR's own checks
-# and would otherwise look ignored.
+# Either builds the PR's current head commit and ships it to stagingapp.
 #
-# Actions -> Deploy Staging -> Run workflow does the same for any branch.
+# Prefer the label while this workflow is not yet on the default branch: GitHub
+# runs issue_comment (and workflow_dispatch) only from the DEFAULT branch, so
+# "/deploy" is ignored until this file is merged to main. pull_request events
+# run the workflow from the PR's own branch, so the label works right away.
+#
+# The comment path gets a rocket reaction as an ack, because a run triggered by
+# issue_comment is attached to the default branch and so does NOT appear in the
+# PR's own checks. The label path does appear there.
+#
+# Actions -> Deploy Staging -> Run workflow does the same for any branch (also
+# default-branch-only).
 #
 # Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
 # protection rules configured there (required reviewers, wait timer) apply on
@@ -25,13 +34,17 @@ name: Deploy Staging
 # triggered from here, and so a PR only ever offers a staging deploy.
 
 on:
+  # Adding the "deploy-staging" label IS the request. Only `labeled` — a push to
+  # the PR does nothing, so this never deploys on its own.
+  pull_request:
+    types: [labeled]
   issue_comment:
     types: [created]
   workflow_dispatch:
 
 concurrency:
   # A newer request for the same PR/branch supersedes an in-flight one.
-  group: deploy-staging-${{ github.event.issue.number || github.ref }}
+  group: deploy-staging-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
   cancel-in-progress: true
 
 jobs:
@@ -44,7 +57,10 @@ jobs:
     if: >-
       github.actor == github.repository_owner &&
       (github.event_name == 'workflow_dispatch' ||
-        (github.event.issue.pull_request != null &&
+        (github.event_name == 'pull_request' &&
+         github.event.label.name == 'deploy-staging') ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request != null &&
          startsWith(github.event.comment.body, '/deploy')))
     runs-on: ubuntu-latest
     environment:
@@ -65,6 +81,19 @@ jobs:
           gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
             -f content=rocket --silent || true
 
+      # Consume the label immediately, so it behaves as a button rather than a
+      # sticky "this PR auto-deploys" state: re-adding it requests another
+      # deploy, and a failed run can be retried the same way.
+      - name: Consume the deploy-staging label
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/deploy-staging" \
+            --silent || true
+
       - name: Resolve what to deploy
         id: target
         # Event data goes through the environment rather than being interpolated
@@ -75,17 +104,28 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.issue.number }}
+          LABEL_REF: ${{ github.event.pull_request.head.ref }}
+          LABEL_SHA: ${{ github.event.pull_request.head.sha }}
           DISPATCH_REF: ${{ github.ref_name }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          if [ "$EVENT" = "issue_comment" ]; then
-            # The comment carries no head info; deploy the PR as it stands now.
-            read -r ref sha < <(gh api "repos/$REPO/pulls/$PR_NUMBER" \
-              --jq '"\(.head.ref) \(.head.sha)"')
-          else
-            ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
-          fi
+          case "$EVENT" in
+            pull_request)
+              # The label event carries the PR head directly. Use the head
+              # commit, not the merge commit GitHub synthesises, so the deployed
+              # build is exactly what the PR contains.
+              ref="$LABEL_REF"; sha="$LABEL_SHA"
+              ;;
+            issue_comment)
+              # The comment carries no head info; deploy the PR as it stands now.
+              read -r ref sha < <(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+                --jq '"\(.head.ref) \(.head.sha)"')
+              ;;
+            *)
+              ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              ;;
+          esac
           {
             echo "ref=$ref"
             echo "sha=$sha"
