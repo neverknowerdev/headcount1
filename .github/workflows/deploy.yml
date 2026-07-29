@@ -21,9 +21,10 @@ name: Deploy
 # If the releases repo is private, each server also needs
 # HEADCOUNT1_DEPLOY_DOWNLOAD_TOKEN set to a PAT that can read release assets.
 #
-# The `deploy` job runs in the GitHub Environment named for its target
-# ("production"/"staging"), so required reviewers or wait timers configured on
-# that environment gate the deploy as well.
+# The `deploy` job runs in a GitHub Environment — "production" for production
+# and "Preview" for staging — so required reviewers or wait timers configured on
+# that environment gate the deploy as well, and each deploy shows up (with a
+# link to the live URL) under the repo's Environments/Deployments UI.
 
 on:
   push:
@@ -59,6 +60,7 @@ jobs:
     outputs:
       deploy: ${{ steps.decide.outputs.deploy }}
       env: ${{ steps.decide.outputs.env }}
+      gh_env: ${{ steps.decide.outputs.gh_env }}
       event_type: ${{ steps.decide.outputs.event_type }}
       ref: ${{ steps.decide.outputs.ref }}
       tag: ${{ steps.decide.outputs.tag }}
@@ -117,9 +119,19 @@ jobs:
             fi
           fi
 
+          # GitHub Environment name for this target. "production" is special-cased
+          # by GitHub (it marks the deployment as a production deployment);
+          # staging deploys are surfaced as "Preview".
+          gh_env=""
+          case "$env" in
+            production) gh_env=production ;;
+            staging)    gh_env=Preview ;;
+          esac
+
           {
             echo "deploy=$deploy"
             echo "env=$env"
+            echo "gh_env=$gh_env"
             echo "event_type=$event_type"
             echo "ref=$ref"
             echo "tag=$tag"
@@ -132,9 +144,12 @@ jobs:
     needs: decide
     if: needs.decide.outputs.deploy == 'true'
     runs-on: ubuntu-latest
-    # Binds the run to the target GitHub Environment, so any protection rules
-    # (required reviewers, wait timer) configured there apply to this deploy.
-    environment: ${{ needs.decide.outputs.env }}
+    # Binds the run to the target GitHub Environment ("production" / "Preview"),
+    # so any protection rules (required reviewers, wait timer) configured there
+    # apply to this deploy. url makes the deployment clickable in that UI.
+    environment:
+      name: ${{ needs.decide.outputs.gh_env }}
+      url: ${{ needs.decide.outputs.env == 'production' && vars.PROD_DEPLOY_URL || vars.STAGING_DEPLOY_URL }}
     permissions:
       contents: write # create/update release assets
     steps:
