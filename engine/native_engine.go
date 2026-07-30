@@ -484,14 +484,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
-	// Resolve the task's environment and decrypt its secrets for injection
-	// into the agent's shell. Decrypt() registers every value with the
-	// redaction layer, so the agent can USE a secret ($API_KEY in a command)
-	// but never SEE it — any echo into tool output or logs is scrubbed.
-	// A locked owner (vault sealed) skips that secret with a log line rather
-	// than failing the run.
+	// Decrypt the company's "headcount1 cloud" environment secrets for
+	// injection into the agent's shell — tasks always run in that
+	// environment (the other environments describe external deploy targets
+	// and are not exposed to task runs). Decrypt() registers every value
+	// with the redaction layer, so the agent can USE a secret ($API_KEY in
+	// a command) but never SEE it — any echo into tool output or logs is
+	// scrubbed. A locked owner (vault sealed) skips that secret with a log
+	// line rather than failing the run.
 	envSecrets := map[string]string{}
-	if env, rows, envErr := e.q.EnvironmentSecretsForTask(ctx, task); envErr == nil {
+	if env, rows, envErr := e.q.DefaultEnvironmentSecrets(ctx, task.CompanyID); envErr == nil {
 		for _, row := range rows {
 			plain, decErr := secrets.Default().Decrypt(row.ValueEncrypted)
 			if decErr != nil {

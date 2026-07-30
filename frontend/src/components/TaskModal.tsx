@@ -63,14 +63,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         parent_id: '',
         status: 'backlog',
         is_archived: false,
-        environment_id: '',
     });
 
     // Metadata
     const [projects, setProjects] = useState<any[]>([]);
     const [sprints, setSprints] = useState<any[]>([]);
     const [agents, setAgents] = useState<any[]>([]);
-    const [environments, setEnvironments] = useState<any[]>([]);
     const [allTasks, setAllTasks] = useState<any[]>([]);
     const [parentSearch, setParentSearch] = useState('');
     const [showParentDropdown, setShowParentDropdown] = useState(false);
@@ -81,10 +79,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             axios.get(`/api/projects?company_id=${selectedCompanyId}`),
             axios.get(`/api/sprints?company_id=${selectedCompanyId}`),
             axios.get(`/api/agents?company_id=${selectedCompanyId}`),
-            axios.get(`/api/tasks?company_id=${selectedCompanyId}`),
-            axios.get(`/api/companies/${selectedCompanyId}/environments`).catch(() => ({ data: [] })),
-        ]).then(([projRes, sprintRes, agentRes, tasksRes, envRes]) => {
-            setEnvironments(envRes.data || []);
+            axios.get(`/api/tasks?company_id=${selectedCompanyId}`)
+        ]).then(([projRes, sprintRes, agentRes, tasksRes]) => {
             setAllTasks(tasksRes.data || []);
             setProjects(projRes.data || []);
             const fetchedSprints = sprintRes.data || [];
@@ -143,7 +139,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     parent_id: t.parent_id ? t.parent_id.toString() : '',
                     status: t.status,
                     is_archived: t.is_archived,
-                    environment_id: t.environment_id ? t.environment_id.toString() : '',
                 });
                 await fetchActivity();
             } catch (e) {
@@ -244,13 +239,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             if (formData.agent_id) payload.agent_id = parseInt(formData.agent_id);
             if (formData.parent_id) payload.parent_id = parseInt(formData.parent_id);
             if (formData.due_date) payload.due_date = new Date(formData.due_date).toISOString();
-            // 0 explicitly clears the override server-side (back to the
-            // company's default environment).
-            if (formData.environment_id) {
-                payload.environment_id = parseInt(formData.environment_id);
-            } else if (taskId && task?.environment_id) {
-                payload.environment_id = 0;
-            }
 
             if (taskId) {
                 payload.status = formData.status;
@@ -851,21 +839,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Due Date</label>
                             <input type="date" value={formData.due_date} onChange={e => setFormData({...formData, due_date: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm" />
-                        </div>
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Environment</label>
-                            <select
-                                value={formData.environment_id}
-                                onChange={e => setFormData({...formData, environment_id: e.target.value})}
-                                className="w-full border rounded p-2 text-sm shadow-sm"
-                                title="The task's runs receive this environment's secrets as env vars"
-                            >
-                                {environments.map((env: any) => (
-                                    <option key={env.id} value={env.is_default ? '' : env.id}>
-                                        {env.name}{env.is_default ? ' (default)' : ''}
-                                    </option>
-                                ))}
-                            </select>
                         </div>
                         <div className="relative">
                             <label className="block text-sm font-medium text-gray-700 mb-1">Parent Task</label>

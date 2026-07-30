@@ -118,9 +118,7 @@ func (q *Queries) RenameEnvironment(ctx context.Context, id int32, name string) 
 	return env, err
 }
 
-// DeleteEnvironment removes a user-defined environment and (via FK cascade)
-// its secrets. Tasks referencing it fall back to the default environment
-// (their environment_id is SET NULL by the FK).
+// DeleteEnvironment removes a user-defined environment and its secrets.
 func (q *Queries) DeleteEnvironment(ctx context.Context, id int32) error {
 	env, err := q.GetEnvironment(ctx, id)
 	if err != nil {
@@ -130,11 +128,8 @@ func (q *Queries) DeleteEnvironment(ctx context.Context, id int32) error {
 		return fmt.Errorf("builtin environments cannot be deleted")
 	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		// SQLite (glebarez) doesn't always enforce FK cascade/SET NULL on
-		// AutoMigrate-created schemas; do both explicitly.
-		if err := tx.Model(&Task{}).Where("environment_id = ?", id).Update("environment_id", nil).Error; err != nil {
-			return err
-		}
+		// SQLite (glebarez) doesn't always enforce FK cascade on
+		// AutoMigrate-created schemas; delete the secrets explicitly.
 		if err := tx.Where("environment_id = ?", id).Delete(&EnvironmentSecret{}).Error; err != nil {
 			return err
 		}
@@ -188,18 +183,13 @@ func (q *Queries) DeleteEnvironmentSecret(ctx context.Context, environmentID int
 		Delete(&EnvironmentSecret{}).Error
 }
 
-// EnvironmentSecretsForTask resolves the environment whose secrets a task's
-// runs receive (the task's own environment_id, or the company default) and
-// returns that environment plus its secret rows (values still sealed —
-// decrypt at the point of use).
-func (q *Queries) EnvironmentSecretsForTask(ctx context.Context, task Task) (Environment, []EnvironmentSecret, error) {
-	var env Environment
-	var err error
-	if task.EnvironmentID != nil {
-		env, err = q.GetEnvironment(ctx, *task.EnvironmentID)
-	} else {
-		env, err = q.GetDefaultEnvironment(ctx, task.CompanyID)
-	}
+// DefaultEnvironmentSecrets returns the company's default environment
+// ("headcount1 cloud" — the one every task runs in) plus its secret rows
+// (values still sealed — decrypt at the point of use). Only this
+// environment's secrets are injected into agent shells; the other
+// environments describe external deploy targets and are not exposed here.
+func (q *Queries) DefaultEnvironmentSecrets(ctx context.Context, companyID int32) (Environment, []EnvironmentSecret, error) {
+	env, err := q.GetDefaultEnvironment(ctx, companyID)
 	if err != nil {
 		return Environment{}, nil, err
 	}

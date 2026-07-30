@@ -20,23 +20,6 @@ import (
 // and has_value flags — the value is sealed under the caller's DEK and can
 // never be read back out.
 
-// authorizeTaskEnvironment validates a task's environment_id: it must exist
-// and belong to the task's own company. A nil (or 0 = "clear") id is fine —
-// the task falls back to the company default.
-func (api *API) authorizeTaskEnvironment(r *http.Request, companyID int32, envID *int32) error {
-	if envID == nil || *envID == 0 {
-		return nil
-	}
-	env, err := api.q.GetEnvironment(r.Context(), *envID)
-	if err != nil {
-		return err
-	}
-	if env.CompanyID != companyID {
-		return errNotOwned
-	}
-	return nil
-}
-
 // authorizeEnvironment returns the environment iff its company is visible to
 // the ctx user. Ownership mismatches are 404 like every other resource.
 func (api *API) authorizeEnvironment(r *http.Request, envID int32) (db.Environment, error) {

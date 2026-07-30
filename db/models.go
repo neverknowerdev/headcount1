@@ -390,20 +390,17 @@ type Task struct {
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
 	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
-	// EnvironmentID selects which environment's secrets the task's runs
-	// receive as shell env vars. Nil means the company's default
-	// environment ("headcount1 cloud").
-	EnvironmentID *int32       `json:"environment_id" gorm:"index"`
-	Environment   *Environment `json:"environment,omitempty" gorm:"foreignKey:EnvironmentID;constraint:OnDelete:SET NULL;"`
-	CreatedAt     time.Time    `json:"created_at"`
-	UpdatedAt     time.Time    `json:"updated_at"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 // Environment is a named set of secrets scoped to a company. Every company
 // gets the three defaults (headcount1 cloud, preview, production) seeded on
-// first use; "headcount1 cloud" is the default for new tasks. A run receives
-// its task's environment secrets as shell env vars — the agent can use them
-// ($API_KEY) but never sees the values (redaction scrubs any echo).
+// first use. Tasks always run in "headcount1 cloud": only ITS secrets are
+// injected into the agent's shell as env vars — the agent can use them
+// ($API_KEY) but never sees the values (redaction scrubs any echo). The
+// other environments describe external deploy targets (another server,
+// Vercel, …); exposing their secrets to those targets comes later.
 type Environment struct {
 	ID        int32   `json:"id" gorm:"primaryKey"`
 	CompanyID int32   `json:"company_id" gorm:"not null;index;uniqueIndex:idx_env_company_name"`

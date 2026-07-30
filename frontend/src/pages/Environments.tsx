@@ -120,9 +120,11 @@ export function Environments() {
         <div className="p-6 max-w-4xl">
             <h1 className="text-2xl font-bold text-gray-900">Environments</h1>
             <p className="mt-1 text-sm text-gray-600">
-                Each task runs in one environment and its shell receives that environment's secrets as env
-                vars. Agents can <em>use</em> a secret (<code>$API_KEY</code>) but never <em>see</em> it —
-                values are encrypted with your passkey and redacted from all run output and logs.
+                Tasks always run in <strong>headcount1 cloud</strong>: its secrets are injected into the
+                agent's shell as env vars. Agents can <em>use</em> a secret (<code>$API_KEY</code>) but
+                never <em>see</em> it — values are encrypted with your passkey and redacted from all run
+                output and logs. The other environments hold secrets for external deploy targets (your own
+                servers, Vercel, …); exposing them there comes later.
             </p>
             {error && <div className="mt-3 rounded bg-red-50 p-2 text-sm text-red-700">{error}</div>}
 
@@ -166,6 +168,11 @@ export function Environments() {
                                 )}
                                 {env.builtin && (
                                     <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">built-in</span>
+                                )}
+                                {!env.is_default && (
+                                    <span className="text-xs text-gray-400" title="Secrets here are for external deploy targets and are not injected into agent shells">
+                                        not used by task runs yet
+                                    </span>
                                 )}
                             </div>
                             {!env.builtin && renamingId !== env.id && (

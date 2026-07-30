@@ -147,8 +147,11 @@ func secretsDekRelock(t *testing.T, userID int32) {
 	secrets.Default().UnlockUser(userID, dek, time.Minute)
 }
 
-func TestEnvironmentSecretsForTask(t *testing.T) {
-	q, database, company, user := setupEnvTest(t)
+// TestDefaultEnvironmentSecrets: task runs always draw from the company's
+// default environment ("headcount1 cloud") — other environments' secrets
+// stay out of the run path entirely.
+func TestDefaultEnvironmentSecrets(t *testing.T) {
+	q, _, company, user := setupEnvTest(t)
 	ctx := context.Background()
 
 	staging, err := q.CreateEnvironment(ctx, company.ID, "staging")
@@ -161,33 +164,16 @@ func TestEnvironmentSecretsForTask(t *testing.T) {
 	_, err = q.UpsertEnvironmentSecret(ctx, staging.ID, user.ID, "STAGING_ONLY", "sv")
 	require.NoError(t, err)
 
-	sprint := db.Sprint{CompanyID: company.ID, Name: "S1"}
-	require.NoError(t, database.Create(&sprint).Error)
-
-	// Task without environment_id → company default env.
-	taskDefault := db.Task{CompanyID: company.ID, SprintID: sprint.ID, Title: "t1"}
-	require.NoError(t, database.Create(&taskDefault).Error)
-	env, rows, err := q.EnvironmentSecretsForTask(ctx, taskDefault)
+	env, rows, err := q.DefaultEnvironmentSecrets(ctx, company.ID)
 	require.NoError(t, err)
 	require.Equal(t, "headcount1 cloud", env.Name)
 	require.Len(t, rows, 1)
 	require.Equal(t, "DEFAULT_ONLY", rows[0].Name)
 
-	// Task pinned to staging → staging secrets.
-	taskStaging := db.Task{CompanyID: company.ID, SprintID: sprint.ID, Title: "t2", EnvironmentID: &staging.ID}
-	require.NoError(t, database.Create(&taskStaging).Error)
-	env, rows, err = q.EnvironmentSecretsForTask(ctx, taskStaging)
-	require.NoError(t, err)
-	require.Equal(t, "staging", env.Name)
-	require.Len(t, rows, 1)
-	require.Equal(t, "STAGING_ONLY", rows[0].Name)
-
-	// Deleting the environment falls tasks back to the default.
+	// Deleting a non-default environment doesn't disturb the default's set.
 	require.NoError(t, q.DeleteEnvironment(ctx, staging.ID))
-	var reloaded db.Task
-	require.NoError(t, database.First(&reloaded, taskStaging.ID).Error)
-	require.Nil(t, reloaded.EnvironmentID)
-	env, _, err = q.EnvironmentSecretsForTask(ctx, reloaded)
+	env, rows, err = q.DefaultEnvironmentSecrets(ctx, company.ID)
 	require.NoError(t, err)
 	require.Equal(t, "headcount1 cloud", env.Name)
+	require.Len(t, rows, 1)
 }

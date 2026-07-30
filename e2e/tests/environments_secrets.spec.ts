@@ -190,16 +190,20 @@ test.describe.serial('Environments and secrets', () => {
         }
     });
 
-    test('a task pinned to another environment gets that env, not the default', async ({ request }) => {
+    test('non-default environment secrets are NOT injected into task runs', async ({ request }) => {
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        // Tasks always run in "headcount1 cloud": the staging secret must be
+        // absent from the shell, the default one present. (Other environments
+        // describe external deploy targets — exposing secrets there is a
+        // separate, future feature.)
         const scenario = {
             entries: [
                 { tool_call: { id: 'b2', name: 'bash', arguments: {
-                    command: `[ "$STAGING_TOKEN" = "${STAGING_SECRET_VALUE}" ] && echo "STG_""OK" || echo "STG_""FAIL"; [ -z "$DEFAULT_TOKEN" ] && echo "DEF_""GONE" || echo "DEF_""HERE"`,
+                    command: `[ -z "$STAGING_TOKEN" ] && echo "STG_""ABSENT" || echo "STG_""LEAKED"; [ -n "$DEFAULT_TOKEN" ] && echo "DEF_""HERE" || echo "DEF_""GONE"`,
                 } } },
                 { tool_call: { id: 'f2', name: 'finish_task', arguments: {
                     task_status: 'done',
-                    finish_status: 'Checked staging environment.',
+                    finish_status: 'Checked environment scoping.',
                 } } },
             ],
         };
@@ -209,13 +213,11 @@ test.describe.serial('Environments and secrets', () => {
             company_id: companyId,
             sprint_id: sprintId,
             agent_id: agentId,
-            title: 'Use staging env secret',
-            description: 'Run the staging env check.',
+            title: 'Check env scoping',
+            description: 'Run the env scoping check.',
             task_type: 'implement',
             agent_config_name: 'Coder',
-            environment_id: stagingEnvId,
         });
-        expect((await (await request.get(`/api/tasks/${task.id}`)).json()).environment_id).toBe(stagingEnvId);
 
         await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         await waitForTaskStatus(request, task.id, 'done', 90_000);
@@ -223,9 +225,9 @@ test.describe.serial('Environments and secrets', () => {
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
         const run = await (await request.get(`/api/runs/${runs[0].id}`)).json();
         const logText = JSON.stringify(run.log_entries);
-        expect(logText).toContain('STG_OK');
-        expect(logText).not.toContain('STG_FAIL');
-        expect(logText).toContain('DEF_GONE');
+        expect(logText).toContain('STG_ABSENT');
+        expect(logText).not.toContain('STG_LEAKED');
+        expect(logText).toContain('DEF_HERE');
         expect(logText).not.toContain(STAGING_SECRET_VALUE);
     });
 
@@ -269,15 +271,6 @@ test.describe.serial('Environments and secrets', () => {
         await expect(defaultCard.getByTitle('Rename', { exact: true })).toHaveCount(0);
     });
 
-    test('task modal offers the environment picker', async ({ page }) => {
-        await page.goto('/companies/env-co/tasks');
-        await page.getByRole('button', { name: /New Task|Add Task|Create/i }).first().click({ timeout: 90_000 });
-        const envSelect = page.locator('select[title*="environment\'s secrets"]');
-        await expect(envSelect).toBeVisible();
-        const options = await envSelect.locator('option').allTextContents();
-        expect(options.join(',')).toContain('headcount1 cloud (default)');
-        expect(options.join(',')).toContain('staging');
-    });
 });
 
 async function setScenario(scenario: unknown): Promise<void> {
