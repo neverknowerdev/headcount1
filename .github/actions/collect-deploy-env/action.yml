@@ -1,0 +1,119 @@
+name: Collect deploy env
+description: >-
+  Collect the configuration a deploy should deliver to the server from the
+  GitHub Environment's variables and secrets, as a JSON object for the deploy
+  webhook payload.
+
+# The environment's `vars.DEPLOY_ENV_KEYS` names which variables to forward, one
+# per line (commas also work):
+#
+#   DATABASE_URL
+#   APP_BASE_URL
+#   SMTP_HOST
+#   SMTP_PASSWORD
+#
+# Each name is looked up in the environment's SECRETS first, then its VARIABLES.
+# So a value becomes a secret simply by being stored as one, and the server is
+# told which names those were, so it can hide exactly those from the agent's
+# shell.
+#
+# It is an explicit allowlist rather than "forward everything", because the
+# secrets context also holds CI-only credentials (GITHUB_TOKEN, DEPLOY_API_KEY)
+# that have no business on the app server. A listed name with no value fails the
+# job rather than delivering a blank, since a typo would otherwise quietly
+# unset production configuration.
+
+inputs:
+  keys:
+    description: Newline/comma separated variable names to deliver (vars.DEPLOY_ENV_KEYS).
+    required: false
+    default: ''
+  secrets_json:
+    description: toJSON(secrets) from the calling workflow.
+    required: true
+  vars_json:
+    description: toJSON(vars) from the calling workflow.
+    required: true
+
+outputs:
+  env_file:
+    description: >-
+      Path to a file under RUNNER_TEMP holding the delivered NAME->value pairs as
+      a JSON object (`{}` when nothing is configured). Deliberately a file and
+      not a step output: step outputs are recorded with the run, and these values
+      include secrets.
+    value: ${{ steps.collect.outputs.env_file }}
+  secret_keys_json:
+    description: JSON array of the delivered names whose values came from secrets (names only).
+    value: ${{ steps.collect.outputs.secret_keys_json }}
+  summary:
+    description: Human-readable list of delivered names, for the job log.
+    value: ${{ steps.collect.outputs.summary }}
+
+runs:
+  using: composite
+  steps:
+    - id: collect
+      shell: bash
+      env:
+        KEYS: ${{ inputs.keys }}
+        SECRETS_JSON: ${{ inputs.secrets_json }}
+        VARS_JSON: ${{ inputs.vars_json }}
+      run: |
+        set -euo pipefail
+
+        # CI's own credentials, never the app's. Forwarding GITHUB_TOKEN or the
+        # deploy key to the server would hand it privileges it must not hold.
+        BLOCKED="GITHUB_TOKEN ACTIONS_ID_TOKEN_REQUEST_TOKEN ACTIONS_ID_TOKEN_REQUEST_URL DEPLOY_API_KEY DEPLOY_URL DEPLOY_ENV_KEYS"
+
+        # Names, one per line, commas tolerated, blanks and # comments dropped.
+        # The sed strips whitespace within each line — it must not be `tr -d`,
+        # which would eat the newlines too and glue every name together.
+        mapfile -t names < <(printf '%s\n' "$KEYS" | tr ',' '\n' | sed 's/#.*//; s/[[:space:]]//g' | grep -v '^$' || true)
+
+        env_json='{}'
+        secret_keys='[]'
+        missing=()
+        blocked=()
+
+        for name in "${names[@]}"; do
+          if [[ " $BLOCKED " == *" $name "* ]]; then
+            blocked+=("$name")
+            continue
+          fi
+          # jq --arg keeps the value out of the command line and out of the log.
+          if value=$(jq -er --arg k "$name" '.[$k] // empty' <<<"$SECRETS_JSON"); then
+            secret_keys=$(jq -c --arg k "$name" '. + [$k]' <<<"$secret_keys")
+          elif value=$(jq -er --arg k "$name" '.[$k] // empty' <<<"$VARS_JSON"); then
+            :
+          else
+            missing+=("$name")
+            continue
+          fi
+          env_json=$(jq -c --arg k "$name" --arg v "$value" '.[$k] = $v' <<<"$env_json")
+        done
+
+        if [ ${#blocked[@]} -gt 0 ]; then
+          echo "::error::DEPLOY_ENV_KEYS lists CI-only names that must not be delivered to the server: ${blocked[*]}"
+          exit 1
+        fi
+        if [ ${#missing[@]} -gt 0 ]; then
+          echo "::error::DEPLOY_ENV_KEYS names variables with no value in this environment's secrets or variables: ${missing[*]}"
+          exit 1
+        fi
+
+        # The values leave this step in a file, not a step output: outputs are
+        # recorded with the workflow run, and these include secrets.
+        env_file="$RUNNER_TEMP/deploy-env.json"
+        printf '%s' "$env_json" > "$env_file"
+        chmod 600 "$env_file"
+
+        # Only ever print names. GitHub masks secret values in logs, but the
+        # summary is read by humans and shouldn't have to rely on that.
+        summary=$(jq -r 'keys | join(", ")' <<<"$env_json")
+        {
+          echo "env_file=$env_file"
+          echo "secret_keys_json=$secret_keys"
+          echo "summary=${summary:-<none>}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Delivering $(jq 'length' <<<"$env_json") env vars: ${summary:-<none>}"

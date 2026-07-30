@@ -344,4 +344,95 @@ test.describe.serial('Deploy webhook', () => {
         const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
         expect(finalTask.status).toBe('in-review');
     });
+
+    // Configuration delivery: CI reads its GitHub Environment's vars/secrets and
+    // sends them with the deploy, so the app's config lives in GitHub rather than
+    // being hand-edited on the box. The proof that a delivered value really
+    // reaches the process environment is the last stage, which delivers PORT and
+    // then finds the server listening on it.
+    test('delivers env config from CI and restarts to apply it', async () => {
+        test.setTimeout(240_000);
+        await startServer();
+        expect(await version()).toBe(runningCommit);
+
+        const storePath = path.join(home, '.headcount1', 'deploy-env.json');
+        const readStore = () => JSON.parse(fs.readFileSync(storePath, 'utf8'));
+
+        /** The names the successor logged applying, or '' before it has. */
+        async function appliedKeysLine(): Promise<string> {
+            const m = serverLog.match(/Applied \d+ env vars delivered by deploy: (.*)/g);
+            return m ? m[m.length - 1] : '';
+        }
+
+        // An unsafe key is refused WHOLE, before anything is stored: delivering
+        // env must not become a way to make the server execute code.
+        for (const key of ['LD_PRELOAD', 'PATH', 'NODE_OPTIONS', 'HEADCOUNT1_DEPLOY_ALLOWED_HOSTS']) {
+            const bad = await deployPost(deployKey, {
+                ...branchEvent(), env: { DELIVERED_ONE: 'ok', [key]: '/tmp/evil' },
+            });
+            expect(bad.status, `${key} must be refused`).toBe(400);
+            expect(await bad.text()).toContain(key);
+        }
+        expect(fs.existsSync(storePath), 'a rejected payload must deliver nothing').toBeFalsy();
+        expect(await version()).toBe(runningCommit);
+
+        // A real deploy carrying configuration. DELIVERED_TWO is declared a
+        // secret, so the agent sandbox will scrub it by name.
+        const accepted = await deployPost(deployKey, {
+            ...branchEvent(),
+            env: { DELIVERED_ONE: 'one-value', DELIVERED_TWO: 'two-secret' },
+            env_secret_keys: ['DELIVERED_TWO'],
+        });
+        expect(accepted.status).toBe(202);
+
+        await expect
+            .poll(async () => { try { return await version(); } catch { return ''; } },
+                { timeout: 90_000, intervals: [1000], message: 'server should restart into the deployed binary' })
+            .toBe(targetCommit);
+
+        // Stored, and readable only by the server user — it holds secrets in the
+        // clear, like a systemd EnvironmentFile.
+        expect(readStore().values).toEqual({ DELIVERED_ONE: 'one-value', DELIVERED_TWO: 'two-secret' });
+        expect(readStore().secret_keys).toEqual(['DELIVERED_TWO']);
+        expect(fs.statSync(storePath).mode & 0o777).toBe(0o600);
+
+        // And applied by the build that came up — the successor logs the names.
+        await expect
+            .poll(appliedKeysLine, { timeout: 30_000, intervals: [500], message: 'successor should apply delivered env' })
+            .toContain('DELIVERED_ONE, DELIVERED_TWO');
+
+        const status = await (await fetch(`${base}/api/deploy/status`)).json();
+        expect(status.env_keys).toEqual(['DELIVERED_ONE', 'DELIVERED_TWO']);
+
+        // Redelivering the SAME config for the commit already running is a no-op:
+        // otherwise every deploy of an unchanged commit would cycle the server.
+        const noop = await deployPost(deployKey, {
+            ...branchEvent(),
+            env: { DELIVERED_TWO: 'two-secret', DELIVERED_ONE: 'one-value' },
+            env_secret_keys: ['DELIVERED_TWO'],
+        });
+        expect(noop.status).toBe(200);
+        expect((await noop.json()).status).toBe('ignored');
+
+        // Changing only the config, with no new binary, still has to restart —
+        // env is read once at startup. Delivering PORT proves the value truly
+        // lands in the process environment: the server comes back on it.
+        const altPort = port + 1;
+        const altBase = `http://localhost:${altPort}`;
+        const changed = await deployPost(deployKey, {
+            ...branchEvent(),
+            env: { DELIVERED_ONE: 'one-value', DELIVERED_TWO: 'two-secret', PORT: String(altPort) },
+            env_secret_keys: ['DELIVERED_TWO'],
+        });
+        expect(changed.status).toBe(202);
+        expect((await changed.json()).status).toBe('restarting');
+
+        await expect
+            .poll(async () => {
+                try { return (await fetch(`${altBase}/api/version`)).ok; } catch { return false; }
+            }, { timeout: 90_000, intervals: [1000], message: 'delivered PORT should be in effect after the restart' })
+            .toBe(true);
+        // Same build, restarted purely to pick up configuration.
+        expect((await (await fetch(`${altBase}/api/version`)).json()).commit_hash).toBe(targetCommit);
+    });
 });

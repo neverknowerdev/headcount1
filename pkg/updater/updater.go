@@ -32,10 +32,10 @@ const defaultDeployRepo = "neverknowerdev/headcount1"
 // VersionInfo identifies a build. The running build's values are stamped in at
 // compile time via -ldflags; a deploy target's values arrive in the webhook.
 //
-// Version is the human-facing version number derived from git tags (see
-// scripts/version.sh) — "v1.2.3", or "v1.2.3-5-gabc1234" between releases. The
-// remaining fields are the precise build identity, which is what deploy
-// decisions actually compare.
+// Version is the human-facing version number minted at build time (see
+// scripts/version.sh) — "2026.07.29" in production, "staging-<branch>-<commit>"
+// on staging. The remaining fields are the precise build identity, which is what
+// deploy decisions actually compare.
 type VersionInfo struct {
 	Version    string `json:"version"`
 	Branch     string `json:"branch"`
@@ -209,10 +209,46 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 	u.mu.Unlock()
 
 	log.Printf("Deploy: binary replaced; draining and restarting into %s...", target.DisplayString())
+	u.requestShutdown()
+	return nil
+}
 
-	// Hand off to main's SIGTERM handler, which seals the secrets keyring,
-	// drains in-flight agent runs so they resume in the new build, closes the
-	// listener, and finally execs the binary we just wrote.
+// RestartInPlace restarts into the SAME binary, gracefully. It exists for
+// delivered configuration: environment variables are read once at startup, so a
+// deploy that changes only the env (same commit) still has to cycle the process
+// for the new values to take effect.
+//
+// Like Deploy it goes through main's shutdown path rather than exiting, so
+// in-flight agent runs are drained and resumed and the keyring is sealed. reason
+// is logged so an unexplained restart isn't a mystery in the log.
+func (u *Updater) RestartInPlace(reason string) error {
+	execPath, err := os.Executable()
+	if err != nil {
+		return fmt.Errorf("restart: get executable path: %w", err)
+	}
+	if execPath, err = filepath.EvalSymlinks(execPath); err != nil {
+		return fmt.Errorf("restart: eval symlinks: %w", err)
+	}
+
+	u.mu.Lock()
+	if u.restartPending {
+		// A deploy already armed a restart; that one supersedes this.
+		u.mu.Unlock()
+		return nil
+	}
+	u.restartPending = true
+	u.pendingExecPath = execPath
+	u.mu.Unlock()
+
+	log.Printf("Restart: %s; draining and restarting %s...", reason, execPath)
+	u.requestShutdown()
+	return nil
+}
+
+// requestShutdown asks this process to shut down gracefully, so main's SIGTERM
+// handler can seal the secrets keyring, drain in-flight agent runs so they
+// resume in the successor, close the listener, and exec last of all.
+func (u *Updater) requestShutdown() {
 	go func() {
 		time.Sleep(500 * time.Millisecond)
 		if p, err := os.FindProcess(os.Getpid()); err == nil {
@@ -221,8 +257,6 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 			os.Exit(0)
 		}
 	}()
-
-	return nil
 }
 
 // allowedDownloadHosts is the set of hosts a deploy binary may be fetched from.

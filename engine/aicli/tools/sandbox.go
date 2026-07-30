@@ -59,6 +59,25 @@ func SetHiddenReadDirs(dirs []string) {
 // hiddenDirs returns the registered hidden subtrees (nil when none set).
 func hiddenDirs() []string { return hiddenReadDirs }
 
+// deliveredSecretEnvKeys are env var names a deploy delivered from GitHub
+// *secrets* (see pkg/envstore). They are scrubbed from the agent shell's
+// environment by name, which is stronger than the "looks secret-ish" denylist in
+// isServerSecretEnv: the server knows exactly which of its variables are secret
+// because CI told it, so a secret named e.g. MAPS_ENDPOINT is still hidden.
+// Registered once at startup, before any tool runs.
+var deliveredSecretEnvKeys = map[string]bool{}
+
+// SetDeliveredSecretEnvKeys registers env var names that hold delivered secrets.
+func SetDeliveredSecretEnvKeys(keys []string) {
+	m := make(map[string]bool, len(keys))
+	for _, k := range keys {
+		if k != "" {
+			m[strings.ToUpper(k)] = true
+		}
+	}
+	deliveredSecretEnvKeys = m
+}
+
 func loadSandboxHardening() sandboxHardening {
 	h := sandboxHardening{uid: envInt("HEADCOUNT1_SANDBOX_UID"), gid: envInt("HEADCOUNT1_SANDBOX_GID")}
 	if h.gid == 0 {
@@ -103,6 +122,11 @@ func scrubbedEnv() []string {
 
 func isServerSecretEnv(key string) bool {
 	up := strings.ToUpper(key)
+	// Names CI told us are secrets. Exact, so it catches the ones the heuristics
+	// below would miss.
+	if deliveredSecretEnvKeys[up] {
+		return true
+	}
 	// The app's own crown jewels + cloud creds + mailer + ssh-agent, by prefix.
 	// SMTP_ covers SMTP_USERNAME/SMTP_HOST/SMTP_FROM (SMTP_PASSWORD is also
 	// caught by the PASSWORD substring); SSH_ covers SSH_AUTH_SOCK /

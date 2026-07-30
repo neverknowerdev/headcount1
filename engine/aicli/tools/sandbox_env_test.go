@@ -36,3 +36,25 @@ func TestScrubbedEnvRemovesServerSecrets(t *testing.T) {
 		t.Error("non-secret project vars must be preserved")
 	}
 }
+
+// TestScrubbedEnvRemovesDeliveredSecrets covers what the heuristics above cannot
+// do: a secret whose name looks like ordinary configuration. The deploy tells
+// the server which delivered names came from GitHub secrets, so those are
+// scrubbed by name rather than guessed at.
+func TestScrubbedEnvRemovesDeliveredSecrets(t *testing.T) {
+	t.Setenv("MAPS_ENDPOINT", "https://user:delivered-secret@maps.internal")
+	t.Setenv("BILLING_ACCOUNT", "acct-delivered-secret")
+	t.Setenv("PUBLIC_APP_NAME", "keep-me")
+
+	// Registered at startup from the env store's secret_keys.
+	SetDeliveredSecretEnvKeys([]string{"MAPS_ENDPOINT", "BILLING_ACCOUNT"})
+	t.Cleanup(func() { SetDeliveredSecretEnvKeys(nil) })
+
+	joined := strings.Join(scrubbedEnv(), "\n")
+	if strings.Contains(joined, "delivered-secret") {
+		t.Error("scrubbed env leaked a delivered secret the name heuristics can't detect")
+	}
+	if !strings.Contains(joined, "PUBLIC_APP_NAME=keep-me") {
+		t.Error("a delivered var that is NOT a secret must stay visible to the agent")
+	}
+}

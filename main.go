@@ -26,6 +26,7 @@ import (
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/bootkey"
+	"agent-orchestrator/pkg/envstore"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/mailer"
@@ -67,6 +68,27 @@ func main() {
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
 
+	// Apply the configuration the last deploy delivered from its GitHub
+	// Environment, before anything reads a setting or opens a connection. These
+	// values win over the inherited environment on purpose — GitHub is the
+	// intended source of truth — so log the names (never the values) to make that
+	// precedence visible when a value surprises someone.
+	deliveredEnv, err := envstore.Apply()
+	if err != nil {
+		// Don't abort: a server that won't boot because of a bad config file is
+		// harder to recover than one running on its previous environment.
+		log.Printf("Warning: could not apply delivered deploy env (%s): %v", envstore.Path(), err)
+	}
+	if len(deliveredEnv) > 0 {
+		log.Printf("Applied %d env vars delivered by deploy: %s",
+			len(deliveredEnv), strings.Join(deliveredEnv, ", "))
+	}
+	// Hide the delivered secrets from the agent's shell by name (the scrubber's
+	// own heuristics can't know which of these are secret).
+	if store, err := envstore.Load(); err == nil {
+		tools.SetDeliveredSecretEnvKeys(store.SecretKeys)
+	}
+
 	settings := appsettings.Load()
 	basePath := settings.BasePath
 
@@ -87,7 +109,6 @@ func main() {
 	dbConnStr := os.Getenv("DATABASE_URL")
 
 	var database *gorm.DB
-	var err error
 
 	if strings.HasPrefix(dbConnStr, "postgres://") {
 		log.Println("Connecting to PostgreSQL database")

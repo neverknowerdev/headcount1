@@ -5,7 +5,7 @@ import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 interface BuildVersion {
-    /** Human-facing version number, e.g. "v1.2.3" or "v1.2.3-5-gabc1234". */
+    /** Version number: "2026.07.29" in production, "staging-<branch>-<commit>" on staging. */
     version?: string;
     branch: string;
     commit_hash: string;
@@ -28,6 +28,12 @@ interface DeployStatus {
     deploy_target?: BuildVersion;
     /** Only returned to the operator (global admin API enabled). */
     last_error?: string;
+    /**
+     * NAMES of the env vars the last deploy delivered from its GitHub
+     * Environment — never the values. Operator-only, like last_error.
+     */
+    env_keys?: string[];
+    env_updated_at?: string;
 }
 
 export const Settings: React.FC = () => {
@@ -300,12 +306,24 @@ export const Settings: React.FC = () => {
                         {deployStatus.last_error && (
                             <div className="text-xs text-red-600">Last deploy error: {deployStatus.last_error}</div>
                         )}
+                        {/* Names only. Enough to confirm configuration arrived without
+                            shell access to the box; the values stay on the server. */}
+                        {deployStatus.env_keys && deployStatus.env_keys.length > 0 && (
+                            <div className="text-xs text-gray-500">
+                                Config delivered from GitHub
+                                {deployStatus.env_updated_at && ` on ${new Date(deployStatus.env_updated_at).toLocaleString()}`}:{' '}
+                                <span className="font-mono">{deployStatus.env_keys.join(', ')}</span>
+                            </div>
+                        )}
                     </div>
                 )}
 
                 <p className="text-xs text-gray-500 mb-4">
                     New builds are deployed to this server automatically by CI. Production servers apply
                     updates from the source selected below; staging servers deploy any branch/PR pushed to them.
+                    Each deploy also delivers this environment's configuration and secrets from GitHub
+                    (Settings → Environments → <code>DEPLOY_ENV_KEYS</code>), so the server's env vars are
+                    managed there rather than on the box.
                 </p>
 
                 <div className="space-y-4">

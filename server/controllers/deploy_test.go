@@ -8,6 +8,7 @@ import (
 	"testing"
 
 	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/envstore"
 	"agent-orchestrator/pkg/utils"
 
 	"github.com/stretchr/testify/require"
@@ -129,4 +130,100 @@ func TestDeployWebhookRejectsUntrustedArtifact(t *testing.T) {
 	require.Equal(t, http.StatusBadRequest, post(DeployWebhookPayload{
 		EventType: deployEventBranch, DownloadURL: ourAsset,
 	}).Code)
+}
+
+// TestDeployWebhookRejectsUnsafeEnv covers the config-write half of the deploy
+// surface: delivering env vars must not become a way to run code. A payload
+// carrying one of these keys is refused WHOLE, with the reason, so the CI job
+// fails visibly instead of the key being quietly dropped.
+func TestDeployWebhookRejectsUnsafeEnv(t *testing.T) {
+	t.Setenv("HEADCOUNT1_DEPLOY_API_KEY", "secret")
+	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
+	api := &API{}
+
+	post := func(env map[string]string) *httptest.ResponseRecorder {
+		b, _ := json.Marshal(DeployWebhookPayload{
+			EventType:   deployEventBranch,
+			DownloadURL: "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1",
+			SHA256:      "abc123",
+			Env:         env,
+		})
+		r := httptest.NewRequest(http.MethodPost, "/deploy/webhook", bytes.NewReader(b))
+		r.Header.Set("X-Deploy-Key", "secret")
+		w := httptest.NewRecorder()
+		api.DeployWebhook(w, r)
+		return w
+	}
+
+	for _, key := range []string{"LD_PRELOAD", "PATH", "NODE_OPTIONS", "HTTPS_PROXY",
+		"HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "HEADCOUNT1_ENV", "lowercase"} {
+		w := post(map[string]string{"DATABASE_URL": "postgres://ok", key: "x"})
+		require.Equal(t, http.StatusBadRequest, w.Code, "must refuse env key %s", key)
+		require.Contains(t, w.Body.String(), key)
+	}
+
+	// The refusal happens before the deploy decision, so nothing was stored —
+	// not even the legitimate key that shared the payload.
+	stored, err := envstore.Load()
+	require.NoError(t, err)
+	require.Empty(t, stored.Values, "a rejected payload must not deliver anything")
+
+	// Ordinary configuration passes the check (this server ignores the event
+	// itself, which is what keeps the test from needing a real binary).
+	w := post(map[string]string{"DATABASE_URL": "postgres://ok", "SMTP_HOST": "mail"})
+	require.Equal(t, http.StatusOK, w.Code)
+}
+
+// TestPersistDeliveredEnv pins the rule that decides whether a deploy touches
+// the stored configuration at all.
+func TestPersistDeliveredEnv(t *testing.T) {
+	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
+
+	// First delivery: new configuration, so changed.
+	changed, err := persistDeliveredEnv(DeployWebhookPayload{
+		Env:           map[string]string{"DATABASE_URL": "postgres://a", "SMTP_HOST": "mail"},
+		EnvSecretKeys: []string{"DATABASE_URL"},
+	})
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	stored, err := envstore.Load()
+	require.NoError(t, err)
+	require.Equal(t, map[string]string{"DATABASE_URL": "postgres://a", "SMTP_HOST": "mail"}, stored.Values)
+	require.Equal(t, []string{"DATABASE_URL"}, stored.SecretKeys)
+
+	// Redelivering the same values is NOT a change — otherwise every deploy of
+	// an unchanged commit would restart the server for nothing.
+	changed, err = persistDeliveredEnv(DeployWebhookPayload{
+		Env:           map[string]string{"SMTP_HOST": "mail", "DATABASE_URL": "postgres://a"},
+		EnvSecretKeys: []string{"DATABASE_URL"},
+	})
+	require.NoError(t, err)
+	require.False(t, changed)
+
+	// A changed value is a change.
+	changed, err = persistDeliveredEnv(DeployWebhookPayload{
+		Env: map[string]string{"DATABASE_URL": "postgres://b", "SMTP_HOST": "mail"},
+	})
+	require.NoError(t, err)
+	require.True(t, changed)
+
+	// An ABSENT env field means "this deploy doesn't manage configuration" and
+	// must leave the store alone: a hand-rolled curl deploy must not be able to
+	// wipe the server's config.
+	changed, err = persistDeliveredEnv(DeployWebhookPayload{Env: nil})
+	require.NoError(t, err)
+	require.False(t, changed)
+	stored, err = envstore.Load()
+	require.NoError(t, err)
+	require.Len(t, stored.Values, 2, "an absent env field must not clear the store")
+
+	// An explicitly EMPTY object does clear it — that is how removing every name
+	// from DEPLOY_ENV_KEYS takes effect.
+	changed, err = persistDeliveredEnv(DeployWebhookPayload{Env: map[string]string{}})
+	require.NoError(t, err)
+	require.True(t, changed)
+	stored, err = envstore.Load()
+	require.NoError(t, err)
+	require.Empty(t, stored.Values)
 }
