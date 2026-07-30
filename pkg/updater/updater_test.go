@@ -77,6 +77,10 @@ func TestValidateDownloadURL(t *testing.T) {
 		"http not https": "http://api.github.com/repos/" + repo + "/releases/assets/1",
 		"other repo":     "https://api.github.com/repos/attacker/evil/releases/assets/1",
 		"other repo web": "https://github.com/attacker/evil/releases/download/v1/bin",
+		// Git tags may contain slashes, so an attacker's release tag can spell
+		// out our repo name mid-path. Only a prefix-anchored pin refuses these.
+		"repo name in tag":     "https://github.com/attacker/evil/releases/download/" + repo + "/bin",
+		"repo name in api tag": "https://api.github.com/repos/attacker/evil/releases/tags/" + repo + "/x",
 		"host lookalike": "https://api.github.com.evil.example.com/repos/" + repo + "/x",
 		"bad host chars": "https://exa mple.com/x",
 	}

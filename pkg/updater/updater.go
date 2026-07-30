@@ -171,8 +171,22 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 		return fail(errors.New("deploy: sha256 is required"))
 	}
 
+	execPath, err := os.Executable()
+	if err != nil {
+		return fail(fmt.Errorf("deploy: get executable path: %w", err))
+	}
+	execPath, err = filepath.EvalSymlinks(execPath)
+	if err != nil {
+		return fail(fmt.Errorf("deploy: eval symlinks: %w", err))
+	}
+
+	// The download lands NEXT TO the executable, not in os.TempDir(): the swap
+	// below must be a rename, and a rename only works within one filesystem.
+	// /tmp is typically tmpfs while the binary lives on disk — and the obvious
+	// fallback, copying over the live executable, can never work: Linux refuses
+	// to open a running binary for write (ETXTBSY).
 	log.Printf("Deploy: downloading %s (%s)...", target.DisplayString(), downloadURL)
-	tmpFile, gotSum, err := downloadBinary(downloadURL, u.downloadTokenFn())
+	tmpFile, gotSum, err := downloadBinary(downloadURL, u.downloadTokenFn(), filepath.Dir(execPath))
 	if err != nil {
 		return fail(fmt.Errorf("deploy: download binary: %w", err))
 	}
@@ -181,24 +195,9 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 		return fail(fmt.Errorf("deploy: sha256 mismatch: expected %s, got %s", expected, gotSum))
 	}
 
-	execPath, err := os.Executable()
-	if err != nil {
-		os.Remove(tmpFile)
-		return fail(fmt.Errorf("deploy: get executable path: %w", err))
-	}
-	execPath, err = filepath.EvalSymlinks(execPath)
-	if err != nil {
-		os.Remove(tmpFile)
-		return fail(fmt.Errorf("deploy: eval symlinks: %w", err))
-	}
-
 	if err := os.Rename(tmpFile, execPath); err != nil {
-		// Rename fails across filesystems; fall back to an in-place copy.
-		if copyErr := copyFile(tmpFile, execPath); copyErr != nil {
-			os.Remove(tmpFile)
-			return fail(fmt.Errorf("deploy: replace binary: %w (copy also failed: %v)", err, copyErr))
-		}
 		os.Remove(tmpFile)
+		return fail(fmt.Errorf("deploy: replace binary: %w", err))
 	}
 
 	u.mu.Lock()
@@ -311,22 +310,41 @@ func ValidateDownloadURL(raw string) error {
 	if !hosts[host] {
 		return fmt.Errorf("download host %q is not an allowed deploy source", host)
 	}
-	// api.github.com and github.com URLs name the repository in their path
-	// (/repos/{owner}/{repo}/... and /{owner}/{repo}/... respectively), so pin
-	// it. The githubusercontent CDN hosts opaque signed blob paths and is only
-	// ever reached by following a redirect from an already-validated API URL.
-	if !overridden && (host == "api.github.com" || host == "github.com") {
-		if !strings.Contains(u.Path, "/"+deployRepo()+"/") {
+	// api.github.com and github.com URLs name the repository at the START of
+	// their path (/repos/{owner}/{repo}/... and /{owner}/{repo}/...), so pin it
+	// as a prefix. It must NOT be a substring match: git tags may contain
+	// slashes, so an attacker's repo can serve a release whose tag spells out
+	// our repo name mid-path (/attacker/evil/releases/download/{our-repo}/x) —
+	// anchoring at the path root is what defeats that. The githubusercontent
+	// CDN hosts opaque signed blob paths and is only ever reached by following
+	// a redirect from an already-validated API URL.
+	if !overridden {
+		repoPrefix := ""
+		switch host {
+		case "api.github.com":
+			repoPrefix = "/repos/" + deployRepo() + "/"
+		case "github.com":
+			repoPrefix = "/" + deployRepo() + "/"
+		}
+		if repoPrefix != "" && !strings.HasPrefix(u.Path, repoPrefix) {
 			return fmt.Errorf("download_url does not belong to %s", deployRepo())
 		}
 	}
 	return nil
 }
 
-// downloadBinary fetches url to a temp file, returning the path and the file's
-// hex-encoded sha256 (computed in the same pass, so the bytes are never read
-// twice and the digest is of exactly what was written).
-func downloadBinary(url, token string) (path string, sha256Hex string, err error) {
+// maxBinarySize bounds a deploy download. The artifact URL is repo-pinned and
+// the bytes digest-checked, so this is not an integrity control — it just makes
+// a wrong or corrupted asset fail cheaply instead of streaming to disk without
+// limit before the digest check rejects it.
+const maxBinarySize = 512 << 20 // 512 MiB
+
+// downloadBinary fetches url to a temp file inside destDir, returning the path
+// and the file's hex-encoded sha256 (computed in the same pass, so the bytes
+// are never read twice and the digest is of exactly what was written). destDir
+// must be on the same filesystem as the final destination, so the caller's
+// rename is atomic and cannot fail with EXDEV.
+func downloadBinary(url, token, destDir string) (path string, sha256Hex string, err error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return "", "", err
@@ -350,15 +368,21 @@ func downloadBinary(url, token string) (path string, sha256Hex string, err error
 		return "", "", fmt.Errorf("download returned HTTP %d", resp.StatusCode)
 	}
 
-	tmpFile, err := os.CreateTemp("", "headcount1-deploy-*")
+	tmpFile, err := os.CreateTemp(destDir, ".headcount1-deploy-*")
 	if err != nil {
 		return "", "", err
 	}
 	hasher := sha256.New()
-	if _, err := io.Copy(io.MultiWriter(tmpFile, hasher), resp.Body); err != nil {
+	n, err := io.Copy(io.MultiWriter(tmpFile, hasher), io.LimitReader(resp.Body, maxBinarySize+1))
+	if err != nil {
 		tmpFile.Close()
 		os.Remove(tmpFile.Name())
 		return "", "", err
+	}
+	if n > maxBinarySize {
+		tmpFile.Close()
+		os.Remove(tmpFile.Name())
+		return "", "", fmt.Errorf("download exceeds %d bytes", int64(maxBinarySize))
 	}
 	tmpFile.Close()
 
@@ -369,21 +393,3 @@ func downloadBinary(url, token string) (path string, sha256Hex string, err error
 	return tmpFile.Name(), hex.EncodeToString(hasher.Sum(nil)), nil
 }
 
-func copyFile(src, dst string) error {
-	in, err := os.Open(src)
-	if err != nil {
-		return err
-	}
-	defer in.Close()
-
-	out, err := os.Create(dst)
-	if err != nil {
-		return err
-	}
-	defer out.Close()
-
-	if _, err := io.Copy(out, in); err != nil {
-		return err
-	}
-	return out.Chmod(0755)
-}

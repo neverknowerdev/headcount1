@@ -111,7 +111,15 @@ type Store struct {
 	// untrusted shell's environment by name, instead of relying on its
 	// best-effort "looks secret-ish" denylist to guess (see tools.scrubbedEnv).
 	SecretKeys []string `json:"secret_keys,omitempty"`
-	UpdatedAt  string   `json:"updated_at,omitempty"`
+	// RemovedKeys are names an earlier delivery set that the latest one no
+	// longer contains. Apply must actively UNSET them: a deploy restart is a
+	// syscall.Exec carrying os.Environ() forward, so a value applied on a
+	// previous boot survives in the inherited environment — without this,
+	// deleting a secret from the GitHub Environment would never delete it from
+	// the server. Kept (not cleared) across identical redeliveries so the unset
+	// also happens on an ordinary process-manager restart.
+	RemovedKeys []string `json:"removed_keys,omitempty"`
+	UpdatedAt   string   `json:"updated_at,omitempty"`
 }
 
 // Path is the store's location: alongside settings.yaml, in the bootstrap data
@@ -176,6 +184,11 @@ func SkippedSummary(skipped map[string]string) []string {
 // configuration changed even when the binary did not — see the deploy
 // controller, which restarts on an env-only change so the new values take
 // effect. Nil and empty share a digest: both mean "nothing delivered".
+//
+// SecretKeys is part of the identity even though it changes no value: moving a
+// variable to a GitHub secret is a request to hide it from the agent shell, and
+// the scrubber only learns its list at startup — so the reclassification alone
+// must trigger the restart.
 func (s Store) Digest() string {
 	keys := make([]string, 0, len(s.Values))
 	for k := range s.Values {
@@ -187,6 +200,11 @@ func (s Store) Digest() string {
 		// Length-prefixed, so no combination of names and values can be
 		// rearranged into the same byte stream.
 		fmt.Fprintf(h, "%d:%s=%d:%s\n", len(k), k, len(s.Values[k]), s.Values[k])
+	}
+	secretKeys := append([]string(nil), s.SecretKeys...)
+	sort.Strings(secretKeys)
+	for _, k := range secretKeys {
+		fmt.Fprintf(h, "secret %d:%s\n", len(k), k)
 	}
 	return hex.EncodeToString(h.Sum(nil))
 }
@@ -224,6 +242,7 @@ func Load() (Store, error) {
 func Save(s Store) error {
 	s.UpdatedAt = time.Now().UTC().Format(time.RFC3339)
 	sort.Strings(s.SecretKeys)
+	sort.Strings(s.RemovedKeys)
 	data, err := json.MarshalIndent(s, "", "  ")
 	if err != nil {
 		return err
@@ -243,17 +262,20 @@ func Save(s Store) error {
 	return nil
 }
 
-// Apply sets every stored variable in the current process environment and
-// returns the names it applied, sorted.
+// Apply sets every stored variable in the current process environment, unsets
+// every removed one, and returns the names it applied, sorted.
 //
 // Delivered values WIN over anything already in the environment: the GitHub
 // Environment is the intended source of truth, so a value set there must not be
-// silently shadowed by a stale one in a systemd unit. Startup logs the names
-// applied (never the values) so the precedence is visible when a value
-// surprises someone.
+// silently shadowed by a stale one in a systemd unit. The same reasoning makes
+// the unset mandatory — a deploy restart execs with os.Environ(), so a value
+// deleted from GitHub would otherwise survive in the inherited environment
+// forever. Startup logs the names applied (never the values) so the precedence
+// is visible when a value surprises someone.
 //
 // Keys are re-checked here, not just on receipt, so a store file edited by hand
-// — or written by an older, more permissive build — still cannot inject PATH.
+// — or written by an older, more permissive build — still cannot inject PATH,
+// nor unset it.
 func Apply() ([]string, error) {
 	s, err := Load()
 	if err != nil {
@@ -268,6 +290,14 @@ func Apply() ([]string, error) {
 			return applied, fmt.Errorf("set %s: %w", key, err)
 		}
 		applied = append(applied, key)
+	}
+	for _, key := range s.RemovedKeys {
+		if err := Validate(key); err != nil {
+			return applied, fmt.Errorf("stored removed key %s is not applicable: %w", key, err)
+		}
+		if err := os.Unsetenv(key); err != nil {
+			return applied, fmt.Errorf("unset %s: %w", key, err)
+		}
 	}
 	return applied, nil
 }

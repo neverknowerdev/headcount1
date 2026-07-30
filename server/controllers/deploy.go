@@ -270,7 +270,18 @@ func persistDeliveredEnv(p DeployWebhookPayload) (changed bool, skipped map[stri
 		}
 	}
 
-	incoming := envstore.Store{Values: accepted, SecretKeys: secretKeys}
+	// Names the previous delivery set that this one no longer carries. Recorded
+	// so the next startup actively unsets them — the deploy restart execs with
+	// os.Environ(), so a deleted GitHub secret would otherwise survive in the
+	// inherited environment (see envstore.Store.RemovedKeys).
+	var removed []string
+	for key := range current.Values {
+		if _, still := accepted[key]; !still {
+			removed = append(removed, key)
+		}
+	}
+
+	incoming := envstore.Store{Values: accepted, SecretKeys: secretKeys, RemovedKeys: removed}
 	if incoming.Digest() == current.Digest() {
 		return false, skipped, nil
 	}

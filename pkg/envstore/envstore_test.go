@@ -196,8 +196,45 @@ func TestDigestDetectsAnyChange(t *testing.T) {
 		Store{Values: map[string]string{"AB": "C"}}.Digest(),
 		Store{Values: map[string]string{"A": "BC"}}.Digest())
 
-	// SecretKeys is metadata about the same values, not part of the identity.
-	require.Equal(t, base.Digest(), Store{
+	// Reclassifying a variable as a secret changes no value, but it IS a change:
+	// the agent-shell scrubber only learns its list at startup, so the
+	// reclassification must trigger the restart.
+	require.NotEqual(t, base.Digest(), Store{
 		Values: map[string]string{"A": "1", "B": "2"}, SecretKeys: []string{"A"},
 	}.Digest())
+
+	// RemovedKeys is bookkeeping about how to reach this state, not part of the
+	// state itself — otherwise an identical redelivery after a removal would
+	// look like a change and restart the server for nothing.
+	require.Equal(t, base.Digest(), Store{
+		Values: map[string]string{"A": "1", "B": "2"}, RemovedKeys: []string{"OLD"},
+	}.Digest())
+}
+
+// TestApplyUnsetsRemovedKeys covers the removal half of delivery: a deploy
+// restart execs with os.Environ(), so a value applied on a previous boot
+// survives into the successor's inherited environment — deleting it from the
+// GitHub Environment only takes effect because Apply actively unsets it.
+func TestApplyUnsetsRemovedKeys(t *testing.T) {
+	isolate(t)
+	t.Setenv("REMOVED_SECRET", "applied-on-a-previous-boot")
+
+	require.NoError(t, Save(Store{
+		Values:      map[string]string{"KEPT_VAR": "v"},
+		RemovedKeys: []string{"REMOVED_SECRET"},
+	}))
+
+	applied, err := Apply()
+	require.NoError(t, err)
+	require.Equal(t, []string{"KEPT_VAR"}, applied)
+	_, present := os.LookupEnv("REMOVED_SECRET")
+	require.False(t, present, "a key the delivery removed must not survive into this boot")
+
+	// A removed name is validated like any other, so a tampered store cannot
+	// use the removal path to unset PATH out from under the server.
+	require.NoError(t, os.WriteFile(Path(),
+		[]byte(`{"values":{},"removed_keys":["PATH"]}`), 0600))
+	_, err = Apply()
+	require.Error(t, err)
+	require.NotEmpty(t, os.Getenv("PATH"), "PATH must still be set")
 }

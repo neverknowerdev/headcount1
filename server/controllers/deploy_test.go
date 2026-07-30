@@ -254,12 +254,25 @@ func TestPersistDeliveredEnv(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, stored.Values, 2, "an absent env field must not clear the store")
 
-	// An explicitly EMPTY object does clear it — that is how removing every name
-	// from DEPLOY_ENV_KEYS takes effect.
+	// Dropping a key is a change, and the dropped name is recorded so the next
+	// startup unsets it (a deploy restart execs with os.Environ(), which still
+	// carries the previously applied value).
+	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{
+		Env: map[string]string{"DATABASE_URL": "postgres://b"},
+	})
+	require.NoError(t, err)
+	require.True(t, changed)
+	stored, err = envstore.Load()
+	require.NoError(t, err)
+	require.Equal(t, []string{"SMTP_HOST"}, stored.RemovedKeys)
+
+	// An explicitly EMPTY object does clear it — that is how emptying the
+	// GitHub Environment takes effect — and records everything as removed.
 	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{Env: map[string]string{}})
 	require.NoError(t, err)
 	require.True(t, changed)
 	stored, err = envstore.Load()
 	require.NoError(t, err)
 	require.Empty(t, stored.Values)
+	require.Equal(t, []string{"DATABASE_URL"}, stored.RemovedKeys)
 }
