@@ -3,6 +3,7 @@ package endpoints
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -132,21 +133,24 @@ func TestDeployWebhookRejectsUntrustedArtifact(t *testing.T) {
 	}).Code)
 }
 
-// TestDeployWebhookRejectsUnsafeEnv covers the config-write half of the deploy
-// surface: delivering env vars must not become a way to run code. A payload
-// carrying one of these keys is refused WHOLE, with the reason, so the CI job
-// fails visibly instead of the key being quietly dropped.
-func TestDeployWebhookRejectsUnsafeEnv(t *testing.T) {
+// TestDeployWebhookSkipsUnsafeEnv covers the config-write half of the deploy
+// surface. CI delivers EVERY variable and secret the GitHub Environment holds,
+// so a name the server can't use is routine rather than a misconfiguration: the
+// unusable ones are dropped and reported, the rest still land.
+func TestDeployWebhookSkipsUnsafeEnv(t *testing.T) {
 	t.Setenv("HEADCOUNT1_DEPLOY_API_KEY", "secret")
 	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
+	// Staging accepts branch events, so the payload is actually acted on.
+	t.Setenv("HEADCOUNT1_ENV", "staging")
 	api := &API{}
 
-	post := func(env map[string]string) *httptest.ResponseRecorder {
+	post := func(env map[string]string, secretKeys []string) *httptest.ResponseRecorder {
 		b, _ := json.Marshal(DeployWebhookPayload{
-			EventType:   deployEventBranch,
-			DownloadURL: "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1",
-			SHA256:      "abc123",
-			Env:         env,
+			EventType:     deployEventBranch,
+			DownloadURL:   "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1",
+			SHA256:        "abc123",
+			Env:           env,
+			EnvSecretKeys: secretKeys,
 		})
 		r := httptest.NewRequest(http.MethodPost, "/deploy/webhook", bytes.NewReader(b))
 		r.Header.Set("X-Deploy-Key", "secret")
@@ -155,23 +159,55 @@ func TestDeployWebhookRejectsUnsafeEnv(t *testing.T) {
 		return w
 	}
 
-	for _, key := range []string{"LD_PRELOAD", "PATH", "NODE_OPTIONS", "HTTPS_PROXY",
-		"HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "HEADCOUNT1_ENV", "lowercase"} {
-		w := post(map[string]string{"DATABASE_URL": "postgres://ok", key: "x"})
-		require.Equal(t, http.StatusBadRequest, w.Code, "must refuse env key %s", key)
-		require.Contains(t, w.Body.String(), key)
+	// No updater wired up, so the request stops before any restart — but the env
+	// has already been stored by then, which is what this asserts.
+	unsafe := []string{"LD_PRELOAD", "PATH", "NODE_OPTIONS", "HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "lowercase"}
+	env := map[string]string{"DATABASE_URL": "postgres://ok", "SMTP_PASSWORD": "pw"}
+	for _, key := range unsafe {
+		env[key] = "/tmp/evil"
 	}
+	post(env, []string{"SMTP_PASSWORD", "LD_PRELOAD"})
 
-	// The refusal happens before the deploy decision, so nothing was stored —
-	// not even the legitimate key that shared the payload.
 	stored, err := envstore.Load()
 	require.NoError(t, err)
-	require.Empty(t, stored.Values, "a rejected payload must not deliver anything")
+	require.Equal(t, map[string]string{"DATABASE_URL": "postgres://ok", "SMTP_PASSWORD": "pw"}, stored.Values,
+		"usable config must survive alongside names the server refuses")
+	require.Equal(t, []string{"SMTP_PASSWORD"}, stored.SecretKeys,
+		"a refused key must not be recorded as a stored secret")
 
-	// Ordinary configuration passes the check (this server ignores the event
-	// itself, which is what keeps the test from needing a real binary).
-	w := post(map[string]string{"DATABASE_URL": "postgres://ok", "SMTP_HOST": "mail"})
-	require.Equal(t, http.StatusOK, w.Code)
+	// And the skipped names come back to CI with reasons, so they show up in the
+	// job log instead of vanishing.
+	w := post(env, nil)
+	var resp map[string]interface{}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	reported, _ := json.Marshal(resp["env_skipped"])
+	for _, key := range unsafe {
+		require.Contains(t, string(reported), key)
+	}
+}
+
+// TestDeployWebhookRejectsTooManyEnvVars: an implausible count means something
+// upstream is wrong, and silently truncating configuration is worse than not
+// deploying at all.
+func TestDeployWebhookRejectsTooManyEnvVars(t *testing.T) {
+	t.Setenv("HEADCOUNT1_DEPLOY_API_KEY", "secret")
+	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
+	env := make(map[string]string, envstore.MaxKeys+1)
+	for i := 0; i <= envstore.MaxKeys; i++ {
+		env[fmt.Sprintf("KEY_%03d", i)] = "v"
+	}
+	b, _ := json.Marshal(DeployWebhookPayload{
+		EventType:   deployEventBranch,
+		DownloadURL: "https://api.github.com/repos/neverknowerdev/headcount1/releases/assets/1",
+		SHA256:      "abc123",
+		Env:         env,
+	})
+	r := httptest.NewRequest(http.MethodPost, "/deploy/webhook", bytes.NewReader(b))
+	r.Header.Set("X-Deploy-Key", "secret")
+	w := httptest.NewRecorder()
+	(&API{}).DeployWebhook(w, r)
+	require.Equal(t, http.StatusBadRequest, w.Code)
+	require.Contains(t, w.Body.String(), "too many env vars")
 }
 
 // TestPersistDeliveredEnv pins the rule that decides whether a deploy touches
@@ -180,7 +216,7 @@ func TestPersistDeliveredEnv(t *testing.T) {
 	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
 
 	// First delivery: new configuration, so changed.
-	changed, err := persistDeliveredEnv(DeployWebhookPayload{
+	changed, _, err := persistDeliveredEnv(DeployWebhookPayload{
 		Env:           map[string]string{"DATABASE_URL": "postgres://a", "SMTP_HOST": "mail"},
 		EnvSecretKeys: []string{"DATABASE_URL"},
 	})
@@ -194,7 +230,7 @@ func TestPersistDeliveredEnv(t *testing.T) {
 
 	// Redelivering the same values is NOT a change — otherwise every deploy of
 	// an unchanged commit would restart the server for nothing.
-	changed, err = persistDeliveredEnv(DeployWebhookPayload{
+	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{
 		Env:           map[string]string{"SMTP_HOST": "mail", "DATABASE_URL": "postgres://a"},
 		EnvSecretKeys: []string{"DATABASE_URL"},
 	})
@@ -202,7 +238,7 @@ func TestPersistDeliveredEnv(t *testing.T) {
 	require.False(t, changed)
 
 	// A changed value is a change.
-	changed, err = persistDeliveredEnv(DeployWebhookPayload{
+	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{
 		Env: map[string]string{"DATABASE_URL": "postgres://b", "SMTP_HOST": "mail"},
 	})
 	require.NoError(t, err)
@@ -211,7 +247,7 @@ func TestPersistDeliveredEnv(t *testing.T) {
 	// An ABSENT env field means "this deploy doesn't manage configuration" and
 	// must leave the store alone: a hand-rolled curl deploy must not be able to
 	// wipe the server's config.
-	changed, err = persistDeliveredEnv(DeployWebhookPayload{Env: nil})
+	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{Env: nil})
 	require.NoError(t, err)
 	require.False(t, changed)
 	stored, err = envstore.Load()
@@ -220,7 +256,7 @@ func TestPersistDeliveredEnv(t *testing.T) {
 
 	// An explicitly EMPTY object does clear it — that is how removing every name
 	// from DEPLOY_ENV_KEYS takes effect.
-	changed, err = persistDeliveredEnv(DeployWebhookPayload{Env: map[string]string{}})
+	changed, _, err = persistDeliveredEnv(DeployWebhookPayload{Env: map[string]string{}})
 	require.NoError(t, err)
 	require.True(t, changed)
 	stored, err = envstore.Load()

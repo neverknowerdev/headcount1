@@ -20,10 +20,11 @@
 // the first place — that loop is closed by refusing the HEADCOUNT1_DEPLOY_
 // prefix outright, so deploy config stays on the box.
 //
-// Check() enforces that denylist and the controller refuses the whole payload if
-// anything trips it, loudly, so a mistake in DEPLOY_ENV_KEYS fails the CI job
-// rather than being silently dropped. Apply() re-checks on the way out, so a
-// hand-tampered store file cannot inject them either.
+// CI delivers every variable and secret the environment exposes, so meeting such
+// a name is ordinary rather than a misconfiguration: Partition() drops them and
+// the controller reports the names back to CI, where the job log shows what did
+// not make it. Apply() re-checks on the way out, so a hand-tampered store file
+// cannot inject them either.
 //
 // The file is 0600 and lives next to settings.yaml, inside the data root that
 // the agent sandbox hides from the untrusted shell. Values are stored in the
@@ -135,25 +136,40 @@ func Validate(key string) error {
 	return nil
 }
 
-// Check returns one "KEY: reason" line per problem in values, sorted, or nil if
-// every key may be delivered. The caller reports these back to CI verbatim, so
-// a misconfigured DEPLOY_ENV_KEYS is visible in the failing job.
-func Check(values map[string]string) []string {
-	var problems []string
-	if len(values) > MaxKeys {
-		problems = append(problems, fmt.Sprintf("too many variables: %d (max %d)", len(values), MaxKeys))
-	}
+// Partition splits a delivered payload into what will be applied and what will
+// not, with a reason per rejected key.
+//
+// Skipping rather than refusing the whole payload is deliberate. CI delivers
+// EVERY variable and secret the GitHub Environment exposes, so a repository
+// secret that happens to be named GIT_TOKEN, or an unrelated PATH variable, is a
+// normal thing to encounter — not a misconfiguration to fail the deploy over.
+// The caller reports the skipped names back to CI so they are visible in the job
+// log rather than silently disappearing.
+func Partition(values map[string]string) (accepted map[string]string, skipped map[string]string) {
+	accepted = make(map[string]string, len(values))
+	skipped = map[string]string{}
 	for key, val := range values {
 		if err := Validate(key); err != nil {
-			problems = append(problems, key+": "+err.Error())
+			skipped[key] = err.Error()
 			continue
 		}
 		if len(val) > MaxValueBytes {
-			problems = append(problems, fmt.Sprintf("%s: value is %d bytes (max %d)", key, len(val), MaxValueBytes))
+			skipped[key] = fmt.Sprintf("value is %d bytes (max %d)", len(val), MaxValueBytes)
+			continue
 		}
+		accepted[key] = val
 	}
-	sort.Strings(problems)
-	return problems
+	return accepted, skipped
+}
+
+// SkippedSummary renders Partition's skipped map as sorted "KEY: reason" lines.
+func SkippedSummary(skipped map[string]string) []string {
+	out := make([]string, 0, len(skipped))
+	for key, reason := range skipped {
+		out = append(out, key+": "+reason)
+	}
+	sort.Strings(out)
+	return out
 }
 
 // Digest identifies the delivered set, so a deploy can tell whether the

@@ -3,6 +3,7 @@ package endpoints
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"fmt"
 	"log"
 	"net/http"
 	"strings"
@@ -39,11 +40,12 @@ type DeployWebhookPayload struct {
 	// server also enforces its own env, so a mismatched target is ignored — this
 	// is a belt-and-suspenders guard against a staging event reaching prod.
 	Target string `json:"target"`
-	// Env is the configuration delivered from the GitHub Environment this deploy
-	// ran in (see .github/actions/collect-deploy-env): the server stores it and
-	// applies it to its own process environment on the way back up, so config
-	// and secrets are managed in GitHub rather than on each box. Only keys
-	// envstore allows are accepted — see its trust model.
+	// Env is every variable and secret the GitHub Environment this deploy ran in
+	// exposes (see .github/actions/collect-deploy-env): the server stores it and
+	// applies it to its own process environment on the way back up, so config and
+	// secrets are managed in GitHub rather than on each box. Names envstore
+	// refuses are skipped and reported in the response, not fatal — see its trust
+	// model.
 	Env map[string]string `json:"env"`
 	// EnvSecretKeys names the entries of Env that came from GitHub *secrets*
 	// rather than plain variables, so the agent sandbox can scrub exactly those
@@ -141,14 +143,11 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "sha256 is required")
 		return
 	}
-	// Refuse a bad env key loudly, before deciding whether to act: a mistake in
-	// the environment's DEPLOY_ENV_KEYS should fail the CI job with the reason,
-	// not be silently dropped on the floor. Rejecting the whole payload (rather
-	// than the offending keys) keeps "the deploy succeeded" from meaning "most of
-	// your configuration arrived".
-	if problems := envstore.Check(payload.Env); len(problems) > 0 {
+	// An implausible number of variables means something is wrong upstream, and
+	// silently truncating configuration would be worse than not deploying.
+	if len(payload.Env) > envstore.MaxKeys {
 		api.respondError(w, http.StatusBadRequest,
-			"rejected delivered env: "+strings.Join(problems, "; "))
+			fmt.Sprintf("too many env vars: %d (max %d)", len(payload.Env), envstore.MaxKeys))
 		return
 	}
 
@@ -162,21 +161,35 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if api.updater == nil {
-		api.respondError(w, http.StatusServiceUnavailable, "updater not available")
-		return
-	}
-
 	// Store the delivered configuration before the deploy starts, so the binary
 	// we're about to exec into reads the new values on its way up. Only for
 	// events this server acts on — an event aimed at another environment must
 	// never reconfigure this one.
-	envChanged, err := persistDeliveredEnv(payload)
+	//
+	// Ahead of the updater check on purpose: configuration is worth persisting
+	// even on a server that can't restart itself, since the next start applies it.
+	envChanged, skipped, err := persistDeliveredEnv(payload)
 	if err != nil {
 		// The configuration is the deploy's payload as much as the binary is;
 		// shipping the new build against stale config would be worse than not
 		// deploying, so this fails the CI job instead.
 		api.respondError(w, http.StatusInternalServerError, "could not store delivered env: "+err.Error())
+		return
+	}
+	// Echo the names that could not be applied. CI delivers everything the
+	// environment holds, so some are expected — but they must show up in the job
+	// log rather than vanishing.
+	respond := func(code int, body map[string]interface{}) {
+		if len(skipped) > 0 {
+			body["env_skipped"] = envstore.SkippedSummary(skipped)
+		}
+		api.respondJSON(w, code, body)
+	}
+
+	if api.updater == nil {
+		// Through respond, not respondError: the configuration was still stored,
+		// so CI should hear which parts of it didn't make it.
+		respond(http.StatusServiceUnavailable, map[string]interface{}{"error": "updater not available"})
 		return
 	}
 
@@ -195,12 +208,14 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 					log.Printf("Deploy: restart for env change failed: %v", err)
 				}
 			}()
-			api.respondJSON(w, http.StatusAccepted, map[string]string{
+			respond(http.StatusAccepted, map[string]interface{}{
 				"status": "restarting", "reason": "delivered configuration changed",
 			})
 			return
 		}
-		api.respondJSON(w, http.StatusOK, map[string]string{"status": "ignored", "reason": "already running this commit"})
+		respond(http.StatusOK, map[string]interface{}{
+			"status": "ignored", "reason": "already running this commit",
+		})
 		return
 	}
 
@@ -215,24 +230,30 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		}
 	}()
 
-	api.respondJSON(w, http.StatusAccepted, map[string]string{
+	respond(http.StatusAccepted, map[string]interface{}{
 		"status": "deploying",
 		"target": target.DisplayString(),
 	})
 }
 
 // persistDeliveredEnv writes the payload's configuration to the env store and
-// reports whether it differs from what was already there.
+// reports whether it differs from what was already there, plus any names that
+// could not be applied (with the reason).
 //
 // An ABSENT env field means "this deploy does not manage configuration" and
 // leaves the store untouched, so a hand-rolled deploy (curl, an older CI) cannot
 // wipe the server's config. An explicitly empty object means "deliver nothing",
-// which clears it — that is how removing every key from DEPLOY_ENV_KEYS takes
-// effect.
-func persistDeliveredEnv(p DeployWebhookPayload) (changed bool, err error) {
+// which clears it — that is how emptying the GitHub Environment takes effect.
+func persistDeliveredEnv(p DeployWebhookPayload) (changed bool, skipped map[string]string, err error) {
 	if p.Env == nil {
-		return false, nil
+		return false, nil, nil
 	}
+	accepted, skipped := envstore.Partition(p.Env)
+	if len(skipped) > 0 {
+		log.Printf("Deploy: skipped %d delivered env vars: %s",
+			len(skipped), strings.Join(envstore.SkippedSummary(skipped), "; "))
+	}
+
 	current, err := envstore.Load()
 	if err != nil {
 		// A store we can't read is a store we can't compare against; overwrite it
@@ -240,16 +261,25 @@ func persistDeliveredEnv(p DeployWebhookPayload) (changed bool, err error) {
 		log.Printf("Deploy: unreadable env store, replacing it: %v", err)
 		current = envstore.Store{}
 	}
-	incoming := envstore.Store{Values: p.Env, SecretKeys: p.EnvSecretKeys}
+	// Only names that survived the filter can be marked secret — otherwise the
+	// store would claim to be hiding something it never stored.
+	secretKeys := make([]string, 0, len(p.EnvSecretKeys))
+	for _, k := range p.EnvSecretKeys {
+		if _, ok := accepted[k]; ok {
+			secretKeys = append(secretKeys, k)
+		}
+	}
+
+	incoming := envstore.Store{Values: accepted, SecretKeys: secretKeys}
 	if incoming.Digest() == current.Digest() {
-		return false, nil
+		return false, skipped, nil
 	}
 	if err := envstore.Save(incoming); err != nil {
-		return false, err
+		return false, skipped, err
 	}
 	log.Printf("Deploy: stored %d delivered env vars: %s",
 		len(incoming.Values), strings.Join(incoming.Keys(), ", "))
-	return true, nil
+	return true, skipped, nil
 }
 
 // deployDecision decides whether a server in environment `env` with the given

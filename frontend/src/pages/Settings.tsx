@@ -321,9 +321,10 @@ export const Settings: React.FC = () => {
                 <p className="text-xs text-gray-500 mb-4">
                     New builds are deployed to this server automatically by CI. Production servers apply
                     updates from the source selected below; staging servers deploy any branch/PR pushed to them.
-                    Each deploy also delivers this environment's configuration and secrets from GitHub
-                    (Settings → Environments → <code>DEPLOY_ENV_KEYS</code>), so the server's env vars are
-                    managed there rather than on the box.
+                    Each deploy also delivers every variable and secret from its GitHub Environment
+                    (Settings → Environments), so this server's env vars are managed there rather than
+                    on the box. Names that could let a value execute code (<code>PATH</code>,{' '}
+                    <code>LD_*</code>, …) are dropped and reported back to the deploy job.
                 </p>
 
                 <div className="space-y-4">

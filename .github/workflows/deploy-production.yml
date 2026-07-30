@@ -26,11 +26,11 @@ name: Deploy Production
 # Config lives ON THE ENVIRONMENT (Settings -> Environments -> production):
 #   vars.DEPLOY_URL        - https://app.headcount1.ai
 #   secrets.DEPLOY_API_KEY - must equal that server's HEADCOUNT1_DEPLOY_API_KEY
-#   vars.DEPLOY_ENV_KEYS   - which of this environment's OTHER vars/secrets to
-#                            deliver to the server as its env vars, one name per
-#                            line (see .github/actions/collect-deploy-env). This
-#                            is how the app's own configuration and secrets are
-#                            managed in GitHub instead of on the box.
+#
+# Every OTHER variable and secret on the environment is delivered to the server
+# as an env var, which is how the app's own configuration is managed in GitHub
+# instead of on the box. Nothing to list. Opt a name out with
+# vars.DEPLOY_ENV_EXCLUDE (see .github/actions/collect-deploy-env).
 
 on:
   push:
@@ -95,14 +95,14 @@ jobs:
         with:
           node-version: 20
 
-      # Configuration the server should run with, taken from this environment's
-      # variables and secrets. Collected before the build so a misconfigured
-      # DEPLOY_ENV_KEYS fails the job in seconds rather than after a full build.
+      # Every variable and secret this environment exposes, delivered to the
+      # server as its env vars. Nothing to enumerate: add a secret in GitHub and
+      # the next deploy carries it.
       - name: Collect delivered env
         id: env
         uses: ./.github/actions/collect-deploy-env
         with:
-          keys: ${{ vars.DEPLOY_ENV_KEYS }}
+          exclude: ${{ vars.DEPLOY_ENV_EXCLUDE }}
           secrets_json: ${{ toJSON(secrets) }}
           vars_json: ${{ toJSON(vars) }}
 
@@ -202,6 +202,14 @@ jobs:
             --data-binary "@$payload_file")
           rm -f "$payload_file" "$ENV_FILE"
           echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
+          # Names the server would not apply (PATH, LD_*, its own deploy config,
+          # ...). Expected when the environment holds secrets meant for other
+          # workflows, but they must be visible rather than vanishing.
+          skipped=$(jq -r '.env_skipped // [] | .[]' /tmp/resp 2>/dev/null || true)
+          if [ -n "$skipped" ]; then
+            echo "::warning::Server did not apply some delivered env vars:"
+            echo "$skipped" | while read -r line; do echo "  - $line"; done
+          fi
           # 202 = deploying (or restarting to pick up changed config), 200 =
           # accepted-but-ignored (this server tracks the other source,
           # auto_deploy paused, or already running this commit with this config).

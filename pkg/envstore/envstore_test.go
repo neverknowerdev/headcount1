@@ -1,7 +1,6 @@
 package envstore
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -67,30 +66,38 @@ func TestValidateRejectsMalformedKeys(t *testing.T) {
 	}
 }
 
-func TestCheckReportsEveryProblemWithReason(t *testing.T) {
-	problems := Check(map[string]string{
+// TestPartitionKeepsGoodKeysAndExplainsTheRest pins the "deliver everything"
+// contract: CI ships every variable and secret the environment holds, so hitting
+// an unusable name is routine. The usable ones must still land, and the rest must
+// come back with a reason instead of failing the deploy.
+func TestPartitionKeepsGoodKeysAndExplainsTheRest(t *testing.T) {
+	accepted, skipped := Partition(map[string]string{
 		"DATABASE_URL": "postgres://ok",
+		"SMTP_HOST":    "mail",
 		"PATH":         "/tmp/evil",
+		"GIT_TOKEN":    "a repo secret for some other workflow",
 		"lower":        "x",
 		"BIG":          strings.Repeat("x", MaxValueBytes+1),
 	})
-	require.Len(t, problems, 3, "one line per bad key, none for the good one: %v", problems)
-	joined := strings.Join(problems, "\n")
-	require.Contains(t, joined, "PATH: refused:")
-	require.Contains(t, joined, "lower: not a valid environment variable name")
-	require.Contains(t, joined, "BIG: value is")
 
-	require.Empty(t, Check(map[string]string{"DATABASE_URL": "x", "SMTP_HOST": "y"}))
-	require.Empty(t, Check(nil))
-}
+	require.Equal(t, map[string]string{"DATABASE_URL": "postgres://ok", "SMTP_HOST": "mail"}, accepted,
+		"one unusable name must not cost the deploy its real configuration")
 
-func TestCheckRejectsTooManyKeys(t *testing.T) {
-	values := make(map[string]string, MaxKeys+1)
-	for i := 0; i <= MaxKeys; i++ {
-		values[fmt.Sprintf("KEY_%03d", i)] = "v"
-	}
-	// Every key is individually fine, so the count is the only complaint.
-	require.Equal(t, []string{fmt.Sprintf("too many variables: %d (max %d)", MaxKeys+1, MaxKeys)}, Check(values))
+	summary := strings.Join(SkippedSummary(skipped), "\n")
+	require.Len(t, skipped, 4)
+	require.Contains(t, summary, "PATH: refused:")
+	require.Contains(t, summary, "GIT_TOKEN: refused:")
+	require.Contains(t, summary, "lower: not a valid environment variable name")
+	require.Contains(t, summary, "BIG: value is")
+
+	// Nothing to complain about, and nothing delivered at all.
+	accepted, skipped = Partition(map[string]string{"DATABASE_URL": "x"})
+	require.Len(t, accepted, 1)
+	require.Empty(t, skipped)
+
+	accepted, skipped = Partition(nil)
+	require.Empty(t, accepted)
+	require.Empty(t, skipped)
 }
 
 func TestSaveLoadRoundTripAndPermissions(t *testing.T) {

@@ -364,36 +364,40 @@ test.describe.serial('Deploy webhook', () => {
             return m ? m[m.length - 1] : '';
         }
 
-        // An unsafe key is refused WHOLE, before anything is stored: delivering
-        // env must not become a way to make the server execute code.
-        for (const key of ['LD_PRELOAD', 'PATH', 'NODE_OPTIONS', 'HEADCOUNT1_DEPLOY_ALLOWED_HOSTS']) {
-            const bad = await deployPost(deployKey, {
-                ...branchEvent(), env: { DELIVERED_ONE: 'ok', [key]: '/tmp/evil' },
-            });
-            expect(bad.status, `${key} must be refused`).toBe(400);
-            expect(await bad.text()).toContain(key);
-        }
-        expect(fs.existsSync(storePath), 'a rejected payload must deliver nothing').toBeFalsy();
-        expect(await version()).toBe(runningCommit);
-
-        // A real deploy carrying configuration. DELIVERED_TWO is declared a
-        // secret, so the agent sandbox will scrub it by name.
+        // CI delivers everything the GitHub Environment holds, so names the
+        // server cannot use turn up routinely — a repo secret named GIT_TOKEN,
+        // an unrelated PATH. Those are dropped and reported; the rest still land.
+        // What must never happen is one of them reaching the process env, since
+        // that would make delivering config a way to execute code.
+        const unsafe = ['LD_PRELOAD', 'PATH', 'NODE_OPTIONS', 'HEADCOUNT1_DEPLOY_ALLOWED_HOSTS'];
         const accepted = await deployPost(deployKey, {
             ...branchEvent(),
-            env: { DELIVERED_ONE: 'one-value', DELIVERED_TWO: 'two-secret' },
-            env_secret_keys: ['DELIVERED_TWO'],
+            env: {
+                DELIVERED_ONE: 'one-value',
+                DELIVERED_TWO: 'two-secret',
+                ...Object.fromEntries(unsafe.map(k => [k, '/tmp/evil'])),
+            },
+            // DELIVERED_TWO is a GitHub secret, so the agent sandbox scrubs it by
+            // name; LD_PRELOAD claims to be one too and must still be dropped.
+            env_secret_keys: ['DELIVERED_TWO', 'LD_PRELOAD'],
         });
         expect(accepted.status).toBe(202);
+        const acceptedBody = await accepted.json();
+        for (const key of unsafe) {
+            expect(JSON.stringify(acceptedBody.env_skipped), `${key} should be reported to CI`).toContain(key);
+        }
 
         await expect
             .poll(async () => { try { return await version(); } catch { return ''; } },
                 { timeout: 90_000, intervals: [1000], message: 'server should restart into the deployed binary' })
             .toBe(targetCommit);
 
-        // Stored, and readable only by the server user — it holds secrets in the
-        // clear, like a systemd EnvironmentFile.
+        // Only the usable names were stored — the refused ones never reach disk,
+        // and the one that falsely claimed to be a secret isn't recorded as one.
         expect(readStore().values).toEqual({ DELIVERED_ONE: 'one-value', DELIVERED_TWO: 'two-secret' });
         expect(readStore().secret_keys).toEqual(['DELIVERED_TWO']);
+        // Readable only by the server user — it holds secrets in the clear, like
+        // a systemd EnvironmentFile.
         expect(fs.statSync(storePath).mode & 0o777).toBe(0o600);
 
         // And applied by the build that came up — the successor logs the names.
