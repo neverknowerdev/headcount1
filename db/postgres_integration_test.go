@@ -52,6 +52,7 @@ func allModels() []any {
 		&db.Task{},
 		&db.Environment{},
 		&db.EnvironmentSecret{},
+		&db.EnvironmentConnector{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},

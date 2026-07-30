@@ -6,8 +6,6 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
-
-	"agent-orchestrator/pkg/secrets/redact"
 )
 
 // PrefixUser marks a value sealed with a specific user's DEK. The owning
@@ -70,9 +68,5 @@ func (s *SecretManager) openUser(stored string) (string, error) {
 	if err != nil {
 		return "", fmt.Errorf("secrets: cannot decrypt secret of user %d: %w", userID, err)
 	}
-	// Every successfully decrypted secret is registered for log/history
-	// redaction, so no call site can forget to. The registry holds only
-	// values that were already decrypted into this process's memory.
-	redact.Register("secret", string(plain))
 	return string(plain), nil
 }

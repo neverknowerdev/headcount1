@@ -28,8 +28,8 @@ func setupEnvironmentsTest(t *testing.T) (*gorm.DB, chi.Router, db.Company, int3
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.Team{}, &db.TeamMember{}, &db.Company{},
-		&db.Environment{}, &db.EnvironmentSecret{}, &db.Task{},
+		&db.User{}, &db.Team{}, &db.TeamMember{}, &db.Company{}, &db.Project{},
+		&db.Environment{}, &db.EnvironmentSecret{}, &db.EnvironmentConnector{}, &db.Task{},
 		&db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}, &db.UserGitCredential{},
 	))
 	q := db.New(database)
@@ -71,20 +71,16 @@ type envResp struct {
 func TestEnvironmentsCRUDAndSecrets(t *testing.T) {
 	database, r, company, uid := setupEnvironmentsTest(t)
 
-	// Listing seeds the three builtin environments.
+	// Listing seeds the single platform environment.
 	req := httptest.NewRequest(http.MethodGet, fmt.Sprintf("/companies/%d/environments", company.ID), nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var envs []envResp
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &envs))
-	require.Len(t, envs, 3)
-	var defaultEnv envResp
-	for _, e := range envs {
-		if e.IsDefault {
-			defaultEnv = e
-		}
-	}
+	require.Len(t, envs, 1)
+	defaultEnv := envs[0]
+	require.True(t, defaultEnv.IsDefault)
 	require.Equal(t, "headcount1 cloud", defaultEnv.Name)
 
 	// Create a user-defined environment.

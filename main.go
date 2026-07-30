@@ -141,6 +141,7 @@ func main() {
 		&db.Task{},
 		&db.Environment{},
 		&db.EnvironmentSecret{},
+		&db.EnvironmentConnector{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
@@ -156,6 +157,16 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
+	}
+
+	// Environments gained a project scope: the unique index moved from
+	// (company_id, name) to (company_id, project_id, name). AutoMigrate adds
+	// the new index but never drops the old one, which would forbid two
+	// projects in one company from both having e.g. "production".
+	if database.Migrator().HasIndex(&db.Environment{}, "idx_env_company_name") {
+		if err := database.Migrator().DropIndex(&db.Environment{}, "idx_env_company_name"); err != nil {
+			log.Printf("Warning: could not drop legacy environments index: %v", err)
+		}
 	}
 
 	recoverStaleRuns(database)

@@ -45,8 +45,9 @@ type systemSecret struct {
 
 type environmentResponse struct {
 	db.Environment
-	Secrets       []db.EnvironmentSecret `json:"secrets"`
-	SystemSecrets []systemSecret         `json:"system_secrets,omitempty"`
+	Secrets       []db.EnvironmentSecret    `json:"secrets"`
+	SystemSecrets []systemSecret            `json:"system_secrets,omitempty"`
+	Connectors    []db.EnvironmentConnector `json:"connectors,omitempty"`
 }
 
 // ListEnvironments returns a company's environments with their secret NAMES
@@ -114,6 +115,65 @@ func (api *API) systemSecretsForUser(r *http.Request) []systemSecret {
 
 type environmentPayload struct {
 	Name string `json:"name"`
+}
+
+// ListProjectEnvironments returns a project's deploy environments with their
+// entries (names only) and connectors.
+func (api *API) ListProjectEnvironments(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	if _, err := api.authorizeProject(r, int32(projectID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
+	envs, err := api.q.ListProjectEnvironments(r.Context(), int32(projectID))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	out := make([]environmentResponse, 0, len(envs))
+	for _, env := range envs {
+		rows, err := api.q.ListEnvironmentSecrets(r.Context(), env.ID)
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		connectors, err := api.q.ListEnvironmentConnectors(r.Context(), env.ID)
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		out = append(out, environmentResponse{Environment: env, Secrets: rows, Connectors: connectors})
+	}
+	api.respondJSON(w, http.StatusOK, out)
+}
+
+// CreateProjectEnvironment adds a deploy environment to a project.
+func (api *API) CreateProjectEnvironment(w http.ResponseWriter, r *http.Request) {
+	projectID, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid project id")
+		return
+	}
+	project, err := api.authorizeProject(r, int32(projectID))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
+	var p environmentPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || strings.TrimSpace(p.Name) == "" {
+		api.respondError(w, http.StatusBadRequest, "name is required")
+		return
+	}
+	env, err := api.q.CreateProjectEnvironment(r.Context(), project.CompanyID, project.ID, p.Name)
+	if err != nil {
+		api.respondError(w, http.StatusConflict, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusCreated, environmentResponse{Environment: env, Secrets: []db.EnvironmentSecret{}})
 }
 
 // CreateEnvironment adds a user-defined environment to a company.
@@ -186,6 +246,9 @@ func (api *API) DeleteEnvironment(w http.ResponseWriter, r *http.Request) {
 type environmentSecretPayload struct {
 	Name  string `json:"name"`
 	Value string `json:"value"`
+	// Kind is "secret" (default) or "variable". Both are sealed at rest;
+	// kind controls redaction and how connectors push to deploy targets.
+	Kind string `json:"kind"`
 }
 
 // UpsertEnvironmentSecret creates or replaces one named secret. The value is
@@ -214,7 +277,7 @@ func (api *API) UpsertEnvironmentSecret(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusConflict, "vault locked — unlock with your passkey before saving a secret")
 		return
 	}
-	row, err := api.q.UpsertEnvironmentSecret(r.Context(), int32(envID), uid, p.Name, p.Value)
+	row, err := api.q.UpsertEnvironmentSecret(r.Context(), int32(envID), uid, p.Name, p.Value, p.Kind)
 	if err != nil {
 		if errors.Is(err, secrets.ErrLocked) {
 			api.respondError(w, http.StatusConflict, "vault locked — unlock with your passkey before saving a secret")
@@ -223,6 +286,9 @@ func (api *API) UpsertEnvironmentSecret(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+	// Keep connected deploy targets current: the next deployment there must
+	// see this value.
+	api.pushEnvironmentAsync(int32(envID))
 	api.respondJSON(w, http.StatusOK, row)
 }
 
@@ -250,5 +316,7 @@ func (api *API) DeleteEnvironmentSecret(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	// Remove it from connected deploy targets too.
+	api.deleteFromConnectorsAsync(int32(envID), name)
 	w.WriteHeader(http.StatusNoContent)
 }

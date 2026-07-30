@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, GitBranch, Save, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ProjectEnvironments } from '../components/ProjectEnvironments';
 
 export const ProjectSettings: React.FC = () => {
   const { shortName, id } = useParams<{ shortName: string; id: string }>();
@@ -263,6 +264,9 @@ export const ProjectSettings: React.FC = () => {
           </button>
         </div>
       </form>
+
+      {/* Deploy environments: secrets/variables + Vercel/GitHub connectors */}
+      {project && <ProjectEnvironments projectId={project.id} />}
     </div>
   );
 };

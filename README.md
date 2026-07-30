@@ -58,7 +58,16 @@ Because DEKs live only in memory, a plain restart would force every active user 
 
 ### Environments — secrets agents can use but never see
 
-Each company has **environments** (built-in: `headcount1 cloud` — the default, `preview`, `production`, plus any user-defined ones), each holding named secrets (`API_KEY=…`). Tasks always run in **`headcount1 cloud`**, and only *its* secrets are injected into the agent's shell as **env vars**: the agent writes `curl -H "Authorization: Bearer $API_KEY"` and it just works. But the agent can never *see* a value — expansion happens inside the child process only, and every echo (`echo $API_KEY`, `env`, error text) is redacted before it reaches the LLM or any log. Values are sealed with the owner's passkey-unlocked key like all other secrets. The other environments hold secrets for **external deploy targets** (your own servers, Vercel, …) — exposing them to those targets is a future feature; they are never injected into agent shells. The `headcount1 cloud` environment additionally lists the platform-managed credentials (provider API keys, MCP tokens, git SSH key) as a separate read-only group — those are used server-side by reference and are never injected into the agent's shell either.
+Every company has the built-in **`headcount1 cloud`** platform environment. Tasks always run in it, and its entries are injected into the agent's shell as **env vars**: the agent writes `curl -H "Authorization: Bearer $API_KEY"` and it just works. But the agent can never *see* a secret value — expansion happens inside the child process only, and every echo (`echo $API_KEY`, `env`, error text) is redacted before it reaches the LLM or any log. Values are sealed with the owner's passkey-unlocked key like all other secrets. This environment also lists the platform-managed credentials (provider API keys, MCP tokens, git SSH key) as a separate read-only group — those are used server-side by reference and are never injected into the agent's shell either.
+
+### Deploy environments — Vercel & GitHub env-var sync
+
+Each **project** can have deploy environments (e.g. `production`, `preview`; managed in the project's settings; none by default). An environment holds **variables** and **secrets** — both encrypted at rest under the owner's passkey key; the API is write-only (names and `has_value` only come back out). Connect an environment to a deploy target — a **Vercel** project environment or a **GitHub** repository environment — by pasting a personal API token (sealed like every secret) and picking the project/repo + environment from a live listing. From then on every entry change (and "Sync now") is **pushed** to the target, so the next deployment there picks up current values:
+
+- **Vercel**: variables become `plain` env vars, secrets become `sensitive` (write-only) ones — `encrypted` on the development target, which rejects sensitive vars.
+- **GitHub**: variables become environment *variables*, secrets become environment *secrets*, sealed client-side with libsodium `crypto_box_seal` against the environment public key — GitHub never sees the plaintext in a readable form.
+
+Sync is deliberately **push-only**: GitHub secrets and Vercel sensitive vars cannot be read back from the target, so this system stays the source of truth. Per-connector sync status (last push, error) is shown in the UI. Deploy-environment entries are **never** injected into agent shells — only `headcount1 cloud` feeds task runs.
 
 ### Secrets never enter LLM message history
 

@@ -97,6 +97,23 @@ func IsUnlocked(userID int32) bool { return Default().IsUnlocked(userID) }
 // as-is. Call it at the point of use and use the result immediately — never
 // stash it.
 func (s *SecretManager) Decrypt(stored string) (string, error) {
+	plain, err := s.DecryptRaw(stored)
+	if err != nil {
+		return "", err
+	}
+	// Every successfully decrypted secret is registered for log/history
+	// redaction, so no call site can forget to. The registry holds only
+	// values that were already decrypted into this process's memory.
+	redact.Register("secret", plain)
+	return plain, nil
+}
+
+// DecryptRaw is Decrypt WITHOUT the redaction registration. Use it only for
+// values that are deliberately non-secret despite being sealed at rest —
+// e.g. plain environment VARIABLES like NODE_ENV=production, whose values
+// would otherwise poison the redaction registry and scrub common words out
+// of every log. Anything credential-like must go through Decrypt.
+func (s *SecretManager) DecryptRaw(stored string) (string, error) {
 	if IsSealed(stored) {
 		return s.openUser(stored)
 	}
@@ -108,9 +125,6 @@ func (s *SecretManager) Decrypt(stored string) (string, error) {
 	if strings.HasPrefix(stored, secretNamespace) {
 		return "", fmt.Errorf("secrets: unrecognized sealed format, refusing to use as plaintext")
 	}
-	// Legacy plaintext values are still secrets — register them for
-	// log/history redaction just like freshly decrypted ones.
-	redact.Register("secret", stored)
 	return stored, nil
 }
 

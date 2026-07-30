@@ -78,15 +78,15 @@ test.describe.serial('Environments and secrets', () => {
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
     });
 
-    test('builtin environments are seeded; secrets are write-only', async ({ request }) => {
+    test('the platform environment is seeded; secrets are write-only', async ({ request }) => {
         const envs = await (await request.get(`/api/companies/${companyId}/environments`)).json();
-        expect((envs as any[]).map((e) => e.name).sort()).toEqual(['headcount1 cloud', 'preview', 'production']);
-        const def = (envs as any[]).find((e) => e.is_default);
-        expect(def.name).toBe('headcount1 cloud');
+        expect((envs as any[]).map((e) => e.name)).toEqual(['headcount1 cloud']);
+        const def = (envs as any[])[0];
+        expect(def.is_default).toBeTruthy();
         expect(def.builtin).toBeTruthy();
         defaultEnvId = def.id;
 
-        // Add a secret to the default environment.
+        // Add a secret to the platform environment.
         const putRes = await request.put(`/api/environments/${defaultEnvId}/secrets`, {
             data: { name: 'DEFAULT_TOKEN', value: DEFAULT_SECRET_VALUE },
         });
@@ -95,19 +95,22 @@ test.describe.serial('Environments and secrets', () => {
         expect(putBody).not.toContain(DEFAULT_SECRET_VALUE);
         expect(putBody).toContain('"has_value":true');
 
-        // Create a user environment with its own secret.
-        const staging = await postJSON(request, `/api/companies/${companyId}/environments`, { name: 'staging' });
+        // A project deploy environment with its own secret — never injected
+        // into agent shells.
+        const project = await postJSON(request, '/api/projects', { company_id: companyId, name: 'Deployables' });
+        const staging = await postJSON(request, `/api/projects/${project.id}/environments`, { name: 'staging' });
         stagingEnvId = staging.id;
         await request.put(`/api/environments/${stagingEnvId}/secrets`, {
             data: { name: 'STAGING_TOKEN', value: STAGING_SECRET_VALUE },
         });
 
-        // Listing returns names only — never a value, in any environment.
+        // Listings return names only — never a value, in any environment.
         const listing = await (await request.get(`/api/companies/${companyId}/environments`)).text();
         expect(listing).toContain('DEFAULT_TOKEN');
-        expect(listing).toContain('STAGING_TOKEN');
         expect(listing).not.toContain(DEFAULT_SECRET_VALUE);
-        expect(listing).not.toContain(STAGING_SECRET_VALUE);
+        const projListing = await (await request.get(`/api/projects/${project.id}/environments`)).text();
+        expect(projListing).toContain('STAGING_TOKEN');
+        expect(projListing).not.toContain(STAGING_SECRET_VALUE);
 
         // Builtins cannot be renamed or deleted.
         expect((await request.put(`/api/environments/${defaultEnvId}`, { data: { name: 'x' } })).status()).toBe(400);
@@ -237,11 +240,11 @@ test.describe.serial('Environments and secrets', () => {
         // while the server finishes its one-time dependency install.
         await expect(page.getByRole('heading', { name: 'Environments' })).toBeVisible({ timeout: 90_000 });
 
-        // The three builtins plus staging are shown; default is labeled.
+        // Only the platform environment is shown at company level; deploy
+        // environments live in project settings now.
         await expect(page.getByTestId('env-headcount1 cloud')).toBeVisible();
-        await expect(page.getByTestId('env-preview')).toBeVisible();
-        await expect(page.getByTestId('env-production')).toBeVisible();
-        await expect(page.getByTestId('env-staging')).toBeVisible();
+        await expect(page.getByTestId('env-preview')).toHaveCount(0);
+        await expect(page.getByTestId('env-production')).toHaveCount(0);
         await expect(page.getByTestId('env-headcount1 cloud').getByText('default', { exact: true })).toBeVisible();
 
         // System-managed credentials are grouped separately in the default env
@@ -254,17 +257,11 @@ test.describe.serial('Environments and secrets', () => {
         await expect(defaultCard.getByTestId('secret-DEFAULT_TOKEN')).toBeVisible();
         await expect(defaultCard.getByTestId('secret-DEFAULT_TOKEN')).toContainText('••••');
 
-        // Add a secret through the UI.
-        const stagingCard = page.getByTestId('env-staging');
-        await stagingCard.getByPlaceholder('API_KEY').fill('UI_ADDED_TOKEN');
-        await stagingCard.getByPlaceholder('secret value').fill('ui-added-value-123456');
-        await stagingCard.getByRole('button', { name: 'Save' }).click();
-        await expect(stagingCard.getByTestId('secret-UI_ADDED_TOKEN')).toBeVisible();
-
-        // Create a new environment through the UI.
-        await page.getByPlaceholder('New environment name (e.g. staging)').fill('qa');
-        await page.getByRole('button', { name: 'Add environment' }).click();
-        await expect(page.getByTestId('env-qa')).toBeVisible();
+        // Add a secret through the UI (into the platform env).
+        await defaultCard.getByPlaceholder('API_KEY').fill('UI_ADDED_TOKEN');
+        await defaultCard.getByPlaceholder('secret value').fill('ui-added-value-123456');
+        await defaultCard.getByRole('button', { name: 'Save' }).click();
+        await expect(defaultCard.getByTestId('secret-UI_ADDED_TOKEN')).toBeVisible();
 
         // Builtin cards expose no rename/delete controls.
         await expect(defaultCard.getByTitle('Delete', { exact: true })).toHaveCount(0);

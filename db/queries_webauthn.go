@@ -125,6 +125,10 @@ func (q *Queries) CryptoShredUser(ctx context.Context, userID int32) error {
 		if err := tx.Where("user_id = ?", userID).Delete(&EnvironmentSecret{}).Error; err != nil {
 			return err
 		}
+		// Deploy-connector tokens too: sealed under the shredded DEK.
+		if err := tx.Where("user_id = ?", userID).Delete(&EnvironmentConnector{}).Error; err != nil {
+			return err
+		}
 		return nil
 	})
 }

@@ -495,7 +495,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	envSecrets := map[string]string{}
 	if env, rows, envErr := e.q.DefaultEnvironmentSecrets(ctx, task.CompanyID); envErr == nil {
 		for _, row := range rows {
-			plain, decErr := secrets.Default().Decrypt(row.ValueEncrypted)
+			// Secrets register with the redaction layer via Decrypt; plain
+			// variables use DecryptRaw — their values (e.g. "production")
+			// must not be scrubbed out of every log line.
+			var plain string
+			var decErr error
+			if row.Kind == db.EnvEntryVariable {
+				plain, decErr = secrets.Default().DecryptRaw(row.ValueEncrypted)
+			} else {
+				plain, decErr = secrets.Default().Decrypt(row.ValueEncrypted)
+			}
 			if decErr != nil {
 				e.logInfo(proxyLogger, fmt.Sprintf("Warning: environment secret %s unavailable: %v", row.Name, decErr))
 				continue

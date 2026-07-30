@@ -394,43 +394,89 @@ type Task struct {
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
-// Environment is a named set of secrets scoped to a company. Every company
-// gets the three defaults (headcount1 cloud, preview, production) seeded on
-// first use. Tasks always run in "headcount1 cloud": only ITS secrets are
-// injected into the agent's shell as env vars — the agent can use them
-// ($API_KEY) but never sees the values (redaction scrubs any echo). The
-// other environments describe external deploy targets (another server,
-// Vercel, …); exposing their secrets to those targets comes later.
+// Environment is a named set of env entries (secrets + variables). Two
+// scopes exist:
+//
+//   - Company-level (ProjectID nil): exactly one seeded builtin,
+//     "headcount1 cloud" — the platform runtime env. Tasks always run in it
+//     and only ITS entries are injected into the agent's shell as env vars —
+//     the agent can use them ($API_KEY) but never sees secret values
+//     (redaction scrubs any echo).
+//   - Project-level (ProjectID set): user-created deploy environments (e.g.
+//     production, preview). Their entries are never injected into agent
+//     shells; instead they can be pushed to external deploy targets (Vercel
+//     project envs, GitHub repo environments) via EnvironmentConnector, so a
+//     deployment picks up the current values.
 type Environment struct {
-	ID        int32   `json:"id" gorm:"primaryKey"`
-	CompanyID int32   `json:"company_id" gorm:"not null;index;uniqueIndex:idx_env_company_name"`
+	ID int32 `json:"id" gorm:"primaryKey"`
+	// The partial unique index idx_env_platform_name guards company-level
+	// rows: NULL project_id rows are mutually distinct under the composite
+	// idx_env_scope_name (SQL NULL semantics), so without it concurrent
+	// seeding could duplicate the platform environment.
+	CompanyID int32   `json:"company_id" gorm:"not null;index;uniqueIndex:idx_env_scope_name;uniqueIndex:idx_env_platform_name,where:project_id IS NULL"`
 	Company   Company `json:"-" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Name      string  `json:"name" gorm:"not null;uniqueIndex:idx_env_company_name"`
-	// IsDefault marks the environment new tasks fall back to when they have
-	// no explicit EnvironmentID ("headcount1 cloud" for seeded companies).
+	// ProjectID scopes a deploy environment to a project; nil marks the
+	// company-level platform environment.
+	ProjectID *int32   `json:"project_id" gorm:"index;uniqueIndex:idx_env_scope_name"`
+	Project   *Project `json:"-" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
+	Name      string   `json:"name" gorm:"not null;uniqueIndex:idx_env_scope_name;uniqueIndex:idx_env_platform_name,where:project_id IS NULL"`
+	// IsDefault marks the company-level environment whose entries agent
+	// runs receive ("headcount1 cloud").
 	IsDefault bool `json:"is_default" gorm:"not null;default:false"`
-	// Builtin marks the seeded environments (headcount1 cloud / preview /
-	// production), which cannot be renamed or deleted from the UI.
+	// Builtin marks seeded environments, which cannot be renamed or deleted.
 	Builtin   bool      `json:"builtin" gorm:"not null;default:false"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 }
 
-// EnvironmentSecret is one named secret (env var) inside an Environment. The
-// value is sealed under the owning user's DEK exactly like provider API keys
-// and MCP tokens: zero-knowledge at rest, unlocked by passkey, crypto-shredded
-// on account recovery. The API only ever returns the name — never the value.
+// EnvironmentSecret is one named entry inside an Environment — either a
+// secret or a plain variable (Kind). BOTH kinds are sealed at rest under the
+// owning user's DEK exactly like provider API keys: zero-knowledge, unlocked
+// by passkey, crypto-shredded on account recovery. The API only ever returns
+// the name — never the value. Kind matters at the boundaries: secrets are
+// registered for log redaction and pushed to deploy targets as write-only
+// secrets (GitHub env secrets / Vercel sensitive vars), variables are pushed
+// as readable env variables (GitHub env variables / Vercel plain vars).
 type EnvironmentSecret struct {
 	ID            int32       `json:"id" gorm:"primaryKey"`
 	EnvironmentID int32       `json:"environment_id" gorm:"not null;index;uniqueIndex:idx_envsecret_env_name"`
 	Environment   Environment `json:"-" gorm:"foreignKey:EnvironmentID;constraint:OnDelete:CASCADE;"`
-	// Name is the env var name the agent's shell sees (e.g. API_KEY).
+	// Name is the env var name the target (agent shell or deployment) sees.
 	Name           string    `json:"name" gorm:"not null;uniqueIndex:idx_envsecret_env_name"`
+	Kind           string    `json:"kind" gorm:"not null;default:'secret'"`             // "secret" | "variable"
 	ValueEncrypted string    `json:"-" gorm:"column:value;type:text;serializer:sealed"` // SEALED (ciphertext); decrypt at use via secrets.Default().Decrypt()
 	HasValue       bool      `json:"has_value" gorm:"-"`                                // computed: ValueEncrypted != ""
 	UserID         *int32    `json:"user_id" gorm:"index"`                              // owning user; their DEK seals ValueEncrypted
 	CreatedAt      time.Time `json:"created_at"`
 	UpdatedAt      time.Time `json:"updated_at"`
+}
+
+// EnvironmentConnector links a project deploy environment to one external
+// deploy target and keeps it in sync: every entry change is pushed so the
+// next deployment picks up current values. The API token is sealed under the
+// creating user's DEK; it is write-only through the API.
+type EnvironmentConnector struct {
+	ID            int32       `json:"id" gorm:"primaryKey"`
+	EnvironmentID int32       `json:"environment_id" gorm:"not null;index"`
+	Environment   Environment `json:"-" gorm:"foreignKey:EnvironmentID;constraint:OnDelete:CASCADE;"`
+	Provider      string      `json:"provider" gorm:"not null"` // "vercel" | "github"
+	// TargetProject identifies the remote container: a Vercel project id/name
+	// or a GitHub "owner/repo".
+	TargetProject string `json:"target_project" gorm:"not null"`
+	// TargetEnvironment identifies the environment within it: a Vercel target
+	// (production/preview/development) or custom-environment id (env_*), or a
+	// GitHub repo environment name.
+	TargetEnvironment string `json:"target_environment" gorm:"not null"`
+	// TeamID is the Vercel team scope (empty for personal scope / GitHub).
+	TeamID            string     `json:"team_id"`
+	ApiTokenEncrypted string     `json:"-" gorm:"column:api_token;type:text;serializer:sealed"` // SEALED credential; decrypt at point of use
+	HasToken          bool       `json:"has_token" gorm:"-"`                                    // computed: ApiTokenEncrypted != ""
+	UserID            *int32     `json:"user_id" gorm:"index"`                                  // owning user; their DEK seals ApiTokenEncrypted
+	LastSyncAt        *time.Time `json:"last_sync_at"`
+	LastSyncStatus    string     `json:"last_sync_status"` // "" | "ok" | "error"
+	LastSyncError     string     `json:"last_sync_error" gorm:"type:text"`
+	CreatedAt         time.Time  `json:"created_at"`
+	UpdatedAt         time.Time  `json:"updated_at"`
 }
 
 type Comment struct {

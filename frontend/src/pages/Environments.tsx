@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import axios from 'axios';
-import { Plus, Trash2, Pencil, Check, X, Lock, Server } from 'lucide-react';
+import { Trash2, Pencil, Check, X, Lock, Server } from 'lucide-react';
 import { useStore } from '../store';
 import { SecretField, SecretLabel } from '../components/SecretField';
 
@@ -38,7 +38,6 @@ export function Environments() {
     const { selectedCompanyId } = useStore();
     const [envs, setEnvs] = useState<Environment[]>([]);
     const [error, setError] = useState('');
-    const [newEnvName, setNewEnvName] = useState('');
     const [renamingId, setRenamingId] = useState<number | null>(null);
     const [renameValue, setRenameValue] = useState('');
     // Per-env new secret form state.
@@ -56,17 +55,6 @@ export function Environments() {
     }, [selectedCompanyId]);
 
     useEffect(() => { load(); }, [load]);
-
-    const createEnv = async () => {
-        if (!newEnvName.trim() || !selectedCompanyId) return;
-        try {
-            await axios.post(`/api/companies/${selectedCompanyId}/environments`, { name: newEnvName.trim() });
-            setNewEnvName('');
-            await load();
-        } catch (e: any) {
-            setError(e?.response?.data?.error || 'Failed to create environment');
-        }
-    };
 
     const renameEnv = async (id: number) => {
         try {
@@ -123,26 +111,10 @@ export function Environments() {
                 Tasks always run in <strong>headcount1 cloud</strong>: its secrets are injected into the
                 agent's shell as env vars. Agents can <em>use</em> a secret (<code>$API_KEY</code>) but
                 never <em>see</em> it — values are encrypted with your passkey and redacted from all run
-                output and logs. The other environments hold secrets for external deploy targets (your own
-                servers, Vercel, …); exposing them there comes later.
+                output and logs. Deploy environments (with Vercel/GitHub sync) live in each project's
+                settings.
             </p>
             {error && <div className="mt-3 rounded bg-red-50 p-2 text-sm text-red-700">{error}</div>}
-
-            <div className="mt-4 flex gap-2">
-                <input
-                    value={newEnvName}
-                    onChange={(e) => setNewEnvName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && createEnv()}
-                    placeholder="New environment name (e.g. staging)"
-                    className="w-72 rounded border p-2 text-sm focus:border-indigo-500 focus:outline-none"
-                />
-                <button
-                    onClick={createEnv}
-                    className="flex items-center gap-1 rounded bg-indigo-600 px-3 py-2 text-sm font-medium text-white hover:bg-indigo-700"
-                >
-                    <Plus size={16} /> Add environment
-                </button>
-            </div>
 
             <div className="mt-6 space-y-6">
                 {envs.map((env) => (
@@ -168,11 +140,6 @@ export function Environments() {
                                 )}
                                 {env.builtin && (
                                     <span className="rounded bg-gray-100 px-2 py-0.5 text-xs text-gray-500">built-in</span>
-                                )}
-                                {!env.is_default && (
-                                    <span className="text-xs text-gray-400" title="Secrets here are for external deploy targets and are not injected into agent shells">
-                                        not used by task runs yet
-                                    </span>
                                 )}
                             </div>
                             {!env.builtin && renamingId !== env.id && (
