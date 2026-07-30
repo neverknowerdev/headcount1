@@ -177,6 +177,8 @@ func (s *Server) Mount(r chi.Router) {
 		// Deploy-target connectors + push sync.
 		r.Post("/connectors", api.CreateEnvironmentConnector)
 		r.Post("/sync", api.SyncEnvironment)
+		// Live view of what's on the connected targets (names only).
+		r.Get("/remote-entries", api.ListRemoteEntries)
 	})
 	r.Delete("/connectors/{connectorID}", api.DeleteEnvironmentConnector)
 	// Connector setup wizard: what can this token reach? (Token travels in

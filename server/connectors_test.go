@@ -79,6 +79,7 @@ func setupConnectorsTest(t *testing.T) (chi.Router, *gorm.DB, db.Project, int32)
 		r.Delete("/secrets/{name}", api.DeleteEnvironmentSecret)
 		r.Post("/connectors", api.CreateEnvironmentConnector)
 		r.Post("/sync", api.SyncEnvironment)
+		r.Get("/remote-entries", api.ListRemoteEntries)
 	})
 	r.Delete("/connectors/{connectorID}", api.DeleteEnvironmentConnector)
 	router := withTestUser(t, database, r)
@@ -233,4 +234,50 @@ func TestConnectorLifecycleAndTenantIsolation(t *testing.T) {
 	w = httptest.NewRecorder()
 	router.ServeHTTP(w, req)
 	require.Equal(t, http.StatusNoContent, w.Code)
+}
+
+// TestRemoteEntriesEndpoint: the live view of the target's entries — names
+// only, deduped across connectors, remote-only entries visible.
+func TestRemoteEntriesEndpoint(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"envs":[
+			{"key":"API_KEY","type":"sensitive","target":["production"]},
+			{"key":"REMOTE_ONLY","type":"plain","target":["production"]}
+		]}`))
+	}))
+	t.Cleanup(srv.Close)
+	t.Setenv("VERCEL_API_URL", srv.URL)
+
+	router, _, project, _ := setupConnectorsTest(t)
+
+	b, _ := json.Marshal(map[string]string{"name": "production"})
+	req := httptest.NewRequest(http.MethodPost, fmt.Sprintf("/projects/%d/environments", project.ID), bytes.NewReader(b))
+	w := httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+	var env struct{ ID int32 }
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &env))
+
+	b, _ = json.Marshal(map[string]string{
+		"provider": "vercel", "token": "tok-1234567890",
+		"target_project": "prj_1", "target_environment": "production",
+	})
+	req = httptest.NewRequest(http.MethodPost, fmt.Sprintf("/environments/%d/connectors", env.ID), bytes.NewReader(b))
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusCreated, w.Code)
+
+	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/environments/%d/remote-entries", env.ID), nil)
+	w = httptest.NewRecorder()
+	router.ServeHTTP(w, req)
+	require.Equal(t, http.StatusOK, w.Code)
+	var resp struct {
+		Entries []struct{ Name, Kind string } `json:"entries"`
+	}
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &resp))
+	byName := map[string]string{}
+	for _, e := range resp.Entries {
+		byName[e.Name] = e.Kind
+	}
+	assert.Equal(t, map[string]string{"API_KEY": "secret", "REMOTE_ONLY": "variable"}, byName)
 }

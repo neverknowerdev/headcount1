@@ -195,6 +195,22 @@ test.describe.serial('Deploy environment sync', () => {
         }, { timeout: 15_000 }).toBeTruthy();
     });
 
+    test('remote entries endpoint lists target names across connectors', async ({ request }) => {
+        const res = await request.get(`/api/environments/${envId}/remote-entries`);
+        expect(res.ok()).toBeTruthy();
+        const data = await res.json();
+        const byName: Record<string, string> = Object.fromEntries(
+            (data.entries as any[]).map((e) => [e.name, e.kind]));
+        // From the mock Vercel target: a plain var and a sensitive secret.
+        expect(byName.DB_URL).toBe('variable');
+        expect(byName.REMOTE_VERCEL_SECRET).toBe('secret');
+        // From the mock GitHub target: an env secret and an env variable.
+        expect(byName.REMOTE_GH_SECRET).toBe('secret');
+        expect(byName.REMOTE_GH_VAR).toBe('variable');
+        // No values ride along — names and kinds only.
+        expect(JSON.stringify(data)).not.toContain('gh-var-value');
+    });
+
     test('project settings UI manages environments and connectors', async ({ page, request }) => {
         await page.goto(`/companies/deploy-co/projects/${projectId}`);
         const section = page.getByTestId('project-environments');
@@ -207,6 +223,22 @@ test.describe.serial('Deploy environment sync', () => {
         await expect(envCard.getByTestId('connector-vercel-prj_mock1')).toBeVisible();
         await expect(envCard.getByTestId('connector-github-acme/web')).toBeVisible();
         await expect(envCard.getByText('synced').first()).toBeVisible();
+
+        // Remote-only entries (pulled live from the targets) appear name-only
+        // with an "on target only" badge — no value shown anywhere — and can
+        // be given a value from here.
+        const remoteRow = envCard.getByTestId('remote-entry-REMOTE_GH_SECRET');
+        await expect(remoteRow).toBeVisible();
+        await expect(remoteRow.getByText('on target only')).toBeVisible();
+        await expect(envCard.getByTestId('remote-entry-REMOTE_GH_VAR')).toBeVisible();
+        expect(await page.content()).not.toContain('gh-var-value');
+        // "Set value" prefills the form; saving turns it into a local entry
+        // (which then pushes, overwriting the target).
+        await remoteRow.getByRole('button', { name: 'Set value' }).click();
+        await expect(envCard.getByPlaceholder('API_KEY')).toHaveValue('REMOTE_GH_SECRET');
+        await envCard.getByPlaceholder('value').fill('now-managed-here-123');
+        await envCard.getByRole('button', { name: 'Save' }).click();
+        await expect(envCard.getByTestId('entry-REMOTE_GH_SECRET')).toBeVisible();
 
         // Add a variable through the UI.
         await envCard.locator('select').first().selectOption('variable');

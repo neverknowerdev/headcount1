@@ -212,6 +212,65 @@ func (api *API) SyncEnvironment(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, connectors)
 }
 
+// remoteEntriesResponse aggregates what currently exists on every connected
+// target. Names only — secret values are write-only on the targets, so a
+// remote-only entry can be displayed and overwritten but never read.
+type remoteEntriesResponse struct {
+	Entries []deploysync.RemoteEntry `json:"entries"`
+	Errors  []remoteConnectorError   `json:"errors,omitempty"`
+}
+
+type remoteConnectorError struct {
+	ConnectorID int32  `json:"connector_id"`
+	Provider    string `json:"provider"`
+	Error       string `json:"error"`
+}
+
+// ListRemoteEntries pulls the entry names currently set on every connected
+// deploy target, live (called each time the environments UI opens). A broken
+// connector contributes an error instead of failing the whole listing.
+func (api *API) ListRemoteEntries(w http.ResponseWriter, r *http.Request) {
+	envID, err := strconv.Atoi(chi.URLParam(r, "envID"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid environment id")
+		return
+	}
+	if _, err := api.authorizeEnvironment(r, int32(envID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
+	connectors, err := api.q.ListEnvironmentConnectors(r.Context(), int32(envID))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	ctx, cancel := context.WithTimeout(r.Context(), 30*time.Second)
+	defer cancel()
+
+	resp := remoteEntriesResponse{Entries: []deploysync.RemoteEntry{}}
+	seen := map[string]bool{}
+	for _, c := range connectors {
+		target, terr := connectorTarget(c)
+		var remote []deploysync.RemoteEntry
+		if terr == nil {
+			remote, terr = target.ListRemote(ctx)
+		}
+		if terr != nil {
+			resp.Errors = append(resp.Errors, remoteConnectorError{ConnectorID: c.ID, Provider: c.Provider, Error: terr.Error()})
+			continue
+		}
+		for _, e := range remote {
+			if seen[e.Name] {
+				continue
+			}
+			seen[e.Name] = true
+			resp.Entries = append(resp.Entries, e)
+		}
+	}
+	api.respondJSON(w, http.StatusOK, resp)
+}
+
 type discoveryPayload struct {
 	Provider string `json:"provider"`
 	Token    string `json:"token"`

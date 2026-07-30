@@ -67,7 +67,7 @@ Each **project** can have deploy environments (e.g. `production`, `preview`; man
 - **Vercel**: variables become `plain` env vars, secrets become `sensitive` (write-only) ones — `encrypted` on the development target, which rejects sensitive vars.
 - **GitHub**: variables become environment *variables*, secrets become environment *secrets*, sealed client-side with libsodium `crypto_box_seal` against the environment public key — GitHub never sees the plaintext in a readable form.
 
-Sync is deliberately **push-only**: GitHub secrets and Vercel sensitive vars cannot be read back from the target, so this system stays the source of truth. Per-connector sync status (last push, error) is shown in the UI. Deploy-environment entries are **never** injected into agent shells — only `headcount1 cloud` feeds task runs.
+Sync is deliberately **push-only** for values: GitHub secrets and Vercel sensitive vars cannot be read back from the target, so this system stays the source of truth. The UI does, however, pull the target's entry **names** live on every open: entries that exist on the target but not here are shown name-only with an "on target only" badge — their values can never be displayed, but setting a value locally takes them under management and overwrites the target on the next push. Per-connector sync status (last push, error) is shown in the UI. Deploy-environment entries are **never** injected into agent shells — only `headcount1 cloud` feeds task runs.
 
 ### Secrets never enter LLM message history
 

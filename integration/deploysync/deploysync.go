@@ -30,6 +30,15 @@ type Entry struct {
 	Kind  string // "secret" | "variable"
 }
 
+// RemoteEntry is one entry as it exists on the deploy target. Only the NAME
+// is generally available: secret values are write-only on both providers
+// (GitHub Actions secrets, Vercel sensitive vars), so a remote entry that is
+// missing locally can be displayed and overwritten, never read.
+type RemoteEntry struct {
+	Name string `json:"name"`
+	Kind string `json:"kind"` // "secret" | "variable"
+}
+
 // Target pushes entries to one connected deploy environment.
 type Target interface {
 	// PushAll upserts every entry on the target.
@@ -37,6 +46,9 @@ type Target interface {
 	// Delete removes one entry by name from the target. Unknown names are
 	// not an error (the entry may never have been pushed).
 	Delete(ctx context.Context, name string) error
+	// ListRemote returns the names (and kinds) of the entries currently on
+	// the target's environment.
+	ListRemote(ctx context.Context) ([]RemoteEntry, error)
 }
 
 // httpClient is shared by both providers: short timeout, no redirects into

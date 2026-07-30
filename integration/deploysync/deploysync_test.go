@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -258,4 +259,58 @@ func TestGitHubPushSecretErrorSurfaced(t *testing.T) {
 	err := target.PushAll(context.Background(), []Entry{{Name: "A", Value: "v", Kind: "secret"}})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Bad credentials")
+}
+
+func TestVercelListRemoteFiltersEnvironmentAndMapsKinds(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Write([]byte(`{"envs":[
+			{"key":"API_KEY","type":"sensitive","target":["production"]},
+			{"key":"NODE_ENV","type":"plain","target":["production"]},
+			{"key":"PREVIEW_ONLY","type":"plain","target":["preview"]},
+			{"key":"DB_URL","type":"encrypted","target":["production"]}
+		]}`))
+	}))
+	defer srv.Close()
+	t.Setenv("VERCEL_API_URL", srv.URL)
+
+	target := NewVercelTarget("t", "p", "production", "")
+	remote, err := target.ListRemote(context.Background())
+	require.NoError(t, err)
+	byName := map[string]string{}
+	for _, e := range remote {
+		byName[e.Name] = e.Kind
+	}
+	assert.Equal(t, map[string]string{
+		"API_KEY":  "secret",
+		"NODE_ENV": "variable",
+		"DB_URL":   "secret",
+	}, byName, "preview-target rows are filtered out; plain maps to variable")
+}
+
+func TestGitHubListRemoteMergesSecretsAndVariables(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch {
+		case strings.HasPrefix(r.URL.Path, "/repos/acme/web/environments/production/secrets"):
+			w.Write([]byte(`{"secrets":[{"name":"GH_SECRET_A"},{"name":"GH_SECRET_B"}]}`))
+		case strings.HasPrefix(r.URL.Path, "/repos/acme/web/environments/production/variables"):
+			w.Write([]byte(`{"variables":[{"name":"GH_VAR","value":"v"}]}`))
+		default:
+			w.WriteHeader(http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("GITHUB_API_URL", srv.URL)
+
+	target := NewGitHubTarget("t", "acme/web", "production")
+	remote, err := target.ListRemote(context.Background())
+	require.NoError(t, err)
+	byName := map[string]string{}
+	for _, e := range remote {
+		byName[e.Name] = e.Kind
+	}
+	assert.Equal(t, map[string]string{
+		"GH_SECRET_A": "secret",
+		"GH_SECRET_B": "secret",
+		"GH_VAR":      "variable",
+	}, byName)
 }

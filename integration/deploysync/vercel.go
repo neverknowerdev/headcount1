@@ -175,6 +175,44 @@ func (v *VercelTarget) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
+// ListRemote returns the names of the env vars currently set on the
+// configured Vercel environment. Kind is derived from the Vercel type:
+// "plain" rows are variables, everything else (encrypted / sensitive /
+// legacy secret) counts as a secret.
+func (v *VercelTarget) ListRemote(ctx context.Context) ([]RemoteEntry, error) {
+	u := v.url("/v10/projects/"+url.PathEscape(v.Project)+"/env", nil)
+	resp, body, err := v.do(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return nil, fmt.Errorf("vercel list: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, httpError("vercel list", resp, body)
+	}
+	var list struct {
+		Envs []struct {
+			Key                  string   `json:"key"`
+			Type                 string   `json:"type"`
+			Target               []string `json:"target"`
+			CustomEnvironmentIDs []string `json:"customEnvironmentIds"`
+		} `json:"envs"`
+	}
+	if err := json.Unmarshal(body, &list); err != nil {
+		return nil, fmt.Errorf("vercel list: %w", err)
+	}
+	var out []RemoteEntry
+	for _, e := range list.Envs {
+		if !v.matchesEnv(e.Target, e.CustomEnvironmentIDs) {
+			continue
+		}
+		kind := "secret"
+		if e.Type == "plain" {
+			kind = "variable"
+		}
+		out = append(out, RemoteEntry{Name: e.Key, Kind: kind})
+	}
+	return out, nil
+}
+
 func (v *VercelTarget) matchesEnv(targets, customIDs []string) bool {
 	if v.isCustomEnv() {
 		for _, id := range customIDs {

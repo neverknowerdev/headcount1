@@ -30,6 +30,16 @@ interface ProjectEnv {
     connectors?: Connector[];
 }
 
+interface RemoteEntry {
+    name: string;
+    kind: 'secret' | 'variable';
+}
+
+interface RemoteState {
+    entries: RemoteEntry[];
+    errors?: { provider: string; error: string }[];
+}
+
 // Deploy environments of a project: named sets of secrets + variables (all
 // encrypted at rest with the user's passkey key), optionally connected to
 // Vercel project environments or GitHub repo environments. Every change is
@@ -53,10 +63,24 @@ export function ProjectEnvironments({ projectId }: { projectId: number }) {
         loading: boolean;
     }>({ provider: 'vercel', token: '', teamId: '', projects: [], project: '', environments: [], environment: '', loading: false });
 
+    // Live view of what exists on the connected targets, keyed by env id.
+    // Pulled fresh on every load so the UI always reflects the target state.
+    const [remote, setRemote] = useState<Record<number, RemoteState>>({});
+
     const load = useCallback(async () => {
         try {
             const res = await axios.get(`/api/projects/${projectId}/environments`);
-            setEnvs(res.data || []);
+            const list: ProjectEnv[] = res.data || [];
+            setEnvs(list);
+            // Pull remote entry names for every connected environment.
+            list.filter((e) => (e.connectors?.length ?? 0) > 0).forEach(async (e) => {
+                try {
+                    const rr = await axios.get(`/api/environments/${e.id}/remote-entries`);
+                    setRemote((s) => ({ ...s, [e.id]: rr.data }));
+                } catch {
+                    /* remote view is best-effort; local data still renders */
+                }
+            });
         } catch (e: any) {
             setError(e?.response?.data?.error || 'Failed to load environments');
         }
@@ -185,8 +209,18 @@ export function ProjectEnvironments({ projectId }: { projectId: number }) {
 
     const entriesOf = (env: ProjectEnv, kind: 'secret' | 'variable') => env.secrets.filter((s) => s.kind === kind);
 
+    // Remote-only entries: present on a connected target but missing locally.
+    // Only the NAME is known (secret values are write-only on the targets) —
+    // shown so the target state is visible, and updatable: setting a value
+    // stores it here and overwrites the target on push.
+    const remoteOnlyOf = (env: ProjectEnv, kind: 'secret' | 'variable') => {
+        const local = new Set(env.secrets.map((s) => s.name));
+        return (remote[env.id]?.entries || []).filter((r) => r.kind === kind && !local.has(r.name));
+    };
+
     const renderEntryList = (env: ProjectEnv, kind: 'secret' | 'variable') => {
         const list = entriesOf(env, kind);
+        const remoteOnly = remoteOnlyOf(env, kind);
         return (
             <div className="flex-1" data-testid={`${kind}s-${env.name}`}>
                 <div className="text-xs font-semibold uppercase tracking-wide text-gray-500">
@@ -197,7 +231,7 @@ export function ProjectEnvironments({ projectId }: { projectId: number }) {
                         ? 'Write-only on targets (GitHub env secrets / Vercel sensitive). Redacted from all logs.'
                         : 'Readable on targets (GitHub env variables / Vercel plain). Encrypted at rest here.'}
                 </p>
-                {list.length === 0 ? (
+                {list.length === 0 && remoteOnly.length === 0 ? (
                     <p className="mt-1 text-sm text-gray-400">None yet.</p>
                 ) : (
                     <ul className="mt-1 divide-y">
@@ -210,6 +244,27 @@ export function ProjectEnvironments({ projectId }: { projectId: number }) {
                                 </span>
                                 <button onClick={() => deleteEntry(env, s.name)} className="text-gray-400 hover:text-red-600" title={`Delete ${s.name}`}>
                                     <Trash2 size={13} />
+                                </button>
+                            </li>
+                        ))}
+                        {remoteOnly.map((r) => (
+                            <li key={'remote-' + r.name} className="flex items-center justify-between py-1 text-sm" data-testid={`remote-entry-${r.name}`}>
+                                <span className="flex items-center gap-2 font-mono text-gray-500">
+                                    {kind === 'secret' && <Lock size={12} className="text-gray-400" />}
+                                    {r.name}
+                                    <span
+                                        className="rounded bg-amber-50 px-1.5 py-0.5 font-sans text-xs text-amber-700"
+                                        title="Exists on the connected target but not here. The value cannot be read back — set a new value to manage it from here."
+                                    >
+                                        on target only
+                                    </span>
+                                </span>
+                                <button
+                                    onClick={() => setEntryForm(env.id, { name: r.name, kind: r.kind })}
+                                    className="text-xs text-indigo-600 hover:text-indigo-800"
+                                    title={`Set a value for ${r.name} (overwrites the target on push)`}
+                                >
+                                    Set value
                                 </button>
                             </li>
                         ))}
@@ -320,6 +375,11 @@ export function ProjectEnvironments({ projectId }: { projectId: number }) {
                                 </button>
                             </div>
 
+                            {(remote[env.id]?.errors?.length ?? 0) > 0 && (
+                                <p className="mt-1 text-xs text-red-600">
+                                    Could not read target state: {remote[env.id]!.errors![0].provider} — {remote[env.id]!.errors![0].error}
+                                </p>
+                            )}
                             {(env.connectors?.length ?? 0) === 0 ? (
                                 <p className="mt-1 text-sm text-gray-400">Not connected — secrets are only stored here.</p>
                             ) : (

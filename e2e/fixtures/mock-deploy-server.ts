@@ -55,7 +55,12 @@ export async function startMockDeployServer(): Promise<{ baseUrl: string; stop: 
             return json(201, { created: [], failed: [] });
         }
         if (path.startsWith('/v10/projects/') && path.includes('/env') && req.method === 'GET') {
-            return json(200, { envs: [{ id: 'env_row_1', key: 'DB_URL', target: ['production'] }] });
+            return json(200, {
+                envs: [
+                    { id: 'env_row_1', key: 'DB_URL', type: 'plain', target: ['production'] },
+                    { id: 'env_row_2', key: 'REMOTE_VERCEL_SECRET', type: 'sensitive', target: ['production'] },
+                ],
+            });
         }
         if (path.startsWith('/v10/projects')) {
             return json(200, { projects: [{ id: 'prj_mock1', name: 'mock-web' }, { id: 'prj_mock2', name: 'mock-api' }] });
@@ -76,6 +81,12 @@ export async function startMockDeployServer(): Promise<{ baseUrl: string; stop: 
         }
         if (path.endsWith('/secrets/public-key')) {
             return json(200, { key_id: 'mock-key-1', key: ghPublicKeyB64 });
+        }
+        if (/\/environments\/[^/]+\/secrets(\?.*)?$/.test(path) && req.method === 'GET') {
+            return json(200, { secrets: [{ name: 'REMOTE_GH_SECRET' }] });
+        }
+        if (/\/environments\/[^/]+\/variables(\?.*)?$/.test(path) && req.method === 'GET') {
+            return json(200, { variables: [{ name: 'REMOTE_GH_VAR', value: 'gh-var-value' }] });
         }
         if (path.includes('/secrets/') && req.method === 'PUT') {
             res.writeHead(201); return res.end();

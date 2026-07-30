@@ -176,6 +176,52 @@ func (g *GitHubTarget) Delete(ctx context.Context, name string) error {
 	return nil
 }
 
+// ListRemote returns the names of the environment's secrets and variables on
+// GitHub. Secret values are never available (metadata-only endpoints);
+// variables would be readable but only names are needed here.
+func (g *GitHubTarget) ListRemote(ctx context.Context) ([]RemoteEntry, error) {
+	var out []RemoteEntry
+
+	resp, body, err := g.do(ctx, http.MethodGet, g.envPath("/secrets?per_page=100"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("github list secrets: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, httpError("github list secrets", resp, body)
+	}
+	var secretsList struct {
+		Secrets []struct {
+			Name string `json:"name"`
+		} `json:"secrets"`
+	}
+	if err := json.Unmarshal(body, &secretsList); err != nil {
+		return nil, fmt.Errorf("github list secrets: %w", err)
+	}
+	for _, s := range secretsList.Secrets {
+		out = append(out, RemoteEntry{Name: s.Name, Kind: "secret"})
+	}
+
+	resp, body, err = g.do(ctx, http.MethodGet, g.envPath("/variables?per_page=100"), nil)
+	if err != nil {
+		return nil, fmt.Errorf("github list variables: %w", err)
+	}
+	if resp.StatusCode >= 300 {
+		return nil, httpError("github list variables", resp, body)
+	}
+	var varsList struct {
+		Variables []struct {
+			Name string `json:"name"`
+		} `json:"variables"`
+	}
+	if err := json.Unmarshal(body, &varsList); err != nil {
+		return nil, fmt.Errorf("github list variables: %w", err)
+	}
+	for _, vr := range varsList.Variables {
+		out = append(out, RemoteEntry{Name: vr.Name, Kind: "variable"})
+	}
+	return out, nil
+}
+
 // GitHubRepo is one repository visible to the token.
 type GitHubRepo struct {
 	FullName string `json:"full_name"`
