@@ -322,8 +322,11 @@ func ValidateDownloadURL(raw string) error {
 	// slashes, so an attacker's repo can serve a release whose tag spells out
 	// our repo name mid-path (/attacker/evil/releases/download/{our-repo}/x) —
 	// anchoring at the path root is what defeats that. The githubusercontent
-	// CDN hosts opaque signed blob paths and is only ever reached by following
-	// a redirect from an already-validated API URL.
+	// CDN hosts opaque signed blob paths that name no repository, so there is
+	// nothing to anchor there: CI resolves the asset API redirect itself (this
+	// repo is private, and the server holds no GitHub credential to follow it
+	// with) and delivers the resulting short-lived signed URL, so a CDN URL is
+	// a normal deploy target rather than only an internal redirect hop.
 	if !overridden {
 		repoPrefix := ""
 		switch host {

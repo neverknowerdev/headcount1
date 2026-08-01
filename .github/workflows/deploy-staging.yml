@@ -200,12 +200,32 @@ jobs:
             --notes "Staging deploy build for ${{ steps.target.outputs.ref }} (${{ steps.target.outputs.commit }})." \
             agent-orchestrator-linux-amd64
           # The server pins the artifact by digest, so publish the digest of the
-          # exact bytes we uploaded. The asset API URL (not browser_download_url)
-          # serves the raw binary with a bearer token, covering a private repo.
+          # exact bytes we uploaded.
+          asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+            --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')
+          # This repository is PRIVATE, so that asset API URL only serves the
+          # binary to an authenticated caller — the server holds no GitHub
+          # credential and gets HTTP 404 from it. Resolve the redirect here,
+          # where we do have a token: GitHub hands back a short-lived signed
+          # release-assets URL that serves the same bytes without one, and
+          # release-assets.githubusercontent.com is an allowed deploy source
+          # (see pkg/updater). Integrity still rests on the sha256 below.
+          download_url=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "$asset_url")
+          if [ -z "$download_url" ]; then
+            echo "::error::Could not resolve a signed download URL for the release asset."
+            exit 1
+          fi
+          # Through a file, not a step output: that signed URL is itself the
+          # credential for the download, and workflow logs echo the notify step's
+          # `${{ }}` expansions verbatim.
+          umask 077
+          printf '%s' "$download_url" > "$RUNNER_TEMP/download-url.txt"
           {
             echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
-            echo "asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
-              --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')"
+            echo "download_url_file=$RUNNER_TEMP/download-url.txt"
           } >> "$GITHUB_OUTPUT"
 
       - name: Notify staging server
@@ -214,6 +234,7 @@ jobs:
           DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
           ENV_FILE: ${{ steps.env.outputs.env_file }}
           ENV_SECRET_KEYS: ${{ steps.env.outputs.secret_keys_json }}
+          DOWNLOAD_URL_FILE: ${{ steps.publish.outputs.download_url_file }}
         run: |
           set -euo pipefail
           if [ -z "$BASE" ]; then
@@ -229,7 +250,7 @@ jobs:
             --arg ref "${{ steps.target.outputs.ref }}" \
             --arg commit "${{ steps.target.outputs.commit }}" \
             --arg date "${{ steps.target.outputs.date }}" \
-            --arg url "${{ steps.publish.outputs.asset_url }}" \
+            --arg url "$(cat "$DOWNLOAD_URL_FILE")" \
             --arg sha "${{ steps.publish.outputs.sha256 }}" \
             --arg version "${{ steps.build.outputs.version }}" \
             --slurpfile env "$ENV_FILE" \
@@ -291,4 +312,4 @@ jobs:
               exit 1
               ;;
           esac
-          rm -f "$payload_file" "$ENV_FILE"
+          rm -f "$payload_file" "$ENV_FILE" "$DOWNLOAD_URL_FILE"
