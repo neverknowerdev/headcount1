@@ -21,8 +21,11 @@ name: Deploy Staging
 # issue_comment is attached to the default branch and so does NOT appear in the
 # PR's own checks. The label path does appear there.
 #
-# Actions -> Deploy Staging -> Run workflow does the same for any branch (also
-# default-branch-only).
+# Actions -> Deploy Staging -> Run workflow does the same for any branch. Run it
+# from the DEFAULT branch and name the branch in the "ref" input: a run always
+# executes the copy of this file that lives on the ref it was started from, so
+# dispatching an older branch directly deploys it with that branch's (possibly
+# outdated) deploy steps.
 #
 # Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
 # protection rules configured there (required reviewers, wait timer) apply on
@@ -48,6 +51,16 @@ on:
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: >-
+          Branch to deploy. Leave empty to deploy the branch this run was
+          started from. Dispatching from the default branch and naming the
+          branch here is the reliable combination: a run always executes the
+          workflow file belonging to the ref it was started from, so a branch
+          that predates a fix to THIS file would otherwise deploy with the old
+          steps.
+        required: false
 
 concurrency:
   # A newer request for the same PR/branch supersedes an in-flight one.
@@ -115,6 +128,7 @@ jobs:
           LABEL_SHA: ${{ github.event.pull_request.head.sha }}
           DISPATCH_REF: ${{ github.ref_name }}
           DISPATCH_SHA: ${{ github.sha }}
+          INPUT_REF: ${{ inputs.ref }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -130,7 +144,15 @@ jobs:
                 --jq '"\(.head.ref) \(.head.sha)"')
               ;;
             *)
-              ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              if [ -n "${INPUT_REF:-}" ]; then
+                # Deploying a branch other than the one this run was started
+                # from: resolve its current head ourselves, since github.sha
+                # describes the dispatched ref.
+                ref="$INPUT_REF"
+                sha=$(gh api "repos/$REPO/commits/$ref" --jq '.sha')
+              else
+                ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              fi
               ;;
           esac
           {
