@@ -104,8 +104,9 @@ jobs:
       - name: Resolve what to deploy
         id: target
         # Event data goes through the environment rather than being interpolated
-        # into the script: a branch name is attacker-influenced text and `${{ }}`
-        # inside run: would splice it straight into the shell.
+        # into the script: a branch name is attacker-influenced text and an
+        # expression interpolation inside run: would splice it straight into
+        # the shell.
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           REPO: ${{ github.repository }}
@@ -220,7 +221,10 @@ jobs:
           fi
           # Through a file, not a step output: that signed URL is itself the
           # credential for the download, and workflow logs echo the notify step's
-          # `${{ }}` expansions verbatim.
+          # expression expansions verbatim.
+          # (Never write an empty expression literally in a run: block, even in a
+          # shell comment — Actions scans the whole script for them and refuses to
+          # load the workflow, which shows up as a startup_failure with no logs.)
           umask 077
           printf '%s' "$download_url" > "$RUNNER_TEMP/download-url.txt"
           {
