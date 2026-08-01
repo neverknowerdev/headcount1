@@ -1,0 +1,60 @@
+[
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-pause-001",
+      "object": "chat.completion",
+      "created": 1700000010,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+              {
+                "id": "call_fixture_pause_001",
+                "type": "function",
+                "function": {
+                  "name": "write",
+                  "arguments": "{\"path\":\"pause_marker.txt\",\"content\":\"written after resume\"}"
+                }
+              }
+            ]
+          },
+          "finish_reason": "tool_calls"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 60,
+        "completion_tokens": 18,
+        "total_tokens": 78
+      }
+    },
+    "status": 200
+  },
+  {
+    "response_body": {
+      "id": "chatcmpl-fixture-pause-002",
+      "object": "chat.completion",
+      "created": 1700000011,
+      "model": "test-model",
+      "choices": [
+        {
+          "index": 0,
+          "message": {
+            "role": "assistant",
+            "content": "File written after resuming."
+          },
+          "finish_reason": "stop"
+        }
+      ],
+      "usage": {
+        "prompt_tokens": 90,
+        "completion_tokens": 6,
+        "total_tokens": 96
+      }
+    },
+    "status": 200
+  }
+]

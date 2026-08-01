@@ -533,6 +533,13 @@ type Run struct {
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
+	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
+	// captured when a graceful shutdown (e.g. applying an auto-update) paused
+	// this run mid-flight, right after its current turn's LLM response
+	// arrived. Set only while Status == "interrupted"; consumed and cleared
+	// when the run resumes. Internal plumbing, not for display — omitted from
+	// the JSON API.
+	PausedHistory string `json:"-" gorm:"type:text"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to

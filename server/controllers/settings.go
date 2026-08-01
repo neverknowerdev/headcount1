@@ -39,7 +39,11 @@ func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var settings Settings
+	// Decode ON TOP of the current settings so a caller that sends only some
+	// fields doesn't silently reset the rest. Decoding into a zero value would
+	// wipe workspace_folders and — because AutoDeploy defaults to true — turn
+	// an omitted auto_deploy into "deploys disabled".
+	settings := LoadSettings()
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -49,6 +53,10 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
+
+	// Deploy settings (deploy_source, auto_deploy) are read fresh from the file
+	// by the deploy webhook on each event, so there's no live updater state to
+	// propagate here — saving is enough.
 
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)

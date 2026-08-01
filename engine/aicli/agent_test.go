@@ -130,6 +130,85 @@ func TestAgentReadFileTool(t *testing.T) {
 	assert.Contains(t, result, "hello world")
 }
 
+// TestAgentPauseAndResume verifies the core mechanism behind the auto-update
+// graceful-drain feature: RunWithHistory stops right after a turn's LLM
+// response arrives (without running that turn's tool calls) when asked to
+// pause, and a later RunWithHistory call seeded with the returned history
+// resumes by running exactly those pending tool calls before continuing —
+// arriving at the same result a normal, uninterrupted run would.
+func TestAgentPauseAndResume(t *testing.T) {
+	fixturePath := filepath.Join("testdata", "fixtures", "pause_resume.json")
+	client := newTestClient(t, fixturePath)
+
+	workDir := t.TempDir()
+	reg := tools.DefaultRegistry(workDir)
+	agent := aicli.New(aicli.Config{
+		Client:       client,
+		Registry:     reg,
+		ProviderName: "test-provider",
+		AgentName:    "test-agent",
+	})
+
+	initial := aicli.BuildHistory("", []aicli.Message{{Role: "user", Content: "Write a marker file."}})
+
+	// First call: pause unconditionally. The fixture's first entry is a tool
+	// call (write); RunWithHistory must return right after receiving it,
+	// without ever invoking the tool.
+	result, paused, err := agent.RunWithHistory(context.Background(), initial, func() bool { return true })
+	require.ErrorIs(t, err, aicli.ErrPaused)
+	assert.Empty(t, result)
+
+	markerPath := filepath.Join(workDir, "pause_marker.txt")
+	_, statErr := os.Stat(markerPath)
+	assert.True(t, os.IsNotExist(statErr), "tool call must not run before the pause point")
+
+	require.NotEmpty(t, paused)
+	last := paused[len(paused)-1]
+	assert.Equal(t, "assistant", last.Role)
+	require.Len(t, last.ToolCalls, 1)
+	assert.Equal(t, "write", last.ToolCalls[0].Function.Name)
+
+	// Second call: resume from the paused history with no pause callback.
+	// The pending "write" tool call must run first (proving the file now
+	// exists), then the loop continues to the fixture's second entry (the
+	// final text answer) exactly as an uninterrupted run would have.
+	final, resumedHistory, err := agent.RunWithHistory(context.Background(), paused, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "File written after resuming.", final)
+
+	content, readErr := os.ReadFile(markerPath)
+	require.NoError(t, readErr, "tool call pending at pause time must run on resume")
+	assert.Equal(t, "written after resume", string(content))
+
+	// The resumed history is a strict continuation: the tool result for the
+	// previously-pending call plus the final assistant turn, nothing lost or
+	// duplicated from the paused prefix.
+	assert.Greater(t, len(resumedHistory), len(paused))
+	assert.Equal(t, paused, resumedHistory[:len(paused)])
+}
+
+// TestAgentPauseSkippedWhenRunFinishing verifies that a pause request is
+// ignored when the current turn's response has no tool calls — the run was
+// about to finish anyway, so there is nothing to gain by interrupting it one
+// step from done, and RunWithHistory returns the normal final answer.
+func TestAgentPauseSkippedWhenRunFinishing(t *testing.T) {
+	fixturePath := filepath.Join("testdata", "fixtures", "simple_chat.json")
+	client := newTestClient(t, fixturePath)
+
+	reg := aicli.NewRegistry()
+	agent := aicli.New(aicli.Config{
+		Client:       client,
+		Registry:     reg,
+		ProviderName: "test-provider",
+		AgentName:    "test-agent",
+	})
+
+	initial := aicli.BuildHistory("", []aicli.Message{{Role: "user", Content: "What is 2+2?"}})
+	result, _, err := agent.RunWithHistory(context.Background(), initial, func() bool { return true })
+	require.NoError(t, err)
+	assert.Equal(t, "4", result)
+}
+
 // TestAgentRetryOn429 verifies that the client retries after a 429 response.
 // The fixture has a 429 first, then a 200.
 func TestAgentRetryOn429(t *testing.T) {

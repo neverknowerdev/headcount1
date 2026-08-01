@@ -13,6 +13,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/authctx"
 	"agent-orchestrator/pkg/setup"
+	"agent-orchestrator/pkg/updater"
 	endpoints "agent-orchestrator/server/controllers"
 
 	"github.com/go-chi/chi/v5"
@@ -21,10 +22,11 @@ import (
 )
 
 type Server struct {
-	db     *gorm.DB
-	q      db.Querier
-	hub    *eventhub.Hub
-	engine engine.Engine
+	db      *gorm.DB
+	q       db.Querier
+	hub     *eventhub.Hub
+	engine  engine.Engine
+	updater *updater.Updater
 }
 
 func NewServer(database *gorm.DB, eng engine.Engine) *Server {
@@ -34,6 +36,8 @@ func NewServer(database *gorm.DB, eng engine.Engine) *Server {
 		engine: eng,
 	}
 }
+
+func (s *Server) SetUpdater(upd *updater.Updater) { s.updater = upd }
 
 func (s *Server) SetHub(h *eventhub.Hub) { s.hub = h }
 
@@ -87,7 +91,7 @@ func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
 // endpoints themselves and the setup-status probe the frontend polls before
 // anyone is signed in. Everything else lives in Mount, behind RequireAuth.
 func (s *Server) MountPublic(r chi.Router) {
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api := endpoints.NewAPI(s.db, s.engine, s.hub).SetUpdater(s.updater)
 
 	// Passwordless passkey ceremonies (challenge round-trip is the guard).
 	// Registered flat (not via r.Route) so the authenticated /auth routes in
@@ -109,6 +113,11 @@ func (s *Server) MountPublic(r chi.Router) {
 	// Public: lets the register page show which team an invite joins (the
 	// token itself is the credential).
 	r.Get("/invite-info", api.InviteInfo)
+
+	// Public deploy webhook: CI (not a user session) posts build/deploy events
+	// here. It authenticates with the shared HEADCOUNT1_DEPLOY_API_KEY, and is
+	// a no-op unless that key is configured — see DeployWebhook.
+	r.Post("/deploy/webhook", api.DeployWebhook)
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
 		pending, ok, errMsg, warning := setup.Status()
@@ -139,7 +148,7 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Get("/ws", s.serveWs)
 
-	api := endpoints.NewAPI(s.db, s.engine, s.hub)
+	api := endpoints.NewAPI(s.db, s.engine, s.hub).SetUpdater(s.updater)
 
 	// Authenticated passkey operations: crash re-tap unlock (session present,
 	// keyring cold) and managing enrolled credentials (must be unlocked).
@@ -338,6 +347,12 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/list", api.ListBackups)
 		r.Post("/restore", api.RestoreBackup)
 	})
+
+	// Deploy state, read-only for any signed-in user (the running version +
+	// this server's environment/source). Deploys themselves are triggered by
+	// CI via the public /deploy/webhook, not from here.
+	r.Get("/version", api.GetVersion)
+	r.Get("/deploy/status", api.GetDeployStatus)
 
 	r.Route("/mcp-servers", func(r chi.Router) {
 		r.Get("/", api.ListMCPServers)
