@@ -137,13 +137,19 @@ func (u *Updater) RestartPending() (string, bool) {
 // window, and (b) run the successor's interrupted-run resume scan before the
 // outgoing process had written the runs it paused, stranding them.
 //
+// ErrInProgress is returned by Deploy when another deploy already holds the
+// process: the first one wins and the process is on its way out. The webhook
+// maps it to 409 so CI can tell "wait for the one in flight" apart from a
+// failed deploy.
+var ErrInProgress = errors.New("a deploy is already in progress")
+
 // Concurrent deploys are rejected: the first one wins and the process is on its
 // way out, so a second is meaningless.
 func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) error {
 	u.mu.Lock()
 	if u.deploying {
 		u.mu.Unlock()
-		return errors.New("a deploy is already in progress")
+		return ErrInProgress
 	}
 	u.deploying = true
 	u.status.Deploying = true

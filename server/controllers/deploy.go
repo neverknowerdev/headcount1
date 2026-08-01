@@ -3,6 +3,7 @@ package endpoints
 import (
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net/http"
@@ -77,7 +78,7 @@ func (api *API) GetVersion(w http.ResponseWriter, r *http.Request) {
 func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
 	resp := map[string]interface{}{
-		"environment":   utils.DeployEnv(),
+		"environment":   utils.CurrentEnv(),
 		"deploy_source": settings.EffectiveDeploySource(),
 		"auto_deploy":   settings.AutoDeploy,
 	}
@@ -101,7 +102,7 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	// server holds is itself a hint worth not publishing.
 	if utils.IsE2E() || globalAdminAPIEnabled() {
 		if store, err := envstore.Load(); err == nil {
-			resp["env_keys"] = store.Keys()
+			resp["env_key_names"] = store.Keys()
 			resp["env_updated_at"] = store.UpdatedAt
 		}
 	}
@@ -152,7 +153,7 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	settings := LoadSettings()
-	decision, reason := deployDecision(payload, utils.DeployEnv(), settings)
+	decision, reason := deployDecision(payload, utils.CurrentEnv(), settings)
 
 	if !decision {
 		// Acknowledge without acting — an expected outcome for events meant for
@@ -203,32 +204,43 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		// Same build — but env is read once at startup, so new configuration for
 		// the commit we're already on still needs a cycle to take effect.
 		if envChanged {
-			go func() {
-				if err := api.updater.RestartInPlace("delivered configuration changed"); err != nil {
-					log.Printf("Deploy: restart for env change failed: %v", err)
-				}
-			}()
+			if err := api.updater.RestartInPlace("delivered configuration changed"); err != nil {
+				respond(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+				return
+			}
 			respond(http.StatusAccepted, map[string]interface{}{
 				"status": "restarting", "reason": "delivered configuration changed",
 			})
 			return
 		}
+		// This is also how CI confirms a deploy finished: it re-posts the same
+		// event after a 202 and reads this answer — the new binary reporting
+		// itself current IS the success signal.
 		respond(http.StatusOK, map[string]interface{}{
 			"status": "ignored", "reason": "already running this commit",
 		})
 		return
 	}
 
-	// Kick the deploy off in the background and respond immediately: Deploy
-	// replaces the binary and signals this process to shut down, so we must
-	// answer the webhook before that shutdown races the response out.
-	go func() {
-		if err := api.updater.Deploy(payload.DownloadURL, payload.SHA256, target); err != nil {
-			// Deploy records the error in its status; nothing else to do here
-			// (the webhook has already been answered).
-			_ = err
+	// Deploy runs SYNCHRONOUSLY so a failure (bad download, digest mismatch,
+	// swap error) comes back as this request's status code and shows up in the
+	// CI job log, instead of only in the server's own log. That is safe because
+	// a successful Deploy does not kill the process from under the response: it
+	// arms a restart and requests a graceful shutdown after a grace delay, and
+	// the HTTP server drains in-flight responses before exiting. What CANNOT be
+	// awaited here is the restart itself — the process has to die to complete
+	// it — so success is still a 202, and CI confirms completion by re-posting
+	// the event until the new binary answers "already running this commit".
+	if err := api.updater.Deploy(payload.DownloadURL, payload.SHA256, target); err != nil {
+		if errors.Is(err, updater.ErrInProgress) {
+			// Not a failure: an earlier deploy holds the process. CI polls until
+			// that one lands.
+			respond(http.StatusConflict, map[string]interface{}{"error": err.Error()})
+			return
 		}
-	}()
+		respond(http.StatusInternalServerError, map[string]interface{}{"error": err.Error()})
+		return
+	}
 
 	respond(http.StatusAccepted, map[string]interface{}{
 		"status": "deploying",

@@ -305,7 +305,7 @@ func main() {
 	// The download token is only needed if the releases repo is private.
 	upd := updater.New(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
 	log.Printf("Deploy target: env=%s, version=%s, build=%s",
-		utils.DeployEnv(), Version, upd.Current().DisplayString())
+		utils.CurrentEnv(), Version, upd.Current().DisplayString())
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)

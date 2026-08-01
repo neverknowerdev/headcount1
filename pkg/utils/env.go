@@ -18,11 +18,11 @@ const (
 	EnvStaging    = "staging"
 )
 
-// DeployEnv returns this server's deploy environment from HEADCOUNT1_ENV,
+// CurrentEnv returns this server's deploy environment from HEADCOUNT1_ENV,
 // defaulting to production. Only "staging" flips it; anything else (including
 // unset) is production, so a misconfigured value never accidentally opens a
 // server up to arbitrary-branch deploys.
-func DeployEnv() string {
+func CurrentEnv() string {
 	if strings.ToLower(strings.TrimSpace(os.Getenv("HEADCOUNT1_ENV"))) == EnvStaging {
 		return EnvStaging
 	}
@@ -31,7 +31,7 @@ func DeployEnv() string {
 
 // IsStaging reports whether this server is a staging deployment.
 func IsStaging() bool {
-	return DeployEnv() == EnvStaging
+	return CurrentEnv() == EnvStaging
 }
 
 // DeployAPIKey is the shared secret a deploy webhook must present (header

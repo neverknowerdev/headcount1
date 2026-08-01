@@ -32,7 +32,7 @@ interface DeployStatus {
      * NAMES of the env vars the last deploy delivered from its GitHub
      * Environment — never the values. Operator-only, like last_error.
      */
-    env_keys?: string[];
+    env_key_names?: string[];
     env_updated_at?: string;
 }
 
@@ -308,11 +308,11 @@ export const Settings: React.FC = () => {
                         )}
                         {/* Names only. Enough to confirm configuration arrived without
                             shell access to the box; the values stay on the server. */}
-                        {deployStatus.env_keys && deployStatus.env_keys.length > 0 && (
+                        {deployStatus.env_key_names && deployStatus.env_key_names.length > 0 && (
                             <div className="text-xs text-gray-500">
                                 Config delivered from GitHub
                                 {deployStatus.env_updated_at && ` on ${new Date(deployStatus.env_updated_at).toLocaleString()}`}:{' '}
-                                <span className="font-mono">{deployStatus.env_keys.join(', ')}</span>
+                                <span className="font-mono">{deployStatus.env_key_names.join(', ')}</span>
                             </div>
                         )}
                     </div>

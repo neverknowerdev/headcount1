@@ -242,7 +242,6 @@ jobs:
             -H "Content-Type: application/json" \
             -H "X-Deploy-Key: $DEPLOY_KEY" \
             --data-binary "@$payload_file")
-          rm -f "$payload_file" "$ENV_FILE"
           echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
           # Names the server would not apply (PATH, LD_*, its own deploy config,
           # ...). Expected when the environment holds secrets meant for other
@@ -252,10 +251,44 @@ jobs:
             echo "::warning::Server did not apply some delivered env vars:"
             echo "$skipped" | while read -r line; do echo "  - $line"; done
           fi
-          # 202 = deploying (or restarting to pick up changed config), 200 =
-          # accepted-but-ignored (auto_deploy paused, or already running this
-          # commit with this config). All are successful outcomes for CI.
+          # The server handles the deploy synchronously: a download/digest/swap
+          # failure comes back as an HTTP error with the reason, and fails this
+          # job right here. A 202 means the binary is swapped and the server is
+          # restarting into it — confirm that completed by re-posting the same
+          # event until the NEW binary answers "already running this commit"
+          # (200). While the old process is still draining, the re-post gets 409
+          # (deploy in progress) or a connection error; both mean keep waiting.
+          # Response bodies contain only status/reason fields and env var NAMES
+          # (env_skipped) — values are never echoed back.
           case "$code" in
-            200|202) echo "notify ok" ;;
-            *) echo "deploy notify failed"; exit 1 ;;
+            200)
+              echo "notify ok (server acknowledged without redeploying)"
+              ;;
+            202)
+              echo "Deploy started; waiting for the server to come back on the new build..."
+              deadline=$(( $(date +%s) + 600 ))
+              confirmed=""
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                sleep 10
+                code2=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+                  -H "Content-Type: application/json" \
+                  -H "X-Deploy-Key: $DEPLOY_KEY" \
+                  --data-binary "@$payload_file" || echo 000)
+                if [ "$code2" = "200" ]; then
+                  confirmed=1
+                  echo "Server is up on the new build:"; cat /tmp/resp; echo
+                  break
+                fi
+                echo "  still deploying (HTTP $code2)"
+              done
+              if [ -z "$confirmed" ]; then
+                echo "::error::Deploy started but the server did not confirm the new build within 10 minutes."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Deploy failed on the server (HTTP $code); see response above."
+              exit 1
+              ;;
           esac
+          rm -f "$payload_file" "$ENV_FILE"

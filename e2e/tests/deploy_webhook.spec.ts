@@ -204,15 +204,12 @@ test.describe.serial('Deploy webhook', () => {
         expect(noDigest.status).toBe(400);
 
         // A tampered artifact (right URL, wrong digest) is downloaded but
-        // rejected before the binary is swapped. The webhook has already been
-        // answered by then, so wait for the failure the server recorded.
-        expect((await deployPost(deployKey, { ...branchEvent(), sha256: 'f'.repeat(64) })).status).toBe(202);
-        await expect
-            .poll(async () => {
-                const st = await (await fetch(`${base}/api/deploy/status`)).json();
-                return st.last_error ?? '';
-            }, { timeout: 60_000, intervals: [500], message: 'digest mismatch should be recorded' })
-            .toContain('sha256 mismatch');
+        // rejected before the binary is swapped. The deploy runs synchronously,
+        // so the failure comes back on this very request — which is what makes
+        // it visible in a CI job log rather than only in the server's own log.
+        const tampered = await deployPost(deployKey, { ...branchEvent(), sha256: 'f'.repeat(64) });
+        expect(tampered.status).toBe(500);
+        expect(await tampered.text()).toContain('sha256 mismatch');
         expect(await version()).toBe(runningCommit);
 
         // A production-only event (main) is ignored by this staging server.
@@ -237,6 +234,12 @@ test.describe.serial('Deploy webhook', () => {
             .toBe(targetCommit);
 
         expect((await fetch(`${base}/api/ping`)).ok).toBeTruthy();
+
+        // Re-posting the same event now gets "already running this commit" —
+        // the answer CI's confirmation poll relies on to declare the deploy done.
+        const confirm = await deployPost(deployKey, branchEvent());
+        expect(confirm.status).toBe(200);
+        expect((await confirm.json()).reason).toContain('already running this commit');
     });
 
     // The composition of the two features: deploying while an agent run is
@@ -406,7 +409,7 @@ test.describe.serial('Deploy webhook', () => {
             .toContain('DELIVERED_ONE, DELIVERED_TWO');
 
         const status = await (await fetch(`${base}/api/deploy/status`)).json();
-        expect(status.env_keys).toEqual(['DELIVERED_ONE', 'DELIVERED_TWO']);
+        expect(status.env_key_names).toEqual(['DELIVERED_ONE', 'DELIVERED_TWO']);
 
         // Redelivering the SAME config for the commit already running is a no-op:
         // otherwise every deploy of an unchanged commit would cycle the server.
