@@ -1,0 +1,294 @@
+name: Deploy Staging
+
+# Staging deploys, ON REQUEST ONLY. Nothing here runs on a push.
+#
+# Two ways to request one from the pull request itself:
+#
+#   1. Add the "deploy-staging" label. The label is removed again as soon as the
+#      run starts, so it is a button, not a state — re-add it to deploy again.
+#   2. Comment "/deploy".
+#
+# Either builds the PR's current head commit and ships it to stagingapp, versioned
+# staging-<branch>-<commit> — a staging build is not a release, so it is named
+# after what it actually is rather than given a release number.
+#
+# Prefer the label while this workflow is not yet on the default branch: GitHub
+# runs issue_comment (and workflow_dispatch) only from the DEFAULT branch, so
+# "/deploy" is ignored until this file is merged to main. pull_request events
+# run the workflow from the PR's own branch, so the label works right away.
+#
+# The comment path gets a rocket reaction as an ack, because a run triggered by
+# issue_comment is attached to the default branch and so does NOT appear in the
+# PR's own checks. The label path does appear there.
+#
+# Actions -> Deploy Staging -> Run workflow does the same for any branch (also
+# default-branch-only).
+#
+# Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
+# protection rules configured there (required reviewers, wait timer) apply on
+# top of the request, and the deploy is recorded with a link to the live URL.
+#
+# Config lives ON THE ENVIRONMENT (Settings -> Environments -> Preview):
+#   vars.DEPLOY_URL        - https://stagingapp.headcount1.ai
+#   secrets.DEPLOY_API_KEY - must equal that server's HEADCOUNT1_DEPLOY_API_KEY
+#
+# Every OTHER variable and secret on the environment is delivered to the server
+# as an env var. Environment-level values override repository-wide ones, so
+# staging points at its own database and test credentials just by setting them
+# here. Opt a name out with vars.DEPLOY_ENV_EXCLUDE.
+#
+# Production is a separate workflow (deploy-production.yml) so it can never be
+# triggered from here, and so a PR only ever offers a staging deploy.
+
+on:
+  # Adding the "deploy-staging" label IS the request. Only `labeled` — a push to
+  # the PR does nothing, so this never deploys on its own.
+  pull_request:
+    types: [labeled]
+  issue_comment:
+    types: [created]
+  workflow_dispatch:
+
+concurrency:
+  # A newer request for the same PR/branch supersedes an in-flight one.
+  group: deploy-staging-${{ github.event.pull_request.number || github.event.issue.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    # Owner-only, and for a comment only a "/deploy" on a PULL REQUEST — so
+    # ordinary discussion never starts a runner.
+    # NOTE: if this repo moves to an organization, repository_owner becomes the
+    # org name and will never equal a username; switch to an actor allowlist or
+    # rely on the Preview environment's required reviewers instead.
+    if: >-
+      github.actor == github.repository_owner &&
+      (github.event_name == 'workflow_dispatch' ||
+        (github.event_name == 'pull_request' &&
+         github.event.label.name == 'deploy-staging') ||
+        (github.event_name == 'issue_comment' &&
+         github.event.issue.pull_request != null &&
+         startsWith(github.event.comment.body, '/deploy')))
+    runs-on: ubuntu-latest
+    environment:
+      name: Preview
+      url: ${{ vars.DEPLOY_URL }}
+    permissions:
+      contents: write # create/update the per-branch rolling release asset
+      pull-requests: read # resolve the PR's head commit
+      issues: write # react to the /deploy comment
+    steps:
+      - name: Acknowledge the request
+        if: github.event_name == 'issue_comment'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          COMMENT_ID: ${{ github.event.comment.id }}
+        run: |
+          gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
+            -f content=rocket --silent || true
+
+      # Consume the label immediately, so it behaves as a button rather than a
+      # sticky "this PR auto-deploys" state: re-adding it requests another
+      # deploy, and a failed run can be retried the same way.
+      - name: Consume the deploy-staging label
+        if: github.event_name == 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+        run: |
+          gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/deploy-staging" \
+            --silent || true
+
+      - name: Resolve what to deploy
+        id: target
+        # Event data goes through the environment rather than being interpolated
+        # into the script: a branch name is attacker-influenced text and `${{ }}`
+        # inside run: would splice it straight into the shell.
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          REPO: ${{ github.repository }}
+          EVENT: ${{ github.event_name }}
+          PR_NUMBER: ${{ github.event.issue.number }}
+          LABEL_REF: ${{ github.event.pull_request.head.ref }}
+          LABEL_SHA: ${{ github.event.pull_request.head.sha }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          DISPATCH_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          case "$EVENT" in
+            pull_request)
+              # The label event carries the PR head directly. Use the head
+              # commit, not the merge commit GitHub synthesises, so the deployed
+              # build is exactly what the PR contains.
+              ref="$LABEL_REF"; sha="$LABEL_SHA"
+              ;;
+            issue_comment)
+              # The comment carries no head info; deploy the PR as it stands now.
+              read -r ref sha < <(gh api "repos/$REPO/pulls/$PR_NUMBER" \
+                --jq '"\(.head.ref) \(.head.sha)"')
+              ;;
+            *)
+              ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              ;;
+          esac
+          {
+            echo "ref=$ref"
+            echo "sha=$sha"
+            echo "commit=${sha:0:7}"
+            echo "date=$(date -u +%Y-%m-%d)"
+            echo "tag=deploy-staging-$(printf '%s' "$ref" | tr '/' '-')"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying $ref @ ${sha:0:7} to staging"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ steps.target.outputs.sha }}
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Every variable and secret this environment exposes, delivered to the
+      # server as its env vars. Nothing to enumerate: add a secret in GitHub and
+      # the next deploy carries it.
+      - name: Collect delivered env
+        id: env
+        uses: ./.github/actions/collect-deploy-env
+        with:
+          exclude: ${{ vars.DEPLOY_ENV_EXCLUDE }}
+          secrets_json: ${{ toJSON(secrets) }}
+          vars_json: ${{ toJSON(vars) }}
+
+      - name: Build
+        id: build
+        env:
+          REF: ${{ steps.target.outputs.ref }}
+        run: |
+          set -euo pipefail
+          # The branch has to be passed in: the checkout is a detached HEAD at the
+          # PR's commit, so git here has no branch name to report.
+          VERSION=$(./scripts/version.sh staging "$REF")
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+          cd frontend && npm install && npm run build && cd ..
+          GOOS=linux GOARCH=amd64 go build \
+            -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
+            -o agent-orchestrator-linux-amd64 \
+            main.go
+
+      - name: Publish release asset
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          TAG: ${{ steps.target.outputs.tag }}
+          SHA: ${{ steps.target.outputs.sha }}
+        run: |
+          set -euo pipefail
+          # Rolling prerelease per branch: recreate so the asset always reflects
+          # the commit being deployed.
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          gh release create "$TAG" \
+            --prerelease \
+            --target "$SHA" \
+            --title "staging ${{ steps.target.outputs.ref }} @ ${{ steps.target.outputs.commit }}" \
+            --notes "Staging deploy build for ${{ steps.target.outputs.ref }} (${{ steps.target.outputs.commit }})." \
+            agent-orchestrator-linux-amd64
+          # The server pins the artifact by digest, so publish the digest of the
+          # exact bytes we uploaded. The asset API URL (not browser_download_url)
+          # serves the raw binary with a bearer token, covering a private repo.
+          {
+            echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
+            echo "asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
+              --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify staging server
+        env:
+          BASE: ${{ vars.DEPLOY_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
+          ENV_FILE: ${{ steps.env.outputs.env_file }}
+          ENV_SECRET_KEYS: ${{ steps.env.outputs.secret_keys_json }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "No DEPLOY_URL variable set on the 'Preview' environment."
+            exit 1
+          fi
+          # The payload carries the delivered configuration, so it goes through a
+          # 0600 file rather than an argv/variable: `curl -d "$payload"` would put
+          # secrets in this runner's process list.
+          payload_file="$RUNNER_TEMP/deploy-payload.json"
+          umask 077
+          jq -n \
+            --arg ref "${{ steps.target.outputs.ref }}" \
+            --arg commit "${{ steps.target.outputs.commit }}" \
+            --arg date "${{ steps.target.outputs.date }}" \
+            --arg url "${{ steps.publish.outputs.asset_url }}" \
+            --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            --arg version "${{ steps.build.outputs.version }}" \
+            --slurpfile env "$ENV_FILE" \
+            --argjson skeys "$ENV_SECRET_KEYS" \
+            '{event_type:"branch", ref:$ref, commit:$commit, build_date:$date,
+              version:$version, download_url:$url, sha256:$sha, target:"staging",
+              env:$env[0], env_secret_keys:$skeys}' > "$payload_file"
+          echo "Delivering env: ${{ steps.env.outputs.summary }}"
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Key: $DEPLOY_KEY" \
+            --data-binary "@$payload_file")
+          echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
+          # Names the server would not apply (PATH, LD_*, its own deploy config,
+          # ...). Expected when the environment holds secrets meant for other
+          # workflows, but they must be visible rather than vanishing.
+          skipped=$(jq -r '.env_skipped // [] | .[]' /tmp/resp 2>/dev/null || true)
+          if [ -n "$skipped" ]; then
+            echo "::warning::Server did not apply some delivered env vars:"
+            echo "$skipped" | while read -r line; do echo "  - $line"; done
+          fi
+          # The server handles the deploy synchronously: a download/digest/swap
+          # failure comes back as an HTTP error with the reason, and fails this
+          # job right here. A 202 means the binary is swapped and the server is
+          # restarting into it — confirm that completed by re-posting the same
+          # event until the NEW binary answers "already running this commit"
+          # (200). While the old process is still draining, the re-post gets 409
+          # (deploy in progress) or a connection error; both mean keep waiting.
+          # Response bodies contain only status/reason fields and env var NAMES
+          # (env_skipped) — values are never echoed back.
+          case "$code" in
+            200)
+              echo "notify ok (server acknowledged without redeploying)"
+              ;;
+            202)
+              echo "Deploy started; waiting for the server to come back on the new build..."
+              deadline=$(( $(date +%s) + 600 ))
+              confirmed=""
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                sleep 10
+                code2=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+                  -H "Content-Type: application/json" \
+                  -H "X-Deploy-Key: $DEPLOY_KEY" \
+                  --data-binary "@$payload_file" || echo 000)
+                if [ "$code2" = "200" ]; then
+                  confirmed=1
+                  echo "Server is up on the new build:"; cat /tmp/resp; echo
+                  break
+                fi
+                echo "  still deploying (HTTP $code2)"
+              done
+              if [ -z "$confirmed" ]; then
+                echo "::error::Deploy started but the server did not confirm the new build within 10 minutes."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Deploy failed on the server (HTTP $code); see response above."
+              exit 1
+              ;;
+          esac
+          rm -f "$payload_file" "$ENV_FILE"

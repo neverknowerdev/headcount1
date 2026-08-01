@@ -10,15 +10,17 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/authctx"
+	"agent-orchestrator/pkg/updater"
 
 	"gorm.io/gorm"
 )
 
 type API struct {
-	db     *gorm.DB
-	q      *db.Queries
-	engine engine.Engine
-	hub    *eventhub.Hub
+	db      *gorm.DB
+	q       *db.Queries
+	engine  engine.Engine
+	hub     *eventhub.Hub
+	updater *updater.Updater
 }
 
 func NewAPI(database *gorm.DB, eng engine.Engine, h *eventhub.Hub) *API {
@@ -28,6 +30,13 @@ func NewAPI(database *gorm.DB, eng engine.Engine, h *eventhub.Hub) *API {
 		engine: eng,
 		hub:    h,
 	}
+}
+
+// SetUpdater attaches the app-wide auto-updater to this API instance. Returns
+// the API so it can be chained onto NewAPI at the one call site that needs it.
+func (api *API) SetUpdater(upd *updater.Updater) *API {
+	api.updater = upd
+	return api
 }
 
 // currentUserID returns the authenticated user's ID from the request context

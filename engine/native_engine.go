@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"agent-orchestrator/db"
@@ -32,6 +33,17 @@ type NativeEngine struct {
 	hub          *eventhub.Hub
 	agentFactory agentconfig.Factory
 	cancelFuncs  sync.Map // runID -> context.CancelFunc
+
+	// draining and activeRoots back BeginDrain/WaitForActiveRuns: the
+	// graceful-shutdown path for an auto-update. draining, once set, stops
+	// processTask from starting new runs and asks every active ROOT run's
+	// agent loop to pause at its next safe turn boundary instead of
+	// continuing (see executeSession). Only root runs are tracked/paused —
+	// a run with an active delegation tree runs it to completion rather than
+	// attempting to pause child sessions, whose parent-child coordination
+	// (Go channels) cannot survive a process restart; see executeSession.
+	draining    atomic.Bool
+	activeRoots sync.WaitGroup
 }
 
 // NewNativeEngine creates a NativeEngine pre-loaded with the default agent
@@ -41,6 +53,33 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 		q:            db.New(database),
 		hub:          hub,
 		agentFactory: agentconfig.NewDefaultFactory(),
+	}
+}
+
+// BeginDrain flips the engine into drain mode for a graceful shutdown (e.g.
+// applying an auto-update): processTask stops starting new runs, and every
+// active root run is asked to pause at its next safe turn boundary — right
+// after its current in-flight LLM call returns — instead of continuing.
+// Idempotent; safe to call more than once.
+func (e *NativeEngine) BeginDrain() {
+	e.draining.Store(true)
+}
+
+// WaitForActiveRuns blocks until every active root run has either finished
+// normally or paused (see BeginDrain), or ctx's deadline passes — whichever
+// comes first. Runs still active when the deadline passes are abandoned (the
+// process is about to exit); they are recovered as ordinary crashed runs by
+// the existing stale-run cleanup on the next boot, exactly as an ungraceful
+// kill -9 would leave them today.
+func (e *NativeEngine) WaitForActiveRuns(ctx context.Context) {
+	done := make(chan struct{})
+	go func() {
+		e.activeRoots.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-ctx.Done():
 	}
 }
 
@@ -145,6 +184,15 @@ func (e *NativeEngine) RerunTask(ctx context.Context, taskID int32) error {
 }
 
 func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun bool) error {
+	// Draining for a graceful shutdown (see BeginDrain): refuse to start any
+	// new run. Existing runs already in flight are left to reach their own
+	// pause point; this task will be picked up again on the next boot, either
+	// via its resumed run or (once that completes) the next natural status
+	// transition.
+	if e.draining.Load() {
+		return nil
+	}
+
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
@@ -239,14 +287,60 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 
 // run is the goroutine body for a single root agent execution.
 func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
-	e.executeSession(ctx, task, mode, nil)
+	e.executeSession(ctx, task, mode, nil, nil)
+}
+
+// resumeSession re-enters a previously-paused root run using its persisted
+// conversation history instead of building a fresh one from the task. Only
+// root runs are ever paused (see BeginDrain/executeSession's pause wiring),
+// so this always passes parent = nil.
+func (e *NativeEngine) resumeSession(ctx context.Context, task db.Task, run db.Run) {
+	e.executeSession(ctx, task, "resume", nil, &run)
+}
+
+// ResumeInterruptedRuns re-enters every run left paused by a graceful
+// shutdown (see BeginDrain), picking up its conversation exactly where it
+// left off. Call once at boot, after the engine is constructed. A run whose
+// task/agent has since disappeared, or whose saved history fails to parse,
+// is marked failed and unlocked instead — the same fallback ordinary
+// stale-run recovery uses for a hard crash.
+func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
+	runs, err := e.q.GetInterruptedRuns(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to list interrupted runs: %v\n", err)
+		return
+	}
+	if len(runs) == 0 {
+		return
+	}
+	fmt.Printf("Resuming %d interrupted run(s) after restart...\n", len(runs))
+	for _, run := range runs {
+		task, taskErr := e.q.GetTask(ctx, run.TaskID)
+		if taskErr != nil {
+			fmt.Printf("Warning: could not resume run %d: task %d not found: %v\n", run.ID, run.TaskID, taskErr)
+			e.resolveStaleRun(ctx, run.ID)
+			continue
+		}
+		if resumeErr := e.q.ResumeRun(ctx, run.ID); resumeErr != nil {
+			fmt.Printf("Warning: failed to mark run %d as running for resume: %v\n", run.ID, resumeErr)
+			continue
+		}
+		go e.resumeSession(context.Background(), task, run)
+	}
 }
 
 // executeSession runs one agent session for a task and returns its final run
-// status ("completed", "failed" or "canceled"). Root sessions (parent == nil)
-// run detached from the caller's context; delegated child sessions inherit the
-// parent's run context so stopping the parent stops the whole tree.
-func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession) string {
+// status ("completed", "failed", "canceled" or "interrupted"). Root sessions
+// (parent == nil) run detached from the caller's context; delegated child
+// sessions inherit the parent's run context so stopping the parent stops the
+// whole tree.
+//
+// resumeRun, when non-nil, re-enters a previously paused root run instead of
+// starting a fresh one: its persisted conversation (PausedHistory) seeds the
+// agent loop in place of a freshly built initial message list, and the
+// existing Run row is reused rather than creating a new one. Only root runs
+// are ever resumed — see the pause-signal wiring below.
+func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run) string {
 	if task.AgentID == nil {
 		return "failed"
 	}
@@ -263,30 +357,45 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	newRun := db.Run{
-		TaskID:          task.ID,
-		AgentID:         agent.ID,
-		Status:          "running",
-		StartedAt:       time.Now(),
-		AgentConfigName: task.AgentConfigName,
-	}
-	if parent != nil {
-		parentID := parent.parentRunID
-		rootID := parent.rootRunID
-		newRun.ParentRunID = &parentID
-		newRun.RootRunID = &rootID
-	}
-	run, err := e.q.CreateRun(ctx, newRun)
-	if err != nil {
-		return "failed"
-	}
-	if parent == nil {
-		// Root runs point at themselves so the whole tree shares one root id.
-		rootID := run.ID
-		run.RootRunID = &rootID
-		if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
-			fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
+	var run db.Run
+	if resumeRun != nil {
+		run = *resumeRun
+	} else {
+		newRun := db.Run{
+			TaskID:          task.ID,
+			AgentID:         agent.ID,
+			Status:          "running",
+			StartedAt:       time.Now(),
+			AgentConfigName: task.AgentConfigName,
 		}
+		if parent != nil {
+			parentID := parent.parentRunID
+			rootID := parent.rootRunID
+			newRun.ParentRunID = &parentID
+			newRun.RootRunID = &rootID
+		}
+		created, createErr := e.q.CreateRun(ctx, newRun)
+		if createErr != nil {
+			return "failed"
+		}
+		run = created
+		if parent == nil {
+			// Root runs point at themselves so the whole tree shares one root id.
+			rootID := run.ID
+			run.RootRunID = &rootID
+			if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
+				fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
+			}
+		}
+	}
+
+	// Track active root runs so a graceful shutdown (BeginDrain +
+	// WaitForActiveRuns) knows when it's safe to proceed. A root run's
+	// goroutine only returns once its whole delegation tree (if any) has
+	// finished, so tracking roots alone covers entire trees.
+	if parent == nil {
+		e.activeRoots.Add(1)
+		defer e.activeRoots.Done()
 	}
 
 	// Register the cancel func and lock the task immediately so that
@@ -305,10 +414,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.cancelFuncs.Delete(run.ID)
 	}()
 
+	// LockTaskRun is a conditional UPDATE (WHERE run_id IS NULL): for a fresh
+	// run it claims the task; for a resumed run the task is already locked to
+	// this same run ID (pausing never unlocks it — see the paused branch
+	// below), so this is a harmless no-op that leaves the existing lock as-is.
 	if lockErr := e.q.LockTaskRun(ctx, task.ID, run.ID); lockErr != nil {
 		fmt.Printf("Warning: failed to lock task %d for run %d: %v\n", task.ID, run.ID, lockErr)
 	}
+	// paused is set just before returning if this session stops via
+	// aicli.ErrPaused. In that case the task must stay locked to this run (no
+	// other run may start on it) until ResumeInterruptedRuns picks it back up
+	// after the restart, so the unlock below is skipped.
+	paused := false
 	defer func() {
+		if paused {
+			return
+		}
 		if clearErr := e.q.UnlockTaskRun(context.Background(), task.ID); clearErr != nil {
 			fmt.Printf("Warning: failed to unlock task %d: %v\n", task.ID, clearErr)
 		}
@@ -319,6 +440,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		parent.onRunCreated(run)
 	}
 
+	// A resumed run re-enters "running", so it reuses the same run_started
+	// event a fresh run emits: the Run Logs UI re-fetches the list on it (the
+	// run reappears as active) and no consumer has to learn a new event type.
 	e.hub.BroadcastEventForCompany(task.CompanyID, "run_started", run)
 
 	company, compErr := e.q.GetCompany(ctx, task.CompanyID)
@@ -362,24 +486,28 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
-	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2".
-	shortName := agentconfig.DeriveShortName(agent.Name)
-	if agentCfg != nil {
-		shortName = agentCfg.EffectiveShortName()
-	}
-	taskRef := task.RefKey
-	if taskRef == "" {
-		taskRef = fmt.Sprintf("TASK-%d", task.ID)
-	}
-	runKey := taskRef + "-" + shortName
-	// prior = earlier runs with this key (this run's name is still empty, so
-	// it is not counted). The second run becomes "<key>-2", and so on.
-	if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
-		runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
-	}
-	run.Name = runKey
-	if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
-		fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
+	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". A resumed run already has its name
+	// from before it paused — recomputing would double-count it against
+	// CountRunsByNameKey (its own row now matches the key) and rename it.
+	if resumeRun == nil {
+		shortName := agentconfig.DeriveShortName(agent.Name)
+		if agentCfg != nil {
+			shortName = agentCfg.EffectiveShortName()
+		}
+		taskRef := task.RefKey
+		if taskRef == "" {
+			taskRef = fmt.Sprintf("TASK-%d", task.ID)
+		}
+		runKey := taskRef + "-" + shortName
+		// prior = earlier runs with this key (this run's name is still empty, so
+		// it is not counted). The second run becomes "<key>-2", and so on.
+		if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
+			runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
+		}
+		run.Name = runKey
+		if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
+			fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
+		}
 	}
 
 	// Workspace layout:
@@ -892,7 +1020,51 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
 	}
 
-	_, agentErr := aiAgent.RunWithMessages(runCtx, systemPrompt, initialMessages)
+	// Seed the loop's history: a resumed run continues from its persisted
+	// conversation (captured mid-turn by a prior pause — see below); a fresh
+	// run starts from the system prompt + task-derived initial messages.
+	seedHistory := aicli.BuildHistory(systemPrompt, initialMessages)
+	if resumeRun != nil {
+		if uErr := json.Unmarshal([]byte(resumeRun.PausedHistory), &seedHistory); uErr != nil {
+			e.failRun(ctx, run.ID, fmt.Sprintf("failed to resume run: could not parse saved conversation: %v", uErr))
+			return "failed"
+		}
+		e.logInfo(proxyLogger, fmt.Sprintf("Resuming interrupted run %d (%d saved messages)", run.ID, len(seedHistory)))
+	}
+
+	// Only root sessions ever pause: a session with an active delegation tree
+	// (parent != nil, or a root session currently blocked inside a delegating
+	// tool call) is left to run to completion rather than attempting to pause
+	// mid-delegation — the parent/child coordination channels in
+	// waitForSubtaskEvent cannot survive a process restart. Since the pause
+	// check only fires between a session's OWN turns (never while blocked
+	// inside a tool call), a root session currently waiting on a child is
+	// naturally not interrupted by draining; it only gets a chance to pause
+	// once that delegation returns and it starts its next turn.
+	var pauseFn aicli.PauseRequested
+	if parent == nil {
+		pauseFn = e.draining.Load
+	}
+
+	_, resultHistory, agentErr := aiAgent.RunWithHistory(runCtx, seedHistory, pauseFn)
+
+	if agentErr != nil && errors.Is(agentErr, aicli.ErrPaused) {
+		historyJSON, mErr := json.Marshal(resultHistory)
+		if mErr != nil {
+			// Can't persist the conversation — pausing would silently lose it,
+			// so fail the run instead of pretending it can be resumed.
+			e.logError(proxyLogger, fmt.Sprintf("failed to serialize paused run history: %v — failing the run instead", mErr))
+			e.failRun(ctx, run.ID, fmt.Sprintf("update pause failed: could not serialize conversation: %v", mErr))
+			return "failed"
+		}
+		if pErr := e.q.PauseRun(context.Background(), run.ID, string(historyJSON)); pErr != nil {
+			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
+		}
+		e.logInfo(proxyLogger, "Run paused for server update — will resume automatically after restart")
+		e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "interrupted"})
+		paused = true
+		return "interrupted"
+	}
 
 	status := "completed"
 	var runErrMsg string
@@ -1228,7 +1400,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 		// Run the child session in a goroutine so this call can also react to
 		// ask_task_owner questions while the session is still in flight.
 		go func() {
-			status := e.executeSession(callCtx, subtask, "implement", session)
+			status := e.executeSession(callCtx, subtask, "implement", session, nil)
 			select {
 			case state.eventCh <- subtaskEvent{status: status, done: true}:
 			case <-callCtx.Done():

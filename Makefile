@@ -1,5 +1,11 @@
 .PHONY: build dev setup e2e run run-dev
 
+VERSION := $(shell ./scripts/version.sh 2>/dev/null || echo "dev")
+COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+DATE   := $(shell date -u +%Y-%m-%d)
+BRANCH := $(shell git rev-parse --abbrev-ref HEAD 2>/dev/null || echo "main")
+LDFLAGS := -X main.Version=$(VERSION) -X main.CommitHash=$(COMMIT) -X main.BuildDate=$(DATE) -X main.Branch=$(BRANCH)
+
 setup:
 	cd frontend && npm install
 
@@ -7,7 +13,7 @@ build-frontend:
 	cd frontend && npm run build
 
 build: setup build-frontend
-	go build -o agent-orchestrator main.go
+	go build -ldflags "$(LDFLAGS)" -o agent-orchestrator main.go
 
 run: build-frontend
 	go run .
