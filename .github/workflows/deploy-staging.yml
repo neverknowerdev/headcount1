@@ -48,6 +48,11 @@ on:
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to deploy to staging
+        required: true
+        type: string
 
 concurrency:
   # A newer request for the same PR/branch supersedes an in-flight one.
@@ -114,8 +119,7 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
           LABEL_REF: ${{ github.event.pull_request.head.ref }}
           LABEL_SHA: ${{ github.event.pull_request.head.sha }}
-          DISPATCH_REF: ${{ github.ref_name }}
-          DISPATCH_SHA: ${{ github.sha }}
+          DISPATCH_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -131,7 +135,12 @@ jobs:
                 --jq '"\(.head.ref) \(.head.sha)"')
               ;;
             *)
-              ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              # A manual dispatch runs the trusted default-branch workflow,
+              # but deploys the explicit requested ref after resolving it via
+              # the GitHub API. This keeps the release builder itself pinned
+              # to the reviewed workflow (including its target architecture).
+              ref="$DISPATCH_REF"
+              sha="$(gh api "repos/$REPO/commits/$ref" --jq .sha)"
               ;;
           esac
           {
