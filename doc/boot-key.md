@@ -16,21 +16,27 @@ key and writes it to `${HEADCOUNT1_HOME}/keyring.sealed`. On the next boot it
 reads that file, unseals it with the boot key, restores the keyring, and deletes
 the file. Net effect: a seamless deploy/restart with no passkey re-tap.
 
-Without a boot key configured, none of that happens — the seal on shutdown and
-the restore on boot are both skipped — so every restart requires a re-tap. That
-is the safe default: a machine with no external key material must not be able to
-silently reopen users' vaults.
+Without a boot key, none of that happens — the seal on shutdown and the restore
+on boot are both skipped — so every restart requires a re-tap.
 
 The boot key is selected in this order:
 
 1. `VAULT_ADDR` set → HashiCorp Vault **Transit** (the recommended production path — the key never lives on the box).
 2. `HEADCOUNT1_BOOT_KEY` set → an env-provided AES-256 key: 64 hex chars, or any passphrase (stretched with Argon2id). Persistent and externally managed.
-3. else `HEADCOUNT1_LOCAL_BOOTKEY=1` → a **self-managed local key** (see below) — zero-config, for a single-user/dev box.
-4. none of the above → no boot key; every restart requires a re-tap.
+3. **default** → a **self-managed local key** (see below): zero-config, generated per boot, on disk only while the server is stopped.
+4. `HEADCOUNT1_LOCAL_BOOTKEY=0` (or `false`/`no`/`off`) → no boot key at all; every restart requires a re-tap.
 
-### Self-managed local key (`HEADCOUNT1_LOCAL_BOOTKEY=1`)
+**Why 3 is the default.** A deploy is a graceful restart, and a graceful restart
+is supposed to come back with everyone still unlocked. Making that depend on an
+env var nobody had set meant the feature was silently off on every box that
+hadn't opted in — including staging. Option 4 keeps the strictest posture (never
+any key material on disk, a re-tap after every restart) for a deployment that
+wants it, and options 1–2 keep the key off the box entirely while still
+re-warming.
 
-For a local/dev box you usually don't want to manage a persistent key at all. In
+### Self-managed local key (the default; disable with `HEADCOUNT1_LOCAL_BOOTKEY=0`)
+
+Usually you don't want to manage a persistent key at all. In
 this mode the server generates a **random boot key held only in memory** and
 writes it to `${HEADCOUNT1_HOME}/keyring.bootkey` **only at graceful shutdown** —
 right next to the `keyring.sealed` snapshot it seals. The next startup reads the
@@ -38,11 +44,12 @@ key, restores the keyring, and **deletes both files**. So, just like the
 snapshot, no boot-key material sits on disk while the server is running; the two
 files exist only during the window between a graceful stop and the next start.
 
-The trade-off is deliberate and is exactly why this mode is **local/dev only**:
-during that offline window the key and the ciphertext are on disk *together*, so
-anyone who can read the disk then can decrypt the snapshot. An external boot key
-(options 1–2) avoids that — the key is never on the box, so the at-rest snapshot
-is useless on its own. Use `scripts/run.sh`, which enables this mode by default.
+The trade-off is deliberate: during that offline window the key and the
+ciphertext are on disk *together*, so anyone who can read the disk **then** can
+decrypt the snapshot. An external boot key (options 1–2) avoids that — the key is
+never on the box, so the at-rest snapshot is useless on its own — and is still
+what a production host should use. While the server is running, this mode leaves
+nothing on disk either way.
 
 ---
 
@@ -78,10 +85,10 @@ snapshot and nothing else:
 
 | | **Boot key** |
 | --- | --- |
-| Env / source | `HEADCOUNT1_BOOT_KEY`, `HEADCOUNT1_LOCAL_BOOTKEY=1`, or Vault Transit |
+| Env / source | Vault Transit, `HEADCOUNT1_BOOT_KEY`, or the self-managed local key (default) |
 | Protects | the **transient** `keyring.sealed` restart snapshot only |
 | If lost / changed | users **re-tap once**; **no data loss** |
-| Default when unset | none — restarts require a re-tap |
+| Default when unset | self-managed local key — restarts re-warm; `HEADCOUNT1_LOCAL_BOOTKEY=0` opts out |
 
 Rule of thumb: **treat the boot key as an availability convenience you can rotate
 freely — there is nothing else to guard, because no server-held key can open a
@@ -117,11 +124,11 @@ you keep it:
 - **Production**: inject it at boot from a secrets manager / KMS, or use Vault
   Transit (`VAULT_ADDR`) so the key never touches the box. Do **not** write it
   to a file next to the data.
-- **Local dev**: `scripts/run.sh` enables the self-managed local key
-  (`HEADCOUNT1_LOCAL_BOOTKEY=1`), which keeps the key in memory and puts it on
-  disk only during the stopped window (see above). That's fine for a single-user
-  dev box but deliberately weakens the guarantee against disk theft *while the
-  server is stopped* — don't use it on a shared/production host.
+- **Everywhere else (the default)**: the self-managed local key keeps the key in
+  memory and puts it on disk only during the stopped window (see above). It
+  deliberately weakens the guarantee against disk theft *while the server is
+  stopped*, which is why a production host should still inject an external key —
+  but it never leaves key material on disk while the server runs.
 
 **On `0600` and "who can read it".** `0600` restricts by *UID*, not by process:
 another user can't read it and neither can the agent under a dedicated sandbox
@@ -161,8 +168,25 @@ export HEADCOUNT1_BOOT_KEY=$(openssl rand -hex 32)
 make run
 ```
 
-On a successful restore you'll see, at startup:
+## Reading the logs
+
+Every boot says which branch of the above it took, so a surprise re-tap can be
+diagnosed from the log alone:
 
 ```
 Restored N unlocked vault(s) from graceful-exit snapshot (boot key: local:self-managed (…/keyring.bootkey))
+Boot key: <backend> — no graceful-exit keyring snapshot to restore (previous exit was not graceful, or nobody was unlocked).
+Boot key: none — the keyring is not sealed on shutdown, so every restart requires a passkey re-tap. (…)
 ```
+
+and every shutdown says whether it left anything for the next boot:
+
+```
+Sealed N unlocked vault(s) for the next start (boot key: …).
+Nothing to seal on shutdown: no vault is unlocked (boot key: …).
+Boot key: none — not sealing the keyring; …
+```
+
+The same state is on `GET /api/deploy/status` as `boot_key`
+(`{backend, snapshot_found, restored_vaults}`), for an operator with the global
+admin API enabled.

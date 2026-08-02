@@ -6,8 +6,12 @@
 //     self-hosted.
 //   - env key (HEADCOUNT1_BOOT_KEY): an AES key injected at boot, never
 //     persisted. Simplest; the operator's choice for a locked-down single box.
-//   - none: no boot key → no graceful-exit re-warm; every restart (planned or
-//     not) requires a passkey re-tap. Fully zero-knowledge.
+//   - self-managed local key (the default when neither of the above is set, see
+//     LocalBootKey): a random key held in memory and put on disk only for the
+//     window between a graceful stop and the next start.
+//   - none (HEADCOUNT1_LOCAL_BOOTKEY=0): no boot key → no graceful-exit re-warm;
+//     every restart (planned or not) requires a passkey re-tap. Fully
+//     zero-knowledge.
 //
 // Cloud KMS (AWS/GCP/Azure) plug in behind the same interface; add a backend
 // file implementing Seal/Unseal via the provider SDK and wire it into FromEnv.
@@ -45,15 +49,22 @@ func FromEnv() secrets.KeyUnwrapper {
 
 // ── self-managed local boot key ──────────────────────────────────────────────
 
-// LocalBootKeyEnabled reports the HEADCOUNT1_LOCAL_BOOTKEY opt-in for the
-// self-managed local boot key (see LocalBootKey). Only consulted when no
-// external boot key (Vault / HEADCOUNT1_BOOT_KEY) is configured.
+// LocalBootKeyEnabled reports whether the self-managed local boot key (see
+// LocalBootKey) may be used. Only consulted when no external boot key (Vault /
+// HEADCOUNT1_BOOT_KEY) is configured.
+//
+// It is ON by default: a graceful restart — which is what every deploy does —
+// is expected to come back with active vaults still unlocked, and requiring an
+// env var to be set on every box for that turned "seamless deploys" into a
+// silent no-op wherever nobody had set one. HEADCOUNT1_LOCAL_BOOTKEY=0 (or
+// false/no/off) opts out, for a deployment that wants the strictest posture:
+// nothing whatsoever on disk, and a passkey re-tap after every restart.
 func LocalBootKeyEnabled() bool {
 	switch strings.ToLower(strings.TrimSpace(os.Getenv("HEADCOUNT1_LOCAL_BOOTKEY"))) {
-	case "1", "true", "yes", "on":
-		return true
+	case "0", "false", "no", "off":
+		return false
 	}
-	return false
+	return true
 }
 
 // LocalBootKey is a zero-config boot key for a single-user/local box. Unlike an
@@ -64,9 +75,10 @@ func LocalBootKeyEnabled() bool {
 //
 // The trade-off it makes explicit: during the offline window between a graceful
 // stop and the next start, the key file and the snapshot are on disk together,
-// so anyone who reads the disk in that window can decrypt the snapshot. That's
-// fine for local dev but is why production should use an external boot key
-// (kept off the box) instead — set HEADCOUNT1_BOOT_KEY or VAULT_ADDR.
+// so anyone who reads the disk in that window can decrypt the snapshot. That is
+// why it is only the fallback: an external boot key (HEADCOUNT1_BOOT_KEY or
+// VAULT_ADDR) is never on the box at all and wins when configured, and
+// HEADCOUNT1_LOCAL_BOOTKEY=0 turns the fallback off entirely.
 type LocalBootKey struct {
 	*envUnwrapper
 	hexKey string

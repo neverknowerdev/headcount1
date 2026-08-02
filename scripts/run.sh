@@ -5,11 +5,12 @@
 # instead of asking each user to re-tap their passkey — WITHOUT leaving any key
 # material on disk while the server runs.
 #
-# It sets HEADCOUNT1_LOCAL_BOOTKEY=1, which makes the server hold a random boot
-# key in memory and write it to disk (${HEADCOUNT1_HOME}/keyring.bootkey) ONLY at
-# graceful shutdown, next to the keyring snapshot it seals — then consume and
-# delete both at the next startup. Nothing persists on disk during runtime.
-# Local/dev only; production uses an external boot key (see doc/boot-key.md).
+# That self-managed local boot key is the server's default when no external key
+# is configured: a random boot key held in memory, written to disk
+# (${HEADCOUNT1_HOME}/keyring.bootkey) ONLY at graceful shutdown, next to the
+# keyring snapshot it seals — then consumed and deleted at the next startup.
+# Nothing persists on disk during runtime. Production can do better still with an
+# external key that never touches the box (see doc/boot-key.md).
 #
 # Usage:
 #   scripts/run.sh [--build] [--port N] [--no-boot-key]
@@ -54,14 +55,16 @@ if [ -n "${VAULT_ADDR:-}" ]; then
 elif [ -n "${HEADCOUNT1_BOOT_KEY:-}" ]; then
 	echo "→ Boot key: external HEADCOUNT1_BOOT_KEY (already set). Seamless restarts enabled."
 elif [ "$NO_BOOT_KEY" = 1 ]; then
-	unset HEADCOUNT1_LOCAL_BOOTKEY || true
+	# Explicitly 0: unsetting it no longer disables anything, the local key is
+	# the server's default.
+	export HEADCOUNT1_LOCAL_BOOTKEY=0
 	echo "→ Boot key: DISABLED (--no-boot-key). A restart will require each active user to re-tap their passkey."
 else
 	export HEADCOUNT1_LOCAL_BOOTKEY=1
 	echo "→ Boot key: self-managed local key (HEADCOUNT1_LOCAL_BOOTKEY=1)."
 	echo "  The key lives only in memory; it's written to $DATA_DIR/keyring.bootkey"
 	echo "  ONLY at graceful shutdown and consumed+deleted at the next startup —"
-	echo "  nothing on disk while running. Local/dev only (see doc/boot-key.md)."
+	echo "  nothing on disk while running (see doc/boot-key.md)."
 fi
 
 # ── port ──────────────────────────────────────────────────────────────────────
