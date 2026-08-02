@@ -13,6 +13,7 @@ import { ProvidersManager } from './pages/ProvidersManager';
 import { SprintsManager } from './pages/SprintsManager';
 import { SkillsManager } from './pages/SkillsManager';
 import { MCPServers } from './pages/MCPServers';
+import { Environments } from './pages/Environments';
 import { Settings } from './pages/Settings';
 import { Backup } from './pages/Backup';
 import { AddCompany } from './pages/AddCompany';
@@ -40,6 +41,7 @@ function App() {
             <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
             <Route path="/companies/:shortName/skills" element={<SkillsManager />} />
             <Route path="/companies/:shortName/mcp-servers" element={<MCPServers />} />
+            <Route path="/companies/:shortName/environments" element={<Environments />} />
             <Route path="/companies/:shortName/runs" element={<RunLogs />} />
             <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
             <Route path="/companies/:shortName/settings" element={<Settings />} />

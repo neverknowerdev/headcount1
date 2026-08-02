@@ -33,6 +33,10 @@ type childConfig struct {
 	// protectedReadDirs without the operator turning on full read-scoping.
 	// Ignored when ReadScoping is true (that path has its own curated roots).
 	ReadRoots []string `json:"rr"`
+	// ReadFiles are the non-directory entries from that same enumeration
+	// (e.g. /swapfile, /initrd.img). They must be granted file access rights:
+	// Landlock rejects a rule that puts directory rights on a regular file.
+	ReadFiles []string `json:"rf"`
 }
 
 // readScopeRoots are the system directories a toolchain needs to read. It
@@ -150,12 +154,12 @@ func sandboxedCommand(ctx context.Context, workspacePath, command string, readOn
 	// runs here (server uid), which can always list the excluded paths.
 	if !h.readScoping {
 		if hd := hiddenDirs(); len(hd) > 0 {
-			cfg.ReadRoots = readRootsExcluding(hd)
+			cfg.ReadRoots, cfg.ReadFiles = readRootsExcluding(hd)
 		}
 	}
 	// Pass the config whenever it carries anything the child can't recompute on
 	// its own: extra hardening, or the secret-excluding read allowlist.
-	if h.active() || len(cfg.ReadRoots) > 0 {
+	if h.active() || len(cfg.ReadRoots) > 0 || len(cfg.ReadFiles) > 0 {
 		if blob, err := json.Marshal(cfg); err == nil {
 			args = append(args, base64.StdEncoding.EncodeToString(blob))
 		}
@@ -248,7 +252,7 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 		// readable via the RW grants above.
 		roots := append(append([]string{}, readScopeRoots...), cfg.ReadOnlyDirs...)
 		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
-	case len(cfg.ReadRoots) > 0:
+	case len(cfg.ReadRoots) > 0 || len(cfg.ReadFiles) > 0:
 		// Read the whole filesystem EXCEPT the headcount1 data root (the parent
 		// granted "/" minus that subtree), then re-grant the task's own dirs
 		// that live inside it: the read-only dirs here, plus the workspace via
@@ -256,6 +260,12 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 		// but the only data-root paths the agent can read are its own task's.
 		roots := append(append([]string{}, cfg.ReadRoots...), cfg.ReadOnlyDirs...)
 		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
+		// Regular files caught by that enumeration need file access rights:
+		// directory rights on a regular file is EINVAL, which would fail the
+		// whole ruleset and break every command (see readRootsExcluding).
+		if len(cfg.ReadFiles) > 0 {
+			rules = append(rules, landlock.ROFiles(cfg.ReadFiles...).IgnoreIfMissing())
+		}
 	default:
 		rules = append(rules, landlock.RODirs("/"))
 	}
@@ -272,7 +282,22 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 // that branch — fail closed (the tool loses read access there) rather than leak
 // the secret. Returns nil when nothing valid remains, so the caller falls back
 // to granting "/".
-func readRootsExcluding(excludes []string) []string {
+// Entries are returned split by type: dirs get directory access rights,
+// regular files get file access rights. Mixing them up is not cosmetic —
+// Landlock rejects a rule that applies directory rights to a regular file
+// (EINVAL, "inconsistent access rights"), and one bad rule fails the whole
+// ruleset, so every sandboxed command would exit 125. Hosts commonly do have
+// regular files directly under "/": /swapfile on GitHub Actions runners,
+// /initrd.img and /vmlinuz on Debian/Ubuntu.
+func readRootsExcluding(excludes []string) (dirs, files []string) {
+	return readRootsExcludingFrom("/", excludes)
+}
+
+// readRootsExcludingFrom is readRootsExcluding rooted at an arbitrary
+// directory, so the classification can be tested without depending on what
+// the host happens to have at "/".
+func readRootsExcludingFrom(root string, excludes []string) (dirs, files []string) {
+	root = filepath.Clean(root)
 	blocked := map[string]bool{}   // exact paths to never grant (the secrets)
 	ancestors := map[string]bool{} // dirs we must descend into, not grant whole
 	for _, e := range excludes {
@@ -280,7 +305,7 @@ func readRootsExcluding(excludes []string) []string {
 			continue
 		}
 		e = filepath.Clean(e)
-		if e == "/" || e == "." {
+		if e == "/" || e == "." || e == root {
 			continue // refuse to hide the whole root
 		}
 		blocked[e] = true
@@ -292,10 +317,9 @@ func readRootsExcluding(excludes []string) []string {
 		}
 	}
 	if len(blocked) == 0 {
-		return nil
+		return nil, nil
 	}
 
-	var roots []string
 	var walk func(dir string)
 	walk = func(dir string) {
 		entries, err := os.ReadDir(dir)
@@ -310,10 +334,23 @@ func readRootsExcluding(excludes []string) []string {
 			case ancestors[p]:
 				walk(p) // a secret lives deeper in here — descend, don't grant whole
 			default:
-				roots = append(roots, p)
+				// Stat (not the dirent type) so a symlink is classified by what
+				// it resolves to — Landlock resolves the path the same way. A
+				// path that can't be resolved (broken symlink, no permission)
+				// is granted nothing: it would contribute no usable access
+				// anyway, and skipping keeps the ruleset valid.
+				fi, err := os.Stat(p)
+				if err != nil {
+					continue
+				}
+				if fi.IsDir() {
+					dirs = append(dirs, p)
+				} else {
+					files = append(files, p)
+				}
 			}
 		}
 	}
-	walk("/")
-	return roots
+	walk(root)
+	return dirs, files
 }

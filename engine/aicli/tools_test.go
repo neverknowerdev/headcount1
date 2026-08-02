@@ -3,12 +3,14 @@ package aicli_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 
 	"agent-orchestrator/engine/aicli"
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 type listingStubTool struct {
@@ -59,4 +61,45 @@ func TestRegistry_PromptListing(t *testing.T) {
 	// Long sentence-less descriptions are capped.
 	assert.Contains(t, listing, strings.Repeat("x", 140)+"…")
 	assert.NotContains(t, listing, strings.Repeat("x", 141))
+}
+
+type secretStubTool struct {
+	name   string
+	output string
+	err    error
+}
+
+func (t *secretStubTool) Def() aicli.ToolDef {
+	return aicli.ToolDef{
+		Type: "function",
+		Function: aicli.FuncMeta{
+			Name:       t.name,
+			Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
+		},
+	}
+}
+
+func (t *secretStubTool) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	return t.output, t.err
+}
+
+// TestRegistry_Execute_ScrubsSecrets: a tool whose output contains a
+// registered secret (e.g. bash cat-ing a .env) must not be able to place
+// that secret into the message history handed back to the agent loop.
+func TestRegistry_Execute_ScrubsSecrets(t *testing.T) {
+	const secret = "sk-exectest-supersecret-98765432"
+	redact.Register("exec-test", secret)
+
+	reg := aicli.NewRegistry()
+	reg.Register(&secretStubTool{name: "leaky", output: "API key is " + secret})
+	reg.Register(&secretStubTool{name: "failing", err: errors.New("dial with key " + secret + " refused")})
+
+	out, err := reg.Execute(context.Background(), "leaky", nil)
+	assert.NoError(t, err)
+	assert.NotContains(t, out, secret)
+	assert.Contains(t, out, "[REDACTED:exec-test]")
+
+	_, err = reg.Execute(context.Background(), "failing", nil)
+	assert.Error(t, err)
+	assert.NotContains(t, err.Error(), secret)
 }

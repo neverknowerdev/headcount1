@@ -56,6 +56,23 @@ The design is deliberately **zero-knowledge**: a user's DEK exists only in an **
 
 Because DEKs live only in memory, a plain restart would force every active user to re-tap their passkey. An optional **boot key** seals the in-memory keyring on a graceful shutdown and restores it on the next boot, avoiding the re-tap — it protects only that transient restart snapshot and never decrypts secrets at rest. It's off by default (safe); `make run-dev` and `scripts/run.sh` enable a zero-config local boot key. See [`doc/boot-key.md`](doc/boot-key.md).
 
+### Environments — secrets agents can use but never see
+
+Every company has the built-in **`headcount1 cloud`** platform environment. Tasks always run in it, and its entries are injected into the agent's shell as **env vars**: the agent writes `curl -H "Authorization: Bearer $API_KEY"` and it just works. But the agent can never *see* a secret value — expansion happens inside the child process only, and every echo (`echo $API_KEY`, `env`, error text) is redacted before it reaches the LLM or any log. Values are sealed with the owner's passkey-unlocked key like all other secrets. This environment also lists the platform-managed credentials (provider API keys, MCP tokens, git SSH key) as a separate read-only group — those are used server-side by reference and are never injected into the agent's shell either.
+
+### Deploy environments — Vercel & GitHub env-var sync
+
+Each **project** can have deploy environments (e.g. `production`, `preview`; managed in the project's settings; none by default). An environment holds **variables** and **secrets** — both encrypted at rest under the owner's passkey key; the API is write-only (names and `has_value` only come back out). Connect an environment to a deploy target — a **Vercel** project environment or a **GitHub** repository environment — by pasting a personal API token (sealed like every secret) and picking the project/repo + environment from a live listing. From then on every entry change (and "Sync now") is **pushed** to the target, so the next deployment there picks up current values:
+
+- **Vercel**: variables become `plain` env vars, secrets become `sensitive` (write-only) ones — `encrypted` on the development target, which rejects sensitive vars.
+- **GitHub**: variables become environment *variables*, secrets become environment *secrets*, sealed client-side with libsodium `crypto_box_seal` against the environment public key — GitHub never sees the plaintext in a readable form.
+
+Sync is deliberately **push-only** for values: GitHub secrets and Vercel sensitive vars cannot be read back from the target, so this system stays the source of truth. The UI does, however, pull the target's entry **names** live on every open: entries that exist on the target but not here are shown name-only with an "on target only" badge — their values can never be displayed, but setting a value locally takes them under management and overwrites the target on the next push. Per-connector sync status (last push, error) is shown in the UI. Deploy-environment entries are **never** injected into agent shells — only `headcount1 cloud` feeds task runs.
+
+### Secrets never enter LLM message history
+
+Decrypted secrets are kept out of the conversation sent to LLM providers and out of every persisted copy of it. Each secret the server decrypts (and each gateway run token it mints) is registered with a redaction registry (`pkg/secrets/redact`); tool outputs are scrubbed **before** they enter the agent's message history, and every run-log sink — the JSONL trajectory files, the `runs.log_entries` column, and the live WebSocket stream — scrubs again on write. Registered values are caught in raw, base64, URL-escaped, and JSON-escaped forms, and high-precision patterns additionally redact secrets the server never saw (PEM private keys, well-known API-token shapes, `Authorization` headers, passwords in connection URLs, `.env`-style assignments an agent might read from a workspace).
+
 ### Hardening the agent sandbox
 
 The agent's shell tool runs as the server's user by default and can read the server's at-rest files. For shared/multi-tenant hosts, run the agent under a dedicated uid and/or hide the data directory from it — see [`doc/sandbox-hardening.md`](doc/sandbox-hardening.md).

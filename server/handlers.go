@@ -172,8 +172,27 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadCompany)
 			r.Put("/", api.UpdateCompany)
 			r.With(api.RequireTeamOwner).Delete("/", api.DeleteCompany)
+			// Environments: named secret sets for the company's task runs.
+			r.Get("/environments", api.ListEnvironments)
+			r.Post("/environments", api.CreateEnvironment)
 		})
 	})
+
+	r.Route("/environments/{envID}", func(r chi.Router) {
+		r.Put("/", api.UpdateEnvironment)
+		r.Delete("/", api.DeleteEnvironment)
+		r.Put("/secrets", api.UpsertEnvironmentSecret)
+		r.Delete("/secrets/{name}", api.DeleteEnvironmentSecret)
+		// Deploy-target connectors + push sync.
+		r.Post("/connectors", api.CreateEnvironmentConnector)
+		r.Post("/sync", api.SyncEnvironment)
+		// Live view of what's on the connected targets (names only).
+		r.Get("/remote-entries", api.ListRemoteEntries)
+	})
+	r.Delete("/connectors/{connectorID}", api.DeleteEnvironmentConnector)
+	// Connector setup wizard: what can this token reach? (Token travels in
+	// the body once; never stored, never echoed.)
+	r.Post("/connector-discovery", api.DiscoverConnectorTargets)
 
 	r.Route("/team", func(r chi.Router) {
 		r.Get("/", api.GetTeam)
@@ -212,6 +231,9 @@ func (s *Server) Mount(r chi.Router) {
 			r.Get("/", api.GetProject)
 			r.Put("/", api.UpdateProject)
 			r.Get("/codegraph", api.GetProjectCodegraph)
+			// Deploy environments (secrets + variables + connectors).
+			r.Get("/environments", api.ListProjectEnvironments)
+			r.Post("/environments", api.CreateProjectEnvironment)
 		})
 	})
 

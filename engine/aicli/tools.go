@@ -3,9 +3,12 @@ package aicli
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
+
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 // Tool is the interface every agent tool must implement.
@@ -38,13 +41,24 @@ func (r *Registry) Defs() []ToolDef {
 	return defs
 }
 
-// Execute runs the named tool with the given JSON arguments.
+// Execute runs the named tool with the given JSON arguments. The tool's
+// output (and any error text) is scrubbed of known and pattern-detected
+// secrets before it is returned, so a secret an agent encounters — a
+// workspace .env, a key file, an MCP response — never enters the message
+// history sent to the LLM provider or any log derived from it.
 func (r *Registry) Execute(ctx context.Context, name string, args json.RawMessage) (string, error) {
 	t, ok := r.tools[name]
 	if !ok {
 		return "", fmt.Errorf("unknown tool: %s", name)
 	}
-	return t.Execute(ctx, args)
+	out, err := t.Execute(ctx, args)
+	out = redact.Scrub(out)
+	if err != nil {
+		if scrubbed := redact.Scrub(err.Error()); scrubbed != err.Error() {
+			err = errors.New(scrubbed)
+		}
+	}
+	return out, err
 }
 
 // Filter returns a new Registry containing only tools whose names appear in
@@ -68,10 +82,25 @@ func (r *Registry) Filter(allowed []string) *Registry {
 	return filtered
 }
 
+// legacyToolAliases maps historical tool names still used in agent configs
+// (builtin and user TOML alike) to the names the tools actually register
+// under. Without this an allowed_tools list saying "exec_command" silently
+// filtered out the shell tool, which registers as "bash".
+var legacyToolAliases = map[string]string{
+	"read_file":    "read",
+	"write_file":   "write",
+	"list_dir":     "ls",
+	"exec_command": "bash",
+}
+
 // nameMatchesFilter reports whether a tool name matches any filter entry.
-// An entry ending in "*" matches by prefix (e.g. "codegraph_*").
+// An entry ending in "*" matches by prefix (e.g. "codegraph_*"); legacy
+// aliases (exec_command → bash, …) match the canonical name.
 func nameMatchesFilter(name string, allowed []string) bool {
 	for _, a := range allowed {
+		if alias, ok := legacyToolAliases[a]; ok {
+			a = alias
+		}
 		if a == name {
 			return true
 		}

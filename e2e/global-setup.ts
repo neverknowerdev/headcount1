@@ -6,6 +6,7 @@ import * as path from 'path';
 import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
+import { startMockDeployServer } from './fixtures/mock-deploy-server';
 
 const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '.e2e-env.json');
 const pidFile = process.env.E2E_PID_FILE || path.join(__dirname, '.e2e-server.pid');
@@ -37,11 +38,16 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     const mock = await startMockProviderServer();
     console.log(`[globalSetup] mock provider: ${mock.baseUrl}`);
 
+    // 4b. Mock deploy-target server (Vercel + GitHub API emulation).
+    const mockDeploy = await startMockDeployServer();
+    console.log(`[globalSetup] mock deploy target: ${mockDeploy.baseUrl}`);
+
     // 5. Persist env for tests
     const envData = {
         E2E_MOCK_PROVIDER_URL: mock.baseUrl,
         E2E_TEST_REPO_URL: repoUrl,
         E2E_HEADCOUNT1_HOME: e2eHome,
+        E2E_MOCK_DEPLOY_URL: mockDeploy.baseUrl,
     };
     fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
     process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
@@ -53,6 +59,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
     env.E2E_HEADCOUNT1_HOME = e2eHome;
+    // Point the deploysync clients at the mock deploy-target server.
+    env.VERCEL_API_URL = mockDeploy.baseUrl;
+    env.GITHUB_API_URL = mockDeploy.baseUrl;
 
     const projectRoot = path.resolve(__dirname, '..');
     // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module

@@ -15,6 +15,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/secrets/redact"
 	"agent-orchestrator/pkg/tokens"
 )
 
@@ -177,11 +178,15 @@ func (l *ProxyLogger) FilePath() string {
 func (l *ProxyLogger) makeEntry(entryType, content string, extra map[string]interface{}) map[string]interface{} {
 	entry := map[string]interface{}{
 		"type":    entryType,
-		"content": content,
+		"content": redact.Scrub(content),
 		"ts":      time.Now().UTC().Format(time.RFC3339Nano),
 		"seq":     NextRunLogSeq(context.Background(), l.q, l.runID),
 	}
 	for k, v := range extra {
+		if s, ok := v.(string); ok {
+			entry[k] = redact.Scrub(s)
+			continue
+		}
 		entry[k] = v
 	}
 	return entry
@@ -481,7 +486,9 @@ func (l *ProxyLogger) LogToolResultsFromRequest(model, providerName string, mess
 		entry := l.makeEntry("tool_response", r.content, extra)
 		l.writeFileEntry(entry)
 
-		preview := r.content
+		// Build the bounded preview from the entry's already-scrubbed
+		// content, not the raw tool output.
+		preview, _ := entry["content"].(string)
 		if len(preview) > 2000 {
 			preview = preview[:2000] + "…(truncated)"
 		}
