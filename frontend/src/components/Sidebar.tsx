@@ -27,8 +27,8 @@ export const Sidebar: React.FC = () => {
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
 
   // version is the human-facing number (2026.07.29 in production,
-  // staging-<branch>-<commit> on staging); build is the exact build identity,
-  // shown on hover for support and bug reports.
+  // staging-<short branch>-<short commit> on staging); build is the exact
+  // build identity, shown on hover for support and bug reports.
   const [version, setVersion] = useState<string>('');
   const [build, setBuild] = useState<string>('');
 

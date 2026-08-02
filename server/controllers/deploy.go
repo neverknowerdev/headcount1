@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/http"
 	"strings"
+	"sync"
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/envstore"
@@ -73,6 +74,29 @@ func (api *API) GetVersion(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// bootKeyState records how the boot key resolved on THIS boot (see
+// pkg/bootkey): which backend is in effect, whether a graceful-exit keyring
+// snapshot was waiting, and how many vaults it re-warmed. Set once from main at
+// startup and read-only afterwards, so a plain value behind a mutex is enough.
+type bootKeyState struct {
+	Backend        string `json:"backend"` // "none" when restarts require a re-tap
+	SnapshotFound  bool   `json:"snapshot_found"`
+	RestoredVaults int    `json:"restored_vaults"`
+}
+
+var (
+	bootKeyMu     sync.RWMutex
+	bootKeyStatus = bootKeyState{Backend: "none"}
+)
+
+// SetBootKeyStatus publishes this boot's boot-key outcome for the Deployment
+// panel. Called by main after the restore attempt.
+func SetBootKeyStatus(backend string, snapshotFound bool, restoredVaults int) {
+	bootKeyMu.Lock()
+	defer bootKeyMu.Unlock()
+	bootKeyStatus = bootKeyState{Backend: backend, SnapshotFound: snapshotFound, RestoredVaults: restoredVaults}
+}
+
 // GetDeployStatus returns the deploy state + this server's environment and
 // effective source setting, for the UI's Deployment panel. Behind auth.
 func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
@@ -105,6 +129,14 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 			resp["env_key_names"] = store.Keys()
 			resp["env_updated_at"] = store.UpdatedAt
 		}
+		// Whether a deploy restart re-warms unlocked vaults or makes everyone
+		// re-tap their passkey, and — when it didn't — which half failed: no boot
+		// key at all, or a boot key with no snapshot waiting for it. Operator-only
+		// for the same reason as the rest of this block; the backend name can name
+		// a path or a Vault key.
+		bootKeyMu.RLock()
+		resp["boot_key"] = bootKeyStatus
+		bootKeyMu.RUnlock()
 	}
 	api.respondJSON(w, http.StatusOK, resp)
 }

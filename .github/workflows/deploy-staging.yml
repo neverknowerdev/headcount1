@@ -1,5 +1,13 @@
 name: Deploy Staging
 
+# The run's title in the Actions list, so a glance at the list tells you what
+# each run shipped. It is evaluated when the run is QUEUED, which is why it
+# names the branch rather than the full version string: the version is
+# staging-<short branch>-<short sha> (scripts/version.sh) and the sha is only
+# known once the job resolves the head commit. The exact version is printed in
+# the job summary and in the "Build" step.
+run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format('PR #{0}', github.event.issue.number) || (github.event.pull_request.head.ref || github.ref_name) }}"
+
 # Staging deploys, ON REQUEST ONLY. Nothing here runs on a push.
 #
 # Two ways to request one from the pull request itself:
@@ -9,20 +17,25 @@ name: Deploy Staging
 #   2. Comment "/deploy".
 #
 # Either builds the PR's current head commit and ships it to stagingapp, versioned
-# staging-<branch>-<commit> — a staging build is not a release, so it is named
-# after what it actually is rather than given a release number.
+# staging-<short branch>-<short commit> — a staging build is not a release, so
+# it is named after what it actually is rather than given a release number, and
+# trimmed to stay readable (see scripts/version.sh).
 #
 # Prefer the label while this workflow is not yet on the default branch: GitHub
-# runs issue_comment (and workflow_dispatch) only from the DEFAULT branch, so
-# "/deploy" is ignored until this file is merged to main. pull_request events
-# run the workflow from the PR's own branch, so the label works right away.
+# runs issue_comment from the DEFAULT branch's copy of this file, so "/deploy"
+# is ignored until it is merged to main. pull_request events run the workflow
+# from the PR's own branch, so the label works right away. A manual dispatch is
+# offered only once the file is on the default branch, but then runs the copy on
+# whichever branch is selected.
 #
 # The comment path gets a rocket reaction as an ack, because a run triggered by
 # issue_comment is attached to the default branch and so does NOT appear in the
 # PR's own checks. The label path does appear there.
 #
-# Actions -> Deploy Staging -> Run workflow does the same for any branch (also
-# default-branch-only).
+# Actions -> Deploy Staging -> Run workflow deploys the branch picked in the
+# "Use workflow from" dropdown — that one selector is the whole form: the branch
+# chosen there is both the workflow file that runs and the code that ships, so
+# there is no second field to keep in sync with it.
 #
 # Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
 # protection rules configured there (required reviewers, wait timer) apply on
@@ -47,12 +60,8 @@ on:
     types: [labeled]
   issue_comment:
     types: [created]
+  # No inputs: the branch selected in "Use workflow from" IS what gets deployed.
   workflow_dispatch:
-    inputs:
-      ref:
-        description: Branch, tag, or commit to deploy to staging
-        required: true
-        type: string
 
 concurrency:
   # A newer request for the same PR/branch supersedes an in-flight one.
@@ -119,7 +128,8 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
           LABEL_REF: ${{ github.event.pull_request.head.ref }}
           LABEL_SHA: ${{ github.event.pull_request.head.sha }}
-          DISPATCH_REF: ${{ inputs.ref || github.ref_name }}
+          DISPATCH_REF: ${{ github.ref_name }}
+          DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -135,12 +145,12 @@ jobs:
                 --jq '"\(.head.ref) \(.head.sha)"')
               ;;
             *)
-              # A manual dispatch runs the trusted default-branch workflow,
-              # but deploys the explicit requested ref after resolving it via
-              # the GitHub API. This keeps the release builder itself pinned
-              # to the reviewed workflow (including its target architecture).
+              # A manual dispatch deploys the branch it was dispatched on — the
+              # one picked in "Use workflow from". github.sha is that branch's
+              # head, so there is nothing to resolve and no way for the workflow
+              # that builds and the code that ships to disagree.
               ref="$DISPATCH_REF"
-              sha="$(gh api "repos/$REPO/commits/$ref" --jq .sha)"
+              sha="$DISPATCH_SHA"
               ;;
           esac
           {
@@ -186,6 +196,10 @@ jobs:
           VERSION=$(./scripts/version.sh staging "$REF")
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
+          # The run title can only name the branch (see run-name above), so the
+          # full version — branch AND commit — is stated once, at the top of the
+          # run's summary page.
+          echo "### Staging deploy \`$VERSION\`" >> "$GITHUB_STEP_SUMMARY"
           cd frontend && npm install && npm run build && cd ..
           GOOS=linux GOARCH=arm64 go build \
             -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
