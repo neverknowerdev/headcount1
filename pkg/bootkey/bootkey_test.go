@@ -51,6 +51,29 @@ func TestEnvUnwrapperHexKey(t *testing.T) {
 	}
 }
 
+// The local boot key is the fallback that makes a graceful restart re-warm
+// unlocked vaults on a box with no external key. It must be ON unless the
+// operator explicitly turns it off — an unset variable used to mean "no boot
+// key", which silently disabled seamless deploys everywhere.
+func TestLocalBootKeyEnabledDefaultsOn(t *testing.T) {
+	os.Unsetenv("HEADCOUNT1_LOCAL_BOOTKEY")
+	if !LocalBootKeyEnabled() {
+		t.Fatal("unset HEADCOUNT1_LOCAL_BOOTKEY must enable the local boot key")
+	}
+	for _, v := range []string{"0", "false", "no", "off", "OFF", " false "} {
+		t.Setenv("HEADCOUNT1_LOCAL_BOOTKEY", v)
+		if LocalBootKeyEnabled() {
+			t.Fatalf("HEADCOUNT1_LOCAL_BOOTKEY=%q must disable the local boot key", v)
+		}
+	}
+	for _, v := range []string{"", "1", "true", "yes", "on"} {
+		t.Setenv("HEADCOUNT1_LOCAL_BOOTKEY", v)
+		if !LocalBootKeyEnabled() {
+			t.Fatalf("HEADCOUNT1_LOCAL_BOOTKEY=%q must keep the local boot key enabled", v)
+		}
+	}
+}
+
 func TestLocalBootKeyLifecycle(t *testing.T) {
 	dir := t.TempDir()
 	path := dir + "/keyring.bootkey"

@@ -33,7 +33,7 @@ const defaultDeployRepo = "neverknowerdev/headcount1"
 // compile time via -ldflags; a deploy target's values arrive in the webhook.
 //
 // Version is the human-facing version number minted at build time (see
-// scripts/version.sh) — "2026.07.29" in production, "staging-<branch>-<commit>"
+// scripts/version.sh) — "2026.07.29" in production, "staging-<short branch>-<short commit>"
 // on staging. The remaining fields are the precise build identity, which is what
 // deploy decisions actually compare.
 type VersionInfo struct {

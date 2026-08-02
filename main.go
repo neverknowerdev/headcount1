@@ -271,11 +271,12 @@ func main() {
 	// active users' vaults without a passkey re-tap. The blob is deleted after
 	// loading so an unexpected crash can never replay a stale keyring.
 	bootKey := bootkey.FromEnv()
-	// When no external boot key is configured, an operator can opt into a
-	// self-managed local boot key (HEADCOUNT1_LOCAL_BOOTKEY): a random key held
-	// in memory, written to disk only at graceful shutdown next to the snapshot
-	// and consumed at the next boot — so nothing sits on disk during runtime.
-	// For local/dev only (see doc/boot-key.md); production uses an external key.
+	// When no external boot key is configured, fall back to the self-managed
+	// local boot key (unless HEADCOUNT1_LOCAL_BOOTKEY=0): a random key held in
+	// memory, written to disk only at graceful shutdown next to the snapshot and
+	// consumed at the next boot — so nothing sits on disk during runtime. An
+	// external key (HEADCOUNT1_BOOT_KEY / VAULT_ADDR) is still the stronger
+	// option and wins when set (see doc/boot-key.md).
 	var localBootKey *bootkey.LocalBootKey
 	if bootKey == nil && bootkey.LocalBootKeyEnabled() {
 		if lk, err := bootkey.LoadOrCreateLocalBootKey(filepath.Join(basePath, "keyring.bootkey")); err != nil {
@@ -286,15 +287,29 @@ func main() {
 		}
 	}
 	keyringBlobPath := filepath.Join(basePath, "keyring.sealed")
+	// Whether restarts re-warm at all is decided here, silently, from the
+	// environment — so say it out loud on every boot, and record it for the
+	// Deployment panel. Otherwise "the deploy asked me for my passkey again"
+	// leaves nothing in the log to explain why.
+	bootKeyName := "none"
+	if bootKey != nil {
+		bootKeyName = bootKey.Name()
+	} else {
+		log.Printf("Boot key: none — the keyring is not sealed on shutdown, so every restart requires a passkey re-tap. (Unset HEADCOUNT1_LOCAL_BOOTKEY=0, or set HEADCOUNT1_BOOT_KEY / VAULT_ADDR, to re-warm planned restarts.)")
+	}
+	restoredVaults := 0
+	snapshotFound := false
 	if bootKey != nil {
 		if blob, err := os.ReadFile(keyringBlobPath); err == nil {
+			snapshotFound = true
 			// Re-warm with the same ceiling a normal unlock grants (the absolute
 			// session cap), not the longer SessionLifetime — a restored DEK must
 			// not outlive the session that could authenticate its owner.
 			if err := secrets.Default().UnsealKeyring(bootKey, blob, db.SessionAbsoluteCap()); err != nil {
 				log.Printf("Warning: could not restore sealed keyring: %v", err)
 			} else {
-				log.Printf("Restored %d unlocked vault(s) from graceful-exit snapshot (boot key: %s)", secrets.DefaultKeyring().Len(), bootKey.Name())
+				restoredVaults = secrets.DefaultKeyring().Len()
+				log.Printf("Restored %d unlocked vault(s) from graceful-exit snapshot (boot key: %s)", restoredVaults, bootKeyName)
 			}
 			// The snapshot must never survive boot: a lingering blob would let an
 			// unexpected later crash replay a stale keyring. If the unlink fails,
@@ -306,8 +321,17 @@ func main() {
 					log.Fatalf("FATAL: keyring snapshot %s could be neither deleted nor truncated (%v); refusing to run with a replayable snapshot on disk", keyringBlobPath, terr)
 				}
 			}
+		} else if !os.IsNotExist(err) {
+			log.Printf("Warning: could not read keyring snapshot %s: %v", keyringBlobPath, err)
+		}
+		if !snapshotFound {
+			// The expected state after a crash, a `kill -9`, or a first boot — and
+			// the state to look for when a *planned* restart still asked for a
+			// re-tap: it means the previous exit never got to write the snapshot.
+			log.Printf("Boot key: %s — no graceful-exit keyring snapshot to restore (previous exit was not graceful, or nobody was unlocked).", bootKeyName)
 		}
 	}
+	endpoints.SetBootKeyStatus(bootKeyName, snapshotFound, restoredVaults)
 
 	// Transactional mail (passkey recovery): SMTP_* env vars, or a logging
 	// no-op mailer that prints the link to the server log.
@@ -505,19 +529,29 @@ func main() {
 	// Seal the in-memory keyring under the boot key so this planned restart
 	// re-warms without a passkey re-tap. Only written on a graceful exit — an
 	// unexpected crash leaves nothing behind (strict zero-knowledge).
-	if bootKey != nil {
+	if bootKey == nil {
+		log.Printf("Boot key: none — not sealing the keyring; every unlocked user will re-tap their passkey after this restart.")
+	} else {
+		unlocked := secrets.DefaultKeyring().Len()
 		if blob, err := secrets.Default().SealKeyring(bootKey); err != nil {
 			log.Printf("Warning: could not seal keyring on shutdown: %v", err)
-		} else if len(blob) > 0 {
-			if err := os.WriteFile(keyringBlobPath, blob, 0600); err != nil {
-				log.Printf("Warning: could not persist sealed keyring: %v", err)
-			} else if localBootKey != nil {
-				// Self-managed mode: write the boot key to disk ONLY now, next to
-				// the snapshot it seals. The next boot consumes and deletes both.
+		} else if len(blob) == 0 {
+			log.Printf("Nothing to seal on shutdown: no vault is unlocked (boot key: %s).", bootKeyName)
+		} else if err := os.WriteFile(keyringBlobPath, blob, 0600); err != nil {
+			log.Printf("Warning: could not persist sealed keyring: %v", err)
+		} else {
+			sealed := true
+			// Self-managed mode: write the boot key to disk ONLY now, next to
+			// the snapshot it seals. The next boot consumes and deletes both.
+			if localBootKey != nil {
 				if err := localBootKey.Persist(); err != nil {
 					log.Printf("Warning: could not persist local boot key: %v", err)
 					_ = os.Remove(keyringBlobPath) // don't leave a snapshot we can't reopen
+					sealed = false
 				}
+			}
+			if sealed {
+				log.Printf("Sealed %d unlocked vault(s) for the next start (boot key: %s).", unlocked, bootKeyName)
 			}
 		}
 	}
