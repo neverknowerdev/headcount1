@@ -117,9 +117,9 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
           cd frontend && npm install && npm run build && cd ..
-          GOOS=linux GOARCH=amd64 go build \
+          GOOS=linux GOARCH=arm64 go build \
             -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
-            -o agent-orchestrator-linux-amd64 \
+            -o agent-orchestrator-linux-arm64 \
             main.go
 
       - name: Publish release asset
@@ -139,7 +139,7 @@ jobs:
             git push origin "refs/tags/$VERSION"
             # The release itself already exists under the tag a human chose —
             # attach the binary there rather than opening a competing release.
-            gh release upload "$RELEASE_TAG" agent-orchestrator-linux-amd64 --clobber
+            gh release upload "$RELEASE_TAG" agent-orchestrator-linux-arm64 --clobber
             asset_tag="$RELEASE_TAG"
           else
             # One release per production build, tagged with its version (which
@@ -153,13 +153,13 @@ jobs:
               --target "$SHA" \
               --title "$VERSION (main @ ${{ steps.target.outputs.commit }})" \
               --notes "Production deploy build for main (${{ steps.target.outputs.commit }})." \
-              agent-orchestrator-linux-amd64
+              agent-orchestrator-linux-arm64
             asset_tag="$VERSION"
           fi
           # The server pins the artifact by digest, so publish the digest of the
           # exact bytes we uploaded.
           asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$asset_tag" \
-            --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')
+            --jq '.assets[] | select(.name=="agent-orchestrator-linux-arm64") | .url')
           # This repository is PRIVATE, so that asset API URL only serves the
           # binary to an authenticated caller — the server holds no GitHub
           # credential and gets HTTP 404 from it. Resolve the redirect here,
@@ -184,7 +184,7 @@ jobs:
           umask 077
           printf '%s' "$download_url" > "$RUNNER_TEMP/download-url.txt"
           {
-            echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
+            echo "sha256=$(sha256sum agent-orchestrator-linux-arm64 | awk '{print $1}')"
             echo "download_url_file=$RUNNER_TEMP/download-url.txt"
           } >> "$GITHUB_OUTPUT"
 
