@@ -5,7 +5,7 @@ import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
 
 interface BuildVersion {
-    /** Version number: "2026.07.29" in production, "staging-<branch>-<commit>" on staging. */
+    /** Version number: "2026.07.29" in production, "staging-<short branch>-<short commit>" on staging. */
     version?: string;
     branch: string;
     commit_hash: string;

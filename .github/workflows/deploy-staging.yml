@@ -3,7 +3,7 @@ name: Deploy Staging
 # The run's title in the Actions list, so a glance at the list tells you what
 # each run shipped. It is evaluated when the run is QUEUED, which is why it
 # names the branch rather than the full version string: the version is
-# staging-<branch>-<short sha> (scripts/version.sh) and the short sha is only
+# staging-<short branch>-<short sha> (scripts/version.sh) and the sha is only
 # known once the job resolves the head commit. The exact version is printed in
 # the job summary and in the "Build" step.
 run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format('PR #{0}', github.event.issue.number) || (github.event.pull_request.head.ref || github.ref_name) }}"
@@ -17,8 +17,9 @@ run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format(
 #   2. Comment "/deploy".
 #
 # Either builds the PR's current head commit and ships it to stagingapp, versioned
-# staging-<branch>-<commit> — a staging build is not a release, so it is named
-# after what it actually is rather than given a release number.
+# staging-<short branch>-<short commit> — a staging build is not a release, so
+# it is named after what it actually is rather than given a release number, and
+# trimmed to stay readable (see scripts/version.sh).
 #
 # Prefer the label while this workflow is not yet on the default branch: GitHub
 # runs issue_comment from the DEFAULT branch's copy of this file, so "/deploy"
