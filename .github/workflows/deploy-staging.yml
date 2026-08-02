@@ -48,6 +48,11 @@ on:
   issue_comment:
     types: [created]
   workflow_dispatch:
+    inputs:
+      ref:
+        description: Branch, tag, or commit to deploy to staging
+        required: true
+        type: string
 
 concurrency:
   # A newer request for the same PR/branch supersedes an in-flight one.
@@ -114,8 +119,7 @@ jobs:
           PR_NUMBER: ${{ github.event.issue.number }}
           LABEL_REF: ${{ github.event.pull_request.head.ref }}
           LABEL_SHA: ${{ github.event.pull_request.head.sha }}
-          DISPATCH_REF: ${{ github.ref_name }}
-          DISPATCH_SHA: ${{ github.sha }}
+          DISPATCH_REF: ${{ inputs.ref || github.ref_name }}
         run: |
           set -euo pipefail
           case "$EVENT" in
@@ -131,7 +135,12 @@ jobs:
                 --jq '"\(.head.ref) \(.head.sha)"')
               ;;
             *)
-              ref="$DISPATCH_REF"; sha="$DISPATCH_SHA"
+              # A manual dispatch runs the trusted default-branch workflow,
+              # but deploys the explicit requested ref after resolving it via
+              # the GitHub API. This keeps the release builder itself pinned
+              # to the reviewed workflow (including its target architecture).
+              ref="$DISPATCH_REF"
+              sha="$(gh api "repos/$REPO/commits/$ref" --jq .sha)"
               ;;
           esac
           {
@@ -178,9 +187,9 @@ jobs:
           echo "version=$VERSION" >> "$GITHUB_OUTPUT"
           echo "Building version $VERSION"
           cd frontend && npm install && npm run build && cd ..
-          GOOS=linux GOARCH=amd64 go build \
+          GOOS=linux GOARCH=arm64 go build \
             -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
-            -o agent-orchestrator-linux-amd64 \
+            -o agent-orchestrator-linux-arm64 \
             main.go
 
       - name: Publish release asset
@@ -199,11 +208,11 @@ jobs:
             --target "$SHA" \
             --title "staging ${{ steps.target.outputs.ref }} @ ${{ steps.target.outputs.commit }}" \
             --notes "Staging deploy build for ${{ steps.target.outputs.ref }} (${{ steps.target.outputs.commit }})." \
-            agent-orchestrator-linux-amd64
+            agent-orchestrator-linux-arm64
           # The server pins the artifact by digest, so publish the digest of the
           # exact bytes we uploaded.
           asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$TAG" \
-            --jq '.assets[] | select(.name=="agent-orchestrator-linux-amd64") | .url')
+            --jq '.assets[] | select(.name=="agent-orchestrator-linux-arm64") | .url')
           # This repository is PRIVATE, so that asset API URL only serves the
           # binary to an authenticated caller — the server holds no GitHub
           # credential and gets HTTP 404 from it. Resolve the redirect here,
@@ -228,7 +237,7 @@ jobs:
           umask 077
           printf '%s' "$download_url" > "$RUNNER_TEMP/download-url.txt"
           {
-            echo "sha256=$(sha256sum agent-orchestrator-linux-amd64 | awk '{print $1}')"
+            echo "sha256=$(sha256sum agent-orchestrator-linux-arm64 | awk '{print $1}')"
             echo "download_url_file=$RUNNER_TEMP/download-url.txt"
           } >> "$GITHUB_OUTPUT"
 
