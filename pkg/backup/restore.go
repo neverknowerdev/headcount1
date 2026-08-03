@@ -130,20 +130,31 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		return fmt.Errorf("archive has no entities/ tree (unsupported backup version?): %w", err)
 	}
 
-	// Wipe existing data (children before parents for FK enforcement).
+	// Wipe existing data (children before parents for FK enforcement). The
+	// identity graph is wiped last of all — companies (and their per-user
+	// providers) reference users/teams, so they must go first; the ephemeral
+	// auth tables (sessions, reset tokens, invites) are cleared too since
+	// they FK to users and are not part of the archive.
 	tables := []string{
 		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
 		"mcp_accounts", "mcp_servers",
-		"run_log_entries",
 		"activity_logs", "proxy_request_logs", "artifacts", "runs", "comments",
 		"attachments", "tasks", "skills", "agents",
 		"model_group_members", "model_groups", "default_model_settings",
 		"llm_providers", "sprints", "projects", "companies",
+		"team_invites", "password_reset_tokens", "sessions",
+		"web_authn_sessions", "web_authn_credentials", "team_members", "teams", "users",
 	}
 	for _, table := range tables {
 		database.Exec("DELETE FROM " + table)
 	}
-	database.Exec("DELETE FROM sqlite_sequence")
+	// SQLite tracks AUTOINCREMENT counters in sqlite_sequence; clearing it lets
+	// restored explicit ids re-seed the counter. Postgres has no such table —
+	// its serial sequences are realigned after the insert (see
+	// resetPostgresSequences below), so skip this on Postgres.
+	if database.Dialector.Name() == "sqlite" {
+		database.Exec("DELETE FROM sqlite_sequence")
+	}
 
 	byTable := map[string][]row{}
 	addRows := func(table string, rows []row) {
@@ -152,6 +163,10 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 
 	// Global tables.
 	for _, g := range []struct{ file, table string }{
+		{"users.json", "users"},
+		{"teams.json", "teams"},
+		{"team-members.json", "team_members"},
+		{"webauthn-credentials.json", "web_authn_credentials"},
 		{"llm-providers.json", "llm_providers"},
 		{"model-groups.json", "model_groups"},
 		{"model-group-members.json", "model_group_members"},
@@ -231,6 +246,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	// Insert in dependency order, each table's rows sorted by id so
 	// self-references (task parent_id) resolve before their children.
 	insertOrder := []string{
+		"users", "teams", "team_members", "web_authn_credentials",
 		"companies", "llm_providers", "model_groups", "model_group_members",
 		"default_model_settings", "sprints", "projects", "agents", "skills",
 		"tasks", "comments", "attachments", "artifacts", "runs",
@@ -248,7 +264,49 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		}
 	}
 
+	// On Postgres, rows were inserted with explicit ids, which does NOT advance
+	// the tables' serial sequences. Realign every sequence past the max restored
+	// id so the next auto-id insert doesn't collide with a restored row. On
+	// SQLite this is unnecessary (rowid allocation follows MAX(rowid)), so it's
+	// a no-op there.
+	resetPostgresSequences(database, insertOrder)
+
 	return nil
+}
+
+// resetPostgresSequences advances each table's identity sequence past the
+// largest restored id. No-op on non-Postgres dialects and for tables without a
+// serial id column (e.g. the composite-key join tables).
+func resetPostgresSequences(database *gorm.DB, tables []string) {
+	if database.Dialector.Name() != "postgres" {
+		return
+	}
+	for _, table := range tables {
+		// Skip tables without an id column (the composite-key join tables) up
+		// front — pg_get_serial_sequence raises rather than returns NULL for a
+		// missing column, which would log a spurious error.
+		var hasID bool
+		if err := database.Raw(
+			`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			 WHERE table_schema = current_schema() AND table_name = ? AND column_name = 'id')`,
+			table,
+		).Scan(&hasID).Error; err != nil || !hasID {
+			continue
+		}
+		var seq *string
+		if err := database.Raw(`SELECT pg_get_serial_sequence(?, 'id')`, table).Scan(&seq).Error; err != nil || seq == nil {
+			continue // no serial id column — nothing to realign
+		}
+		// is_called mirrors whether the table has rows: with rows, setval to
+		// MAX(id) and is_called=true so nextval yields MAX(id)+1; empty, reset to
+		// 1 with is_called=false so the first insert still gets id=1.
+		if err := database.Exec(
+			`SELECT setval(?, COALESCE((SELECT MAX(id) FROM `+table+`), 1), (SELECT MAX(id) FROM `+table+`) IS NOT NULL)`,
+			*seq,
+		).Error; err != nil {
+			log.Printf("Warning: restore: failed to realign sequence for %s: %v", table, err)
+		}
+	}
 }
 
 func sortRowsByID(rows []row) {

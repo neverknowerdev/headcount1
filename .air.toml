@@ -8,8 +8,12 @@ tmp_dir = "tmp"
   exclude_dir = ["tmp", "node_modules", "frontend", "e2e", "vendor", "testdata"]
   exclude_regex = ["_test\\.go$"]
   include_ext = ["go", "toml", "yaml"]
-  kill_delay = "0s"
-  send_interrupt = false
+  # Send SIGINT (not an immediate SIGKILL) and give the server a moment to run
+  # its graceful-shutdown handler — that handler seals the in-memory keyring so
+  # a rebuild/restart re-warms without a passkey re-tap. With send_interrupt =
+  # false the binary was SIGKILLed and the seal never happened.
+  kill_delay = "3s"
+  send_interrupt = true
   stop_on_error = true
 
 [color]

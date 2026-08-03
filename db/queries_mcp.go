@@ -16,13 +16,32 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 	return s, err
 }
 
-// ListMCPServers returns all MCP servers with their accounts preloaded.
+// ListMCPServers returns MCP servers with their accounts preloaded.
 // For non-builtin servers, Enabled is computed from account presence.
 // When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
-// to only those whose project belongs to the given company.
-func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPServer, error) {
+// to only those whose project belongs to the given company. When userID > 0,
+// visibility is tenant-scoped: builtin catalog rows, the user's own custom
+// servers, and codegraph servers whose project belongs to a company the user
+// can access; account preloads are filtered to the user's own credentials.
+// userID 0 (background cache refresh) sees all.
+func (q *Queries) ListMCPServers(ctx context.Context, companyID, userID int32) ([]MCPServer, error) {
 	var servers []MCPServer
-	db := q.db.WithContext(ctx).Order("id").Preload("Accounts").Preload("Project")
+	db := q.db.WithContext(ctx).Order("id").Preload("Project")
+	if userID > 0 {
+		// Codegraph servers (project_id set) leak project names, repository URLs
+		// and workspace paths, so they must be bounded to the caller's own tenants
+		// — projects of a company they created or whose team they belong to. A bare
+		// "project_id IS NOT NULL" would expose every tenant's projects.
+		accessibleCodegraph := "project_id IN (" +
+			"SELECT p.id FROM projects p JOIN companies c ON c.id = p.company_id WHERE " +
+			"c.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?) OR " +
+			"(c.team_id IS NULL AND c.user_id = ?))"
+		db = db.
+			Preload("Accounts", "user_id = ?", userID).
+			Where("builtin = ? OR owner_user_id = ? OR ("+accessibleCodegraph+")", true, userID, userID, userID)
+	} else {
+		db = db.Preload("Accounts")
+	}
 	if companyID > 0 {
 		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE company_id = ?)", companyID)
 	} else {
@@ -34,7 +53,7 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPSer
 	}
 	for i := range servers {
 		for j := range servers[i].Accounts {
-			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
+			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthTokenEncrypted != ""
 		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
 		// for codegraph servers (ProjectID set) which are managed by init_status,
@@ -175,7 +194,7 @@ func (q *Queries) GetCodegraphServerForProject(ctx context.Context, projectID in
 func (q *Queries) IncrementMCPToolCallCount(ctx context.Context, serverID int32, toolName string) error {
 	return q.db.WithContext(ctx).Exec(
 		`INSERT INTO mcp_tool_stats (mcp_server_id, tool_name, call_count) VALUES (?, ?, 1)
-		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = call_count + 1`,
+		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = mcp_tool_stats.call_count + 1`,
 		serverID, toolName,
 	).Error
 }
@@ -196,20 +215,23 @@ func (q *Queries) GetMCPToolCallCounts(ctx context.Context, serverID int32) (map
 
 func (q *Queries) CreateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
 	err := q.db.WithContext(ctx).Create(&a).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) GetMCPAccount(ctx context.Context, id int32) (MCPAccount, error) {
 	var a MCPAccount
 	err := q.db.WithContext(ctx).First(&a, id).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) UpdateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
+	// AuthTokenEncrypted is ciphertext: a metadata-only edit round-trips the
+	// sealed value verbatim, and a token change was re-sealed by the caller, so
+	// a plain Save can never destroy the secret.
 	err := q.db.WithContext(ctx).Save(&a).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
@@ -230,7 +252,7 @@ func (q *Queries) ListMCPAccountsForServer(ctx context.Context, serverID int32) 
 	var accounts []MCPAccount
 	err := q.db.WithContext(ctx).Where("mcp_server_id = ?", serverID).Find(&accounts).Error
 	for i := range accounts {
-		accounts[i].HasToken = accounts[i].AuthToken != ""
+		accounts[i].HasToken = accounts[i].AuthTokenEncrypted != ""
 	}
 	return accounts, err
 }
@@ -343,49 +365,6 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 		}
 		return nil
 	})
-}
-
-// MigrateServerTokensToAccounts converts any legacy auth_token on MCPServer rows
-// into MCPAccount("Default") records, and migrates AgentMCPServer → AgentMCPAccount.
-// Safe to run on every startup (idempotent).
-func (q *Queries) MigrateServerTokensToAccounts(ctx context.Context) error {
-	// Find servers that still have a legacy auth_token.
-	type serverRow struct {
-		ID        int32
-		AuthToken string
-	}
-	var rows []serverRow
-	if err := q.db.WithContext(ctx).Raw("SELECT id, auth_token FROM mcp_servers WHERE auth_token != ''").Scan(&rows).Error; err != nil {
-		return err
-	}
-
-	for _, row := range rows {
-		// Skip if already migrated.
-		var count int64
-		q.db.WithContext(ctx).Model(&MCPAccount{}).Where("mcp_server_id = ?", row.ID).Count(&count)
-		if count > 0 {
-			q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '' WHERE id = ?", row.ID)
-			continue
-		}
-
-		acc := MCPAccount{MCPServerID: row.ID, Name: "Default", AuthToken: row.AuthToken}
-		if err := q.db.WithContext(ctx).Create(&acc).Error; err != nil {
-			log.Printf("MCP migration: failed to create account for server %d: %v", row.ID, err)
-			continue
-		}
-		// Clear the legacy token.
-		q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '', enabled = true WHERE id = ?", row.ID)
-
-		// Migrate AgentMCPServer → AgentMCPAccount for this server.
-		var agentAssigns []AgentMCPServer
-		q.db.WithContext(ctx).Where("mcp_server_id = ?", row.ID).Find(&agentAssigns)
-		for _, a := range agentAssigns {
-			ama := AgentMCPAccount{AgentID: a.AgentID, MCPAccountID: acc.ID, Enabled: a.Enabled}
-			q.db.WithContext(ctx).Create(&ama)
-		}
-		log.Printf("MCP migration: migrated server %d auth_token → account %d", row.ID, acc.ID)
-	}
-	return nil
 }
 
 // EnsureBuiltinMCPServers creates all predefined MCP servers if they don't

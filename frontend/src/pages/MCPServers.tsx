@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
+import { SecretLabel } from '../components/SecretField';
 import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2, SearchIcon } from 'lucide-react';
 
 interface MCPAccount {
@@ -84,6 +85,7 @@ const emptyForm = {
 
 export const MCPServers: React.FC = () => {
     const { selectedCompanyId } = useStore();
+    const isOwner = useIsOwner();
 
     // ── Server modal state (for custom servers only) ───────────────────────────
     const [servers, setServers] = useState<MCPServer[]>([]);
@@ -478,9 +480,11 @@ export const MCPServers: React.FC = () => {
                                         <button onClick={() => openModal(s)} className="p-1.5 text-gray-500 hover:text-gray-700 rounded">
                                             <Edit2 size={16} />
                                         </button>
-                                        <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
-                                            <Trash2 size={16} />
-                                        </button>
+                                        {isOwner && (
+                                            <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
+                                                <Trash2 size={16} />
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                                 {discoverErrors[s.id] && (
@@ -618,9 +622,9 @@ export const MCPServers: React.FC = () => {
                             </div>
                             {formData.auth_type !== 'none' && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         {authLabel(formData.auth_type)} {editingId && '(leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <input type="password" value={formData.auth_token}
                                         onChange={e => setFormData({ ...formData, auth_token: e.target.value })}
                                         className="w-full border rounded p-2 text-sm" />
@@ -669,9 +673,7 @@ export const MCPServers: React.FC = () => {
                             )}
                             {accountModal.authType === 'google-oauth' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                                        OAuth client credentials JSON
-                                    </label>
+                                    <SecretLabel>OAuth client credentials JSON</SecretLabel>
                                     <label className={`flex items-center gap-2 w-full border-2 border-dashed rounded p-3 cursor-pointer transition-colors ${accountForm.credentials_json ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
                                         <input type="file" accept=".json,application/json" className="hidden"
                                             onChange={e => {
@@ -699,10 +701,10 @@ export const MCPServers: React.FC = () => {
                                 </div>
                             ) : accountModal.authType === 'credentials-file' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         Credentials JSON file
                                         {accountModal.mode === 'reauth' && ' (leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <label className={`flex items-center gap-2 w-full border-2 border-dashed rounded p-3 cursor-pointer transition-colors ${accountForm.credentials_json ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
                                         <input type="file" accept=".json,application/json" className="hidden"
                                             onChange={e => {
@@ -732,10 +734,10 @@ export const MCPServers: React.FC = () => {
 								<div className="text-sm text-gray-600">GitHub authentication is provided by the connected Headcount1 GitHub App. Connect GitHub in Settings and select a repository for the task's project.</div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         {authLabel(accountModal.authType)}
                                         {accountModal.mode === 'reauth' && ' (leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <input type={accountModal.authType === 'url-token' ? 'text' : 'password'} value={accountForm.auth_token}
                                         onChange={e => setAccountForm(f => ({ ...f, auth_token: e.target.value }))}
                                         placeholder={accountModal.authType === 'url-token' ? 'https://mcp.postiz.com/mcp/...' : ''}

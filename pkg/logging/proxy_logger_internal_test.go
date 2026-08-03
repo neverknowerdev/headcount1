@@ -353,7 +353,7 @@ func TestEndToEndWebSocketDelivery(t *testing.T) {
 		if err != nil {
 			return
 		}
-		hub.Serve(conn)
+		hub.Serve(conn, 1)
 	}))
 	defer srv.Close()
 

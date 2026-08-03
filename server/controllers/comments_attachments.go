@@ -19,6 +19,10 @@ func (api *API) ListComments(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "task_id is required")
 		return
 	}
+	if _, err := api.authorizeTask(r, int32(taskID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
 	comments, err := api.q.ListCommentsByTask(r.Context(), int32(taskID))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -39,6 +43,11 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	authTask, err := api.authorizeTask(r, req.TaskID)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
+		return
+	}
 	p := db.Comment{
 		TaskID:     req.TaskID,
 		AuthorType: req.AuthorType,
@@ -51,7 +60,7 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("comment_created", comment)
+	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)
@@ -73,6 +82,11 @@ func (api *API) UploadAttachment(w http.ResponseWriter, r *http.Request) {
 	taskID, err := strconv.Atoi(r.FormValue("task_id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "task_id is required")
+		return
+	}
+
+	if _, err := api.authorizeTask(r, int32(taskID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
 

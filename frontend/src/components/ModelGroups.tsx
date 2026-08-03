@@ -316,7 +316,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
 
                         <div className="flex items-center gap-2 mb-3 bg-gray-50 border rounded px-2 py-1.5">
                             <code className="text-xs text-gray-700 truncate flex-1">{groupUrl(g.slug)}</code>
-                            <button onClick={() => copyUrl(g)} className="text-gray-500 hover:text-indigo-600 shrink-0" title="Copy endpoint URL">
+                            <button onClick={() => copyUrl(g)} className="text-gray-500 hover:text-indigo-600 shrink-0" title="Copy endpoint URL — requests need your login session (cookie) or an agent run token">
                                 {copiedId === g.id ? <Check size={15} className="text-green-600" /> : <Copy size={15} />}
                             </button>
                         </div>

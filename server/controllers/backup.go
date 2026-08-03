@@ -91,6 +91,10 @@ func (api *API) RestoreBackup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// A restore is a full-fidelity, server-wide snapshot swap: the archive
+	// carries every tenant (users, teams, memberships, per-user keys) with
+	// original IDs, so it is replayed verbatim rather than re-stamped onto
+	// the requesting user.
 	err := backup.RestoreBackup(archivePath, basePath, api.db)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "Failed to restore backup: "+err.Error())

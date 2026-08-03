@@ -2,11 +2,12 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Link } from 'react-router-dom';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { Folder, GitBranch } from 'lucide-react';
 
 export const CompanyView: React.FC = () => {
   const { selectedCompanyId } = useStore();
+  const isOwner = useIsOwner();
   const [projects, setProjects] = useState<any[]>([]);
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [formData, setFormData] = useState({ name: '', workspace_folder: '', repository_url: '' });
@@ -64,11 +65,13 @@ export const CompanyView: React.FC = () => {
     <div>
       <h1 className="text-2xl font-bold mb-6">Projects</h1>
 
-      <div className="mb-8">
-        <button onClick={() => { setIsModalOpen(true); setError(''); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
-          Create Project
-        </button>
-      </div>
+      {isOwner && (
+        <div className="mb-8">
+          <button onClick={() => { setIsModalOpen(true); setError(''); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
+            Create Project
+          </button>
+        </div>
+      )}
 
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
         {projects.map(p => (

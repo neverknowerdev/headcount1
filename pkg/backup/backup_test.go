@@ -3,6 +3,7 @@ package backup
 import (
 	"os"
 	"path/filepath"
+	"strconv"
 	"testing"
 
 	"agent-orchestrator/db"
@@ -20,6 +21,8 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 	if err := database.AutoMigrate(
+		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
+		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},
 		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
 		&db.Agent{}, &db.Skill{}, &db.Task{}, &db.Comment{}, &db.Attachment{},
@@ -118,15 +121,113 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	for _, f := range []string{
 		filepath.Join(newBase, "uploads", "1", "a.txt"),
 		filepath.Join(newBase, "logs", "acme", "1", "run-1", "main.log"),
-		filepath.Join(newBase, "ssh", "id_rsa"),
 	} {
 		if _, err := os.Stat(f); err != nil {
 			t.Errorf("file not restored: %s", f)
 		}
 	}
 
-	// Credentials must NOT be in the backup.
-	if _, err := os.Stat(filepath.Join(newBase, "credentials", "secret.json")); err == nil {
-		t.Error("credentials were restored — they must be excluded from backups")
+	// Cleartext private keys must NOT be in the backup: credentials/ and ssh/
+	// hold usable secrets and are excluded (per-user keys survive as ciphertext
+	// in the DB; the shared ssh key is re-provisioned on restore).
+	for _, f := range []string{
+		filepath.Join(newBase, "credentials", "secret.json"),
+		filepath.Join(newBase, "ssh", "id_rsa"),
+	} {
+		if _, err := os.Stat(f); err == nil {
+			t.Errorf("secret file was restored — it must be excluded from backups: %s", f)
+		}
 	}
+}
+
+// TestBackupRestorePreservesIdentityAndSecrets verifies the multi-tenant
+// alignment: the identity graph (users, teams, memberships, per-user wrapped
+// keys), the tenancy columns on companies/providers, and the encrypted secret
+// ciphertext all survive a backup/restore verbatim — so a restored database is
+// a faithful multi-user snapshot, not an ownerless one. The passkey-wrapped DEKs
+// travel in web_authn_credentials; there is no server-held keystore to archive.
+func TestBackupRestorePreservesIdentityAndSecrets(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+
+	user := db.User{Email: "owner@acme.io"}
+	if err := database.Create(&user).Error; err != nil {
+		t.Fatal(err)
+	}
+	team := db.Team{Name: "Acme Team"}
+	database.Create(&team)
+	database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner})
+	database.Create(&db.WebAuthnCredential{
+		UserID: user.ID, CredentialID: []byte("cred-abc"), PublicKey: []byte("pub"),
+		WrappedDEK: "prf1:wrapped-dek", PRFSalt: []byte("salt"), Nickname: "Laptop",
+	})
+
+	comp := db.Company{Name: "Acme", ShortName: "acme", TeamID: &team.ID, UserID: &user.ID}
+	database.Create(&comp)
+
+	// A per-user provider whose api_key column holds enc:u1 ciphertext. Set
+	// the raw column directly so the round-trip is tested independently of the
+	// secrets subsystem (which the pkg/secrets tests cover).
+	prov := db.LLMProvider{Name: "P", BaseUrl: "http://x", ApiKeyEncrypted: "", UserID: &user.ID}
+	database.Create(&prov)
+	sealed := "enc:u1:" + itoa(user.ID) + ":Y2lwaGVydGV4dA=="
+	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
+
+	archivePath, err := CreateBackup(basePath, database)
+	if err != nil {
+		t.Fatalf("CreateBackup: %v", err)
+	}
+
+	// Wipe the identity graph and tenant data, restore into a fresh base.
+	newBase := t.TempDir()
+	for _, table := range []string{
+		"llm_providers", "companies", "web_authn_credentials", "team_members", "teams", "users",
+	} {
+		database.Exec("DELETE FROM " + table)
+	}
+	if err := RestoreBackup(archivePath, newBase, database); err != nil {
+		t.Fatalf("RestoreBackup: %v", err)
+	}
+
+	// Identity graph restored with original IDs.
+	var gotUser db.User
+	if err := database.First(&gotUser, user.ID).Error; err != nil {
+		t.Fatalf("user not restored: %v", err)
+	}
+	if gotUser.Email != "owner@acme.io" {
+		t.Errorf("user email = %q", gotUser.Email)
+	}
+	var gotCred db.WebAuthnCredential
+	if err := database.First(&gotCred, "user_id = ?", user.ID).Error; err != nil {
+		t.Fatalf("passkey not restored (secrets would be unrecoverable): %v", err)
+	}
+	if gotCred.WrappedDEK != "prf1:wrapped-dek" {
+		t.Errorf("wrapped DEK = %q", gotCred.WrappedDEK)
+	}
+	var memberCount int64
+	database.Model(&db.TeamMember{}).Where("team_id = ? AND user_id = ?", team.ID, user.ID).Count(&memberCount)
+	if memberCount != 1 {
+		t.Errorf("team membership not restored (count=%d)", memberCount)
+	}
+
+	// Tenancy columns preserved on the company.
+	var gotComp db.Company
+	database.First(&gotComp, comp.ID)
+	if gotComp.TeamID == nil || *gotComp.TeamID != team.ID {
+		t.Errorf("company team_id = %v, want %d", gotComp.TeamID, team.ID)
+	}
+	if gotComp.UserID == nil || *gotComp.UserID != user.ID {
+		t.Errorf("company user_id = %v, want %d", gotComp.UserID, user.ID)
+	}
+
+	// Encrypted secret ciphertext round-tripped verbatim (raw column read).
+	var gotCipher string
+	database.Raw("SELECT api_key FROM llm_providers WHERE id = ?", prov.ID).Scan(&gotCipher)
+	if gotCipher != sealed {
+		t.Errorf("provider api_key ciphertext = %q, want %q", gotCipher, sealed)
+	}
+}
+
+func itoa(n int32) string {
+	return strconv.Itoa(int(n))
 }

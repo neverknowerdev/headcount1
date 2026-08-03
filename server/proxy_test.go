@@ -24,7 +24,7 @@ func TestProxyChatCompletionsStreamUsage(t *testing.T) {
 	comp := db.Company{Name: "Test"}
 	database.Create(&comp)
 
-	provider := db.LLMProvider{Name: "Test Provider", BaseUrl: "http://example.com", ApiKey: "test-key"}
+	provider := db.LLMProvider{Name: "Test Provider", BaseUrl: "http://example.com", ApiKeyEncrypted: sealKey("test-key")}
 	database.Create(&provider)
 
 	agent := db.Agent{CompanyID: comp.ID, Name: "Test Agent", ProviderID: &provider.ID}

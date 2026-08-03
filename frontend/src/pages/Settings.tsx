@@ -1,11 +1,45 @@
-import React, { useState, useEffect, useRef } from 'react';
+import { SecretLabel } from '../components/SecretField';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
+
+interface BuildVersion {
+    /** Version number: "2026.07.29" in production, "staging-<short branch>-<short commit>" on staging. */
+    version?: string;
+    branch: string;
+    commit_hash: string;
+    build_date: string;
+}
+
+/** "v1.2.3 (branch+date+commit)" — version first, exact build identity after. */
+const describeBuild = (b: BuildVersion): string => {
+    const build = `${b.branch}+${b.build_date}+${b.commit_hash}`;
+    return b.version ? `${b.version} (${build})` : build;
+};
+
+interface DeployStatus {
+    environment: 'production' | 'staging';
+    deploy_source: 'releases' | 'main';
+    auto_deploy: boolean;
+    current?: BuildVersion;
+    deploying?: boolean;
+    /** The build an in-progress deploy is switching to. */
+    deploy_target?: BuildVersion;
+    /** Only returned to the operator (global admin API enabled). */
+    last_error?: string;
+    /**
+     * NAMES of the env vars the last deploy delivered from its GitHub
+     * Environment — never the values. Operator-only, like last_error.
+     */
+    env_key_names?: string[];
+    env_updated_at?: string;
+}
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
     const { selectedCompanyId, companies, setCompanies } = useStore();
+    const isOwner = useIsOwner();
 
     const [companyShortName, setCompanyShortName] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -20,12 +54,15 @@ export const Settings: React.FC = () => {
     }, [selectedCompanyId, companies]);
 
     const [basePath, setBasePath] = useState('');
-    const [gitRemoteUrl, setGitRemoteUrl] = useState('');
+    const [deploySource, setDeploySource] = useState<'releases' | 'main'>('releases');
+    const [autoDeploy, setAutoDeploy] = useState(true);
 	const [github, setGithub] = useState<any>(null);
     const [saving, setSaving] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
     const sshFileInputRef = useRef<HTMLInputElement>(null);
+
+    const [deployStatus, setDeployStatus] = useState<DeployStatus | null>(null);
 
     useEffect(() => {
         const fetchSettings = async () => {
@@ -33,7 +70,8 @@ export const Settings: React.FC = () => {
                 const res = await axios.get('/api/settings');
                 if (res.data) {
                     setBasePath(res.data.base_path || '');
-                    setGitRemoteUrl(res.data.git_remote_url || '');
+                    setDeploySource(res.data.deploy_source === 'main' ? 'main' : 'releases');
+                    setAutoDeploy(res.data.auto_deploy !== false);
                 }
             } catch (e) {
                 console.error(e);
@@ -44,20 +82,41 @@ export const Settings: React.FC = () => {
 
 	useEffect(() => { axios.get('/api/github/status').then(r => setGithub(r.data)).catch(() => setGithub(null)); }, []);
 	const connectGitHub = async () => { const r = await axios.post('/api/github/connect'); window.location.assign(r.data.authorize_url); };
+    const fetchDeployStatus = useCallback(async () => {
+        try {
+            const res = await axios.get('/api/deploy/status');
+            setDeployStatus(res.data);
+        } catch (e) {
+            console.error(e);
+        }
+    }, []);
+
+    useEffect(() => {
+        fetchDeployStatus();
+    }, [fetchDeployStatus]);
 
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setSaving(true);
         try {
-            await axios.post('/api/settings', {
-                base_path: basePath,
-                git_remote_url: gitRemoteUrl,
-            });
-
+            // The SSH key is per-user, encrypted at rest under your passkey.
             if (sshKey) {
                 await axios.post('/api/settings/ssh', { key: sshKey });
                 setSshKey('');
-                alert('SSH Key uploaded successfully');
+            }
+
+            // The workspace root and deploy config are instance-global
+            // (operator-managed). Saving them is only possible when the operator
+            // has enabled the global admin API; a 404 there is expected for
+            // regular users, so don't fail the save.
+            try {
+                await axios.post('/api/settings', {
+                    base_path: basePath,
+                    deploy_source: deploySource,
+                    auto_deploy: autoDeploy,
+                });
+            } catch (err: any) {
+                if (err?.response?.status !== 404) throw err;
             }
 
             const currentCompany = companies.find(c => c.id === selectedCompanyId);
@@ -152,29 +211,16 @@ export const Settings: React.FC = () => {
                             placeholder="/home/user/.headcount1"
                         />
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            Data Git Remote URL
-                        </label>
-                        <input
-                            type="text"
-                            value={gitRemoteUrl}
-                            onChange={e => setGitRemoteUrl(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="git@github.com:user/headcount1-data.git"
-                        />
-                    </div>
 					{github?.configured && <div className="border rounded-md p-3 bg-gray-50"><div className="font-medium text-sm">GitHub</div><p className="text-xs text-gray-600 mt-1">Connect GitHub to select repositories and let agents create draft pull requests without a personal access token.</p><div className="mt-2 flex gap-2"><button type="button" onClick={connectGitHub} className="text-sm bg-indigo-600 text-white rounded px-3 py-1">Connect GitHub</button><a href={github.install_url} target="_blank" rel="noreferrer" className="text-sm text-indigo-700 px-2 py-1">Manage repository access</a></div></div>}
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
                         Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            SSH Private Key
-                        </label>
+                        <SecretLabel>SSH Private Key</SecretLabel>
                         <p className="text-xs text-gray-500 mb-2">
-                            Used to authenticate Git operations for private repositories. Paste the key or upload the file directly.
+                            Your personal key to authenticate Git operations for private repositories.
+                            Encrypted at rest under your passkey; never shared with other users. Paste the key or upload the file directly.
                         </p>
                         <textarea
                             value={sshKey}
@@ -213,18 +259,112 @@ export const Settings: React.FC = () => {
                             {saving ? 'Saving...' : 'Save Settings'}
                         </button>
 
-                        <button
-                            type="button"
-                            onClick={() => navigate(`/companies/${companyShortName}/backup`)}
-                            className="bg-blue-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-blue-700"
-                        >
-                            Backup & Restore
-                        </button>
+                        {isOwner && (
+                            <button
+                                type="button"
+                                onClick={() => navigate(`/companies/${companyShortName}/backup`)}
+                                className="bg-blue-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-blue-700"
+                            >
+                                Export & Import
+                            </button>
+                        )}
                     </div>
                 </form>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
+            <div className="bg-white p-6 rounded-lg shadow-sm border mt-8">
+                <div className="flex items-center justify-between border-b pb-2 mb-4">
+                    <h2 className="text-lg font-medium text-gray-900">Deployment</h2>
+                    {deployStatus && (
+                        <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${deployStatus.environment === 'production' ? 'bg-emerald-100 text-emerald-800' : 'bg-amber-100 text-amber-800'}`}>
+                            {deployStatus.environment}
+                        </span>
+                    )}
+                </div>
+
+                {deployStatus?.current && (
+                    <div className="mb-4 text-sm text-gray-600 space-y-1">
+                        <div className="flex items-baseline gap-2">
+                            <span className="font-medium">Version</span>
+                            <span className="text-base font-semibold text-gray-900 font-mono">
+                                {deployStatus.current.version || 'dev'}
+                            </span>
+                        </div>
+                        <div className="text-xs text-gray-500">
+                            Build{' '}
+                            <code className="bg-gray-100 px-1 rounded">
+                                {deployStatus.current.branch}+{deployStatus.current.build_date}+{deployStatus.current.commit_hash}
+                            </code>
+                        </div>
+                        {deployStatus.deploying && (
+                            <div className="text-xs text-indigo-600">
+                                Deploying
+                                {deployStatus.deploy_target && (
+                                    <> to <code className="bg-indigo-50 px-1 rounded">
+                                        {describeBuild(deployStatus.deploy_target)}
+                                    </code></>
+                                )}
+                                {' '}— in-flight runs are draining, then the server restarts.
+                            </div>
+                        )}
+                        {deployStatus.last_error && (
+                            <div className="text-xs text-red-600">Last deploy error: {deployStatus.last_error}</div>
+                        )}
+                        {/* Names only. Enough to confirm configuration arrived without
+                            shell access to the box; the values stay on the server. */}
+                        {deployStatus.env_key_names && deployStatus.env_key_names.length > 0 && (
+                            <div className="text-xs text-gray-500">
+                                Config delivered from GitHub
+                                {deployStatus.env_updated_at && ` on ${new Date(deployStatus.env_updated_at).toLocaleString()}`}:{' '}
+                                <span className="font-mono">{deployStatus.env_key_names.join(', ')}</span>
+                            </div>
+                        )}
+                    </div>
+                )}
+
+                <p className="text-xs text-gray-500 mb-4">
+                    New builds are deployed to this server automatically by CI. Production servers apply
+                    updates from the source selected below; staging servers deploy any branch/PR pushed to them.
+                    Each deploy also delivers every variable and secret from its GitHub Environment
+                    (Settings → Environments), so this server's env vars are managed there rather than
+                    on the box. Names that could let a value execute code (<code>PATH</code>,{' '}
+                    <code>LD_*</code>, …) are dropped and reported back to the deploy job.
+                </p>
+
+                <div className="space-y-4">
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                            Update source
+                        </label>
+                        <p className="text-xs text-gray-500 mb-2">
+                            Which builds a production server auto-deploys. (Ignored on staging.)
+                        </p>
+                        <select
+                            value={deploySource}
+                            onChange={e => setDeploySource(e.target.value === 'main' ? 'main' : 'releases')}
+                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border bg-white"
+                        >
+                            <option value="releases">Releases (recommended)</option>
+                            <option value="main">Main branch</option>
+                        </select>
+                    </div>
+
+                    <div className="flex items-center gap-3">
+                        <input
+                            type="checkbox"
+                            id="auto_deploy"
+                            checked={autoDeploy}
+                            onChange={e => setAutoDeploy(e.target.checked)}
+                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                        />
+                        <label htmlFor="auto_deploy" className="text-sm text-gray-700">
+                            Auto-deploy matching builds (uncheck to pause deployments on this server)
+                        </label>
+                    </div>
+                </div>
+            </div>
+
+            {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>
                 <div className="flex items-center justify-between">
                     <div>
@@ -241,7 +381,7 @@ export const Settings: React.FC = () => {
                         Delete Company
                     </button>
                 </div>
-            </div>
+            </div>}
 
             {showDeleteConfirm && (
                 <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50">
