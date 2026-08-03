@@ -67,6 +67,7 @@ const serverIcon = (name: string) => {
 
 const authLabel = (authType: string) => {
     if (authType === 'bearer') return 'Personal Access Token';
+	if (authType === 'github-app') return 'Connected GitHub App';
     if (authType === 'credentials-file') return 'Credentials file path';
     if (authType === 'url-token') return 'MCP URL (with your token)';
     return 'Token';
@@ -727,6 +728,8 @@ export const MCPServers: React.FC = () => {
                                         {' '}and download the JSON key file.
                                     </p>
                                 </div>
+                            ) : accountModal.authType === 'github-app' ? (
+								<div className="text-sm text-gray-600">GitHub authentication is provided by the connected Headcount1 GitHub App. Connect GitHub in Settings and select a repository for the task's project.</div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">
@@ -737,15 +740,6 @@ export const MCPServers: React.FC = () => {
                                         onChange={e => setAccountForm(f => ({ ...f, auth_token: e.target.value }))}
                                         placeholder={accountModal.authType === 'url-token' ? 'https://mcp.postiz.com/mcp/...' : ''}
                                         className="w-full border rounded p-2 text-sm font-mono" />
-                                    {accountModal.serverDisplayName === 'GitHub' && (
-                                        <p className="text-xs text-gray-400 mt-1">
-                                            Generate at{' '}
-                                            <a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline inline-flex items-center gap-0.5">
-                                                github.com/settings/tokens<ExternalLink size={10} className="ml-0.5" />
-                                            </a>
-                                            {' '}with <code>repo</code>, <code>read:user</code>, and <code>read:org</code> scopes.
-                                        </p>
-                                    )}
                                     {accountModal.serverDisplayName === 'Postiz' && (
                                         <p className="text-xs text-gray-400 mt-1">
                                             In your Postiz dashboard go to <strong>Settings → MCP</strong>, copy the full personal URL (looks like <code>https://mcp.postiz.com/mcp/...</code>) and paste it above.
@@ -785,12 +779,12 @@ interface SetupStep {
 }
 
 const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; docsLabel: string }> = {
-    github: {
+github: {
         docsUrl: 'https://github.com/github/github-mcp-server',
         docsLabel: 'github-mcp-server on GitHub',
         steps: [
             { before: 'Install the MCP server binary:', code: 'brew install github-mcp-server' },
-            { before: 'Go to ', link: { text: 'github.com/settings/tokens/new', url: 'https://github.com/settings/tokens/new' }, after: ' and create a classic Personal Access Token.' },
+			{ before: 'Connect the Headcount1 GitHub App in Settings; no personal access token is required.' },
             { before: 'Select these scopes:', code: 'repo  read:user  read:org' },
             { before: 'Click Authorize below and paste the token.' },
         ],

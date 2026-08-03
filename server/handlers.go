@@ -99,6 +99,13 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/settings", api.GetSettings)
 	r.Post("/settings", api.UpdateSettings)
 	r.Post("/settings/ssh", api.UploadSSHKey)
+	r.Route("/github", func(r chi.Router) {
+		r.Get("/status", api.GitHubStatus)
+		r.Post("/connect", api.StartGitHubOAuth)
+		r.Get("/callback", api.GitHubCallback)
+		r.Get("/repositories", api.ListGitHubRepositories)
+		r.Post("/webhook", api.GitHubWebhook)
+	})
 	r.Get("/activities", api.ListActivities)
 
 	r.Route("/skills", func(r chi.Router) {

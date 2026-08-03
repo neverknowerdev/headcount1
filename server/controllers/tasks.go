@@ -321,6 +321,14 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	gitMgr := git.NewGitManager(repoDir, sshDir)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)
+	if project.GitHubInstallationID != 0 {
+		// GitHub-backed projects publish a draft PR. Never merge or force-push
+		// the default branch as part of task status changes.
+		branchName = fmt.Sprintf("headcount1/task-%d", task.ID)
+		if newStatus == "done" {
+			return
+		}
+	}
 
 	if newStatus == "done" {
 		// Merge worktree branch into main

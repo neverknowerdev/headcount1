@@ -92,6 +92,8 @@ func main() {
 	err = database.AutoMigrate(
 		&db.Company{},
 		&db.Project{},
+		&db.GitHubOAuthState{},
+		&db.GitHubConnection{},
 		&db.Sprint{},
 		&db.LLMProvider{},
 		&db.ModelGroup{},

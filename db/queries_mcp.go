@@ -399,7 +399,7 @@ func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 			Transport:   "stdio",
 			Command:     "github-mcp-server",
 			Args:        `["stdio"]`,
-			AuthType:    "bearer",
+			AuthType:    "github-app",
 			AuthEnvVar:  "GITHUB_PERSONAL_ACCESS_TOKEN",
 			Enabled:     false,
 			Builtin:     true,

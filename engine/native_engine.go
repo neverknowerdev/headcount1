@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/githubapp"
 	"agent-orchestrator/pkg/logging"
 
 	"gorm.io/gorm"
@@ -422,11 +423,25 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			gitProject = true
 			projectRepoDir := fsMgr.GetProjectRepoPath(company, project)
 			gitMgr = git.NewGitManager(projectRepoDir, fsMgr.Paths().SSHDir())
+			if project.GitHubInstallationID != 0 {
+				if gh, ghErr := githubapp.FromEnv(); ghErr == nil {
+					if token, tokenErr := gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID); tokenErr == nil {
+						gitMgr.WithHTTPToken(token)
+					} else {
+						e.logInfo(proxyLogger, "GitHub token error: "+tokenErr.Error())
+					}
+				}
+			}
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
 				e.logInfo(proxyLogger, "Warning: git pull failed: "+pullErr.Error())
 			}
-			if _, statErr := os.Stat(workspacePath); os.IsNotExist(statErr) {
-				branchName := fmt.Sprintf("task-%d", task.ID)
+			// CreateTaskWorkspace creates an empty directory before the run; it
+			// still needs converting into a Git worktree.
+			if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); os.IsNotExist(statErr) {
+				branchName := fmt.Sprintf("headcount1/task-%d", task.ID)
+				// Git refuses to add a worktree into the placeholder directory
+				// created with the task. It contains only disposable task memory.
+				_ = os.RemoveAll(workspacePath)
 				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/main"); wtErr != nil {
 					e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
 					gitProject = false
@@ -778,6 +793,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			}
 			synthetic := srv
 			synthetic.AuthToken = acc.AuthToken
+			// GitHub uses the selected repository's short-lived App token, never a PAT.
+			if srv.Name == "github" && task.ProjectID != nil {
+				if project, err := e.q.GetProject(ctx, *task.ProjectID); err == nil && project.GitHubInstallationID != 0 {
+					if gh, err := githubapp.FromEnv(); err == nil {
+						synthetic.AuthToken, _ = gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+					}
+				}
+			}
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
 			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
@@ -899,6 +922,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == "completed" {
 		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
+		if task.ProjectID != nil {
+			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task)
+		}
 	}
 
 	// Emit final token summary.
@@ -940,6 +966,37 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
 
 	return status
+}
+
+func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspace string, task db.Task) {
+	if task.ProjectID == nil || task.GitHubPRNumber != 0 {
+		return
+	}
+	project, err := e.q.GetProject(ctx, *task.ProjectID)
+	if err != nil || project.GitHubInstallationID == 0 {
+		return
+	}
+	branch := fmt.Sprintf("headcount1/task-%d", task.ID)
+	if err := gitMgr.PushWorktreeBranch(ctx, workspace, branch); err != nil {
+		e.logInfo(logger, "GitHub push failed: "+err.Error())
+		return
+	}
+	gh, err := githubapp.FromEnv()
+	if err != nil {
+		return
+	}
+	token, err := gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+	if err != nil {
+		return
+	}
+	number, url, err := gh.CreatePullRequest(ctx, token, strings.TrimSuffix(strings.TrimPrefix(project.RepositoryUrl, "https://github.com/"), ".git"), task.Title, branch, project.GitHubDefaultBranch, fmt.Sprintf("Created by Headcount1 for task %s.", task.RefKey))
+	if err != nil {
+		e.logInfo(logger, "GitHub PR creation failed: "+err.Error())
+		return
+	}
+	task.GitHubBranch, task.GitHubPRNumber, task.GitHubPRURL = branch, number, url
+	_, _ = e.q.UpdateTask(ctx, task)
+	e.logInfo(logger, fmt.Sprintf("Created draft PR #%d: %s", number, url))
 }
 
 // buildInitialMessages assembles a session's conversation seed: the task

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -10,9 +11,14 @@ import (
 )
 
 type GitManager struct {
-	repoPath string
-	sshDir   string
+	repoPath  string
+	sshDir    string
+	httpToken string
 }
+
+// WithHTTPToken makes Git authenticate to GitHub over HTTPS without putting a
+// credential in the remote URL or command arguments.
+func (g *GitManager) WithHTTPToken(token string) *GitManager { g.httpToken = token; return g }
 
 func NewGitManager(repoPath, sshDir string) *GitManager {
 	return &GitManager{
@@ -113,6 +119,14 @@ func (g *GitManager) sshEnv() string {
 func (g *GitManager) withGitEnv() []string {
 	env := os.Environ()
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
+	if g.httpToken != "" {
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
+		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
+	}
+	if g.httpToken != "" {
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
+		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
+	}
 	if sshCmd := g.sshEnv(); sshCmd != "" {
 		env = append(env, "GIT_SSH_COMMAND="+sshCmd)
 	}
@@ -257,9 +271,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
-		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
+		cmd.Env = g.withGitEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("git %v failed: %v, output: %s", args, err, string(out))
@@ -285,14 +297,25 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	return nil
 }
 
+// PushWorktreeBranch publishes an agent branch; callers create a PR rather
+// than merging or force-pushing the default branch.
+func (g *GitManager) PushWorktreeBranch(ctx context.Context, worktreeDir, branch string) error {
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
+	cmd.Dir = worktreeDir
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git push failed: %v, output: %s", err, string(out))
+	}
+	return nil
+}
+
 func (g *GitManager) MergeBranch(ctx context.Context, baseRepoDir, branchName string) error {
 	// Simple merge strategy (checkout main, pull, merge branch, push)
 	run := func(args ...string) error {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = baseRepoDir
-		keyPath := filepath.Join(g.sshDir, "id_rsa")
-		sshCmd := fmt.Sprintf("ssh -i %s -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -o BatchMode=yes", keyPath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
+		cmd.Env = g.withGitEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git %v failed: %v, output: %s", args, err, string(out))

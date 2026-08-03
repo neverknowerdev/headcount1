@@ -21,7 +21,7 @@ export const Settings: React.FC = () => {
 
     const [basePath, setBasePath] = useState('');
     const [gitRemoteUrl, setGitRemoteUrl] = useState('');
-    const [githubPat, setGithubPat] = useState('');
+	const [github, setGithub] = useState<any>(null);
     const [saving, setSaving] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
@@ -34,7 +34,6 @@ export const Settings: React.FC = () => {
                 if (res.data) {
                     setBasePath(res.data.base_path || '');
                     setGitRemoteUrl(res.data.git_remote_url || '');
-                    setGithubPat(res.data.github_pat || '');
                 }
             } catch (e) {
                 console.error(e);
@@ -43,6 +42,9 @@ export const Settings: React.FC = () => {
         fetchSettings();
     }, []);
 
+	useEffect(() => { axios.get('/api/github/status').then(r => setGithub(r.data)).catch(() => setGithub(null)); }, []);
+	const connectGitHub = async () => { const r = await axios.post('/api/github/connect'); window.location.assign(r.data.authorize_url); };
+
     const handleSave = async (e: React.FormEvent) => {
         e.preventDefault();
         setSaving(true);
@@ -50,7 +52,6 @@ export const Settings: React.FC = () => {
             await axios.post('/api/settings', {
                 base_path: basePath,
                 git_remote_url: gitRemoteUrl,
-                github_pat: githubPat
             });
 
             if (sshKey) {
@@ -163,18 +164,7 @@ export const Settings: React.FC = () => {
                             placeholder="git@github.com:user/headcount1-data.git"
                         />
                     </div>
-                    <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
-                            GitHub PAT (Personal Access Token)
-                        </label>
-                        <input
-                            type="password"
-                            value={githubPat}
-                            onChange={e => setGithubPat(e.target.value)}
-                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
-                            placeholder="ghp_..."
-                        />
-                    </div>
+					{github?.configured && <div className="border rounded-md p-3 bg-gray-50"><div className="font-medium text-sm">GitHub</div><p className="text-xs text-gray-600 mt-1">Connect GitHub to select repositories and let agents create draft pull requests without a personal access token.</p><div className="mt-2 flex gap-2"><button type="button" onClick={connectGitHub} className="text-sm bg-indigo-600 text-white rounded px-3 py-1">Connect GitHub</button><a href={github.install_url} target="_blank" rel="noreferrer" className="text-sm text-indigo-700 px-2 py-1">Manage repository access</a></div></div>}
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
                         Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.

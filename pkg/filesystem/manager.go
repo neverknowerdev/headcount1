@@ -52,7 +52,7 @@ func (m *Manager) GetProjectRepoPath(company db.Company, project db.Project) str
 	return m.paths.RepoDir(company.ShortName, project.Name)
 }
 
-func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project) error {
+func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, project db.Project, tokens ...string) error {
 	if project.RepositoryUrl == "" {
 		return nil
 	}
@@ -63,6 +63,9 @@ func (m *Manager) PrepareProjectRepo(ctx context.Context, company db.Company, pr
 	}
 
 	gitMgr := git.NewGitManager(repoDir, m.paths.SSHDir())
+	if len(tokens) > 0 {
+		gitMgr.WithHTTPToken(tokens[0])
+	}
 	return gitMgr.CloneOrFetchProject(ctx, project.RepositoryUrl, repoDir)
 }
 

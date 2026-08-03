@@ -14,16 +14,19 @@ type Company struct {
 }
 
 type Project struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	CompanyID       int32     `json:"company_id" gorm:"not null"`
-	Company         Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Name            string    `json:"name" gorm:"not null"`
-	Description     string    `json:"description"`
-	WorkspaceFolder string    `json:"workspace_folder"`
-	RepositoryUrl   string    `json:"repository_url"`
-	IsExternal      bool      `json:"is_external" gorm:"not null;default:false"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                   int32     `json:"id" gorm:"primaryKey"`
+	CompanyID            int32     `json:"company_id" gorm:"not null"`
+	Company              Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Name                 string    `json:"name" gorm:"not null"`
+	Description          string    `json:"description"`
+	WorkspaceFolder      string    `json:"workspace_folder"`
+	RepositoryUrl        string    `json:"repository_url"`
+	GitHubRepositoryID   int64     `json:"github_repository_id" gorm:"index"`
+	GitHubInstallationID int64     `json:"github_installation_id" gorm:"index"`
+	GitHubDefaultBranch  string    `json:"github_default_branch"`
+	IsExternal           bool      `json:"is_external" gorm:"not null;default:false"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type Sprint struct {
@@ -159,8 +162,34 @@ type Task struct {
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
 	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
+	GitHubPRNumber     int        `json:"github_pr_number"`
+	GitHubPRURL        string     `json:"github_pr_url"`
+	GitHubBranch       string     `json:"github_branch"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// GitHubOAuthState is short lived and prevents authorization callbacks from
+// being attached to an unrelated Headcount1 session.
+type GitHubOAuthState struct {
+	ID          string     `json:"-" gorm:"primaryKey"`
+	RedirectURL string     `json:"-"`
+	ExpiresAt   time.Time  `json:"-"`
+	UsedAt      *time.Time `json:"-"`
+	CreatedAt   time.Time
+}
+
+// GitHubConnection represents the one GitHub App installation connected to
+// this single-tenant Headcount1 instance. User tokens are retained only to
+// discover repositories; Git operations use short-lived installation tokens.
+type GitHubConnection struct {
+	ID              int32     `json:"id" gorm:"primaryKey"`
+	InstallationID  int64     `json:"installation_id" gorm:"uniqueIndex"`
+	AccountLogin    string    `json:"account_login"`
+	UserAccessToken string    `json:"-" gorm:"type:text"`
+	ConnectedAt     time.Time `json:"connected_at"`
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 type Comment struct {

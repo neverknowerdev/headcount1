@@ -301,6 +301,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 <div className="flex flex-col min-w-0">
                     <span className="text-xs font-mono text-gray-400">{task.ref_key || `${prefix}-${task.id}`}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
                     <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
+					{task.github_pr_url && <a href={task.github_pr_url} target="_blank" rel="noreferrer" className="text-sm text-indigo-600 hover:underline">PR #{task.github_pr_number}</a>}
                 </div>
             ) : (
                 <h2 className="text-xl font-bold text-gray-900">Create New Task</h2>

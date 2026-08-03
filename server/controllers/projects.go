@@ -35,12 +35,13 @@ func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID       int32  `json:"company_id"`
-		Name            string `json:"name"`
-		Description     string `json:"description"`
-		WorkspaceFolder string `json:"workspace_folder"`
-		RepositoryUrl   string `json:"repository_url"`
-		IsExternal      bool   `json:"is_external"`
+		CompanyID        int32           `json:"company_id"`
+		Name             string          `json:"name"`
+		Description      string          `json:"description"`
+		WorkspaceFolder  string          `json:"workspace_folder"`
+		RepositoryUrl    string          `json:"repository_url"`
+		GitHubRepository json.RawMessage `json:"github_repository"`
+		IsExternal       bool            `json:"is_external"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -53,7 +54,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RepositoryUrl != "" {
+	if req.RepositoryUrl != "" && len(req.GitHubRepository) == 0 {
 		settings := LoadSettings()
 		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
 		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
@@ -71,6 +72,9 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		WorkspaceFolder: req.WorkspaceFolder,
 		RepositoryUrl:   req.RepositoryUrl,
 		IsExternal:      req.IsExternal,
+	}
+	if len(req.GitHubRepository) > 0 {
+		GitHubRepoSelection(&p, string(req.GitHubRepository))
 	}
 
 	var comp db.Company
@@ -107,8 +111,12 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
 
-	if req.RepositoryUrl != "" {
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {
+	if req.RepositoryUrl != "" && len(req.GitHubRepository) == 0 {
+		var tokens []string
+		if token, err := GitHubTokenForProject(r.Context(), api.q, proj); err == nil && token != "" {
+			tokens = []string{token}
+		}
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, tokens...); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -165,10 +173,11 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var req struct {
-		Name            string `json:"name"`
-		Description     string `json:"description"`
-		WorkspaceFolder string `json:"workspace_folder"`
-		RepositoryUrl   string `json:"repository_url"`
+		Name             string          `json:"name"`
+		Description      string          `json:"description"`
+		WorkspaceFolder  string          `json:"workspace_folder"`
+		RepositoryUrl    string          `json:"repository_url"`
+		GitHubRepository json.RawMessage `json:"github_repository"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -191,6 +200,10 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		project.WorkspaceFolder = req.WorkspaceFolder
 	}
 
+	if len(req.GitHubRepository) > 0 {
+		GitHubRepoSelection(&project, string(req.GitHubRepository))
+		req.RepositoryUrl = project.RepositoryUrl
+	}
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
 		sshDir := filesystem.NewPaths(settings.BasePath).SSHDir()
@@ -204,7 +217,11 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
 		fsManager := filesystem.NewManager(settings.BasePath)
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project); err != nil {
+		var tokens []string
+		if token, err := GitHubTokenForProject(r.Context(), api.q, project); err == nil && token != "" {
+			tokens = []string{token}
+		}
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, tokens...); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}

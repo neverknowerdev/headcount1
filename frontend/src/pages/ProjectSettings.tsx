@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
-import { ArrowLeft, GitBranch, Save, CheckCircle2, AlertCircle, Loader2 } from 'lucide-react';
+import { ArrowLeft, GitBranch, Save, CheckCircle2, AlertCircle, Loader2, ExternalLink } from 'lucide-react';
 
 export const ProjectSettings: React.FC = () => {
   const { shortName, id } = useParams<{ shortName: string; id: string }>();
@@ -20,6 +20,10 @@ export const ProjectSettings: React.FC = () => {
   const [savingDetails, setSavingDetails] = useState(false);
 
   const [repositoryUrl, setRepositoryUrl] = useState('');
+	const [githubRepos, setGithubRepos] = useState<any[]>([]);
+	const [githubStatus, setGithubStatus] = useState<any>(null);
+	const [repoSearch, setRepoSearch] = useState('');
+	const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
   const [repoError, setRepoError] = useState('');
   const [repoSuccess, setRepoSuccess] = useState('');
   const [savingRepo, setSavingRepo] = useState(false);
@@ -55,6 +59,8 @@ export const ProjectSettings: React.FC = () => {
   }, [id]);
 
   useEffect(() => { fetchCodegraphStatus(); }, [fetchCodegraphStatus]);
+
+  useEffect(() => { (async () => { try { const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]); setGithubStatus(status.data); setGithubRepos(repos.data || []); } catch { /* GitHub is optional */ } })(); }, []);
 
   // Poll every 3 s while initializing
   useEffect(() => {
@@ -100,6 +106,7 @@ export const ProjectSettings: React.FC = () => {
       const res = await axios.put(`/api/projects/${id}`, {
         name,
         repository_url: repositoryUrl.trim(),
+		github_repository: selectedGithubRepo || undefined,
       });
       setProject(res.data);
       setRepositoryUrl(res.data.repository_url || repositoryUrl.trim());
@@ -209,6 +216,12 @@ export const ProjectSettings: React.FC = () => {
         )}
 
         <div>
+			{githubStatus?.configured && (
+				<div className="rounded border bg-indigo-50 p-3 text-sm">
+					<div className="flex items-center justify-between gap-3"><span className="font-medium">GitHub App repositories</span><a href={githubStatus.install_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-indigo-700 hover:underline">Manage repository access <ExternalLink size={13}/></a></div>
+					{githubRepos.length > 0 ? <><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search connected repositories…" className="mt-2 w-full rounded border p-2"/><select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setRepositoryUrl(repo.clone_url); }} className="mt-2 w-full rounded border p-2"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select></> : <p className="mt-2 text-gray-600">No repositories are available yet. Install the Headcount1 GitHub App or connect GitHub first.</p>}
+				</div>
+			)}
           <label className="block text-sm font-medium text-gray-700 mb-1">Repository URL</label>
           <input
             type="text"
@@ -219,7 +232,7 @@ export const ProjectSettings: React.FC = () => {
           />
           <p className="text-xs text-gray-500 mt-1">
             Enter a URL like <code>github.com/user/repo</code> or <code>git@github.com:user/repo.git</code>.
-            The server will connect via SSH — make sure your SSH key is configured in Settings.
+			Select a connected GitHub repository above (recommended), or enter a repository URL manually for SSH/local repositories.
           </p>
         </div>
 
