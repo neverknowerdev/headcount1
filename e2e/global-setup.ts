@@ -24,6 +24,7 @@ let serverProcess: ChildProcessWithoutNullStreams | null = null;
  */
 export default async function globalSetup(config: FullConfig): Promise<void> {
     const baseURL = config.projects[0]?.use?.baseURL || 'http://localhost:8080';
+    const port = new URL(baseURL).port || '80';
 
     // 1. Create isolated home directory for E2E tests
     const e2eHome = createE2EHome();
@@ -53,6 +54,7 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
     env.E2E_HEADCOUNT1_HOME = e2eHome;
+    env.PORT = port;
 
     const projectRoot = path.resolve(__dirname, '..');
     // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module

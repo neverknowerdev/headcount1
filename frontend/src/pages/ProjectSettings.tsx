@@ -41,6 +41,9 @@ export const ProjectSettings: React.FC = () => {
         setDescription(p.description || '');
         setWorkspaceFolder(p.workspace_folder || '');
         setRepositoryUrl(p.repository_url || '');
+		// Preserve the editable manual field for projects that already use a
+		// non-GitHub repository. New projects still lead with the GitHub picker.
+		setShowManualRepo(Boolean(p.repository_url && !p.github_repository_id));
       } catch {
         setLoadError('Failed to load project');
       } finally {

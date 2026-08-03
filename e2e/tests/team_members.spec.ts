@@ -51,7 +51,7 @@ test.describe.serial('Team & members', () => {
         // browser's (auto-authenticated) session stays the owner's.
         // Passwordless registration needs a WebAuthn ceremony; in E2E we use
         // the deterministic-unlock register bypass to create the teammate.
-        const api = await playwright.request.newContext({ baseURL: 'http://localhost:8080' });
+        const api = await playwright.request.newContext({ baseURL: process.env.E2E_BASE_URL || 'http://localhost:8080' });
         const reg = await api.post('/api/e2e/register', {
             data: { email: 'dev@corp.io', invite_token: token },
         });
