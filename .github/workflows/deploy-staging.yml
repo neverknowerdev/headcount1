@@ -8,15 +8,14 @@ name: Deploy Staging
 # the job summary and in the "Build" step.
 run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format('PR #{0}', github.event.issue.number) || (github.event.pull_request.head.ref || github.ref_name) }}"
 
-# Staging deploys, ON REQUEST ONLY. Nothing here runs on a push.
+# Staging deploys are opt-in per pull request.
 #
-# Two ways to request one from the pull request itself:
+# Add the "auto-deploy-to-staging" label to a pull request to deploy its current
+# head immediately and every new commit pushed to that PR. Remove the label to
+# stop automatic staging deploys.
 #
-#   1. Add the "deploy-staging" label. The label is removed again as soon as the
-#      run starts, so it is a button, not a state — re-add it to deploy again.
-#   2. Comment "/deploy".
-#
-# Either builds the PR's current head commit and ships it to stagingapp, versioned
+# A one-off deploy can still be requested by commenting "/deploy". Either path
+# builds the PR's current head commit and ships it to stagingapp, versioned
 # staging-<short branch>-<short commit> — a staging build is not a release, so
 # it is named after what it actually is rather than given a release number, and
 # trimmed to stay readable (see scripts/version.sh).
@@ -37,9 +36,12 @@ run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format(
 # chosen there is both the workflow file that runs and the code that ships, so
 # there is no second field to keep in sync with it.
 #
-# Requests are owner-only. The job runs in the "Preview" GitHub Environment, so
-# protection rules configured there (required reviewers, wait timer) apply on
-# top of the request, and the deploy is recorded with a link to the live URL.
+# Manual and comment requests are owner-only. Adding or removing PR labels
+# requires repository permission; once auto-deploy is enabled, a synchronize
+# event can be caused by anyone able to update that PR. The job runs in the
+# "Preview" GitHub Environment, so protection rules configured there (required
+# reviewers, wait timer) apply on top of the request, and the deploy is recorded
+# with a link to the live URL.
 #
 # Config lives ON THE ENVIRONMENT (Settings -> Environments -> Preview):
 #   vars.DEPLOY_URL        - https://stagingapp.headcount1.ai
@@ -54,10 +56,10 @@ run-name: "Deploy staging · ${{ github.event_name == 'issue_comment' && format(
 # triggered from here, and so a PR only ever offers a staging deploy.
 
 on:
-  # Adding the "deploy-staging" label IS the request. Only `labeled` — a push to
-  # the PR does nothing, so this never deploys on its own.
+  # Adding the label deploys immediately. `synchronize` deploys each subsequent
+  # PR head commit while the label remains attached.
   pull_request:
-    types: [labeled]
+    types: [labeled, synchronize]
   issue_comment:
     types: [created]
   # No inputs: the branch selected in "Use workflow from" IS what gets deployed.
@@ -70,17 +72,21 @@ concurrency:
 
 jobs:
   deploy:
-    # Owner-only, and for a comment only a "/deploy" on a PULL REQUEST — so
-    # ordinary discussion never starts a runner.
+    # Manual and comment deploys are owner-only. A PR deploy requires the
+    # persistent opt-in label; unrelated labels and unlabeled PR updates are
+    # ignored.
     # NOTE: if this repo moves to an organization, repository_owner becomes the
     # org name and will never equal a username; switch to an actor allowlist or
     # rely on the Preview environment's required reviewers instead.
     if: >-
-      github.actor == github.repository_owner &&
-      (github.event_name == 'workflow_dispatch' ||
+      ((github.event_name == 'workflow_dispatch' &&
+        github.actor == github.repository_owner) ||
         (github.event_name == 'pull_request' &&
-         github.event.label.name == 'deploy-staging') ||
+         contains(github.event.pull_request.labels.*.name, 'auto-deploy-to-staging') &&
+         (github.event.action == 'synchronize' ||
+          github.event.label.name == 'auto-deploy-to-staging')) ||
         (github.event_name == 'issue_comment' &&
+         github.actor == github.repository_owner &&
          github.event.issue.pull_request != null &&
          startsWith(github.event.comment.body, '/deploy')))
     runs-on: ubuntu-latest
@@ -102,19 +108,6 @@ jobs:
           gh api -X POST "repos/$REPO/issues/comments/$COMMENT_ID/reactions" \
             -f content=rocket --silent || true
 
-      # Consume the label immediately, so it behaves as a button rather than a
-      # sticky "this PR auto-deploys" state: re-adding it requests another
-      # deploy, and a failed run can be retried the same way.
-      - name: Consume the deploy-staging label
-        if: github.event_name == 'pull_request'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          REPO: ${{ github.repository }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-        run: |
-          gh api -X DELETE "repos/$REPO/issues/$PR_NUMBER/labels/deploy-staging" \
-            --silent || true
-
       - name: Resolve what to deploy
         id: target
         # Event data goes through the environment rather than being interpolated
@@ -126,18 +119,18 @@ jobs:
           REPO: ${{ github.repository }}
           EVENT: ${{ github.event_name }}
           PR_NUMBER: ${{ github.event.issue.number }}
-          LABEL_REF: ${{ github.event.pull_request.head.ref }}
-          LABEL_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_REF: ${{ github.event.pull_request.head.ref }}
+          PR_SHA: ${{ github.event.pull_request.head.sha }}
           DISPATCH_REF: ${{ github.ref_name }}
           DISPATCH_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
           case "$EVENT" in
             pull_request)
-              # The label event carries the PR head directly. Use the head
+              # The pull_request event carries the PR head directly. Use the head
               # commit, not the merge commit GitHub synthesises, so the deployed
               # build is exactly what the PR contains.
-              ref="$LABEL_REF"; sha="$LABEL_SHA"
+              ref="$PR_REF"; sha="$PR_SHA"
               ;;
             issue_comment)
               # The comment carries no head info; deploy the PR as it stands now.
