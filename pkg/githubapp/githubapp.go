@@ -64,8 +64,14 @@ func (c *Client) AuthorizeURL(state, redirect string) string {
 	return "https://github.com/login/oauth/authorize?" + q.Encode()
 }
 
-func (c *Client) ExchangeCode(ctx context.Context, code string) (string, error) {
+// ExchangeCode repeats redirectURI when authorization used one. GitHub Apps
+// can register multiple callback URLs; omitting it here makes the exchange
+// ambiguous and breaks staging/prod flows that share one App.
+func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (string, error) {
 	v := url.Values{"client_id": {c.config.ClientID}, "client_secret": {c.config.ClientSecret}, "code": {code}}
+	if redirectURI != "" {
+		v.Set("redirect_uri", redirectURI)
+	}
 	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(v.Encode()))
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")

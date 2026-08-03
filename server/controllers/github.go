@@ -1,8 +1,11 @@
 package endpoints
 
 import (
+	"bytes"
 	"context"
+	"crypto/hmac"
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,6 +23,44 @@ import (
 
 func githubClient() (*githubapp.Client, error) { return githubapp.FromEnv() }
 func deploymentURL() string                    { return strings.TrimRight(os.Getenv("DEPLOY_URL"), "/") }
+
+const forwardedWebhookSignatureHeader = "X-Headcount1-Webhook-Forward-Signature"
+
+// A GitHub App has one webhook URL. Production can optionally forward its
+// verified deliveries to staging with a second shared secret, allowing both
+// environments to use the same App without exposing an unsigned relay.
+func forwardedWebhookSignature(body []byte, secret string) string {
+	mac := hmac.New(sha256.New, []byte(secret))
+	_, _ = mac.Write(body)
+	return "sha256=" + hex.EncodeToString(mac.Sum(nil))
+}
+
+func validForwardedWebhook(body []byte, signature, secret string) bool {
+	if secret == "" || signature == "" {
+		return false
+	}
+	return hmac.Equal([]byte(signature), []byte(forwardedWebhookSignature(body, secret)))
+}
+
+func forwardGitHubWebhook(body []byte, event string) {
+	url, secret := os.Getenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_URL"), os.Getenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET")
+	if url == "" || secret == "" {
+		return
+	}
+	req, err := http.NewRequest(http.MethodPost, url, bytes.NewReader(body))
+	if err != nil {
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-GitHub-Event", event)
+	req.Header.Set(forwardedWebhookSignatureHeader, forwardedWebhookSignature(body, secret))
+	client := &http.Client{Timeout: 10 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		return
+	}
+	_ = resp.Body.Close()
+}
 
 func (api *API) GitHubStatus(w http.ResponseWriter, r *http.Request) {
 	c, err := githubClient()
@@ -103,7 +144,7 @@ func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 500)
 		return
 	}
-	token, err := c.ExchangeCode(r.Context(), code)
+	token, err := c.ExchangeCode(r.Context(), code, s.RedirectURL)
 	if err != nil {
 		http.Error(w, err.Error(), 400)
 		return
@@ -177,12 +218,23 @@ func (api *API) GitHubWebhook(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, 400, "invalid webhook body")
 		return
 	}
-	c, err := githubClient()
-	if err != nil || !c.VerifyWebhook(body, r.Header.Get("X-Hub-Signature-256")) {
-		api.respondError(w, 401, "invalid GitHub webhook signature")
-		return
+	forwarded := r.Header.Get(forwardedWebhookSignatureHeader) != ""
+	if forwarded {
+		if !validForwardedWebhook(body, r.Header.Get(forwardedWebhookSignatureHeader), os.Getenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET")) {
+			api.respondError(w, 401, "invalid forwarded webhook signature")
+			return
+		}
+	} else {
+		c, err := githubClient()
+		if err != nil || !c.VerifyWebhook(body, r.Header.Get("X-Hub-Signature-256")) {
+			api.respondError(w, 401, "invalid GitHub webhook signature")
+			return
+		}
 	}
 	event := r.Header.Get("X-GitHub-Event")
+	if !forwarded {
+		go forwardGitHubWebhook(body, event)
+	}
 	var p struct {
 		Repository struct {
 			ID int64 `json:"id"`
