@@ -23,7 +23,8 @@ export const ProjectSettings: React.FC = () => {
 	const [githubRepos, setGithubRepos] = useState<any[]>([]);
 	const [githubStatus, setGithubStatus] = useState<any>(null);
 	const [repoSearch, setRepoSearch] = useState('');
-	const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
+  const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
+	const [showManualRepo, setShowManualRepo] = useState(false);
   const [repoError, setRepoError] = useState('');
   const [repoSuccess, setRepoSuccess] = useState('');
   const [savingRepo, setSavingRepo] = useState(false);
@@ -215,13 +216,12 @@ export const ProjectSettings: React.FC = () => {
           <div className="p-3 bg-green-50 border border-green-200 rounded text-green-700 text-sm">{repoSuccess}</div>
         )}
 
-        <div>
-			{githubStatus?.configured && (
-				<div className="rounded border bg-indigo-50 p-3 text-sm">
-					<div className="flex items-center justify-between gap-3"><span className="font-medium">GitHub App repositories</span><a href={githubStatus.install_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-indigo-700 hover:underline">Manage repository access <ExternalLink size={13}/></a></div>
-					{githubRepos.length > 0 ? <><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search connected repositories…" className="mt-2 w-full rounded border p-2"/><select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setRepositoryUrl(repo.clone_url); }} className="mt-2 w-full rounded border p-2"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select></> : <p className="mt-2 text-gray-600">No repositories are available yet. Install the Headcount1 GitHub App or connect GitHub first.</p>}
-				</div>
-			)}
+			<div className="rounded-lg border border-gray-200 bg-gray-50 p-4">
+				<div className="flex items-start justify-between gap-3"><div className="flex gap-2"><GitBranch className="mt-0.5" size={19}/><div><h3 className="font-medium text-gray-900">GitHub repository</h3><p className="mt-1 text-xs text-gray-600">Recommended. Select a repository that you connected in Settings.</p></div></div>{githubStatus?.configured && <a href={githubStatus.install_url} target="_blank" rel="noreferrer" className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-indigo-700 hover:underline">Manage access <ExternalLink size={12}/></a>}</div>
+				{githubStatus?.configured && githubRepos.length > 0 ? <><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search repositories…" className="mt-3 w-full rounded border p-2 text-sm"/><select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setRepositoryUrl(repo.clone_url); }} className="mt-2 w-full rounded border p-2 text-sm"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select></> : <p className="mt-3 text-sm text-gray-600">{githubStatus?.configured ? 'No connected repositories yet. Use “Manage access” to install the GitHub App for a repository.' : 'GitHub is not connected yet. Open Settings to connect it first.'}</p>}
+			</div>
+			<button type="button" onClick={() => setShowManualRepo(v => !v)} className="mt-4 text-sm font-medium text-gray-600 hover:text-gray-900">{showManualRepo ? 'Hide manual repository URL' : 'Use a non-GitHub repository or SSH URL instead'}</button>
+			{showManualRepo && <div className="mt-3">
           <label className="block text-sm font-medium text-gray-700 mb-1">Repository URL</label>
           <input
             type="text"
@@ -232,9 +232,9 @@ export const ProjectSettings: React.FC = () => {
           />
           <p className="text-xs text-gray-500 mt-1">
             Enter a URL like <code>github.com/user/repo</code> or <code>git@github.com:user/repo.git</code>.
-			Select a connected GitHub repository above (recommended), or enter a repository URL manually for SSH/local repositories.
+			For GitLab, Bitbucket, self-hosted Git, or local repositories.
           </p>
-        </div>
+			</div>}
 
         {project?.repository_url && (
           <div className="p-3 bg-gray-50 rounded text-sm text-gray-600 font-mono break-all">
