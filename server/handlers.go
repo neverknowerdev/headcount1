@@ -350,6 +350,7 @@ func (s *Server) Mount(r chi.Router) {
 			r.With(api.RequireTeamOwner).Delete("/", api.DeleteMCPServer)
 			r.Post("/discover", api.DiscoverMCPServerTools)
 			r.Post("/accounts", api.CreateMCPAccount)
+			r.Post("/github-oauth", api.StartMCPGitHubOAuth)
 			r.Post("/google-oauth", api.StartGoogleOAuth)
 			r.Get("/google-oauth", api.PollGoogleOAuth)
 		})

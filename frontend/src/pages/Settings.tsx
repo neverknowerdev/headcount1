@@ -56,7 +56,6 @@ export const Settings: React.FC = () => {
     const [basePath, setBasePath] = useState('');
     const [deploySource, setDeploySource] = useState<'releases' | 'main'>('releases');
     const [autoDeploy, setAutoDeploy] = useState(true);
-	const [github, setGithub] = useState<any>(null);
     const [saving, setSaving] = useState(false);
     const [sshKey, setSshKey] = useState('');
     const [sshFileName, setSshFileName] = useState('');
@@ -80,11 +79,6 @@ export const Settings: React.FC = () => {
         fetchSettings();
     }, []);
 
-	useEffect(() => { axios.get('/api/github/status').then(r => setGithub(r.data)).catch(() => setGithub({ configured: false, error: 'Unable to check GitHub configuration.' })); }, []);
-	const connectGitHub = async () => {
-		try { const r = await axios.post('/api/github/connect'); window.location.assign(r.data.authorize_url); }
-		catch (err: any) { setGithub((current: any) => ({ ...current, connectError: err.response?.data?.error || 'GitHub is not configured on this environment yet.' })); }
-	};
     const fetchDeployStatus = useCallback(async () => {
         try {
             const res = await axios.get('/api/deploy/status');
@@ -214,13 +208,9 @@ export const Settings: React.FC = () => {
                             placeholder="/home/user/.headcount1"
                         />
                     </div>
-					<div className="rounded-lg border border-gray-200 bg-gradient-to-br from-gray-50 to-white p-5">
-						<div className="flex items-start justify-between gap-4">
-							<div className="flex gap-3"><div className="rounded-lg bg-gray-900 p-2 text-white"><GitBranch size={20}/></div><div><h3 className="font-semibold text-gray-900">Connect GitHub</h3><p className="mt-1 text-sm text-gray-600">Choose exactly which repositories Headcount1 can access. Agents create draft pull requests—no personal access token or SSH key required.</p></div></div>
-							{github?.configured && github?.connections?.length > 0 && <span className="shrink-0 rounded-full bg-emerald-100 px-2.5 py-1 text-xs font-medium text-emerald-800">Connected</span>}
-						</div>
-						{github?.configured ? <div className="mt-4 flex flex-wrap items-center gap-3"><button type="button" onClick={connectGitHub} className="inline-flex items-center gap-2 rounded-md bg-gray-900 px-4 py-2 text-sm font-medium text-white hover:bg-gray-700"><GitBranch size={16}/>{github.connections?.length ? 'Connect another GitHub account' : 'Connect GitHub'}</button><a href={github.install_url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 text-sm font-medium text-indigo-700 hover:underline">Manage repository access <ExternalLink size={14}/></a></div> : <div className="mt-4 rounded-md border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span className="font-medium">GitHub App needs configuration.</span> Add the GitHub App environment variables, then refresh this page. {github?.error && <span className="block mt-1 text-xs">{github.error}</span>}</div>}
-						{github?.connectError && <p className="mt-3 text-sm text-red-700">{github.connectError}</p>}
+					<div className="flex gap-3 rounded-lg border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-950">
+						<GitBranch className="mt-0.5 shrink-0 text-indigo-700" size={18}/>
+						<p><span className="font-semibold">Connect GitHub in MCP Servers.</span> Add personal and work GitHub accounts separately, then choose from their permitted repositories when setting up a project. <a href={`/companies/${companyShortName}/mcp-servers`} className="inline-flex items-center gap-1 font-medium text-indigo-700 underline hover:text-indigo-900">Manage GitHub accounts <ExternalLink size={13}/></a></p>
 					</div>
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
                         Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}

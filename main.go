@@ -184,6 +184,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
+	// Earlier GitHub App support allowed only one row per installation. MCP
+	// accounts intentionally allow personal and work identities to connect the
+	// same installation independently, so replace that legacy unique index.
+	if database.Migrator().HasIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id") {
+		if err := database.Migrator().DropIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id"); err != nil {
+			log.Printf("GitHub connection index migration: %v", err)
+		}
+	}
+	if err := database.Migrator().CreateIndex(&db.GitHubConnection{}, "InstallationID"); err != nil {
+		log.Printf("GitHub connection index migration: %v", err)
+	}
 
 	recoverStaleRuns(database)
 

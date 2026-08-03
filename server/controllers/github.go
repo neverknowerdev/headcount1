@@ -14,6 +14,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/githubapp"
+	"agent-orchestrator/pkg/secrets"
 	"github.com/go-chi/chi/v5"
 )
 
@@ -27,8 +28,48 @@ func (api *API) GitHubStatus(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var connections []db.GitHubConnection
-	api.db.Order("id").Find(&connections)
+	api.db.Where("user_id = ?", api.currentUserID(r)).Order("id").Find(&connections)
 	api.respondJSON(w, http.StatusOK, map[string]any{"configured": true, "install_url": c.InstallURL(), "connections": connections})
+}
+
+// StartMCPGitHubOAuth starts GitHub App OAuth for a named MCP account. The
+// resulting OAuth token is encrypted in that account; it is never shown in the
+// UI or entered manually by the user.
+func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
+	server := api.mcpServerFromCtx(r)
+	if server.Name != "github" {
+		api.respondError(w, http.StatusBadRequest, "GitHub OAuth is only available for the GitHub integration")
+		return
+	}
+	c, err := githubClient()
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	if deploymentURL() == "" {
+		api.respondError(w, http.StatusInternalServerError, "DEPLOY_URL is required for GitHub OAuth")
+		return
+	}
+	var input struct {
+		Name       string `json:"name"`
+		ReturnPath string `json:"return_path"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if input.Name == "" {
+		input.Name = "GitHub account"
+	}
+	if input.ReturnPath == "" || !strings.HasPrefix(input.ReturnPath, "/") || strings.HasPrefix(input.ReturnPath, "//") {
+		input.ReturnPath = "/settings"
+	}
+	b := make([]byte, 32)
+	_, _ = rand.Read(b)
+	state := hex.EncodeToString(b)
+	callback := deploymentURL() + "/api/github/callback"
+	api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, UserID: api.currentUserID(r), AccountName: input.Name, ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)})
+	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback), "install_url": c.InstallURL()})
 }
 func (api *API) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	c, err := githubClient()
@@ -72,6 +113,24 @@ func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), 400)
 		return
 	}
+	if s.MCPServerID != 0 {
+		sealed, sealErr := secrets.Default().EncryptForUser(s.UserID, token)
+		if sealErr != nil {
+			http.Error(w, "Your secure vault is locked. Return to Headcount1, unlock it, and try again.", http.StatusConflict)
+			return
+		}
+		account, createErr := api.q.CreateMCPAccount(r.Context(), db.MCPAccount{MCPServerID: s.MCPServerID, Name: s.AccountName, AuthTokenEncrypted: sealed, UserID: &s.UserID})
+		if createErr != nil {
+			http.Error(w, createErr.Error(), http.StatusInternalServerError)
+			return
+		}
+		for _, in := range installs {
+			conn := db.GitHubConnection{InstallationID: in.ID, MCPAccountID: account.ID, UserID: s.UserID, AccountLogin: in.Account.Login, ConnectedAt: now}
+			api.db.Where("mcp_account_id = ? AND installation_id = ?", account.ID, in.ID).Assign(conn).FirstOrCreate(&conn)
+		}
+		http.Redirect(w, r, deploymentURL()+s.ReturnPath+"?github=connected", http.StatusFound)
+		return
+	}
 	for _, in := range installs {
 		conn := db.GitHubConnection{InstallationID: in.ID, AccountLogin: in.Account.Login, UserAccessToken: token, ConnectedAt: now}
 		api.db.Where("installation_id = ?", in.ID).Assign(conn).FirstOrCreate(&conn)
@@ -85,13 +144,24 @@ func (api *API) ListGitHubRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var conns []db.GitHubConnection
-	api.db.Find(&conns)
+	api.db.Where("user_id = ?", api.currentUserID(r)).Find(&conns)
 	repos := []map[string]any{}
 	for _, conn := range conns {
-		if conn.UserAccessToken == "" {
+		token := conn.UserAccessToken
+		if conn.MCPAccountID != 0 {
+			account, getErr := api.q.GetMCPAccount(r.Context(), conn.MCPAccountID)
+			if getErr != nil || account.UserID == nil || *account.UserID != api.currentUserID(r) {
+				continue
+			}
+			token, getErr = secrets.Default().Decrypt(account.AuthTokenEncrypted)
+			if getErr != nil {
+				continue
+			}
+		}
+		if token == "" {
 			continue
 		}
-		rs, e := c.UserRepositories(r.Context(), conn.UserAccessToken, conn.InstallationID)
+		rs, e := c.UserRepositories(r.Context(), token, conn.InstallationID)
 		if e != nil {
 			continue
 		}

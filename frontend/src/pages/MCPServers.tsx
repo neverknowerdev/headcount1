@@ -228,7 +228,21 @@ export const MCPServers: React.FC = () => {
         if (!accountModal) return;
         setAccountError(null);
 
-        // Google OAuth uses a separate two-step flow — start it instead of the normal save.
+		// OAuth integrations launch their provider flow instead of saving a manually-entered token.
+		if (accountModal.authType === 'github-app') {
+			try {
+				const res = await axios.post(`/api/mcp-servers/${accountModal.serverId}/github-oauth`, {
+					name: accountForm.name || 'GitHub account',
+					return_path: window.location.pathname,
+				});
+				window.location.assign(res.data.authorize_url);
+			} catch (e: any) {
+				setAccountError(e.response?.data?.error || 'Failed to start GitHub authorization');
+			}
+			return;
+		}
+
+		// Google OAuth uses a separate two-step flow — start it instead of the normal save.
         if (accountModal.authType === 'google-oauth') {
             if (!accountForm.credentials_json) {
                 setAccountError('Please select your OAuth client credentials JSON file.');
@@ -730,8 +744,8 @@ export const MCPServers: React.FC = () => {
                                         {' '}and download the JSON key file.
                                     </p>
                                 </div>
-                            ) : accountModal.authType === 'github-app' ? (
-								<div className="text-sm text-gray-600">GitHub authentication is provided by the connected Headcount1 GitHub App. Connect GitHub in Settings and select a repository for the task's project.</div>
+							) : accountModal.authType === 'github-app' ? (
+								<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Sign in with GitHub</p><p className="mt-1 text-indigo-800">Authorize this account in GitHub, choose the repositories Headcount1 may access, then return here. You can add multiple personal or work accounts.</p></div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
                                     <SecretLabel>
@@ -786,9 +800,9 @@ github: {
         docsLabel: 'github-mcp-server on GitHub',
         steps: [
             { before: 'Install the MCP server binary:', code: 'brew install github-mcp-server' },
-			{ before: 'Connect the Headcount1 GitHub App in Settings; no personal access token is required.' },
-            { before: 'Select these scopes:', code: 'repo  read:user  read:org' },
-            { before: 'Click Authorize below and paste the token.' },
+			{ before: 'Click Authorize below and sign in to GitHub. No personal access token is required.' },
+			{ before: 'Choose the repositories Headcount1 may access in the GitHub App installation screen.' },
+			{ before: 'Add another account whenever you need separate personal and work access.' },
         ],
     },
     'brave-search': {
