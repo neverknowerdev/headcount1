@@ -94,6 +94,7 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Name       string `json:"name"`
 		ReturnPath string `json:"return_path"`
+		AccountID  int32  `json:"account_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
@@ -109,7 +110,7 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	_, _ = rand.Read(b)
 	state := hex.EncodeToString(b)
 	callback := deploymentURL() + "/api/github/callback"
-	api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, UserID: api.currentUserID(r), AccountName: input.Name, ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)})
+	api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, MCPAccountID: input.AccountID, UserID: api.currentUserID(r), AccountName: input.Name, ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)})
 	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback), "install_url": c.InstallURL()})
 }
 func (api *API) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
@@ -160,10 +161,27 @@ func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 			http.Error(w, "Your secure vault is locked. Return to Headcount1, unlock it, and try again.", http.StatusConflict)
 			return
 		}
-		account, createErr := api.q.CreateMCPAccount(r.Context(), db.MCPAccount{MCPServerID: s.MCPServerID, Name: s.AccountName, AuthTokenEncrypted: sealed, UserID: &s.UserID})
-		if createErr != nil {
-			http.Error(w, createErr.Error(), http.StatusInternalServerError)
-			return
+		var account db.MCPAccount
+		if s.MCPAccountID != 0 {
+			if api.db.Where("id = ? AND mcp_server_id = ? AND user_id = ?", s.MCPAccountID, s.MCPServerID, s.UserID).First(&account).Error != nil {
+				http.Error(w, "GitHub account was not found. Return to Headcount1 and try again.", http.StatusNotFound)
+				return
+			}
+			account.Name = s.AccountName
+			account.AuthTokenEncrypted = sealed
+			account.LastError = ""
+			if _, updateErr := api.q.UpdateMCPAccount(r.Context(), account); updateErr != nil {
+				http.Error(w, updateErr.Error(), http.StatusInternalServerError)
+				return
+			}
+			api.db.Where("mcp_account_id = ?", account.ID).Delete(&db.GitHubConnection{})
+		} else {
+			var createErr error
+			account, createErr = api.q.CreateMCPAccount(r.Context(), db.MCPAccount{MCPServerID: s.MCPServerID, Name: s.AccountName, AuthTokenEncrypted: sealed, UserID: &s.UserID})
+			if createErr != nil {
+				http.Error(w, createErr.Error(), http.StatusInternalServerError)
+				return
+			}
 		}
 		for _, in := range installs {
 			conn := db.GitHubConnection{InstallationID: in.ID, MCPAccountID: account.ID, UserID: s.UserID, AccountLogin: in.Account.Login, ConnectedAt: now}

@@ -403,29 +403,30 @@ type Task struct {
 // GitHubOAuthState is short lived and prevents authorization callbacks from
 // being attached to an unrelated Headcount1 session.
 type GitHubOAuthState struct {
-	ID          string     `json:"-" gorm:"primaryKey"`
-	RedirectURL string     `json:"-"`
+	ID          string `json:"-" gorm:"primaryKey"`
+	RedirectURL string `json:"-"`
 	// MCPAccount details bind an OAuth callback to the account the user chose
 	// from the integrations screen.  This keeps personal and work identities
 	// separate even when they use the same GitHub App installation.
-	MCPServerID int32      `json:"-" gorm:"default:0"`
-	UserID      int32      `json:"-" gorm:"default:0"`
-	AccountName string     `json:"-"`
-	ReturnPath  string     `json:"-"`
-	ExpiresAt   time.Time  `json:"-"`
-	UsedAt      *time.Time `json:"-"`
-	CreatedAt   time.Time
+	MCPServerID  int32      `json:"-" gorm:"default:0"`
+	UserID       int32      `json:"-" gorm:"default:0"`
+	MCPAccountID int32      `json:"-" gorm:"default:0"`
+	AccountName  string     `json:"-"`
+	ReturnPath   string     `json:"-"`
+	ExpiresAt    time.Time  `json:"-"`
+	UsedAt       *time.Time `json:"-"`
+	CreatedAt    time.Time
 }
 
 // GitHubConnection links one GitHub App installation to an MCP account. A
 // person may connect multiple GitHub identities (or the same identity with
 // different repository selections) without exposing them to other users.
 type GitHubConnection struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	InstallationID  int64     `json:"installation_id" gorm:"index"`
-	MCPAccountID    int32     `json:"mcp_account_id" gorm:"index"`
-	UserID          int32     `json:"user_id" gorm:"index"`
-	AccountLogin    string    `json:"account_login"`
+	ID             int32  `json:"id" gorm:"primaryKey"`
+	InstallationID int64  `json:"installation_id" gorm:"index"`
+	MCPAccountID   int32  `json:"mcp_account_id" gorm:"index"`
+	UserID         int32  `json:"user_id" gorm:"index"`
+	AccountLogin   string `json:"account_login"`
 	// Retained only for backwards-compatible rows created before MCP accounts.
 	// New OAuth tokens are sealed in MCPAccount.AuthTokenEncrypted.
 	UserAccessToken string    `json:"-" gorm:"type:text"`

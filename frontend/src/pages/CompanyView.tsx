@@ -3,7 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Link } from 'react-router-dom';
 import { useStore, useIsOwner } from '../store';
-import { Folder, GitBranch } from 'lucide-react';
+import { Folder, GitBranch, ExternalLink, Search } from 'lucide-react';
 
 export const CompanyView: React.FC = () => {
   const { selectedCompanyId } = useStore();
@@ -14,6 +14,11 @@ export const CompanyView: React.FC = () => {
   const [companyShortName, setCompanyShortName] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
+	const [githubRepos, setGithubRepos] = useState<any[]>([]);
+	const [githubStatus, setGithubStatus] = useState<any>(null);
+	const [repoSearch, setRepoSearch] = useState('');
+	const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
+	const [showManualRepo, setShowManualRepo] = useState(false);
 
   useEffect(() => {
     if (selectedCompanyId) {
@@ -23,6 +28,16 @@ export const CompanyView: React.FC = () => {
         });
     }
   }, [selectedCompanyId]);
+
+	useEffect(() => {
+		(async () => {
+			try {
+				const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]);
+				setGithubStatus(status.data);
+				setGithubRepos(repos.data || []);
+			} catch { setGithubStatus({ configured: false }); setGithubRepos([]); }
+		})();
+	}, []);
 
   const fetchProjects = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -49,7 +64,8 @@ export const CompanyView: React.FC = () => {
         company_id: selectedCompanyId,
         name: formData.name,
         workspace_folder: formData.workspace_folder,
-        repository_url: formData.repository_url || undefined
+		repository_url: formData.repository_url || undefined,
+		github_repository: selectedGithubRepo || undefined,
       });
       setFormData({ name: '', workspace_folder: '', repository_url: '' });
       setIsModalOpen(false);
@@ -112,9 +128,13 @@ export const CompanyView: React.FC = () => {
                 <p className="text-xs text-gray-500 mt-1">This directory will be created automatically.</p>
               </div>
               <div>
-                <label className="block text-sm font-medium text-gray-700 mb-1">Git Repository URL (optional)</label>
-                <input type="text" value={formData.repository_url} onChange={e => setFormData({...formData, repository_url: e.target.value})} className="w-full border rounded p-2 text-sm" placeholder="git@github.com:user/repo.git" />
-                <p className="text-xs text-gray-500 mt-1">Must end with .git. Will validate connectivity on save.</p>
+				<div className="flex items-center justify-between gap-2"><label className="block text-sm font-medium text-gray-700">GitHub repository</label><a href={`/companies/${companyShortName}/mcp-servers`} className="inline-flex items-center gap-1 text-xs text-indigo-700 hover:underline">Manage accounts <ExternalLink size={12}/></a></div>
+				{githubStatus?.configured && githubRepos.length > 0 ? <>
+					<div className="relative mt-1"><Search size={14} className="absolute left-2 top-2.5 text-gray-400"/><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search connected repositories…" className="w-full border rounded p-2 pl-7 text-sm"/></div>
+					<select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setFormData(f => ({...f, repository_url: repo.clone_url})); }} className="mt-2 w-full border rounded p-2 text-sm"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select>
+				</> : <p className="mt-1 text-xs text-gray-500">Connect GitHub in MCP Servers to choose from permitted repositories.</p>}
+				<button type="button" onClick={() => setShowManualRepo(v => !v)} className="mt-2 text-xs text-indigo-700 hover:underline">{showManualRepo ? 'Hide manual repository URL' : 'Use a non-GitHub repository or SSH URL instead'}</button>
+				{showManualRepo && <><input type="text" value={formData.repository_url} onChange={e => { setSelectedGithubRepo(null); setFormData({...formData, repository_url: e.target.value}); }} className="mt-2 w-full border rounded p-2 text-sm" placeholder="git@github.com:user/repo.git" /><p className="text-xs text-gray-500 mt-1">For GitLab, Bitbucket, self-hosted Git, or SSH URLs.</p></>}
               </div>
               <div className="flex justify-end space-x-3 pt-4">
                 <button type="button" onClick={() => setIsModalOpen(false)} className="text-gray-500 hover:text-gray-700">Cancel</button>

@@ -233,6 +233,7 @@ export const MCPServers: React.FC = () => {
 			try {
 				const res = await axios.post(`/api/mcp-servers/${accountModal.serverId}/github-oauth`, {
 					name: accountForm.name || 'GitHub account',
+					account_id: accountModal.accountId || 0,
 					return_path: window.location.pathname,
 				});
 				window.location.assign(res.data.authorize_url);
