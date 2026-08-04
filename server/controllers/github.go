@@ -214,39 +214,38 @@ func (api *API) ListGitHubRepositories(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, 400, err.Error())
 		return
 	}
-	var conns []db.GitHubConnection
 	userID := api.currentUserID(r)
-	// Older OAuth rows may not have user_id populated; include connections
-	// linked through this user's MCP GitHub accounts as well.
-	var accountIDs []int32
-	api.db.Model(&db.MCPAccount{}).Where("user_id = ?", userID).Pluck("id", &accountIDs)
-	query := api.db.Where("user_id = ?", userID)
-	if len(accountIDs) > 0 {
-		query = query.Or("mcp_account_id IN ?", accountIDs)
-	}
-	query.Find(&conns)
 	repos := []map[string]any{}
-	for _, conn := range conns {
-		token := conn.UserAccessToken
-		if conn.MCPAccountID != 0 {
-			account, getErr := api.q.GetMCPAccount(r.Context(), conn.MCPAccountID)
-			if getErr != nil || account.UserID == nil || *account.UserID != api.currentUserID(r) {
-				continue
-			}
-			token, getErr = secrets.Default().Decrypt(account.AuthTokenEncrypted)
-			if getErr != nil {
-				continue
-			}
-		}
-		if token == "" {
+	// Discover installations on every request rather than relying on the list
+	// captured during OAuth. A user can change the GitHub App's repository
+	// selection later, and the project picker must see that change immediately.
+	var accounts []db.MCPAccount
+	api.db.Joins("JOIN mcp_servers ON mcp_servers.id = mcp_accounts.mcp_server_id").
+		Where("mcp_accounts.user_id = ? AND mcp_servers.name = ?", userID, "github").Find(&accounts)
+	seen := map[int64]bool{}
+	for _, account := range accounts {
+		token, decryptErr := secrets.Default().Decrypt(account.AuthTokenEncrypted)
+		if decryptErr != nil || token == "" {
 			continue
 		}
-		rs, e := c.UserRepositories(r.Context(), token, conn.InstallationID)
-		if e != nil {
+		installs, installationsErr := c.UserInstallations(r.Context(), token)
+		if installationsErr != nil {
 			continue
 		}
-		for _, repo := range rs {
-			repos = append(repos, map[string]any{"id": repo.ID, "full_name": repo.FullName, "clone_url": repo.CloneURL, "html_url": repo.HTMLURL, "default_branch": repo.DefaultBranch, "installation_id": conn.InstallationID})
+		for _, installation := range installs {
+			conn := db.GitHubConnection{InstallationID: installation.ID, MCPAccountID: account.ID, UserID: userID, AccountLogin: installation.Account.Login, ConnectedAt: time.Now()}
+			api.db.Where("mcp_account_id = ? AND installation_id = ?", account.ID, installation.ID).Assign(conn).FirstOrCreate(&conn)
+			rs, repositoriesErr := c.UserRepositories(r.Context(), token, installation.ID)
+			if repositoriesErr != nil {
+				continue
+			}
+			for _, repo := range rs {
+				if seen[repo.ID] {
+					continue
+				}
+				seen[repo.ID] = true
+				repos = append(repos, map[string]any{"id": repo.ID, "full_name": repo.FullName, "clone_url": repo.CloneURL, "html_url": repo.HTMLURL, "default_branch": repo.DefaultBranch, "installation_id": installation.ID})
+			}
 		}
 	}
 	api.respondJSON(w, 200, repos)

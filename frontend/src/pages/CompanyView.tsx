@@ -29,14 +29,16 @@ export const CompanyView: React.FC = () => {
     }
   }, [selectedCompanyId]);
 
-	useEffect(() => {
-		(async () => {
+	const refreshGitHubRepositories = useCallback(async () => {
 			try {
 				const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]);
 				setGithubStatus(status.data);
 				setGithubRepos(repos.data || []);
 			} catch { setGithubStatus({ configured: false }); setGithubRepos([]); }
-		})();
+	}, []);
+
+	useEffect(() => {
+		refreshGitHubRepositories();
 	}, []);
 
   const fetchProjects = useCallback(async () => {
@@ -83,7 +85,7 @@ export const CompanyView: React.FC = () => {
 
       {isOwner && (
         <div className="mb-8">
-          <button onClick={() => { setIsModalOpen(true); setError(''); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
+			<button onClick={() => { setIsModalOpen(true); setError(''); refreshGitHubRepositories(); }} className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700">
             Create Project
           </button>
         </div>
@@ -132,7 +134,7 @@ export const CompanyView: React.FC = () => {
 				{githubStatus?.configured && githubRepos.length > 0 ? <>
 					<div className="relative mt-1"><Search size={14} className="absolute left-2 top-2.5 text-gray-400"/><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search connected repositories…" className="w-full border rounded p-2 pl-7 text-sm"/></div>
 					<select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setFormData(f => ({...f, repository_url: repo.clone_url})); }} className="mt-2 w-full border rounded p-2 text-sm"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select>
-				</> : <p className="mt-1 text-xs text-gray-500">Connect GitHub in MCP Servers to choose from permitted repositories.</p>}
+				</> : githubStatus?.configured ? <div className="mt-1 text-xs text-gray-500 space-y-1"><p>No permitted repositories found yet.</p><p><a href={githubStatus.install_url} target="_blank" rel="noreferrer" className="text-indigo-700 hover:underline">Select repositories in GitHub</a>, then <button type="button" onClick={refreshGitHubRepositories} className="text-indigo-700 hover:underline">refresh this list</button>.</p></div> : <p className="mt-1 text-xs text-gray-500">Connect GitHub in MCP Servers to choose from permitted repositories.</p>}
 				<button type="button" onClick={() => setShowManualRepo(v => !v)} className="mt-2 text-xs text-indigo-700 hover:underline">{showManualRepo ? 'Hide manual repository URL' : 'Use a non-GitHub repository or SSH URL instead'}</button>
 				{showManualRepo && <><input type="text" value={formData.repository_url} onChange={e => { setSelectedGithubRepo(null); setFormData({...formData, repository_url: e.target.value}); }} className="mt-2 w-full border rounded p-2 text-sm" placeholder="git@github.com:user/repo.git" /><p className="text-xs text-gray-500 mt-1">For GitLab, Bitbucket, self-hosted Git, or SSH URLs.</p></>}
               </div>
