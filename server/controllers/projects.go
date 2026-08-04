@@ -122,7 +122,16 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
 		defer repoKeyCleanup()
 		var tokens []string
-		if token, err := GitHubTokenForProject(r.Context(), api.q, proj); err == nil && token != "" {
+		if proj.GitHubInstallationID != 0 {
+			token, tokenErr := GitHubTokenForProject(r.Context(), api.q, proj)
+			if tokenErr != nil || token == "" {
+				api.db.Delete(&proj)
+				if tokenErr == nil {
+					tokenErr = fmt.Errorf("empty installation token")
+				}
+				api.respondError(w, http.StatusBadRequest, "GitHub access token could not be created: "+tokenErr.Error())
+				return
+			}
 			tokens = []string{token}
 		}
 		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, repoKey, tokens...); err != nil {
@@ -210,7 +219,15 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
 		defer repoKeyCleanup()
 		var tokens []string
-		if token, err := GitHubTokenForProject(r.Context(), api.q, project); err == nil && token != "" {
+		if project.GitHubInstallationID != 0 {
+			token, tokenErr := GitHubTokenForProject(r.Context(), api.q, project)
+			if tokenErr != nil || token == "" {
+				if tokenErr == nil {
+					tokenErr = fmt.Errorf("empty installation token")
+				}
+				api.respondError(w, http.StatusBadRequest, "GitHub access token could not be created: "+tokenErr.Error())
+				return
+			}
 			tokens = []string{token}
 		}
 		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, repoKey, tokens...); err != nil {
