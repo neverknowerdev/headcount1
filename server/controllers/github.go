@@ -156,6 +156,18 @@ func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if s.MCPServerID != 0 {
+		// GitHub may immediately approve an already-authorized installation and
+		// redirect back without showing a confirmation screen. Do not create a
+		// second MCP account for the same GitHub identity in that case.
+		if s.MCPAccountID == 0 {
+			var existing db.GitHubConnection
+			for _, in := range installs {
+				if api.db.Where("user_id = ? AND account_login = ?", s.UserID, in.Account.Login).First(&existing).Error == nil {
+					http.Redirect(w, r, deploymentURL()+s.ReturnPath+"?github=already_connected", http.StatusFound)
+					return
+				}
+			}
+		}
 		sealed, sealErr := secrets.Default().EncryptForUser(s.UserID, token)
 		if sealErr != nil {
 			http.Error(w, "Your secure vault is locked. Return to Headcount1, unlock it, and try again.", http.StatusConflict)
@@ -203,7 +215,16 @@ func (api *API) ListGitHubRepositories(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var conns []db.GitHubConnection
-	api.db.Where("user_id = ?", api.currentUserID(r)).Find(&conns)
+	userID := api.currentUserID(r)
+	// Older OAuth rows may not have user_id populated; include connections
+	// linked through this user's MCP GitHub accounts as well.
+	var accountIDs []int32
+	api.db.Model(&db.MCPAccount{}).Where("user_id = ?", userID).Pluck("id", &accountIDs)
+	query := api.db.Where("user_id = ?", userID)
+	if len(accountIDs) > 0 {
+		query = query.Or("mcp_account_id IN ?", accountIDs)
+	}
+	query.Find(&conns)
 	repos := []map[string]any{}
 	for _, conn := range conns {
 		token := conn.UserAccessToken
