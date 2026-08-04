@@ -746,7 +746,7 @@ export const MCPServers: React.FC = () => {
                                     </p>
                                 </div>
 							) : accountModal.authType === 'github-app' ? (
-								<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Sign in with GitHub</p><p className="mt-1 text-indigo-800">Authorize this account in GitHub, choose the repositories Headcount1 may access, then return here. You can add multiple personal or work accounts.</p></div>
+								<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub uses the identity currently signed in at github.com. If it is already connected, Headcount1 will return here without creating a duplicate. To connect a different personal or work identity, switch accounts in GitHub before continuing.</p><p className="mt-2 text-indigo-800">Repository access is selected separately through the GitHub App installation page. You will see a direct link when creating a project.</p></div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
                                     <SecretLabel>
@@ -778,7 +778,7 @@ export const MCPServers: React.FC = () => {
                         <div className="flex justify-end gap-3 pt-4 border-t mt-4">
                             <button type="button" onClick={() => setAccountModal(null)} className="text-gray-500 hover:text-gray-700 px-4 py-2 text-sm">Cancel</button>
                             <button onClick={handleSaveAccount} className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 text-sm">
-                                {accountModal.mode === 'create' ? 'Authorize' : 'Re-authenticate'}
+								{accountModal.mode === 'create' ? 'Continue to GitHub' : 'Re-authenticate'}
                             </button>
                         </div>
                     </div>
