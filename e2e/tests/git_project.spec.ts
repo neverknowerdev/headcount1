@@ -133,7 +133,7 @@ test.describe.serial('Git Project Scenarios', () => {
         // Manual/SSH URLs are an explicit fallback; GitHub OAuth repositories
         // are selected from the connected-repository picker by default.
         const repoUrlInput = page.locator('input[placeholder="git@github.com:user/repo.git"]');
-        const manualRepoToggle = page.getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' });
+        const manualRepoToggle = page.getByRole('button', { name: 'Use SSH or another Git provider' });
         if (await manualRepoToggle.isVisible()) await manualRepoToggle.click();
         await expect(repoUrlInput).toBeVisible();
         await expect(repoUrlInput).toHaveValue(env.E2E_TEST_REPO_URL);
@@ -150,7 +150,7 @@ test.describe.serial('Git Project Scenarios', () => {
         // Change repo URL to a different file:// path under the same test repo dir
         const updatedUrl = env.E2E_TEST_REPO_URL;
         const repoUrlInput = page.locator('input[placeholder="git@github.com:user/repo.git"]');
-        const manualRepoToggle = page.getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' });
+        const manualRepoToggle = page.getByRole('button', { name: 'Use SSH or another Git provider' });
         if (await manualRepoToggle.isVisible()) await manualRepoToggle.click();
         await repoUrlInput.fill(updatedUrl);
 
