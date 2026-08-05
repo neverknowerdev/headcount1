@@ -28,7 +28,7 @@ func categorizeMCPError(serverName, raw string) string {
 	switch {
 	case strings.Contains(lower, "executable file not found") || strings.Contains(lower, "no such file or directory"):
 		if serverName == "github" {
-			return "Binary not installed. Run: brew install github-mcp-server"
+			return "Optional GitHub API tools are unavailable on this deployment. Git clone, pull, push, and pull request publishing are unaffected."
 		}
 		return "Command not found: " + raw
 	case strings.Contains(lower, "eof"):

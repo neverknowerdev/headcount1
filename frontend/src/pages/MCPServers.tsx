@@ -798,9 +798,8 @@ interface SetupStep {
 const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; docsLabel: string }> = {
 github: {
         docsUrl: 'https://github.com/github/github-mcp-server',
-        docsLabel: 'github-mcp-server on GitHub',
+        docsLabel: 'Optional GitHub MCP tools',
         steps: [
-            { before: 'Install the MCP server binary:', code: 'brew install github-mcp-server' },
 			{ before: 'Click Authorize below and sign in to GitHub. No personal access token is required.' },
 			{ before: 'Choose the repositories Headcount1 may access in the GitHub App installation screen.' },
 			{ before: 'Add another account whenever you need separate personal and work access.' },
@@ -850,7 +849,13 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
     const [showTools, setShowTools] = React.useState(false);
     const [showSetup, setShowSetup] = React.useState(false);
     const hasAccounts = server.accounts && server.accounts.length > 0;
-    const isConnected = hasAccounts && !!server.tools_cache;
+    const hasAuthorizedAccount = !!server.accounts?.some(account => account.has_token);
+    // Git clone/pull/push and PR creation use short-lived GitHub App installation
+    // tokens, independently of the optional github-mcp-server tool process.
+    const isGitHub = server.name === 'github';
+    const isConnected = isGitHub ? hasAuthorizedAccount : hasAccounts && !!server.tools_cache;
+    const needsReconnect = isGitHub && hasAccounts && !hasAuthorizedAccount;
+    const optionalToolsUnavailable = isGitHub && isConnected && !server.tools_cache;
     const setup = SETUP_INSTRUCTIONS[server.name];
 
     const borderClass = isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
@@ -872,6 +877,10 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
                                 <CheckCircle2 size={10} /> Connected
                             </span>
+                        ) : needsReconnect ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
+                                <AlertCircle size={10} /> Reconnect required
+                            </span>
                         ) : hasAccounts ? (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
                                 <AlertCircle size={10} /> Setup required
@@ -883,6 +892,11 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                         )}
                     </div>
                     <p className="text-sm text-gray-600 mb-3">{server.description}</p>
+                    {optionalToolsUnavailable && (
+                        <p className="text-xs text-gray-500 mb-3">
+                            Git operations are ready. Optional GitHub API tools for issues, pull requests, and code search are not available on this deployment.
+                        </p>
+                    )}
 
                     {!hasAccounts ? (
                         /* No accounts — compact by default, setup steps on demand */
