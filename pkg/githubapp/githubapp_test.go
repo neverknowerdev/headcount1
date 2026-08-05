@@ -2,6 +2,10 @@ package githubapp
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"io"
 	"net/http"
 	"strings"
@@ -27,4 +31,24 @@ func TestExchangeCodeIncludesAuthorizationRedirectURI(t *testing.T) {
 	token, err := client.ExchangeCode(context.Background(), "code", "https://stagingapp.headcount1.ai/api/github/callback")
 	require.NoError(t, err)
 	require.Equal(t, "token", token)
+}
+
+func TestInstallationTokenScopesToSelectedRepository(t *testing.T) {
+	key, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+	encoded := pem.EncodeToMemory(&pem.Block{Type: "RSA PRIVATE KEY", Bytes: x509.MarshalPKCS1PrivateKey(key)})
+	client := &Client{config: Config{AppID: "123", PrivateKey: string(encoded)}}
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, http.MethodPost, r.Method)
+		require.Equal(t, "/app/installations/77/access_tokens", r.URL.Path)
+		require.Contains(t, r.Header.Get("Authorization"), "Bearer ")
+		body, readErr := io.ReadAll(r.Body)
+		require.NoError(t, readErr)
+		require.JSONEq(t, `{"repository_ids":[88]}`, string(body))
+		return &http.Response{StatusCode: http.StatusCreated, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"token":"short-lived"}`))}, nil
+	})}
+
+	token, err := client.InstallationToken(context.Background(), 77, 88)
+	require.NoError(t, err)
+	require.Equal(t, "short-lived", token)
 }

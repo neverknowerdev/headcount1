@@ -50,6 +50,10 @@ func (g *GitManager) isLocalOnly() bool {
 	return strings.HasPrefix(p, "file://") || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
 }
 
+func usesSSH(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "git@") || strings.HasPrefix(repoURL, "ssh://")
+}
+
 func (g *GitManager) Init(ctx context.Context) error {
 	if _, err := os.Stat(filepath.Join(g.repoPath, ".git")); os.IsNotExist(err) {
 		_, err := g.runGitCommand(ctx, "init")
@@ -143,10 +147,6 @@ func (g *GitManager) withGitEnv() []string {
 		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
 		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
 	}
-	if g.httpToken != "" {
-		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
-		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
-	}
 	if sshCmd := g.sshEnv(); sshCmd != "" {
 		env = append(env, "GIT_SSH_COMMAND="+sshCmd)
 	}
@@ -228,7 +228,7 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 	// for arbitrary URLs during CreateProject validation.
 	env := os.Environ()
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
-	if !strings.HasPrefix(repoURL, "file://") && !strings.HasPrefix(repoURL, "/") && !strings.HasPrefix(repoURL, "./") && !strings.HasPrefix(repoURL, "../") {
+	if usesSSH(repoURL) {
 		keyPath := g.sshKeyPath
 		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(keyPath))
 	}
@@ -239,6 +239,7 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 		output := string(out)
 		if strings.Contains(output, "Permission denied") ||
 			strings.Contains(output, "Authentication failed") ||
+			strings.Contains(output, "could not read Username") ||
 			strings.Contains(output, "Could not read from remote repository") ||
 			strings.Contains(output, "Host key verification failed") {
 			return fmt.Errorf("[auth] %s", output)

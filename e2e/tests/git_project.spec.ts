@@ -130,7 +130,9 @@ test.describe.serial('Git Project Scenarios', () => {
         await page.click('a:has-text("Git Project")');
         await expect(page.getByRole('heading', { name: 'Project Settings' })).toBeVisible();
 
-        // Verify repo URL field exists and has value
+        // Manual/SSH URLs are an explicit fallback; GitHub OAuth repositories
+        // are selected from the connected-repository picker by default.
+        await page.getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' }).click();
         const repoUrlInput = page.locator('input[placeholder="git@github.com:user/repo.git"]');
         await expect(repoUrlInput).toBeVisible();
         await expect(repoUrlInput).toHaveValue(env.E2E_TEST_REPO_URL);
@@ -144,6 +146,7 @@ test.describe.serial('Git Project Scenarios', () => {
         await page.click('a:has-text("Git Project")');
         await expect(page.getByRole('heading', { name: 'Project Settings' })).toBeVisible();
 
+        await page.getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' }).click();
         // Change repo URL to a different file:// path under the same test repo dir
         const updatedUrl = env.E2E_TEST_REPO_URL;
         const repoUrlInput = page.locator('input[placeholder="git@github.com:user/repo.git"]');
@@ -202,7 +205,7 @@ test.describe.serial('Git Project Scenarios', () => {
         await expect(page.getByText('Git Task')).toBeVisible({ timeout: 10000 });
     });
 
-    test('project create form shows repo URL field', async ({ page }) => {
+    test('project create form leads with connected repositories and preserves manual SSH fallback', async ({ page }) => {
         await page.goto('/companies/gitco/projects');
         await expect(page.getByRole('heading', { name: 'Projects' })).toBeVisible({ timeout: 10000 });
 
@@ -210,12 +213,10 @@ test.describe.serial('Git Project Scenarios', () => {
         await page.click('button:has-text("Create Project")');
         await expect(page.getByRole('dialog')).toBeVisible();
 
-        // Verify repo URL field exists in the modal
+        await expect(page.getByText('GitHub repository')).toBeVisible();
+        await page.getByRole('dialog').getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' }).click();
         const repoInput = page.getByRole('dialog').locator('input[placeholder="git@github.com:user/repo.git"]');
         await expect(repoInput).toBeVisible();
         await expect(repoInput).toHaveValue('');
-
-        // Verify label
-        await expect(page.getByText('Git Repository URL (optional)')).toBeVisible();
     });
 });

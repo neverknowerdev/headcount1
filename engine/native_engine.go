@@ -559,12 +559,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			defer keyCleanup()
 			gitMgr = git.NewGitManager(projectRepoDir, keyPath)
 			if project.GitHubInstallationID != 0 {
-				if gh, ghErr := githubapp.FromEnv(); ghErr == nil {
-					if token, tokenErr := gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID); tokenErr == nil {
-						gitMgr.WithHTTPToken(token)
-					} else {
-						e.logInfo(proxyLogger, "GitHub token error: "+tokenErr.Error())
-					}
+				if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+					gitMgr.WithHTTPToken(token)
+				} else if tokenErr != nil {
+					e.logInfo(proxyLogger, "GitHub App token error: "+tokenErr.Error())
 				}
 			}
 			if pullErr := gitMgr.Pull(ctx); pullErr != nil {
@@ -939,8 +937,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			// GitHub uses the selected repository's short-lived App token, never a PAT.
 			if srv.Name == "github" && task.ProjectID != nil {
 				if project, err := e.q.GetProject(ctx, *task.ProjectID); err == nil && project.GitHubInstallationID != 0 {
-					if gh, err := githubapp.FromEnv(); err == nil {
-						synthetic.AuthToken, _ = gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+					if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+						synthetic.AuthToken = token
 					}
 				}
 			}
@@ -1179,11 +1177,11 @@ func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyL
 		e.logInfo(logger, "GitHub push failed: "+err.Error())
 		return
 	}
-	gh, err := githubapp.FromEnv()
+	token, err := githubapp.TokenForProject(ctx, project)
 	if err != nil {
 		return
 	}
-	token, err := gh.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+	gh, err := githubapp.FromEnv()
 	if err != nil {
 		return
 	}

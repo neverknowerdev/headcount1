@@ -21,6 +21,8 @@ import (
 	"os"
 	"strings"
 	"time"
+
+	"agent-orchestrator/db"
 )
 
 const apiURL = "https://api.github.com"
@@ -115,6 +117,21 @@ func (c *Client) InstallationToken(ctx context.Context, installationID int64, re
 	}
 	err = c.api(ctx, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", installationID), jwt, body, &out)
 	return out.Token, err
+}
+
+// TokenForProject creates the short-lived GitHub App installation token used
+// for every git network operation on a repository selected through GitHub.
+// Projects without GitHub metadata intentionally return an empty token so
+// callers retain their configured SSH/manual repository behavior.
+func TokenForProject(ctx context.Context, project db.Project) (string, error) {
+	if project.GitHubInstallationID == 0 {
+		return "", nil
+	}
+	c, err := FromEnv()
+	if err != nil {
+		return "", err
+	}
+	return c.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
 }
 func (c *Client) CreatePullRequest(ctx context.Context, token, ownerRepo, title, head, base, body string) (int, string, error) {
 	var out struct {

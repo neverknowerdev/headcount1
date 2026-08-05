@@ -341,14 +341,7 @@ func (api *API) GitHubWebhook(w http.ResponseWriter, r *http.Request) {
 	w.WriteHeader(http.StatusNoContent)
 }
 func GitHubTokenForProject(ctx context.Context, database *db.Queries, project db.Project) (string, error) {
-	if project.GitHubInstallationID == 0 {
-		return "", nil
-	}
-	c, err := githubClient()
-	if err != nil {
-		return "", err
-	}
-	return c.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+	return githubapp.TokenForProject(ctx, project)
 }
 func GitHubRepoSelection(project *db.Project, raw string) {
 	var in struct {

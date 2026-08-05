@@ -1,0 +1,40 @@
+package git
+
+import (
+	"encoding/base64"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+)
+
+func TestWithHTTPTokenAddsOneGitHubAuthorizationHeader(t *testing.T) {
+	manager := NewGitManager("/tmp/repo", "").WithHTTPToken("installation-token")
+	env := manager.withGitEnv()
+
+	var count, keyCount, valueCount int
+	for _, item := range env {
+		switch {
+		case item == "GIT_CONFIG_COUNT=1":
+			count++
+		case item == "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader":
+			keyCount++
+		case strings.HasPrefix(item, "GIT_CONFIG_VALUE_0="):
+			valueCount++
+			got := strings.TrimPrefix(item, "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic ")
+			decoded, err := base64.StdEncoding.DecodeString(got)
+			require.NoError(t, err)
+			require.Equal(t, "x-access-token:installation-token", string(decoded))
+		}
+	}
+	require.Equal(t, 1, count)
+	require.Equal(t, 1, keyCount)
+	require.Equal(t, 1, valueCount)
+}
+
+func TestValidateRemoteOnlyConfiguresSSHForSSHURLs(t *testing.T) {
+	require.True(t, usesSSH("git@github.com:org/repo.git"))
+	require.True(t, usesSSH("ssh://git@github.com/org/repo.git"))
+	require.False(t, usesSSH("https://github.com/org/repo.git"))
+	require.False(t, usesSSH("file:///tmp/repo"))
+}

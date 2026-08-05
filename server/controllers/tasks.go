@@ -13,6 +13,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/githubapp"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -352,6 +353,12 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 
 	branchName := fmt.Sprintf("task-%d", task.ID)
 	if project.GitHubInstallationID != 0 {
+		if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+			gitMgr.WithHTTPToken(token)
+		} else if tokenErr != nil {
+			fmt.Printf("Warning: failed to create GitHub App token for project %d: %v\n", project.ID, tokenErr)
+			return
+		}
 		// GitHub-backed projects publish a draft PR. Never merge or force-push
 		// the default branch as part of task status changes.
 		branchName = fmt.Sprintf("headcount1/task-%d", task.ID)
