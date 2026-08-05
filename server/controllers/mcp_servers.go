@@ -421,6 +421,9 @@ func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 // DeleteMCPAccount removes an account and its agent assignments.
 func (api *API) DeleteMCPAccount(w http.ResponseWriter, r *http.Request) {
 	acc := api.mcpAccountFromCtx(r) // loaded + authorized by LoadMCPAccount
+	// Remove GitHub identity links first so OAuth duplicate detection does not
+	// block reconnecting an account after it has been deleted.
+	api.db.Where("mcp_account_id = ?", acc.ID).Delete(&db.GitHubConnection{})
 	if err := api.q.DeleteMCPAccount(r.Context(), acc.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return

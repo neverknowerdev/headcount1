@@ -163,6 +163,14 @@ func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 			var existing db.GitHubConnection
 			for _, in := range installs {
 				if api.db.Where("user_id = ? AND account_login = ?", s.UserID, in.Account.Login).First(&existing).Error == nil {
+					// A deleted MCP account may leave a legacy connection row behind.
+					// Only treat the identity as connected while its owning account
+					// still exists; otherwise it can never be added again.
+					var account db.MCPAccount
+					if api.db.Where("id = ? AND mcp_server_id = ? AND user_id = ?", existing.MCPAccountID, s.MCPServerID, s.UserID).First(&account).Error != nil {
+						api.db.Delete(&existing)
+						continue
+					}
 					http.Redirect(w, r, deploymentURL()+s.ReturnPath+"?github=already_connected", http.StatusFound)
 					return
 				}
