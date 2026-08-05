@@ -198,20 +198,23 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		project.WorkspaceFolder = req.WorkspaceFolder
 	}
 
-	if len(req.GitHubRepository) > 0 {
+	githubRepositorySelected := len(req.GitHubRepository) > 0
+	if githubRepositorySelected {
 		GitHubRepoSelection(&project, string(req.GitHubRepository))
 		req.RepositoryUrl = project.RepositoryUrl
 	}
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
-		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
-		defer cleanup()
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
-		if err != nil {
-			api.respondError(w, http.StatusBadRequest, err.Error())
-			return
+		if !githubRepositorySelected {
+			keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+			defer cleanup()
+			normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
+			if err != nil {
+				api.respondError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			project.RepositoryUrl = normalized
 		}
-		project.RepositoryUrl = normalized
 
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
