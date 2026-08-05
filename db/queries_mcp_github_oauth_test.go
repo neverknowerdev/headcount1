@@ -25,16 +25,19 @@ func TestMigrateGitHubOAuthDropsLegacyTokenAndDisablesDuplicateIdentity(t *testi
 	require.NoError(t, database.Create(&user).Error)
 	server := db.MCPServer{Name: "github", AuthType: "github-app"}
 	require.NoError(t, database.Create(&server).Error)
-	canonical := db.MCPAccount{MCPServerID: server.ID, Name: "canonical", UserID: &user.ID, GitHubUserID: 42, GitHubLogin: "octocat"}
-	duplicate := db.MCPAccount{MCPServerID: server.ID, Name: "duplicate", UserID: &user.ID, GitHubUserID: 42, GitHubLogin: "octocat"}
+	accountTable := database.NamingStrategy.TableName("MCPAccount")
+	require.NoError(t, database.Exec("ALTER TABLE "+accountTable+" ADD COLUMN git_hub_user_id integer").Error)
+	require.NoError(t, database.Exec("ALTER TABLE "+accountTable+" ADD COLUMN git_hub_login text").Error)
+	canonical := db.MCPAccount{MCPServerID: server.ID, Name: "canonical", UserID: &user.ID}
+	duplicate := db.MCPAccount{MCPServerID: server.ID, Name: "duplicate", UserID: &user.ID}
 	legacy := db.MCPAccount{MCPServerID: server.ID, Name: "legacy", UserID: &user.ID}
 	require.NoError(t, database.Create(&canonical).Error)
 	require.NoError(t, database.Create(&duplicate).Error)
 	require.NoError(t, database.Create(&legacy).Error)
-	accountTable := database.NamingStrategy.TableName("MCPAccount")
 	for _, account := range []db.MCPAccount{canonical, duplicate, legacy} {
 		require.NoError(t, database.Exec("UPDATE "+accountTable+" SET auth_token = ? WHERE id = ?", "sealed-legacy-token", account.ID).Error)
 	}
+	require.NoError(t, database.Exec("UPDATE "+accountTable+" SET git_hub_user_id = ?, git_hub_login = ? WHERE id IN (?, ?)", 42, "octocat", canonical.ID, duplicate.ID).Error)
 
 	require.NoError(t, db.New(database).MigrateGitHubOAuth(context.Background()))
 	require.Error(t, database.Exec("SELECT user_access_token FROM "+connectionTable).Error, "legacy plaintext column must be dropped")
@@ -42,12 +45,13 @@ func TestMigrateGitHubOAuthDropsLegacyTokenAndDisablesDuplicateIdentity(t *testi
 	var identity db.GitHubIdentity
 	require.NoError(t, database.Where("mcp_account_id = ?", canonical.ID).First(&identity).Error)
 	require.Equal(t, int64(42), identity.GitHubUserID)
+	require.Equal(t, "octocat", identity.GitHubLogin)
+	require.False(t, database.Migrator().HasColumn(&db.MCPAccount{}, "git_hub_user_id"))
+	require.False(t, database.Migrator().HasColumn(&db.MCPAccount{}, "git_hub_login"))
 	var gotDuplicate, gotLegacy db.MCPAccount
 	require.NoError(t, database.First(&gotDuplicate, duplicate.ID).Error)
 	require.NoError(t, database.First(&gotLegacy, legacy.ID).Error)
 	for _, account := range []db.MCPAccount{gotDuplicate, gotLegacy} {
-		require.Zero(t, account.GitHubUserID)
-		require.Empty(t, account.GitHubLogin)
 		require.Empty(t, account.AuthTokenEncrypted)
 		require.NotEmpty(t, account.LastError)
 	}

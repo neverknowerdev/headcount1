@@ -39,12 +39,12 @@ func githubOAuthStateBelongsToUser(state db.GitHubOAuthState, userID int32) bool
 // this keeps disabled legacy/duplicate rows from being resurrected merely
 // because they still contain an encrypted token.
 func (api *API) hasValidGitHubIdentity(ctx context.Context, account db.MCPAccount, userID int32) (bool, error) {
-	if account.GitHubUserID == 0 || account.UserID == nil || *account.UserID != userID {
+	if account.UserID == nil || *account.UserID != userID {
 		return false, nil
 	}
 	var count int64
 	err := api.db.WithContext(ctx).Model(&db.GitHubIdentity{}).
-		Where("mcp_account_id = ? AND mcp_server_id = ? AND user_id = ? AND git_hub_user_id = ?", account.ID, account.MCPServerID, userID, account.GitHubUserID).
+		Where("mcp_account_id = ? AND mcp_server_id = ? AND user_id = ?", account.ID, account.MCPServerID, userID).
 		Count(&count).Error
 	return count == 1, err
 }
@@ -256,19 +256,8 @@ func (api *API) persistGitHubOAuthAccount(ctx context.Context, state db.GitHubOA
 		if err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 			return err
 		}
-		// The identity table is authoritative, but this catches installations
-		// upgraded before backfill and gives them the same duplicate protection.
-		var legacy db.MCPAccount
-		legacyErr := tx.Where("mcp_server_id = ? AND user_id = ? AND git_hub_user_id = ?", state.MCPServerID, state.UserID, identity.ID).First(&legacy).Error
-		if legacyErr == nil && legacy.ID != state.MCPAccountID {
-			return errGitHubIdentityAlreadyConnected
-		}
-		if legacyErr != nil && !errors.Is(legacyErr, gorm.ErrRecordNotFound) {
-			return legacyErr
-		}
-
 		if state.MCPAccountID == 0 {
-			account = db.MCPAccount{MCPServerID: state.MCPServerID, Name: state.AccountName, AuthTokenEncrypted: sealedToken, UserID: &state.UserID, GitHubUserID: identity.ID, GitHubLogin: identity.Login}
+			account = db.MCPAccount{MCPServerID: state.MCPServerID, Name: state.AccountName, AuthTokenEncrypted: sealedToken, UserID: &state.UserID}
 			if err := tx.Create(&account).Error; err != nil {
 				return err
 			}
@@ -276,8 +265,6 @@ func (api *API) persistGitHubOAuthAccount(ctx context.Context, state db.GitHubOA
 			account.Name = state.AccountName
 			account.AuthTokenEncrypted = sealedToken
 			account.LastError = ""
-			account.GitHubUserID = identity.ID
-			account.GitHubLogin = identity.Login
 			if err := tx.Save(&account).Error; err != nil {
 				return err
 			}
@@ -289,7 +276,7 @@ func (api *API) persistGitHubOAuthAccount(ctx context.Context, state db.GitHubOA
 		accountIdentityErr := tx.Where("mcp_account_id = ?", account.ID).First(&accountIdentity).Error
 		switch {
 		case errors.Is(accountIdentityErr, gorm.ErrRecordNotFound):
-			if err := tx.Create(&db.GitHubIdentity{MCPAccountID: account.ID, MCPServerID: state.MCPServerID, UserID: state.UserID, GitHubUserID: identity.ID}).Error; err != nil {
+			if err := tx.Create(&db.GitHubIdentity{MCPAccountID: account.ID, MCPServerID: state.MCPServerID, UserID: state.UserID, GitHubUserID: identity.ID, GitHubLogin: identity.Login}).Error; err != nil {
 				if strings.Contains(strings.ToLower(err.Error()), "unique") {
 					return errGitHubIdentityAlreadyConnected
 				}
@@ -297,8 +284,9 @@ func (api *API) persistGitHubOAuthAccount(ctx context.Context, state db.GitHubOA
 			}
 		case accountIdentityErr != nil:
 			return accountIdentityErr
-		case accountIdentity.GitHubUserID != identity.ID:
+		case accountIdentity.GitHubUserID != identity.ID || accountIdentity.GitHubLogin != identity.Login:
 			accountIdentity.GitHubUserID = identity.ID
+			accountIdentity.GitHubLogin = identity.Login
 			accountIdentity.MCPServerID = state.MCPServerID
 			accountIdentity.UserID = state.UserID
 			if err := tx.Save(&accountIdentity).Error; err != nil {

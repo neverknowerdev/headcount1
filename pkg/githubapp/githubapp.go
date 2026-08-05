@@ -27,12 +27,24 @@ import (
 
 const apiURL = "https://api.github.com"
 
-type Config struct{ AppID, ClientID, ClientSecret, PrivateKey, Slug, PublicURL, WebhookSecret string }
-type AuthorizeOptions struct{ SelectAccount bool }
+type Config struct {
+	AppID         string
+	ClientID      string
+	ClientSecret  string
+	PrivateKey    string
+	Slug          string
+	WebhookSecret string
+}
+
+type AuthorizeOptions struct {
+	SelectAccount bool
+}
+
 type Client struct {
 	config     Config
 	httpClient *http.Client
 }
+
 type Repository struct {
 	ID            int64  `json:"id"`
 	FullName      string `json:"full_name"`
@@ -41,11 +53,14 @@ type Repository struct {
 	DefaultBranch string `json:"default_branch"`
 	Private       bool   `json:"private"`
 }
+
+type InstallationAccount struct {
+	Login string `json:"login"`
+}
+
 type Installation struct {
-	ID      int64 `json:"id"`
-	Account struct {
-		Login string `json:"login"`
-	} `json:"account"`
+	ID      int64               `json:"id"`
+	Account InstallationAccount `json:"account"`
 }
 
 // User is the stable GitHub identity that authorized an OAuth token. It must
@@ -57,14 +72,28 @@ type User struct {
 }
 
 func FromEnv() (*Client, error) {
-	c := Config{AppID: os.Getenv("HEADCOUNT1_GITHUB_APP_ID"), ClientID: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_ID"), ClientSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_SECRET"), PrivateKey: normalizePrivateKey(os.Getenv("HEADCOUNT1_GITHUB_APP_PRIVATE_KEY")), Slug: os.Getenv("HEADCOUNT1_GITHUB_APP_SLUG"), PublicURL: strings.TrimRight(os.Getenv("DEPLOY_URL"), "/"), WebhookSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_WEBHOOK_SECRET")}
-	if c.AppID == "" || c.ClientID == "" || c.ClientSecret == "" || c.PrivateKey == "" {
+	config := Config{
+		AppID:         os.Getenv("HEADCOUNT1_GITHUB_APP_ID"),
+		ClientID:      os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_ID"),
+		ClientSecret:  os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_SECRET"),
+		PrivateKey:    normalizePrivateKey(os.Getenv("HEADCOUNT1_GITHUB_APP_PRIVATE_KEY")),
+		Slug:          os.Getenv("HEADCOUNT1_GITHUB_APP_SLUG"),
+		WebhookSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_WEBHOOK_SECRET"),
+	}
+	if config.AppID == "" || config.ClientID == "" || config.ClientSecret == "" || config.PrivateKey == "" {
 		return nil, errors.New("GitHub App is not configured")
 	}
-	if c.Slug == "" {
+	if config.Slug == "" {
 		return nil, errors.New("HEADCOUNT1_GITHUB_APP_SLUG is required")
 	}
-	return &Client{config: c, httpClient: &http.Client{Timeout: 20 * time.Second}}, nil
+	return NewClient(config, &http.Client{Timeout: 20 * time.Second}), nil
+}
+
+func NewClient(config Config, httpClient *http.Client) *Client {
+	if httpClient == nil {
+		httpClient = &http.Client{Timeout: 20 * time.Second}
+	}
+	return &Client{config: config, httpClient: httpClient}
 }
 
 // normalizePrivateKey supports both a normal multi-line GitHub Actions secret
@@ -72,16 +101,20 @@ func FromEnv() (*Client, error) {
 func normalizePrivateKey(value string) string {
 	return strings.ReplaceAll(strings.TrimSpace(value), `\n`, "\n")
 }
-func (c *Client) Configured() bool { return c != nil }
+
 func (c *Client) InstallURL() string {
 	return "https://github.com/apps/" + url.PathEscape(c.config.Slug) + "/installations/new"
 }
 func (c *Client) AuthorizeURL(state, redirect string, options AuthorizeOptions) string {
-	q := url.Values{"client_id": {c.config.ClientID}, "state": {state}, "redirect_uri": {redirect}}
-	if options.SelectAccount {
-		q.Set("prompt", "select_account")
+	query := url.Values{
+		"client_id":    {c.config.ClientID},
+		"state":        {state},
+		"redirect_uri": {redirect},
 	}
-	return "https://github.com/login/oauth/authorize?" + q.Encode()
+	if options.SelectAccount {
+		query.Set("prompt", "select_account")
+	}
+	return "https://github.com/login/oauth/authorize?" + query.Encode()
 }
 
 func (c *Client) User(ctx context.Context, userToken string) (User, error) {
@@ -99,11 +132,18 @@ func (c *Client) User(ctx context.Context, userToken string) (User, error) {
 // can register multiple callback URLs; omitting it here makes the exchange
 // ambiguous and breaks staging/prod flows that share one App.
 func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (string, error) {
-	v := url.Values{"client_id": {c.config.ClientID}, "client_secret": {c.config.ClientSecret}, "code": {code}}
-	if redirectURI != "" {
-		v.Set("redirect_uri", redirectURI)
+	form := url.Values{
+		"client_id":     {c.config.ClientID},
+		"client_secret": {c.config.ClientSecret},
+		"code":          {code},
 	}
-	req, _ := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(v.Encode()))
+	if redirectURI != "" {
+		form.Set("redirect_uri", redirectURI)
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodPost, "https://github.com/login/oauth/access_token", strings.NewReader(form.Encode()))
+	if err != nil {
+		return "", fmt.Errorf("create GitHub token request: %w", err)
+	}
 	req.Header.Set("Accept", "application/json")
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	var out struct {
@@ -118,6 +158,7 @@ func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (st
 	}
 	return out.AccessToken, nil
 }
+
 func (c *Client) UserInstallations(ctx context.Context, userToken string) ([]Installation, error) {
 	var installations []Installation
 	err := c.getPaginated(ctx, "/user/installations", userToken, func(body io.Reader) error {
@@ -205,7 +246,7 @@ func nextGitHubLink(header string) (*url.URL, error) {
 	}
 	return nil, nil
 }
-func (c *Client) InstallationToken(ctx context.Context, installationID int64, repositoryID int64) (string, error) {
+func (c *Client) InstallationToken(ctx context.Context, installationID, repositoryID int64) (string, error) {
 	jwt, err := c.appJWT()
 	if err != nil {
 		return "", err
@@ -218,7 +259,13 @@ func (c *Client) InstallationToken(ctx context.Context, installationID int64, re
 		Token string `json:"token"`
 	}
 	err = c.api(ctx, http.MethodPost, fmt.Sprintf("/app/installations/%d/access_tokens", installationID), jwt, body, &out)
-	return out.Token, err
+	if err != nil {
+		return "", err
+	}
+	if out.Token == "" {
+		return "", errors.New("GitHub returned an empty installation token")
+	}
+	return out.Token, nil
 }
 
 // TokenForProject creates the short-lived GitHub App installation token used
@@ -235,6 +282,7 @@ func TokenForProject(ctx context.Context, project db.Project) (string, error) {
 	}
 	return c.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
 }
+
 func (c *Client) CreatePullRequest(ctx context.Context, token, ownerRepo, title, head, base, body string) (int, string, error) {
 	var out struct {
 		Number  int    `json:"number"`
@@ -243,6 +291,7 @@ func (c *Client) CreatePullRequest(ctx context.Context, token, ownerRepo, title,
 	err := c.api(ctx, http.MethodPost, "/repos/"+ownerRepo+"/pulls", token, map[string]any{"title": title, "head": head, "base": base, "body": body, "draft": true}, &out)
 	return out.Number, out.HTMLURL, err
 }
+
 func (c *Client) VerifyWebhook(body []byte, signature string) bool {
 	if c == nil || c.config.WebhookSecret == "" {
 		return false
@@ -252,10 +301,11 @@ func (c *Client) VerifyWebhook(body []byte, signature string) bool {
 		return false
 	}
 	mac := hmac.New(sha256.New, []byte(c.config.WebhookSecret))
-	mac.Write(body)
+	_, _ = mac.Write(body)
 	want := prefix + fmt.Sprintf("%x", mac.Sum(nil))
 	return subtle.ConstantTimeCompare([]byte(want), []byte(signature)) == 1
 }
+
 func (c *Client) appJWT() (string, error) {
 	block, _ := pem.Decode([]byte(c.config.PrivateKey))
 	if block == nil {
@@ -277,20 +327,27 @@ func (c *Client) appJWT() (string, error) {
 	claims := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"iat":%d,"exp":%d,"iss":%s}`, time.Now().Add(-time.Minute).Unix(), time.Now().Add(9*time.Minute).Unix(), c.config.AppID)))
 	input := header + "." + claims
 	hash := crypto.SHA256.New()
-	hash.Write([]byte(input))
+	_, _ = hash.Write([]byte(input))
 	sig, err := rsa.SignPKCS1v15(rand.Reader, key, crypto.SHA256, hash.Sum(nil))
 	if err != nil {
 		return "", err
 	}
 	return input + "." + base64.RawURLEncoding.EncodeToString(sig), nil
 }
+
 func (c *Client) api(ctx context.Context, method, path, token string, body any, out any) error {
-	var r io.Reader
+	var requestBody io.Reader
 	if body != nil {
-		b, _ := json.Marshal(body)
-		r = strings.NewReader(string(b))
+		encoded, err := json.Marshal(body)
+		if err != nil {
+			return fmt.Errorf("encode GitHub API request: %w", err)
+		}
+		requestBody = strings.NewReader(string(encoded))
 	}
-	req, _ := http.NewRequestWithContext(ctx, method, apiURL+path, r)
+	req, err := http.NewRequestWithContext(ctx, method, apiURL+path, requestBody)
+	if err != nil {
+		return fmt.Errorf("create GitHub API request: %w", err)
+	}
 	req.Header.Set("Accept", "application/vnd.github+json")
 	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
 	req.Header.Set("Authorization", "Bearer "+token)
@@ -299,15 +356,22 @@ func (c *Client) api(ctx context.Context, method, path, token string, body any, 
 	}
 	return c.doJSON(req, out)
 }
+
 func (c *Client) doJSON(req *http.Request, out any) error {
 	res, err := c.httpClient.Do(req)
 	if err != nil {
 		return err
 	}
 	defer res.Body.Close()
-	if res.StatusCode < 200 || res.StatusCode > 299 {
+	if res.StatusCode < http.StatusOK || res.StatusCode > 299 {
 		b, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
 		return fmt.Errorf("GitHub API %s: %s", res.Status, strings.TrimSpace(string(b)))
 	}
-	return json.NewDecoder(res.Body).Decode(out)
+	if out == nil {
+		return nil
+	}
+	if err := json.NewDecoder(res.Body).Decode(out); err != nil {
+		return fmt.Errorf("decode GitHub API response: %w", err)
+	}
+	return nil
 }

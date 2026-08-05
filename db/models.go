@@ -440,11 +440,12 @@ type GitHubConnection struct {
 // given Headcount1 user must never connect the same GitHub person twice to the
 // same GitHub MCP server.
 type GitHubIdentity struct {
-	ID           int32 `json:"id" gorm:"primaryKey"`
-	MCPAccountID int32 `json:"mcp_account_id" gorm:"not null;uniqueIndex"`
-	MCPServerID  int32 `json:"mcp_server_id" gorm:"not null;uniqueIndex:idx_github_identity"`
-	UserID       int32 `json:"user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
-	GitHubUserID int64 `json:"github_user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	ID           int32  `json:"id" gorm:"primaryKey"`
+	MCPAccountID int32  `json:"mcp_account_id" gorm:"not null;uniqueIndex"`
+	MCPServerID  int32  `json:"mcp_server_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	UserID       int32  `json:"user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	GitHubUserID int64  `json:"github_user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	GitHubLogin  string `json:"github_login"`
 	CreatedAt    time.Time
 	UpdatedAt    time.Time
 }
@@ -613,19 +614,15 @@ type MCPServer struct {
 // MCPAccount holds credentials for one identity on an MCPServer.
 // A server can have multiple accounts (e.g., personal + work GitHub tokens).
 type MCPAccount struct {
-	ID                 int32  `json:"id" gorm:"primaryKey"`
-	MCPServerID        int32  `json:"mcp_server_id" gorm:"not null;index"`
-	Name               string `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
-	AuthTokenEncrypted string `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
-	HasToken           bool   `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
-	UserID             *int32 `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
-	LastError          string `json:"last_error" gorm:"type:text"`
-	// GitHub identity belongs to the OAuth token, not to an installation.
-	// Organisation installations can be shared by several GitHub users.
-	GitHubUserID int64     `json:"github_user_id" gorm:"index"`
-	GitHubLogin  string    `json:"github_login"`
-	CreatedAt    time.Time `json:"created_at"`
-	UpdatedAt    time.Time `json:"updated_at"`
+	ID                 int32     `json:"id" gorm:"primaryKey"`
+	MCPServerID        int32     `json:"mcp_server_id" gorm:"not null;index"`
+	Name               string    `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
+	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
+	HasToken           bool      `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
+	UserID             *int32    `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
+	LastError          string    `json:"last_error" gorm:"type:text"`
+	CreatedAt          time.Time `json:"created_at"`
+	UpdatedAt          time.Time `json:"updated_at"`
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
