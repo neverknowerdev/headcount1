@@ -218,6 +218,25 @@ else
     fi
 fi
 
+# ── GitHub MCP Server ───────────────────────────────────────────────────────
+step "Checking GitHub MCP Server"
+if command -v github-mcp-server >/dev/null 2>&1; then
+    echo "[setup] GitHub MCP Server: OK"
+else
+    step "Installing GitHub MCP Server via Homebrew"
+    echo "[setup] GitHub MCP Server: not found — installing via Homebrew..."
+    if command -v brew >/dev/null 2>&1; then
+        install_output=$(brew_install github-mcp-server)
+    else
+        install_output="Homebrew not available — install via: brew install github-mcp-server"
+    fi
+    if command -v github-mcp-server >/dev/null 2>&1; then
+        echo "[setup] GitHub MCP Server: installed"
+    else
+        add_failure "GitHub MCP Server" "could not be installed — GitHub agent tools will be unavailable" "$install_output"
+    fi
+fi
+
 # ── codegraph ────────────────────────────────────────────────────────────────
 step "Checking codegraph"
 if command -v codegraph >/dev/null 2>&1; then

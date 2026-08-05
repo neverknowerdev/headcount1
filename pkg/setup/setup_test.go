@@ -1,6 +1,24 @@
 package setup
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
+
+func TestEmbeddedSetupScriptsInstallGitHubMCPServer(t *testing.T) {
+	for _, name := range []string{"scripts/setup-linux.sh", "scripts/setup-macos.sh", "scripts/setup-windows.ps1"} {
+		data, err := scripts.ReadFile(name)
+		if err != nil {
+			t.Fatalf("read %s: %v", name, err)
+		}
+		contents := string(data)
+		for _, required := range []string{"Checking GitHub MCP Server", "github-mcp-server", "GitHub agent tools will be unavailable"} {
+			if !strings.Contains(contents, required) {
+				t.Errorf("%s does not include %q", name, required)
+			}
+		}
+	}
+}
 
 func TestParseFailures(t *testing.T) {
 	output := `[setup] git: OK

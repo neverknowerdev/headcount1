@@ -798,7 +798,7 @@ interface SetupStep {
 const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; docsLabel: string }> = {
 github: {
         docsUrl: 'https://github.com/github/github-mcp-server',
-        docsLabel: 'Optional GitHub MCP tools',
+        docsLabel: 'GitHub MCP Server documentation',
         steps: [
 			{ before: 'Click Authorize below and sign in to GitHub. No personal access token is required.' },
 			{ before: 'Choose the repositories Headcount1 may access in the GitHub App installation screen.' },
@@ -851,11 +851,11 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
     const hasAccounts = server.accounts && server.accounts.length > 0;
     const hasAuthorizedAccount = !!server.accounts?.some(account => account.has_token);
     // Git clone/pull/push and PR creation use short-lived GitHub App installation
-    // tokens, independently of the optional github-mcp-server tool process.
+    // tokens, independently of github-mcp-server tool-process health.
     const isGitHub = server.name === 'github';
     const isConnected = isGitHub ? hasAuthorizedAccount : hasAccounts && !!server.tools_cache;
     const needsReconnect = isGitHub && hasAccounts && !hasAuthorizedAccount;
-    const optionalToolsUnavailable = isGitHub && isConnected && !server.tools_cache;
+    const githubToolsSetupFailed = isGitHub && isConnected && !server.tools_cache;
     const setup = SETUP_INSTRUCTIONS[server.name];
 
     const borderClass = isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
@@ -892,9 +892,9 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                         )}
                     </div>
                     <p className="text-sm text-gray-600 mb-3">{server.description}</p>
-                    {optionalToolsUnavailable && (
-                        <p className="text-xs text-gray-500 mb-3">
-                            Git operations are ready. Optional GitHub API tools for issues, pull requests, and code search are not available on this deployment.
+                    {githubToolsSetupFailed && (
+                        <p className="text-xs text-amber-700 mb-3">
+                            Git is connected, but GitHub agent tools failed setup. Check the system setup error for installation details.
                         </p>
                     )}
 

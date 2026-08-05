@@ -223,6 +223,44 @@ if (Test-Command gh) {
     }
 }
 
+# ── GitHub MCP Server ───────────────────────────────────────────────────────
+Write-Step "Checking GitHub MCP Server"
+if (Test-Command github-mcp-server) {
+    Write-Host "[setup] GitHub MCP Server: OK"
+} else {
+    Write-Step "Installing GitHub MCP Server"
+    Write-Host "[setup] GitHub MCP Server: not found — installing..."
+    $githubMCPVersion = if ($env:HEADCOUNT1_GITHUB_MCP_VERSION) { $env:HEADCOUNT1_GITHUB_MCP_VERSION } else { 'v1.8.0' }
+    $githubMCPArch = switch ([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString()) {
+        'X64' { 'x86_64' }
+        'Arm64' { 'arm64' }
+        'X86' { 'i386' }
+        default { $null }
+    }
+    $githubMCPBinDir = if ($env:HEADCOUNT1_BIN_DIR) { $env:HEADCOUNT1_BIN_DIR } else { Join-Path $env:USERPROFILE '.headcount1\bin' }
+    $githubMCPTemp = Join-Path ([System.IO.Path]::GetTempPath()) ("headcount1-github-mcp-" + [guid]::NewGuid())
+    $installOutput = ''
+    try {
+        if (-not $githubMCPArch) { throw "unsupported CPU architecture: $([System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture)" }
+        New-Item -ItemType Directory -Force -Path $githubMCPTemp, $githubMCPBinDir | Out-Null
+        $asset = "github-mcp-server_Windows_$githubMCPArch.zip"
+        $archive = Join-Path $githubMCPTemp $asset
+        $url = "https://github.com/github/github-mcp-server/releases/download/$githubMCPVersion/$asset"
+        Invoke-WebRequest -UseBasicParsing -Uri $url -OutFile $archive
+        Expand-Archive -Path $archive -DestinationPath $githubMCPTemp -Force
+        Copy-Item (Join-Path $githubMCPTemp 'github-mcp-server.exe') (Join-Path $githubMCPBinDir 'github-mcp-server.exe') -Force
+    } catch {
+        $installOutput = $_ | Out-String
+    } finally {
+        Remove-Item -Recurse -Force $githubMCPTemp -ErrorAction SilentlyContinue
+    }
+    if (Test-Command github-mcp-server) {
+        Write-Host "[setup] GitHub MCP Server: installed"
+    } else {
+        Add-Failure 'GitHub MCP Server' 'could not be installed — GitHub agent tools will be unavailable' $installOutput
+    }
+}
+
 # ── codegraph ────────────────────────────────────────────────────────────────
 Write-Step "Checking codegraph"
 if (Test-Command codegraph) {

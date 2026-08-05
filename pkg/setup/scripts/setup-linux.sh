@@ -241,6 +241,44 @@ else
     fi
 fi
 
+# ── GitHub MCP Server ───────────────────────────────────────────────────────
+step "Checking GitHub MCP Server"
+if command -v github-mcp-server >/dev/null 2>&1; then
+    echo "[setup] GitHub MCP Server: OK"
+else
+    step "Installing GitHub MCP Server"
+    echo "[setup] GitHub MCP Server: not found — installing..."
+    github_mcp_version="${HEADCOUNT1_GITHUB_MCP_VERSION:-v1.8.0}"
+    case "$(uname -m)" in
+        x86_64|amd64) github_mcp_arch="x86_64" ;;
+        aarch64|arm64) github_mcp_arch="arm64" ;;
+        i386|i686) github_mcp_arch="i386" ;;
+        *) github_mcp_arch="" ;;
+    esac
+    github_mcp_tmp=$(mktemp -d 2>/dev/null || true)
+    if [ -z "$github_mcp_arch" ]; then
+        install_output="unsupported CPU architecture: $(uname -m)"
+    elif [ -z "$github_mcp_tmp" ]; then
+        install_output="could not create temporary directory"
+    elif ! command -v curl >/dev/null 2>&1; then
+        install_output="curl is required to download GitHub MCP Server"
+    else
+        github_mcp_asset="github-mcp-server_Linux_${github_mcp_arch}.tar.gz"
+        github_mcp_url="https://github.com/github/github-mcp-server/releases/download/${github_mcp_version}/${github_mcp_asset}"
+        github_mcp_bin_dir="${HEADCOUNT1_BIN_DIR:-$HOME/.headcount1/bin}"
+        install_output=$(mkdir -p "$github_mcp_bin_dir" 2>&1 && \
+            curl -fsSL "$github_mcp_url" -o "$github_mcp_tmp/$github_mcp_asset" 2>&1 && \
+            tar -xzf "$github_mcp_tmp/$github_mcp_asset" -C "$github_mcp_tmp" 2>&1 && \
+            install -m 0755 "$github_mcp_tmp/github-mcp-server" "$github_mcp_bin_dir/github-mcp-server" 2>&1)
+    fi
+    [ -n "$github_mcp_tmp" ] && rm -rf "$github_mcp_tmp"
+    if command -v github-mcp-server >/dev/null 2>&1; then
+        echo "[setup] GitHub MCP Server: installed"
+    else
+        add_failure "GitHub MCP Server" "could not be installed — GitHub agent tools will be unavailable" "$install_output"
+    fi
+fi
+
 # ── codegraph ────────────────────────────────────────────────────────────────
 step "Checking codegraph"
 if command -v codegraph >/dev/null 2>&1; then

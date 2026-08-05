@@ -148,7 +148,20 @@ func runOnce() {
 		store(err.Error())
 		return
 	}
-	cmd.Env = append(os.Environ(), "HEADCOUNT1_VENV_DIR="+venvDir())
+	binDir := filepath.Join(db.Headcount1Home(), "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		store(fmt.Sprintf("failed to create dependency bin dir: %v", err))
+		return
+	}
+	// Setup installs standalone tools here. Update the parent process as well as
+	// the child script so exec.LookPath and later MCP launches see them without a
+	// service restart.
+	pathValue := binDir + string(os.PathListSeparator) + os.Getenv("PATH")
+	if err := os.Setenv("PATH", pathValue); err != nil {
+		store(fmt.Sprintf("failed to configure dependency PATH: %v", err))
+		return
+	}
+	cmd.Env = append(os.Environ(), "HEADCOUNT1_VENV_DIR="+venvDir(), "HEADCOUNT1_BIN_DIR="+binDir)
 
 	var out bytes.Buffer
 	tracker := &stepTracker{}
@@ -162,7 +175,7 @@ func runOnce() {
 	output := out.String()
 
 	// markitdown availability is determined by the script output, independent of
-	// whether other dependencies (e.g. github-mcp-server) failed to install.
+	// whether another dependency failed to install.
 	if strings.Contains(output, "[setup] markitdown: OK") || strings.Contains(output, "[setup] markitdown: installed") {
 		ready.Store(true)
 	}
