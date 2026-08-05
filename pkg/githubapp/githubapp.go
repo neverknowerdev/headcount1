@@ -48,7 +48,7 @@ type Installation struct {
 }
 
 func FromEnv() (*Client, error) {
-	c := Config{AppID: os.Getenv("HEADCOUNT1_GITHUB_APP_ID"), ClientID: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_ID"), ClientSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_SECRET"), PrivateKey: strings.ReplaceAll(os.Getenv("HEADCOUNT1_GITHUB_APP_PRIVATE_KEY"), `\\n`, "\n"), Slug: os.Getenv("HEADCOUNT1_GITHUB_APP_SLUG"), PublicURL: strings.TrimRight(os.Getenv("DEPLOY_URL"), "/"), WebhookSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_WEBHOOK_SECRET")}
+	c := Config{AppID: os.Getenv("HEADCOUNT1_GITHUB_APP_ID"), ClientID: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_ID"), ClientSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_CLIENT_SECRET"), PrivateKey: normalizePrivateKey(os.Getenv("HEADCOUNT1_GITHUB_APP_PRIVATE_KEY")), Slug: os.Getenv("HEADCOUNT1_GITHUB_APP_SLUG"), PublicURL: strings.TrimRight(os.Getenv("DEPLOY_URL"), "/"), WebhookSecret: os.Getenv("HEADCOUNT1_GITHUB_APP_WEBHOOK_SECRET")}
 	if c.AppID == "" || c.ClientID == "" || c.ClientSecret == "" || c.PrivateKey == "" {
 		return nil, errors.New("GitHub App is not configured")
 	}
@@ -56,6 +56,12 @@ func FromEnv() (*Client, error) {
 		return nil, errors.New("HEADCOUNT1_GITHUB_APP_SLUG is required")
 	}
 	return &Client{config: c, httpClient: &http.Client{Timeout: 20 * time.Second}}, nil
+}
+
+// normalizePrivateKey supports both a normal multi-line GitHub Actions secret
+// and a value copied from a dotenv-style configuration with literal "\\n"s.
+func normalizePrivateKey(value string) string {
+	return strings.ReplaceAll(strings.TrimSpace(value), `\n`, "\n")
 }
 func (c *Client) Configured() bool { return c != nil }
 func (c *Client) InstallURL() string {

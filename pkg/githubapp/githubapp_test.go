@@ -18,6 +18,11 @@ type roundTripFunc func(*http.Request) (*http.Response, error)
 
 func (f roundTripFunc) RoundTrip(r *http.Request) (*http.Response, error) { return f(r) }
 
+func TestNormalizePrivateKey(t *testing.T) {
+	value := "  -----BEGIN RSA PRIVATE KEY-----\\nabc\\n-----END RSA PRIVATE KEY-----  "
+	require.Equal(t, "-----BEGIN RSA PRIVATE KEY-----\nabc\n-----END RSA PRIVATE KEY-----", normalizePrivateKey(value))
+}
+
 func TestExchangeCodeIncludesAuthorizationRedirectURI(t *testing.T) {
 	client := &Client{config: Config{ClientID: "client", ClientSecret: "secret"}}
 	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
