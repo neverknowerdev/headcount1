@@ -215,7 +215,7 @@ test.describe.serial('Git Project Scenarios', () => {
         await page.click('button:has-text("Create Project")');
         await expect(page.getByRole('dialog')).toBeVisible();
 
-        await expect(page.getByText('GitHub repository')).toBeVisible();
+        await expect(page.getByText('GitHub repository', { exact: true })).toBeVisible();
         await page.getByRole('dialog').getByRole('button', { name: 'Use a non-GitHub repository or SSH URL instead' }).click();
         const repoInput = page.getByRole('dialog').locator('input[placeholder="git@github.com:user/repo.git"]');
         await expect(repoInput).toBeVisible();
