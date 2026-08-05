@@ -89,6 +89,9 @@ export const MCPServers: React.FC = () => {
 
     // ── Server modal state (for custom servers only) ───────────────────────────
     const [servers, setServers] = useState<MCPServer[]>([]);
+    const [dependencyToast, setDependencyToast] = useState<string | null>(null);
+    const [installingDependencies, setInstallingDependencies] = useState<number | null>(null);
+    const notifiedDependencyErrors = React.useRef(new Set<number>());
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
     const [formData, setFormData] = useState<typeof emptyForm>({ ...emptyForm });
@@ -136,6 +139,11 @@ export const MCPServers: React.FC = () => {
             const res = await axios.get(url);
             const data: MCPServer[] = res.data || [];
             setServers(data);
+            const failed = data.find(s => s.last_error?.startsWith('Dependency setup failed:') && !notifiedDependencyErrors.current.has(s.id));
+            if (failed) {
+                notifiedDependencyErrors.current.add(failed.id);
+                setDependencyToast(`${failed.display_name || failed.name}: ${failed.last_error}`);
+            }
             const cached: Record<number, MCPTool[]> = {};
             for (const s of data) {
                 if (s.name === 'headcount1') {
@@ -151,6 +159,32 @@ export const MCPServers: React.FC = () => {
     }, [selectedCompanyId]);
 
     useEffect(() => { fetchServers(); }, [fetchServers]);
+    useEffect(() => {
+        // MCP dependency installation starts immediately after platform setup.
+        // A user can reach this page during that short window, so refresh until
+        // GitHub installation either succeeds or produces its scoped error.
+        const githubPending = servers.some(s => s.name === 'github' && !s.deps_installed && !s.last_error);
+        if (!githubPending) return;
+        const timer = window.setTimeout(fetchServers, 2000);
+        return () => window.clearTimeout(timer);
+    }, [servers, fetchServers]);
+
+    const retryDependencyInstall = async (server: MCPServer) => {
+        setInstallingDependencies(server.id);
+        try {
+            await axios.post(`/api/mcp-servers/${server.id}/install-dependencies`);
+            const account = server.accounts?.find(a => a.has_token);
+            if (account) {
+                await axios.post(`/api/mcp-accounts/${account.id}/discover`);
+            }
+            setDependencyToast(null);
+        } catch (e: any) {
+            setDependencyToast(`${server.display_name || server.name}: ${e.response?.data?.error || 'Dependency installation failed'}`);
+        } finally {
+            setInstallingDependencies(null);
+            await fetchServers();
+        }
+    };
 
     // ── Custom server modal ─────────────────────────────────────────────────────
     const openModal = (s?: MCPServer) => {
@@ -357,6 +391,18 @@ export const MCPServers: React.FC = () => {
 
     return (
         <div className="h-full flex flex-col space-y-6">
+            {dependencyToast && (
+                <div role="alert" className="fixed top-4 right-4 z-50 max-w-lg rounded-lg border border-red-200 bg-white p-4 shadow-xl">
+                    <div className="flex items-start gap-3">
+                        <AlertCircle size={18} className="mt-0.5 flex-shrink-0 text-red-600" />
+                        <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-red-800">MCP server setup failed</p>
+                            <p className="mt-1 break-words text-xs text-red-700">{dependencyToast}</p>
+                        </div>
+                        <button aria-label="Dismiss notification" onClick={() => setDependencyToast(null)} className="text-gray-400 hover:text-gray-700">×</button>
+                    </div>
+                </div>
+            )}
             <div className="flex justify-between items-center">
                 <div>
                     <h1 className="text-2xl font-bold">MCP Servers</h1>
@@ -417,6 +463,8 @@ export const MCPServers: React.FC = () => {
                                 onReauthAccount={(acc) => openReauthModal(s, acc)}
                                 onDeleteAccount={handleDeleteAccount}
                                 onDiscoverAccount={(accId) => handleDiscover(accId, s.id)}
+                                installingDependencies={installingDependencies === s.id}
+                                onInstallDependencies={() => retryDependencyInstall(s)}
                             />
                         ))}
                     </div>
@@ -835,7 +883,7 @@ github: {
 };
 
 // Card for pre-defined integrations (github, google-docs, etc.)
-function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAddAccount, onReauthAccount, onDeleteAccount, onDiscoverAccount }: {
+function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAddAccount, onReauthAccount, onDeleteAccount, onDiscoverAccount, installingDependencies, onInstallDependencies }: {
     server: MCPServer;
     tools?: MCPTool[];
     discovering: number | null;
@@ -844,6 +892,8 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
     onReauthAccount: (acc: MCPAccount) => void;
     onDeleteAccount: (accountId: number) => void;
     onDiscoverAccount: (accountId: number) => void;
+    installingDependencies: boolean;
+    onInstallDependencies: () => void;
 }) {
     const [showDetails, setShowDetails] = React.useState(false);
     const [showTools, setShowTools] = React.useState(false);
@@ -855,11 +905,12 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
     const isGitHub = server.name === 'github';
     const isConnected = isGitHub ? hasAuthorizedAccount : hasAccounts && !!server.tools_cache;
     const needsReconnect = isGitHub && hasAccounts && !hasAuthorizedAccount;
-    const githubToolsSetupFailed = isGitHub && isConnected && !server.tools_cache;
+    const dependencySetupFailed = server.last_error?.startsWith('Dependency setup failed:');
+    const dependencyName = isGitHub ? 'github-mcp-server' : (server.command || 'the MCP dependency');
     const setup = SETUP_INSTRUCTIONS[server.name];
 
-    const borderClass = isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
-    const iconClass = isConnected ? 'bg-green-50 text-green-700' : hasAccounts ? 'bg-amber-50 text-amber-600' : 'bg-gray-100 text-gray-500';
+    const borderClass = dependencySetupFailed ? 'border-red-200' : isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
+    const iconClass = dependencySetupFailed ? 'bg-red-50 text-red-700' : isConnected ? 'bg-green-50 text-green-700' : hasAccounts ? 'bg-amber-50 text-amber-600' : 'bg-gray-100 text-gray-500';
 
     return (
         <div className={`bg-white rounded-lg border shadow-sm p-5 ${borderClass}`}>
@@ -890,12 +941,33 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                                 <AlertCircle size={10} /> Not connected
                             </span>
                         )}
+                        {dependencySetupFailed && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                <AlertCircle size={10} /> Tool setup error
+                            </span>
+                        )}
                     </div>
                     <p className="text-sm text-gray-600 mb-3">{server.description}</p>
-                    {githubToolsSetupFailed && (
-                        <p className="text-xs text-amber-700 mb-3">
-                            Git is connected, but GitHub agent tools failed setup. Check the system setup error for installation details.
-                        </p>
+                    {dependencySetupFailed && (
+                        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+                            <p className="font-semibold">Agent tools could not be installed</p>
+                            <p className="mt-1 break-words">{server.last_error.replace('Dependency setup failed:', '').trim()}</p>
+                            <p className="mt-2 text-red-700">
+                                Headcount1 installs this dependency automatically. Retry now, or install <span className="font-mono">{dependencyName}</span> on the Headcount1 host and ensure it is available on PATH.
+                            </p>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <button onClick={onInstallDependencies} disabled={installingDependencies}
+                                    className="rounded bg-red-700 px-2.5 py-1 text-white hover:bg-red-800 disabled:opacity-60">
+                                    {installingDependencies ? 'Installing…' : 'Retry installation'}
+                                </button>
+                                {isGitHub && (
+                                    <a href="https://github.com/github/github-mcp-server/releases" target="_blank" rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 font-medium text-red-700 hover:underline">
+                                        Manual installation instructions <ExternalLink size={11} />
+                                    </a>
+                                )}
+                            </div>
+                        </div>
                     )}
 
                     {!hasAccounts ? (

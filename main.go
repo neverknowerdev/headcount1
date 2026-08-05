@@ -365,7 +365,7 @@ func main() {
 		if err := setup.Run(); err != nil {
 			log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
 		}
-		srv.InstallMCPNpmDeps(context.Background())
+		srv.InstallMCPDependencies(context.Background())
 		srv.CacheMCPTools(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())

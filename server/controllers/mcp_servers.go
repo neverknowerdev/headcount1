@@ -115,6 +115,11 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 	}
 
 	for _, s := range servers {
+		if s.Name == "github" && !s.DepsInstalled {
+			// The dependency installer persists the actionable server-level error.
+			// Avoid replacing it with a generic per-account discovery failure.
+			continue
+		}
 		// For external servers, try each account until one succeeds.
 		if len(s.Accounts) == 0 {
 			continue
@@ -143,6 +148,21 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 			log.Printf("MCP cache: %s: tools cached", s.Name)
 		}
 	}
+}
+
+// InstallMCPServerDependencies retries dependency setup for one integration.
+// It is deliberately separate from platform setup so failures remain scoped to
+// the MCP card that owns the dependency.
+func (api *API) InstallMCPServerDependencies(w http.ResponseWriter, r *http.Request) {
+	s := api.mcpServerFromCtx(r)
+	if err := setup.InstallMCPDependencies(r.Context(), s); err != nil {
+		message := "Dependency setup failed: " + err.Error()
+		_ = api.q.UpdateMCPServerLastError(r.Context(), s.ID, message)
+		api.respondError(w, http.StatusBadGateway, message)
+		return
+	}
+	_ = api.q.UpdateMCPServerLastError(r.Context(), s.ID, "")
+	api.respondJSON(w, http.StatusOK, map[string]string{"status": "installed"})
 }
 
 // sortToolsByPopularity re-orders a tools JSON array by descending call count,
