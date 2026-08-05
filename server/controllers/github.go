@@ -109,9 +109,8 @@ func (api *API) GitHubStatus(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, map[string]any{"configured": true, "install_url": c.InstallURL(), "connections": connections})
 }
 
-// StartMCPGitHubOAuth starts GitHub App OAuth for a named MCP account. The
-// resulting OAuth token is encrypted in that account; it is never shown in the
-// UI or entered manually by the user.
+// StartMCPGitHubOAuth starts GitHub App OAuth. The resulting OAuth token and
+// GitHub login are discovered during the callback; neither is entered manually.
 func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	server := api.mcpServerFromCtx(r)
 	if server.Name != "github" {
@@ -128,16 +127,12 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Name       string `json:"name"`
 		ReturnPath string `json:"return_path"`
 		AccountID  int32  `json:"account_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
 		return
-	}
-	if input.Name == "" {
-		input.Name = "GitHub account"
 	}
 	if input.ReturnPath == "" || !strings.HasPrefix(input.ReturnPath, "/") || strings.HasPrefix(input.ReturnPath, "//") {
 		input.ReturnPath = "/settings"
@@ -153,7 +148,7 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	_, _ = rand.Read(b)
 	state := hex.EncodeToString(b)
 	callback := deploymentURL() + "/api/github/callback"
-	if err := api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, MCPAccountID: input.AccountID, UserID: api.currentUserID(r), AccountName: input.Name, ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)}).Error; err != nil {
+	if err := api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, MCPAccountID: input.AccountID, UserID: api.currentUserID(r), ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)}).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, "could not start GitHub authorization")
 		return
 	}
@@ -257,12 +252,12 @@ func (api *API) persistGitHubOAuthAccount(ctx context.Context, state db.GitHubOA
 			return err
 		}
 		if state.MCPAccountID == 0 {
-			account = db.MCPAccount{MCPServerID: state.MCPServerID, Name: state.AccountName, AuthTokenEncrypted: sealedToken, UserID: &state.UserID}
+			account = db.MCPAccount{MCPServerID: state.MCPServerID, Name: identity.Login, AuthTokenEncrypted: sealedToken, UserID: &state.UserID}
 			if err := tx.Create(&account).Error; err != nil {
 				return err
 			}
 		} else {
-			account.Name = state.AccountName
+			account.Name = identity.Login
 			account.AuthTokenEncrypted = sealedToken
 			account.LastError = ""
 			if err := tx.Save(&account).Error; err != nil {

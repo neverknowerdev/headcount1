@@ -266,7 +266,6 @@ export const MCPServers: React.FC = () => {
 		if (accountModal.authType === 'github-app') {
 			try {
 				const res = await axios.post(`/api/mcp-servers/${accountModal.serverId}/github-oauth`, {
-					name: accountForm.name || 'GitHub account',
 					account_id: accountModal.accountId || 0,
 					return_path: window.location.pathname,
 				});
@@ -720,7 +719,7 @@ export const MCPServers: React.FC = () => {
                                 ? `Authorize ${accountModal.serverDisplayName}`
                                 : `Re-authenticate "${accountModal.accountName}"`}
                         </h2>
-                        {accountModal.mode === 'create' && (
+			{accountModal.mode === 'create' && accountModal.authType !== 'github-app' && (
                             <p className="text-sm text-gray-500 mb-4">This will create a new connected account for {accountModal.serverDisplayName}.</p>
                         )}
                         <div className="space-y-4 mt-4">
@@ -794,7 +793,7 @@ export const MCPServers: React.FC = () => {
                                     </p>
                                 </div>
 								) : accountModal.authType === 'github-app' ? (
-									<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub will show its account picker so you can select a different personal or work identity. If you select an identity that is already connected, Headcount1 will return without creating a duplicate.</p><p className="mt-2 text-indigo-800">Repository access is selected separately through the GitHub App installation page. You will see a direct link when creating a project.</p></div>
+									<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub will show its account picker so you can select a different personal or work identity. Headcount1 detects the GitHub username automatically after approval.</p><p className="mt-2 text-indigo-800">If you select an identity that is already connected, Headcount1 will return without creating a duplicate. Repository access is selected separately through the GitHub App installation page.</p></div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
                                     <SecretLabel>

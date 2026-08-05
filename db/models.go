@@ -411,7 +411,6 @@ type GitHubOAuthState struct {
 	MCPServerID  int32      `json:"-" gorm:"default:0"`
 	UserID       int32      `json:"-" gorm:"default:0"`
 	MCPAccountID int32      `json:"-" gorm:"default:0"`
-	AccountName  string     `json:"-"`
 	ReturnPath   string     `json:"-"`
 	ExpiresAt    time.Time  `json:"-"`
 	UsedAt       *time.Time `json:"-"`
