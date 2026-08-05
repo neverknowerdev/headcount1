@@ -67,8 +67,11 @@ func (c *Client) Configured() bool { return c != nil }
 func (c *Client) InstallURL() string {
 	return "https://github.com/apps/" + url.PathEscape(c.config.Slug) + "/installations/new"
 }
-func (c *Client) AuthorizeURL(state, redirect string) string {
+func (c *Client) AuthorizeURL(state, redirect string, selectAccount ...bool) string {
 	q := url.Values{"client_id": {c.config.ClientID}, "state": {state}, "redirect_uri": {redirect}}
+	if len(selectAccount) > 0 && selectAccount[0] {
+		q.Set("prompt", "select_account")
+	}
 	return "https://github.com/login/oauth/authorize?" + q.Encode()
 }
 

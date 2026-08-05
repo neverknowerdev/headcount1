@@ -111,7 +111,7 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	state := hex.EncodeToString(b)
 	callback := deploymentURL() + "/api/github/callback"
 	api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, MCPServerID: server.ID, MCPAccountID: input.AccountID, UserID: api.currentUserID(r), AccountName: input.Name, ReturnPath: input.ReturnPath, ExpiresAt: time.Now().Add(10 * time.Minute)})
-	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback), "install_url": c.InstallURL()})
+	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback, input.AccountID == 0), "install_url": c.InstallURL()})
 }
 func (api *API) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	c, err := githubClient()
@@ -128,7 +128,7 @@ func (api *API) StartGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 	rand.Read(b)
 	state := hex.EncodeToString(b)
 	api.db.Create(&db.GitHubOAuthState{ID: state, RedirectURL: callback, ExpiresAt: time.Now().Add(10 * time.Minute)})
-	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback), "install_url": c.InstallURL()})
+	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback, true), "install_url": c.InstallURL()})
 }
 func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")

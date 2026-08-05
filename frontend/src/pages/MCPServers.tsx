@@ -746,7 +746,7 @@ export const MCPServers: React.FC = () => {
                                     </p>
                                 </div>
 								) : accountModal.authType === 'github-app' ? (
-									<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub uses the identity currently signed in at github.com. If it is already connected, Headcount1 will return here without creating a duplicate. To connect a different personal or work identity, first switch accounts in GitHub, then continue.</p><a href="https://github.com/logout" target="_blank" rel="noopener noreferrer" className="mt-2 inline-flex text-indigo-700 underline">Switch GitHub account</a><p className="mt-2 text-indigo-800">Repository access is selected separately through the GitHub App installation page. You will see a direct link when creating a project.</p></div>
+									<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub will show its account picker so you can select a different personal or work identity. If you select an identity that is already connected, Headcount1 will return without creating a duplicate.</p><p className="mt-2 text-indigo-800">Repository access is selected separately through the GitHub App installation page. You will see a direct link when creating a project.</p></div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
                                     <SecretLabel>
