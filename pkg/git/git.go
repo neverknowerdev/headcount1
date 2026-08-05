@@ -16,6 +16,21 @@ type GitManager struct {
 	httpToken  string
 }
 
+const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.io <headcount1@headcount1.io>"
+
+// commitMessageWithHeadcount1Attribution adds the standard Git co-author
+// trailer to commits created by Headcount1. GitHub renders this trailer as a
+// co-author when the email is associated with a GitHub account.
+func commitMessageWithHeadcount1Attribution(message string) string {
+	message = strings.TrimSpace(message)
+	for _, line := range strings.Split(message, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), headcount1CoAuthorTrailer) {
+			return message
+		}
+	}
+	return message + "\n\n" + headcount1CoAuthorTrailer
+}
+
 // NewGitManager builds a git manager. sshKeyPath is the private-key FILE to
 // authenticate with (per-user, resolved by the caller); an empty path disables
 // SSH auth. Historically this took the ssh DIRECTORY — callers now pass the
@@ -94,7 +109,7 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 	g.runGitCommand(ctx, "config", "user.name", "Agent Orchestrator")
 	g.runGitCommand(ctx, "config", "user.email", "agent@headcount1.local")
 
-	_, err = g.runGitCommand(ctx, "commit", "-m", message)
+	_, err = g.runGitCommand(ctx, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
 	if err != nil {
 		return err
 	}
@@ -322,7 +337,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	run("config", "user.name", "Agent Orchestrator")
 	run("config", "user.email", "agent@headcount1.local")
 
-	if _, err := run("commit", "-m", message); err != nil {
+	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
 		return err
 	}
 	return nil

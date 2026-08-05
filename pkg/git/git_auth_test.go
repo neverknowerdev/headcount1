@@ -1,7 +1,11 @@
 package git
 
 import (
+	"context"
 	"encoding/base64"
+	"os"
+	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -64,4 +68,31 @@ func TestEmptySSHKeyDoesNotConfigureSSH(t *testing.T) {
 	for _, item := range manager.withGitEnv() {
 		require.NotContains(t, item, "GIT_SSH_COMMAND=")
 	}
+}
+
+func TestCommitMessageIncludesHeadcount1CoAuthor(t *testing.T) {
+	message := commitMessageWithHeadcount1Attribution("Fix repository discovery")
+	require.Equal(t, "Fix repository discovery\n\n"+headcount1CoAuthorTrailer, message)
+}
+
+func TestCommitMessageDoesNotDuplicateHeadcount1CoAuthor(t *testing.T) {
+	original := "Fix repository discovery\n\nco-authored-by: HEADCOUNT1.IO <HEADCOUNT1@HEADCOUNT1.IO>"
+	require.Equal(t, original, commitMessageWithHeadcount1Attribution(original))
+}
+
+func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
+	directory := t.TempDir()
+	command := exec.Command("git", "init")
+	command.Dir = directory
+	require.NoError(t, command.Run())
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
+
+	manager := NewGitManager(directory, "")
+	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change"))
+
+	command = exec.Command("git", "log", "-1", "--format=%B")
+	command.Dir = directory
+	message, err := command.Output()
+	require.NoError(t, err)
+	require.Contains(t, string(message), headcount1CoAuthorTrailer)
 }
