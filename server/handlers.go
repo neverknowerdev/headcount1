@@ -118,6 +118,9 @@ func (s *Server) MountPublic(r chi.Router) {
 	// here. It authenticates with the shared HEADCOUNT1_DEPLOY_API_KEY, and is
 	// a no-op unless that key is configured — see DeployWebhook.
 	r.Post("/deploy/webhook", api.DeployWebhook)
+	// GitHub App deliveries cannot carry a Headcount1 browser session. Their
+	// HMAC signature is verified by GitHubWebhook before any processing.
+	r.Post("/github/webhook", api.GitHubWebhook)
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
 		pending, ok, errMsg, warning := setup.Status()
@@ -192,10 +195,8 @@ func (s *Server) Mount(r chi.Router) {
 	r.Post("/settings/ssh", api.UploadSSHKey)
 	r.Route("/github", func(r chi.Router) {
 		r.Get("/status", api.GitHubStatus)
-		r.Post("/connect", api.StartGitHubOAuth)
 		r.Get("/callback", api.GitHubCallback)
 		r.Get("/repositories", api.ListGitHubRepositories)
-		r.Post("/webhook", api.GitHubWebhook)
 	})
 	r.Get("/activities", api.ListActivities)
 

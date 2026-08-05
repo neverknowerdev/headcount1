@@ -38,3 +38,30 @@ func TestValidateRemoteOnlyConfiguresSSHForSSHURLs(t *testing.T) {
 	require.False(t, usesSSH("https://github.com/org/repo.git"))
 	require.False(t, usesSSH("file:///tmp/repo"))
 }
+
+func TestValidateRemoteEnvUsesSSHKeyOnlyForSSHRemote(t *testing.T) {
+	manager := NewGitManager("/tmp/repo", "/tmp/private-key")
+	require.Contains(t, manager.validateRemoteEnv("git@github.com:org/repo.git"), "GIT_SSH_COMMAND="+sshCommandFor("/tmp/private-key"))
+	require.NotContains(t, manager.validateRemoteEnv("https://github.com/org/repo.git"), "GIT_SSH_COMMAND="+sshCommandFor("/tmp/private-key"))
+}
+
+func TestValidateRemoteEnvLeavesSSHAgentAvailableWithoutAKey(t *testing.T) {
+	manager := NewGitManager("/tmp/repo", "")
+	for _, item := range manager.validateRemoteEnv("git@github.com:org/repo.git") {
+		require.NotContains(t, item, "GIT_SSH_COMMAND=")
+	}
+}
+
+func TestHTTPTokenDoesNotConfigureSSH(t *testing.T) {
+	manager := NewGitManager("/tmp/repo", "/tmp/ssh-key").WithHTTPToken("installation-token")
+	for _, item := range manager.withGitEnv() {
+		require.NotContains(t, item, "GIT_SSH_COMMAND=")
+	}
+}
+
+func TestEmptySSHKeyDoesNotConfigureSSH(t *testing.T) {
+	manager := NewGitManager("/tmp/repo", "")
+	for _, item := range manager.withGitEnv() {
+		require.NotContains(t, item, "GIT_SSH_COMMAND=")
+	}
+}

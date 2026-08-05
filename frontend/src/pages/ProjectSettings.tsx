@@ -4,6 +4,20 @@ import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, GitBranch, Save, CheckCircle2, AlertCircle, Loader2, ExternalLink, Search, Pencil } from 'lucide-react';
 
+type GitHubRepository = {
+  id: number;
+  full_name: string;
+  clone_url: string;
+  installation_id: number;
+  account_id: number;
+};
+
+type GitHubAccountStatus = {
+  id: number;
+  name: string;
+  error?: string;
+};
+
 export const ProjectSettings: React.FC = () => {
   const { shortName, id } = useParams<{ shortName: string; id: string }>();
   const navigate = useNavigate();
@@ -20,10 +34,11 @@ export const ProjectSettings: React.FC = () => {
   const [savingDetails, setSavingDetails] = useState(false);
 
   const [repositoryUrl, setRepositoryUrl] = useState('');
-	const [githubRepos, setGithubRepos] = useState<any[]>([]);
+	const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
 	const [githubStatus, setGithubStatus] = useState<any>(null);
+	const [githubAccounts, setGithubAccounts] = useState<GitHubAccountStatus[]>([]);
 	const [repoSearch, setRepoSearch] = useState('');
-  const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
+	const [selectedGithubRepo, setSelectedGithubRepo] = useState<GitHubRepository | null>(null);
 	const [editingGithubRepo, setEditingGithubRepo] = useState(false);
 	const [showManualRepo, setShowManualRepo] = useState(false);
   const [repoError, setRepoError] = useState('');
@@ -65,7 +80,7 @@ export const ProjectSettings: React.FC = () => {
 
   useEffect(() => { fetchCodegraphStatus(); }, [fetchCodegraphStatus]);
 
-  useEffect(() => { (async () => { try { const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]); setGithubStatus(status.data); setGithubRepos(repos.data || []); } catch { /* GitHub is optional */ } })(); }, []);
+	useEffect(() => { (async () => { try { const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]); setGithubStatus(status.data); setGithubRepos(repos.data?.repositories || []); setGithubAccounts(repos.data?.accounts || []); } catch { /* GitHub is optional */ } })(); }, []);
 
 	useEffect(() => {
 		if (!project?.github_repository_id || githubRepos.length === 0) return;
@@ -117,7 +132,7 @@ export const ProjectSettings: React.FC = () => {
       const res = await axios.put(`/api/projects/${id}`, {
         name,
         repository_url: repositoryUrl.trim(),
-		github_repository: selectedGithubRepo || undefined,
+		github_repository: selectedGithubRepo ? { id: selectedGithubRepo.id, installation_id: selectedGithubRepo.installation_id, account_id: selectedGithubRepo.account_id } : undefined,
       });
       setProject(res.data);
       setRepositoryUrl(res.data.repository_url || repositoryUrl.trim());
@@ -242,6 +257,7 @@ export const ProjectSettings: React.FC = () => {
 			) : (
 				<div className="overflow-hidden rounded-xl border border-gray-200 bg-white shadow-sm">
 					<div className="flex items-start justify-between gap-3 border-b border-gray-100 p-4"><div className="flex gap-3"><span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-lg bg-gray-900 text-white"><GitBranch size={19}/></span><div><h3 className="font-semibold text-gray-900">Choose a GitHub repository</h3><p className="mt-0.5 text-xs text-gray-500">Repositories available to your connected GitHub accounts.</p></div></div><a href={`/companies/${shortName}/mcp-servers`} className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-indigo-700 hover:underline">Manage accounts <ExternalLink size={12}/></a></div>
+					{githubAccounts.filter(account => account.error).map(account => <div key={account.id} className="mx-4 mt-4 rounded-lg border border-amber-200 bg-amber-50 p-3 text-sm text-amber-900"><span className="font-medium">{account.name} needs to reconnect.</span> {account.error} <a href={`/companies/${shortName}/mcp-servers`} className="font-medium text-indigo-700 underline">Manage / reconnect</a></div>)}
 					{githubStatus?.configured && githubRepos.length > 0 ? <div className="p-4"><div className="relative"><Search className="absolute left-3 top-2.5 text-gray-400" size={17}/><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search by owner or repository name" className="w-full rounded-lg border border-gray-200 py-2 pl-9 pr-3 text-sm outline-none focus:border-indigo-400 focus:ring-2 focus:ring-indigo-100"/></div><div className="mt-2 max-h-56 overflow-y-auto rounded-lg border border-gray-100">{filteredGithubRepos.map(repo => <button type="button" key={repo.id} onClick={() => { setSelectedGithubRepo(repo); setRepositoryUrl(repo.clone_url); }} className={`flex w-full items-center justify-between border-b border-gray-100 px-3 py-2.5 text-left text-sm last:border-0 ${String(selectedGithubRepo?.id) === String(repo.id) ? 'bg-indigo-50 text-indigo-800' : 'hover:bg-gray-50'}`}><span className="truncate font-medium">{repo.full_name}</span>{String(selectedGithubRepo?.id) === String(repo.id) && <CheckCircle2 className="shrink-0 text-indigo-600" size={16}/>}</button>)}{filteredGithubRepos.length === 0 && <p className="px-3 py-6 text-center text-sm text-gray-500">No repositories match “{repoSearch}”.</p>}</div></div> : <p className="p-4 text-sm text-gray-600">{githubStatus?.configured ? 'No permitted repositories found. Add a GitHub account or update repository access in GitHub.' : 'GitHub integration is unavailable on this environment.'}</p>}
 				</div>
 			)}

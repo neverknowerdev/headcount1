@@ -158,6 +158,9 @@ func main() {
 		&db.Project{},
 		&db.GitHubOAuthState{},
 		&db.GitHubConnection{},
+		&db.GitHubIdentity{},
+		&db.GitHubWebhookDelivery{},
+		&db.GitHubWebhookTarget{},
 		&db.Sprint{},
 		&db.LLMProvider{},
 		&db.ModelGroup{},
@@ -201,6 +204,15 @@ func main() {
 	// Seed predefined MCP servers (headcount1, github, google-docs) if not present.
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
+	}
+	if err := db.New(database).MigrateGitHubOAuth(context.Background()); err != nil {
+		// This migration removes obsolete plaintext GitHub token storage. Starting
+		// with it only partially applied would leave credentials exposed, so fail
+		// closed rather than serving the integration in an unknown state.
+		log.Fatalf("GitHub OAuth security migration failed: %v", err)
+	}
+	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
+		log.Fatalf("GitHub connection index migration failed: %v", err)
 	}
 
 	// Builtin free-model providers (OpenRouter, OpenCode Zen) and the

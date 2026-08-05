@@ -25,7 +25,7 @@ func TestNormalizePrivateKey(t *testing.T) {
 
 func TestAuthorizeURLCanForceGitHubAccountPicker(t *testing.T) {
 	client := &Client{config: Config{ClientID: "client"}}
-	authorizeURL := client.AuthorizeURL("state", "https://app.example/api/github/callback", true)
+	authorizeURL := client.AuthorizeURL("state", "https://app.example/api/github/callback", AuthorizeOptions{SelectAccount: true})
 	require.Contains(t, authorizeURL, "prompt=select_account")
 }
 
@@ -42,6 +42,55 @@ func TestExchangeCodeIncludesAuthorizationRedirectURI(t *testing.T) {
 	token, err := client.ExchangeCode(context.Background(), "code", "https://stagingapp.headcount1.ai/api/github/callback")
 	require.NoError(t, err)
 	require.Equal(t, "token", token)
+}
+
+func TestUserReadsStableGitHubIdentity(t *testing.T) {
+	client := &Client{}
+	client.httpClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/user", r.URL.Path)
+		require.Equal(t, "Bearer user-token", r.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"id":42,"login":"octocat"}`))}, nil
+	})}
+	user, err := client.User(context.Background(), "user-token")
+	require.NoError(t, err)
+	require.Equal(t, int64(42), user.ID)
+	require.Equal(t, "octocat", user.Login)
+}
+
+func TestUserInstallationsFollowsPagination(t *testing.T) {
+	var paths []string
+	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		paths = append(paths, r.URL.RequestURI())
+		header := make(http.Header)
+		if len(paths) == 1 {
+			header.Set("Link", `<https://api.github.com/user/installations?page=2&per_page=100>; rel="next"`)
+			return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"installations":[{"id":1,"account":{"login":"personal"}}]}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"installations":[{"id":2,"account":{"login":"work"}}]}`))}, nil
+	})}}
+
+	installations, err := client.UserInstallations(context.Background(), "user-token")
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2}, []int64{installations[0].ID, installations[1].ID})
+	require.Equal(t, []string{"/user/installations?per_page=100", "/user/installations?page=2&per_page=100"}, paths)
+}
+
+func TestUserRepositoriesFollowsPagination(t *testing.T) {
+	requests := 0
+	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests++
+		header := make(http.Header)
+		if requests == 1 {
+			header.Set("Link", `<https://api.github.com/user/installations/7/repositories?page=2&per_page=100>; rel="next"`)
+			return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":1,"full_name":"a/one"}]}`))}, nil
+		}
+		return &http.Response{StatusCode: http.StatusOK, Header: header, Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":2,"full_name":"a/two"}]}`))}, nil
+	})}}
+
+	repositories, err := client.UserRepositories(context.Background(), "user-token", 7)
+	require.NoError(t, err)
+	require.Equal(t, []int64{1, 2}, []int64{repositories[0].ID, repositories[1].ID})
+	require.Equal(t, 2, requests)
 }
 
 func TestInstallationTokenScopesToSelectedRepository(t *testing.T) {

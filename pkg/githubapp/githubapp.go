@@ -28,6 +28,7 @@ import (
 const apiURL = "https://api.github.com"
 
 type Config struct{ AppID, ClientID, ClientSecret, PrivateKey, Slug, PublicURL, WebhookSecret string }
+type AuthorizeOptions struct{ SelectAccount bool }
 type Client struct {
 	config     Config
 	httpClient *http.Client
@@ -45,6 +46,14 @@ type Installation struct {
 	Account struct {
 		Login string `json:"login"`
 	} `json:"account"`
+}
+
+// User is the stable GitHub identity that authorized an OAuth token. It must
+// not be inferred from an installation owner because organisation installs can
+// be shared by multiple people.
+type User struct {
+	ID    int64  `json:"id"`
+	Login string `json:"login"`
 }
 
 func FromEnv() (*Client, error) {
@@ -67,12 +76,23 @@ func (c *Client) Configured() bool { return c != nil }
 func (c *Client) InstallURL() string {
 	return "https://github.com/apps/" + url.PathEscape(c.config.Slug) + "/installations/new"
 }
-func (c *Client) AuthorizeURL(state, redirect string, selectAccount ...bool) string {
+func (c *Client) AuthorizeURL(state, redirect string, options AuthorizeOptions) string {
 	q := url.Values{"client_id": {c.config.ClientID}, "state": {state}, "redirect_uri": {redirect}}
-	if len(selectAccount) > 0 && selectAccount[0] {
+	if options.SelectAccount {
 		q.Set("prompt", "select_account")
 	}
 	return "https://github.com/login/oauth/authorize?" + q.Encode()
+}
+
+func (c *Client) User(ctx context.Context, userToken string) (User, error) {
+	var out User
+	if err := c.api(ctx, http.MethodGet, "/user", userToken, nil, &out); err != nil {
+		return User{}, err
+	}
+	if out.ID == 0 || out.Login == "" {
+		return User{}, errors.New("GitHub returned an invalid user identity")
+	}
+	return out, nil
 }
 
 // ExchangeCode repeats redirectURI when authorization used one. GitHub Apps
@@ -99,18 +119,91 @@ func (c *Client) ExchangeCode(ctx context.Context, code, redirectURI string) (st
 	return out.AccessToken, nil
 }
 func (c *Client) UserInstallations(ctx context.Context, userToken string) ([]Installation, error) {
-	var out struct {
-		Installations []Installation `json:"installations"`
-	}
-	err := c.api(ctx, http.MethodGet, "/user/installations", userToken, nil, &out)
-	return out.Installations, err
+	var installations []Installation
+	err := c.getPaginated(ctx, "/user/installations", userToken, func(body io.Reader) error {
+		var page struct {
+			Installations []Installation `json:"installations"`
+		}
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return err
+		}
+		installations = append(installations, page.Installations...)
+		return nil
+	})
+	return installations, err
 }
 func (c *Client) UserRepositories(ctx context.Context, userToken string, installationID int64) ([]Repository, error) {
-	var out struct {
-		Repositories []Repository `json:"repositories"`
+	var repositories []Repository
+	err := c.getPaginated(ctx, fmt.Sprintf("/user/installations/%d/repositories", installationID), userToken, func(body io.Reader) error {
+		var page struct {
+			Repositories []Repository `json:"repositories"`
+		}
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return err
+		}
+		repositories = append(repositories, page.Repositories...)
+		return nil
+	})
+	return repositories, err
+}
+
+// getPaginated follows GitHub's Link: rel="next" cursor so repository
+// discovery never silently drops accounts or repositories after the first
+// page. The callback receives a single JSON page at a time.
+func (c *Client) getPaginated(ctx context.Context, endpoint, token string, consume func(io.Reader) error) error {
+	next, err := url.Parse(apiURL + endpoint)
+	if err != nil {
+		return err
 	}
-	err := c.api(ctx, http.MethodGet, fmt.Sprintf("/user/installations/%d/repositories", installationID), userToken, nil, &out)
-	return out.Repositories, err
+	query := next.Query()
+	if query.Get("per_page") == "" {
+		query.Set("per_page", "100")
+		next.RawQuery = query.Encode()
+	}
+	for next != nil {
+		req, err := http.NewRequestWithContext(ctx, http.MethodGet, next.String(), nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Accept", "application/vnd.github+json")
+		req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+		req.Header.Set("Authorization", "Bearer "+token)
+		res, err := c.httpClient.Do(req)
+		if err != nil {
+			return err
+		}
+		if res.StatusCode < http.StatusOK || res.StatusCode > 299 {
+			body, _ := io.ReadAll(io.LimitReader(res.Body, 4096))
+			_ = res.Body.Close()
+			return fmt.Errorf("GitHub API %s: %s", res.Status, strings.TrimSpace(string(body)))
+		}
+		consumeErr := consume(res.Body)
+		link := res.Header.Get("Link")
+		_ = res.Body.Close()
+		if consumeErr != nil {
+			return consumeErr
+		}
+		next, err = nextGitHubLink(link)
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func nextGitHubLink(header string) (*url.URL, error) {
+	for _, part := range strings.Split(header, ",") {
+		part = strings.TrimSpace(part)
+		if !strings.Contains(part, `rel="next"`) {
+			continue
+		}
+		start, end := strings.Index(part, "<"), strings.Index(part, ">")
+		if start < 0 || end <= start+1 {
+			return nil, errors.New("invalid GitHub pagination link")
+		}
+		return url.Parse(part[start+1 : end])
+	}
+	return nil, nil
 }
 func (c *Client) InstallationToken(ctx context.Context, installationID int64, repositoryID int64) (string, error) {
 	jwt, err := c.appJWT()

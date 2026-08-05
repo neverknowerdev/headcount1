@@ -81,7 +81,10 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		IsExternal:      req.IsExternal,
 	}
 	if len(req.GitHubRepository) > 0 {
-		GitHubRepoSelection(&p, string(req.GitHubRepository))
+		if err := api.applyGitHubRepositorySelection(r.Context(), api.currentUserID(r), &p, req.GitHubRepository); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	var comp db.Company
@@ -118,12 +121,15 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
 
-	if req.RepositoryUrl != "" {
+	// A GitHub selection supplies its canonical clone URL server-side, so this
+	// must be based on the persisted project rather than the optional client
+	// repository_url field.
+	if proj.RepositoryUrl != "" {
 		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
 		defer repoKeyCleanup()
 		var tokens []string
 		if proj.GitHubInstallationID != 0 {
-			token, tokenErr := GitHubTokenForProject(r.Context(), api.q, proj)
+			token, tokenErr := GitHubTokenForProject(r.Context(), proj)
 			if tokenErr != nil || token == "" {
 				api.db.Delete(&proj)
 				if tokenErr == nil {
@@ -160,7 +166,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	newCGServer, cgErr := api.q.CreateMCPServer(r.Context(), cgServer)
 	if cgErr != nil {
 		log.Printf("Warning: failed to create codegraph MCP server for project %d: %v", proj.ID, cgErr)
-	} else if req.RepositoryUrl != "" {
+	} else if proj.RepositoryUrl != "" {
 		api.startCodegraphInit(proj.ID, newCGServer.ID, repoPath)
 	}
 
@@ -200,8 +206,16 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	githubRepositorySelected := len(req.GitHubRepository) > 0
 	if githubRepositorySelected {
-		GitHubRepoSelection(&project, string(req.GitHubRepository))
+		if err := api.applyGitHubRepositorySelection(r.Context(), api.currentUserID(r), &project, req.GitHubRepository); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 		req.RepositoryUrl = project.RepositoryUrl
+	} else if req.RepositoryUrl != "" {
+		// A manual URL deliberately opts out of GitHub App authentication. Clear
+		// all GitHub metadata so later clones and PR publishing cannot reuse the
+		// previous repository's installation token.
+		clearGitHubRepositoryMetadata(&project)
 	}
 	if req.RepositoryUrl != "" {
 		settings := LoadSettings()
@@ -223,7 +237,7 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		defer repoKeyCleanup()
 		var tokens []string
 		if project.GitHubInstallationID != 0 {
-			token, tokenErr := GitHubTokenForProject(r.Context(), api.q, project)
+			token, tokenErr := GitHubTokenForProject(r.Context(), project)
 			if tokenErr != nil || token == "" {
 				if tokenErr == nil {
 					tokenErr = fmt.Errorf("empty installation token")
@@ -279,6 +293,12 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 
 	api.logActivity(saved.CompanyID, "project_updated", int32(saved.ID), "project", "")
 	api.respondJSON(w, http.StatusOK, saved)
+}
+
+func clearGitHubRepositoryMetadata(project *db.Project) {
+	project.GitHubRepositoryID = 0
+	project.GitHubInstallationID = 0
+	project.GitHubDefaultBranch = ""
 }
 
 // GetProjectCodegraph returns the codegraph MCP server record for a project,

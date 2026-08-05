@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -25,6 +26,9 @@ func TestGitHubConnectionsAllowMultipleMCPAccountsPerInstallation(t *testing.T) 
 	second := db.GitHubConnection{InstallationID: 42, MCPAccountID: 11, UserID: 1, AccountLogin: "personal", ConnectedAt: time.Now()}
 	require.NoError(t, database.Create(&first).Error)
 	require.NoError(t, database.Create(&second).Error)
+	require.NoError(t, db.New(database).EnsureGitHubConnectionUniqueness(context.Background()))
+	duplicate := db.GitHubConnection{InstallationID: 42, MCPAccountID: 10, UserID: 1, AccountLogin: "duplicate", ConnectedAt: time.Now()}
+	require.Error(t, database.Create(&duplicate).Error)
 
 	var connections []db.GitHubConnection
 	require.NoError(t, database.Where("installation_id = ?", 42).Find(&connections).Error)

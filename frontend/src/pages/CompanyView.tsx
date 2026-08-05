@@ -5,6 +5,20 @@ import { Link } from 'react-router-dom';
 import { useStore, useIsOwner } from '../store';
 import { Folder, GitBranch, ExternalLink, Search } from 'lucide-react';
 
+type GitHubRepository = {
+  id: number;
+  full_name: string;
+  clone_url: string;
+  installation_id: number;
+  account_id: number;
+};
+
+type GitHubAccountStatus = {
+  id: number;
+  name: string;
+  error?: string;
+};
+
 export const CompanyView: React.FC = () => {
   const { selectedCompanyId } = useStore();
   const isOwner = useIsOwner();
@@ -14,10 +28,11 @@ export const CompanyView: React.FC = () => {
   const [companyShortName, setCompanyShortName] = useState('');
   const [error, setError] = useState('');
   const [saving, setSaving] = useState(false);
-	const [githubRepos, setGithubRepos] = useState<any[]>([]);
+	const [githubRepos, setGithubRepos] = useState<GitHubRepository[]>([]);
 	const [githubStatus, setGithubStatus] = useState<any>(null);
+	const [githubAccounts, setGithubAccounts] = useState<GitHubAccountStatus[]>([]);
 	const [repoSearch, setRepoSearch] = useState('');
-	const [selectedGithubRepo, setSelectedGithubRepo] = useState<any>(null);
+	const [selectedGithubRepo, setSelectedGithubRepo] = useState<GitHubRepository | null>(null);
 	const [showManualRepo, setShowManualRepo] = useState(false);
 
   useEffect(() => {
@@ -33,8 +48,9 @@ export const CompanyView: React.FC = () => {
 			try {
 				const [status, repos] = await Promise.all([axios.get('/api/github/status'), axios.get('/api/github/repositories')]);
 				setGithubStatus(status.data);
-				setGithubRepos(repos.data || []);
-			} catch { setGithubStatus({ configured: false }); setGithubRepos([]); }
+				setGithubRepos(repos.data?.repositories || []);
+				setGithubAccounts(repos.data?.accounts || []);
+			} catch { setGithubStatus({ configured: false }); setGithubRepos([]); setGithubAccounts([]); }
 	}, []);
 
 	useEffect(() => {
@@ -67,7 +83,7 @@ export const CompanyView: React.FC = () => {
         name: formData.name,
         workspace_folder: formData.workspace_folder,
 		repository_url: formData.repository_url || undefined,
-		github_repository: selectedGithubRepo || undefined,
+		github_repository: selectedGithubRepo ? { id: selectedGithubRepo.id, installation_id: selectedGithubRepo.installation_id, account_id: selectedGithubRepo.account_id } : undefined,
       });
       setFormData({ name: '', workspace_folder: '', repository_url: '' });
       setIsModalOpen(false);
@@ -129,8 +145,9 @@ export const CompanyView: React.FC = () => {
                 <input type="text" value={formData.workspace_folder} onChange={e => setFormData({...formData, workspace_folder: e.target.value})} className="w-full border rounded p-2 text-sm" />
                 <p className="text-xs text-gray-500 mt-1">This directory will be created automatically.</p>
               </div>
-              <div>
+			  <div>
 				<div className="flex items-center justify-between gap-2"><label className="block text-sm font-medium text-gray-700">GitHub repository</label><a href={`/companies/${companyShortName}/mcp-servers`} className="inline-flex items-center gap-1 text-xs text-indigo-700 hover:underline">Manage accounts <ExternalLink size={12}/></a></div>
+				{githubAccounts.filter(account => account.error).map(account => <div key={account.id} className="mt-2 rounded border border-amber-200 bg-amber-50 p-2 text-xs text-amber-900"><span className="font-medium">{account.name} needs attention.</span> {account.error} <a href={`/companies/${companyShortName}/mcp-servers`} className="font-medium text-indigo-700 underline">Manage / reconnect</a></div>)}
 				{githubStatus?.configured && githubRepos.length > 0 ? <>
 					<div className="relative mt-1"><Search size={14} className="absolute left-2 top-2.5 text-gray-400"/><input value={repoSearch} onChange={e => setRepoSearch(e.target.value)} placeholder="Search connected repositories…" className="w-full border rounded p-2 pl-7 text-sm"/></div>
 					<select value={selectedGithubRepo?.id || ''} onChange={e => { const repo = githubRepos.find(x => String(x.id) === e.target.value) || null; setSelectedGithubRepo(repo); if (repo) setFormData(f => ({...f, repository_url: repo.clone_url})); }} className="mt-2 w-full border rounded p-2 text-sm"><option value="">Select a connected repository</option>{githubRepos.filter(r => r.full_name.toLowerCase().includes(repoSearch.toLowerCase())).map(r => <option key={r.id} value={r.id}>{r.full_name}</option>)}</select>

@@ -340,6 +340,10 @@ func saveCredentialsFile(name, jsonContent string) (string, error) {
 // CreateMCPAccount adds a new account (credentials) for an MCP server.
 func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 	server := api.mcpServerFromCtx(r) // loaded + authorized by LoadMCPServer
+	if server.Name == "github" {
+		api.respondError(w, http.StatusBadRequest, "GitHub accounts must be connected with GitHub OAuth")
+		return
+	}
 	serverID := int(server.ID)
 	var input mcpAccountInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
@@ -380,9 +384,18 @@ func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 // UpdateMCPAccount updates name or auth_token for an account.
 func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 	existing := api.mcpAccountFromCtx(r) // loaded + authorized by LoadMCPAccount
+	server, err := api.q.GetMCPServer(r.Context(), existing.MCPServerID)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "MCP server not found")
+		return
+	}
 	var input mcpAccountInput
 	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
+		return
+	}
+	if server.Name == "github" && (input.AuthToken != "" || input.CredentialsJSON != "") {
+		api.respondError(w, http.StatusBadRequest, "GitHub credentials are managed by GitHub OAuth. Reconnect the account instead.")
 		return
 	}
 	existing.Name = input.Name
@@ -421,9 +434,6 @@ func (api *API) UpdateMCPAccount(w http.ResponseWriter, r *http.Request) {
 // DeleteMCPAccount removes an account and its agent assignments.
 func (api *API) DeleteMCPAccount(w http.ResponseWriter, r *http.Request) {
 	acc := api.mcpAccountFromCtx(r) // loaded + authorized by LoadMCPAccount
-	// Remove GitHub identity links first so OAuth duplicate detection does not
-	// block reconnecting an account after it has been deleted.
-	api.db.Where("mcp_account_id = ?", acc.ID).Delete(&db.GitHubConnection{})
 	if err := api.q.DeleteMCPAccount(r.Context(), acc.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -457,6 +467,17 @@ func (api *API) DiscoverMCPAccountTools(w http.ResponseWriter, r *http.Request) 
 
 // ── Google OAuth2 flow ───────────────────────────────────────────────────────
 
+// isGoogleOAuthServer deliberately checks both the catalog identity and auth
+// mode. The Google OAuth endpoints must never be usable as a generic way to
+// write credentials onto another MCP integration.
+func isGoogleOAuthServer(server db.MCPServer) bool {
+	return server.Name == "google-docs" && server.AuthType == "google-oauth"
+}
+
+func googleOAuthAccountMatches(server db.MCPServer, account db.MCPAccount, userID int32) bool {
+	return userID != 0 && account.UserID != nil && *account.UserID == userID && account.MCPServerID == server.ID
+}
+
 // sanitizeName returns a filesystem-safe version of name.
 func sanitizeName(name string) string {
 	return strings.Map(func(r rune) rune {
@@ -471,6 +492,10 @@ func sanitizeName(name string) string {
 // The npx process opens the user's default browser; this endpoint returns immediately.
 func (api *API) StartGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	server := api.mcpServerFromCtx(r) // loaded + authorized by LoadMCPServer
+	if !isGoogleOAuthServer(server) {
+		api.respondError(w, http.StatusBadRequest, "Google OAuth is only available for the Google Docs integration")
+		return
+	}
 	serverID := int(server.ID)
 	var input struct {
 		AccountName   string `json:"account_name"`
@@ -487,6 +512,13 @@ func (api *API) StartGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	if input.OAuthKeysJSON == "" {
 		api.respondError(w, http.StatusBadRequest, "oauth_keys_json is required")
 		return
+	}
+	if input.AccountID > 0 {
+		existing, err := api.q.GetMCPAccount(r.Context(), input.AccountID)
+		if err != nil || !googleOAuthAccountMatches(server, existing, api.currentUserID(r)) {
+			api.respondError(w, http.StatusNotFound, "Google account was not found")
+			return
+		}
 	}
 
 	keysPath, err := saveCredentialsFile(input.AccountName+"-oauth-keys", input.OAuthKeysJSON)
@@ -524,17 +556,38 @@ func (api *API) StartGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 // success, creates (or updates) the MCPAccount with the token path as auth_token.
 func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	server := api.mcpServerFromCtx(r) // loaded + authorized by LoadMCPServer
+	if !isGoogleOAuthServer(server) {
+		api.respondError(w, http.StatusBadRequest, "Google OAuth is only available for the Google Docs integration")
+		return
+	}
 	serverID := int(server.ID)
 	tokenPath := r.URL.Query().Get("token_path")
 	accountName := r.URL.Query().Get("account_name")
 	accountIDStr := r.URL.Query().Get("account_id")
+	credentialsDir := filesystem.NewPaths(LoadSettings().BasePath).CredentialsDir()
+	expectedTokenPath := filepath.Join(credentialsDir, sanitizeName(accountName)+"-gdrive-token.json")
+	if accountName == "" || filepath.Clean(tokenPath) != expectedTokenPath {
+		api.respondError(w, http.StatusBadRequest, "invalid Google OAuth token path")
+		return
+	}
+
+	accountID, parseErr := strconv.Atoi(accountIDStr)
+	if accountIDStr != "" && parseErr != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid Google account id")
+		return
+	}
+	if accountID > 0 {
+		existing, err := api.q.GetMCPAccount(r.Context(), int32(accountID))
+		if err != nil || !googleOAuthAccountMatches(server, existing, api.currentUserID(r)) {
+			api.respondError(w, http.StatusNotFound, "account not found")
+			return
+		}
+	}
 
 	if _, err := os.Stat(tokenPath); os.IsNotExist(err) {
 		api.respondJSON(w, http.StatusOK, map[string]any{"ready": false})
 		return
 	}
-
-	accountID, _ := strconv.Atoi(accountIDStr)
 
 	// The OAuth token file path is itself the secret carried on the account —
 	// seal it before it reaches the model's AuthTokenEncrypted field.
@@ -548,7 +601,7 @@ func (api *API) PollGoogleOAuth(w http.ResponseWriter, r *http.Request) {
 	var acc db.MCPAccount
 	if accountID > 0 {
 		existing, err := api.q.GetMCPAccount(r.Context(), int32(accountID))
-		if err != nil || !ownedByUser(r, existing.UserID) {
+		if err != nil || !googleOAuthAccountMatches(server, existing, api.currentUserID(r)) {
 			api.respondError(w, http.StatusNotFound, "account not found")
 			return
 		}

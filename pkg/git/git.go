@@ -132,7 +132,7 @@ func sshCommandFor(keyPath string) string {
 // sshEnv returns the GIT_SSH_COMMAND env string for the configured key.
 // Returns "" if the URL is a local file:// path (SSH is irrelevant).
 func (g *GitManager) sshEnv() string {
-	if g.isLocalOnly() {
+	if g.isLocalOnly() || g.sshKeyPath == "" {
 		return ""
 	}
 	return sshCommandFor(g.sshKeyPath)
@@ -147,8 +147,13 @@ func (g *GitManager) withGitEnv() []string {
 		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
 		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
 	}
-	if sshCmd := g.sshEnv(); sshCmd != "" {
-		env = append(env, "GIT_SSH_COMMAND="+sshCmd)
+	// A GitHub App token is an HTTPS credential. Do not inject an unrelated
+	// SSH command into those operations; manual SSH repositories never have an
+	// HTTP token.
+	if g.httpToken == "" {
+		if sshCmd := g.sshEnv(); sshCmd != "" {
+			env = append(env, "GIT_SSH_COMMAND="+sshCmd)
+		}
 	}
 	return env
 }
@@ -223,16 +228,7 @@ func (g *GitManager) CreateWorktree(ctx context.Context, baseRepoDir, targetWork
 
 func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL)
-
-	// Build env based on the URL, not the manager's repoPath, since this can be called
-	// for arbitrary URLs during CreateProject validation.
-	env := os.Environ()
-	env = append(env, "GIT_TERMINAL_PROMPT=0")
-	if usesSSH(repoURL) {
-		keyPath := g.sshKeyPath
-		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(keyPath))
-	}
-	cmd.Env = env
+	cmd.Env = g.validateRemoteEnv(repoURL)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
@@ -247,6 +243,20 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 		return fmt.Errorf("git remote validation failed: %v, output: %s", err, output)
 	}
 	return nil
+}
+
+// validateRemoteEnv only overrides SSH when a user actually supplied a key.
+// Without one, Git must retain its normal SSH-agent/host configuration rather
+// than being forced to run `ssh -i ` with an empty identity path.
+func (g *GitManager) validateRemoteEnv(repoURL string) []string {
+	// Build env based on the URL, not the manager's repoPath, since this can be
+	// called for arbitrary URLs during project validation.
+	env := append([]string{}, os.Environ()...)
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
+	if usesSSH(repoURL) && strings.TrimSpace(g.sshKeyPath) != "" {
+		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(g.sshKeyPath))
+	}
+	return env
 }
 
 func (g *GitManager) Pull(ctx context.Context) error {

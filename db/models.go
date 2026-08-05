@@ -422,17 +422,72 @@ type GitHubOAuthState struct {
 // person may connect multiple GitHub identities (or the same identity with
 // different repository selections) without exposing them to other users.
 type GitHubConnection struct {
-	ID             int32  `json:"id" gorm:"primaryKey"`
-	InstallationID int64  `json:"installation_id" gorm:"index"`
-	MCPAccountID   int32  `json:"mcp_account_id" gorm:"index"`
-	UserID         int32  `json:"user_id" gorm:"index"`
-	AccountLogin   string `json:"account_login"`
-	// Retained only for backwards-compatible rows created before MCP accounts.
-	// New OAuth tokens are sealed in MCPAccount.AuthTokenEncrypted.
-	UserAccessToken string    `json:"-" gorm:"type:text"`
-	ConnectedAt     time.Time `json:"connected_at"`
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID int32 `json:"id" gorm:"primaryKey"`
+	// One account may only record an installation once. The installation is
+	// intentionally not globally unique: personal and work MCP accounts may
+	// both be allowed to use the same organisation installation.
+	InstallationID int64     `json:"installation_id" gorm:"index"`
+	MCPAccountID   int32     `json:"mcp_account_id" gorm:"index"`
+	UserID         int32     `json:"user_id" gorm:"index"`
+	AccountLogin   string    `json:"account_login"`
+	ConnectedAt    time.Time `json:"connected_at"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// GitHubIdentity is the durable, GitHub-only uniqueness boundary for OAuth
+// accounts. A generic MCP account may have any number of credentials, while a
+// given Headcount1 user must never connect the same GitHub person twice to the
+// same GitHub MCP server.
+type GitHubIdentity struct {
+	ID           int32 `json:"id" gorm:"primaryKey"`
+	MCPAccountID int32 `json:"mcp_account_id" gorm:"not null;uniqueIndex"`
+	MCPServerID  int32 `json:"mcp_server_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	UserID       int32 `json:"user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	GitHubUserID int64 `json:"github_user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// GitHubWebhookDelivery records the lifecycle of a verified GitHub delivery.
+// A delivery is complete only after its task comments have been committed; a
+// failed delivery remains retryable by GitHub (and, when configured, by the
+// staging relay).
+type GitHubWebhookDelivery struct {
+	ID          int32      `json:"id" gorm:"primaryKey"`
+	DeliveryID  string     `json:"delivery_id" gorm:"uniqueIndex"`
+	Event       string     `json:"event"`
+	Status      string     `json:"status" gorm:"not null;default:'processing'"` // processing | failed | completed
+	ForwardedAt *time.Time `json:"forwarded_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	LastError   string     `json:"last_error" gorm:"type:text"`
+	// AttemptToken and LeaseExpiresAt form a compare-and-swap lease. They keep
+	// a redelivery from completing or failing work claimed by a newer request.
+	AttemptToken   string     `json:"-" gorm:"index"`
+	LeaseExpiresAt *time.Time `json:"-"`
+	Attempts       int        `json:"attempts" gorm:"not null;default:0"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// GitHubWebhookTarget makes each delivery/task pair idempotent. Comments and
+// their target rows are created in one transaction, so a partial retry can
+// never duplicate a comment that was already committed.
+type GitHubWebhookTarget struct {
+	ID         int32  `json:"id" gorm:"primaryKey"`
+	DeliveryID string `json:"delivery_id" gorm:"not null;uniqueIndex:idx_github_delivery_task"`
+	TaskID     int32  `json:"task_id" gorm:"not null;uniqueIndex:idx_github_delivery_task"`
+	CommentID  int32  `json:"comment_id" gorm:"not null"`
+	// A committed comment is an outbox item until the matching agent wake has
+	// succeeded. This makes a failed engine invocation retryable without ever
+	// creating the comment twice.
+	WakeStatus         string     `json:"wake_status" gorm:"not null;default:'pending'"`
+	WakeAttemptToken   string     `json:"-" gorm:"index"`
+	WakeLeaseExpiresAt *time.Time `json:"-"`
+	WakeAttempts       int        `json:"wake_attempts" gorm:"not null;default:0"`
+	WakeLastError      string     `json:"wake_last_error" gorm:"type:text"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
 }
 
 type Comment struct {
@@ -558,15 +613,19 @@ type MCPServer struct {
 // MCPAccount holds credentials for one identity on an MCPServer.
 // A server can have multiple accounts (e.g., personal + work GitHub tokens).
 type MCPAccount struct {
-	ID                 int32     `json:"id" gorm:"primaryKey"`
-	MCPServerID        int32     `json:"mcp_server_id" gorm:"not null;index"`
-	Name               string    `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
-	AuthTokenEncrypted string    `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
-	HasToken           bool      `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
-	UserID             *int32    `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
-	LastError          string    `json:"last_error" gorm:"type:text"`
-	CreatedAt          time.Time `json:"created_at"`
-	UpdatedAt          time.Time `json:"updated_at"`
+	ID                 int32  `json:"id" gorm:"primaryKey"`
+	MCPServerID        int32  `json:"mcp_server_id" gorm:"not null;index"`
+	Name               string `json:"name" gorm:"not null"`                                   // user label: "Personal", "Work"
+	AuthTokenEncrypted string `json:"-" gorm:"column:auth_token;type:text;serializer:sealed"` // SEALED credential (ciphertext); decrypt at use via secrets.Default().Decrypt()
+	HasToken           bool   `json:"has_token" gorm:"-"`                                     // computed: AuthTokenEncrypted != ""
+	UserID             *int32 `json:"user_id" gorm:"index"`                                   // owning user; their DEK seals AuthTokenEncrypted
+	LastError          string `json:"last_error" gorm:"type:text"`
+	// GitHub identity belongs to the OAuth token, not to an installation.
+	// Organisation installations can be shared by several GitHub users.
+	GitHubUserID int64     `json:"github_user_id" gorm:"index"`
+	GitHubLogin  string    `json:"github_login"`
+	CreatedAt    time.Time `json:"created_at"`
+	UpdatedAt    time.Time `json:"updated_at"`
 }
 
 // AgentMCPServer is the legacy join table for the Agent <-> MCPServer many-to-many.
