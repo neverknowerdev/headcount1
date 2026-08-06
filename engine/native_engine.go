@@ -28,6 +28,12 @@ import (
 	"gorm.io/gorm"
 )
 
+const runStatusCompleted = "completed"
+
+func taskGitBranch(taskID int32) string {
+	return fmt.Sprintf("headcount1/task-%d", taskID)
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q            *db.Queries
@@ -571,7 +577,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			// CreateTaskWorkspace creates an empty directory before the run; it
 			// still needs converting into a Git worktree.
 			if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); os.IsNotExist(statErr) {
-				branchName := fmt.Sprintf("headcount1/task-%d", task.ID)
+				branchName := taskGitBranch(task.ID)
 				// Git refuses to add a worktree into the placeholder directory
 				// created with the task. It contains only disposable task memory.
 				_ = os.RemoveAll(workspacePath)
@@ -630,27 +636,26 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Track whether finish_task was called so we can force it if not, plus
 	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
-	var finishTaskStatus, finishSummary string
+	var finishResult tools.FinishTaskResult
 
-	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, status, finishStatus, resultDetails string) error {
+	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, result tools.FinishTaskResult) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
 		}
 		taskFinished = true
-		finishTaskStatus = status
-		finishSummary = finishStatus
+		finishResult = result
 		prevStatus := t.Status
-		t.Status = status
+		t.Status = result.Status
 		if _, err := e.q.UpdateTask(finCtx, t); err != nil {
 			return err
 		}
-		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": status})
-		if err := e.q.UpdateRunResult(finCtx, run.ID, finishStatus, resultDetails); err != nil {
+		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": result.Status})
+		if err := e.q.UpdateRunResult(finCtx, run.ID, result.FinishStatus, result.ResultDetails); err != nil {
 			fmt.Printf("Warning: failed to store run result: %v\n", err)
 		}
 		runID := run.ID
-		content, _ := json.Marshal(map[string]string{"msg": finishStatus, "from": prevStatus, "to": status})
+		content, _ := json.Marshal(map[string]string{"msg": result.FinishStatus, "from": prevStatus, "to": result.Status})
 		comment, cErr := e.q.CreateComment(finCtx, db.Comment{
 			TaskID:      task.ID,
 			AuthorType:  "agent",
@@ -935,11 +940,18 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			synthetic := srv
 			synthetic.AuthToken = authToken
 			// GitHub uses the selected repository's short-lived App token, never a PAT.
-			if srv.Name == "github" && task.ProjectID != nil {
+			if srv.IsGitHub() && task.ProjectID != nil {
 				if project, err := e.q.GetProject(ctx, *task.ProjectID); err == nil && project.GitHubInstallationID != 0 {
-					if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
-						synthetic.AuthToken = token
+					token, tokenErr := githubapp.TokenForProject(ctx, project)
+					if tokenErr != nil {
+						e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping GitHub MCP account %q: installation token failed: %v", acc.Name, tokenErr))
+						continue
 					}
+					if token == "" {
+						e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping GitHub MCP account %q: installation token is empty", acc.Name))
+						continue
+					}
+					synthetic.AuthToken = token
 				}
 			}
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
@@ -1084,14 +1096,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "interrupted"
 	}
 
-	status := "completed"
+	status := runStatusCompleted
 	var runErrMsg string
 
 	if agentErr != nil {
 		if runCtx.Err() == context.Canceled {
 			e.logInfo(proxyLogger, "Run canceled by user")
 			if proxyLogger != nil {
-				proxyLogger.LogOutcome("canceled", "canceled", finishTaskStatus, agentDisplayName, task.ID, "Run canceled by user")
+				proxyLogger.LogOutcome("canceled", "canceled", finishResult.Status, agentDisplayName, task.ID, "Run canceled by user")
 			}
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
 			e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
@@ -1116,10 +1128,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	// Git commit if there are changes.
-	if gitProject && gitMgr != nil && status == "completed" {
+	if gitProject && gitMgr != nil && status == runStatusCompleted {
 		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
 		if task.ProjectID != nil {
-			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task)
+			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
 		}
 	}
 
@@ -1138,7 +1150,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// the run's JSONL log.
 	if proxyLogger != nil {
 		endReason := "no_finish"
-		summary := finishSummary
+		summary := finishResult.FinishStatus
 		switch {
 		case agentErr != nil && errors.Is(agentErr, aicli.ErrMaxTurns):
 			endReason = "max_turns"
@@ -1151,7 +1163,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case taskFinished:
 			endReason = "finish_task"
 		}
-		proxyLogger.LogOutcome(status, endReason, finishTaskStatus, agentDisplayName, task.ID, summary)
+		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}
 
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
@@ -1164,35 +1176,81 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	return status
 }
 
-func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspace string, task db.Task) {
-	if task.ProjectID == nil || task.GitHubPRNumber != 0 {
+func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspace string, task db.Task, finish tools.FinishTaskResult) {
+	if task.ProjectID == nil {
 		return
 	}
 	project, err := e.q.GetProject(ctx, *task.ProjectID)
 	if err != nil || project.GitHubInstallationID == 0 {
 		return
 	}
-	branch := fmt.Sprintf("headcount1/task-%d", task.ID)
+	branch := taskGitBranch(task.ID)
 	if err := gitMgr.PushWorktreeBranch(ctx, workspace, branch); err != nil {
 		e.logInfo(logger, "GitHub push failed: "+err.Error())
 		return
 	}
 	token, err := githubapp.TokenForProject(ctx, project)
 	if err != nil {
+		e.logInfo(logger, "GitHub installation token failed: "+err.Error())
 		return
 	}
 	gh, err := githubapp.FromEnv()
 	if err != nil {
+		e.logInfo(logger, "GitHub App client failed: "+err.Error())
 		return
 	}
-	number, url, err := gh.CreatePullRequest(ctx, token, strings.TrimSuffix(strings.TrimPrefix(project.RepositoryUrl, "https://github.com/"), ".git"), task.Title, branch, project.GitHubDefaultBranch, fmt.Sprintf("Created by Headcount1 for task %s.", task.RefKey))
+	repositorySlug, err := githubapp.RepositorySlug(project.RepositoryUrl)
+	if err != nil {
+		e.logInfo(logger, "GitHub repository URL is invalid: "+err.Error())
+		return
+	}
+	if task.GitHubPRNumber != 0 {
+		e.logInfo(logger, fmt.Sprintf("Updated existing PR #%d: %s", task.GitHubPRNumber, task.GitHubPRURL))
+		return
+	}
+	owner := strings.SplitN(repositorySlug, "/", 2)[0]
+	existing, found, err := gh.FindOpenPullRequestByHead(ctx, token, repositorySlug, owner+":"+branch)
+	if err != nil {
+		e.logInfo(logger, "GitHub PR lookup failed: "+err.Error())
+		return
+	}
+	if found {
+		task.GitHubBranch, task.GitHubPRNumber, task.GitHubPRURL = branch, existing.Number, existing.HTMLURL
+		_, _ = e.q.UpdateTask(ctx, task)
+		e.logInfo(logger, fmt.Sprintf("Reused existing PR #%d: %s", existing.Number, existing.HTMLURL))
+		return
+	}
+	title, description := pullRequestContent(task, finish)
+	baseBranch := project.GitHubDefaultBranch
+	if baseBranch == "" {
+		baseBranch = "main"
+	}
+	number, prURL, err := gh.CreatePullRequest(ctx, token, repositorySlug, title, branch, baseBranch, description)
 	if err != nil {
 		e.logInfo(logger, "GitHub PR creation failed: "+err.Error())
 		return
 	}
-	task.GitHubBranch, task.GitHubPRNumber, task.GitHubPRURL = branch, number, url
+	task.GitHubBranch, task.GitHubPRNumber, task.GitHubPRURL = branch, number, prURL
 	_, _ = e.q.UpdateTask(ctx, task)
-	e.logInfo(logger, fmt.Sprintf("Created draft PR #%d: %s", number, url))
+	e.logInfo(logger, fmt.Sprintf("Created draft PR #%d: %s", number, prURL))
+}
+
+func pullRequestContent(task db.Task, finish tools.FinishTaskResult) (string, string) {
+	title := strings.TrimSpace(finish.PullRequestTitle)
+	if title == "" {
+		title = task.Title
+	}
+	description := strings.TrimSpace(finish.PullRequestDescription)
+	if description == "" {
+		description = strings.TrimSpace(finish.ResultDetails)
+	}
+	if description == "" {
+		description = strings.TrimSpace(finish.FinishStatus)
+	}
+	if description == "" {
+		description = strings.TrimSpace(task.Description)
+	}
+	return title, description
 }
 
 // buildInitialMessages assembles a session's conversation seed: the task
@@ -1552,7 +1610,7 @@ func (e *NativeEngine) buildSubtaskReply(
 	reply := fmt.Sprintf("Subtask #%d (%s) finished.\nSession: %s, status %s\nSubtask status: %s\nResult: %s",
 		state.subtaskID, state.agentName, runLabel, status, taskStatus, result)
 	reply += childDetails + childArtifacts
-	if status != "completed" {
+	if status != runStatusCompleted {
 		if childErr != "" {
 			reply += "\nError: " + childErr
 		}

@@ -57,6 +57,27 @@ func TestUserReadsStableGitHubIdentity(t *testing.T) {
 	require.Equal(t, "octocat", user.Login)
 }
 
+func TestRepositorySlugValidatesGitHubHTTPSURL(t *testing.T) {
+	slug, err := RepositorySlug("https://github.com/acme/widgets.git")
+	require.NoError(t, err)
+	require.Equal(t, "acme/widgets", slug)
+	_, err = RepositorySlug("git@github.com:acme/widgets.git")
+	require.Error(t, err)
+}
+
+func TestFindOpenPullRequestByHead(t *testing.T) {
+	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/repos/acme/widgets/pulls", r.URL.Path)
+		require.Equal(t, "open", r.URL.Query().Get("state"))
+		require.Equal(t, "acme:headcount1/task-7", r.URL.Query().Get("head"))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`[{"number":12,"html_url":"https://github.com/acme/widgets/pull/12"}]`))}, nil
+	})}}
+	pull, found, err := client.FindOpenPullRequestByHead(t.Context(), "token", "acme/widgets", "acme:headcount1/task-7")
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, 12, pull.Number)
+}
+
 func TestUserInstallationsFollowsPagination(t *testing.T) {
 	var paths []string
 	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {

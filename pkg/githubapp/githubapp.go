@@ -71,6 +71,11 @@ type User struct {
 	Login string `json:"login"`
 }
 
+type PullRequest struct {
+	Number  int    `json:"number"`
+	HTMLURL string `json:"html_url"`
+}
+
 func FromEnv() (*Client, error) {
 	config := Config{
 		AppID:         os.Getenv("HEADCOUNT1_GITHUB_APP_ID"),
@@ -281,6 +286,30 @@ func TokenForProject(ctx context.Context, project db.Project) (string, error) {
 		return "", err
 	}
 	return c.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+}
+
+func RepositorySlug(repositoryURL string) (string, error) {
+	const githubHTTPSPrefix = "https://github.com/"
+	if !strings.HasPrefix(repositoryURL, githubHTTPSPrefix) {
+		return "", fmt.Errorf("repository URL is not a GitHub HTTPS URL")
+	}
+	slug := strings.TrimSuffix(strings.TrimPrefix(repositoryURL, githubHTTPSPrefix), ".git")
+	if len(strings.Split(slug, "/")) != 2 {
+		return "", fmt.Errorf("invalid GitHub repository URL")
+	}
+	return slug, nil
+}
+
+func (c *Client) FindOpenPullRequestByHead(ctx context.Context, token, repositorySlug, head string) (PullRequest, bool, error) {
+	query := url.Values{"state": {"open"}, "head": {head}}
+	var pulls []PullRequest
+	if err := c.api(ctx, http.MethodGet, "/repos/"+repositorySlug+"/pulls?"+query.Encode(), token, nil, &pulls); err != nil {
+		return PullRequest{}, false, err
+	}
+	if len(pulls) == 0 {
+		return PullRequest{}, false, nil
+	}
+	return pulls[0], true, nil
 }
 
 func (c *Client) CreatePullRequest(ctx context.Context, token, ownerRepo, title, head, base, body string) (int, string, error) {

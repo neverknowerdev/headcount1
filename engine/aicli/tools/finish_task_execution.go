@@ -14,14 +14,22 @@ import (
 // ran as a delegated subtask.
 type FinishTask struct {
 	delegated bool
-	onFinish  func(ctx context.Context, status, finishStatus, resultDetails string) error
+	onFinish  func(ctx context.Context, result FinishTaskResult) error
+}
+
+type FinishTaskResult struct {
+	Status                 string
+	FinishStatus           string
+	ResultDetails          string
+	PullRequestTitle       string
+	PullRequestDescription string
 }
 
 // NewFinishTask builds the finish_task tool. delegated marks sessions that
 // run a subtask created by another agent: their result is reviewed by the
 // task owner automatically, so "done" is the normal completion status and
 // "in-review" is reserved for work a human specifically must approve.
-func NewFinishTask(delegated bool, onFinish func(ctx context.Context, status, finishStatus, resultDetails string) error) *FinishTask {
+func NewFinishTask(delegated bool, onFinish func(ctx context.Context, result FinishTaskResult) error) *FinishTask {
 	return &FinishTask{delegated: delegated, onFinish: onFinish}
 }
 
@@ -60,6 +68,14 @@ func (t *FinishTask) Def() aicli.ToolDef {
 					"result_details":{
 						"type":"string",
 						"description":"Detailed handoff: findings, decisions, artifact filenames, caveats. Returned to your task owner when the session completes."
+					},
+					"pull_request_title":{
+						"type":"string",
+						"description":"For code changes, a concise pull request title describing the implementation."
+					},
+					"pull_request_description":{
+						"type":"string",
+						"description":"For code changes, a useful pull request description covering the outcome, key changes, and verification."
 					}
 				},
 				"required":["task_status","finish_status"]
@@ -73,11 +89,17 @@ func (t *FinishTask) Execute(ctx context.Context, args json.RawMessage) (string,
 		TaskStatus    string `json:"task_status"`
 		FinishStatus  string `json:"finish_status"`
 		ResultDetails string `json:"result_details"`
+		PRTitle       string `json:"pull_request_title"`
+		PRDescription string `json:"pull_request_description"`
 	}
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", err
 	}
-	if err := t.onFinish(ctx, p.TaskStatus, p.FinishStatus, p.ResultDetails); err != nil {
+	result := FinishTaskResult{
+		Status: p.TaskStatus, FinishStatus: p.FinishStatus, ResultDetails: p.ResultDetails,
+		PullRequestTitle: p.PRTitle, PullRequestDescription: p.PRDescription,
+	}
+	if err := t.onFinish(ctx, result); err != nil {
 		return "", fmt.Errorf("finish_task: %w", err)
 	}
 	return fmt.Sprintf("Task status set to %q.", p.TaskStatus), nil

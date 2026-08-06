@@ -360,7 +360,7 @@ func saveCredentialsFile(name, jsonContent string) (string, error) {
 // CreateMCPAccount adds a new account (credentials) for an MCP server.
 func (api *API) CreateMCPAccount(w http.ResponseWriter, r *http.Request) {
 	server := api.mcpServerFromCtx(r) // loaded + authorized by LoadMCPServer
-	if server.Name == "github" {
+	if server.Name == db.MCPServerNameGitHub {
 		api.respondError(w, http.StatusBadRequest, "GitHub accounts must be connected with GitHub OAuth")
 		return
 	}

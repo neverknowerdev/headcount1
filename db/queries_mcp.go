@@ -505,13 +505,13 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 	predefined := []MCPServer{
 		{
-			Name:        "github",
+			Name:        MCPServerNameGitHub,
 			DisplayName: "GitHub",
 			Description: "Access GitHub repos, issues, pull requests, and code search.",
 			Transport:   "stdio",
 			Command:     "github-mcp-server",
 			Args:        `["stdio"]`,
-			AuthType:    "github-app",
+			AuthType:    MCPAuthTypeGitHubApp,
 			AuthEnvVar:  "GITHUB_PERSONAL_ACCESS_TOKEN",
 			Enabled:     false,
 			Builtin:     true,

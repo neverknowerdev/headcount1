@@ -610,6 +610,16 @@ type MCPServer struct {
 	UpdatedAt     time.Time    `json:"updated_at"`
 }
 
+const (
+	MCPServerNameGitHub  = "github"
+	MCPAuthTypeGitHubApp = "github-app"
+	MCPTransportBuiltin  = "builtin"
+)
+
+func (s MCPServer) IsGitHub() bool {
+	return s.Builtin && s.Name == MCPServerNameGitHub && s.AuthType == MCPAuthTypeGitHubApp
+}
+
 // MCPAccount holds credentials for one identity on an MCPServer.
 // A server can have multiple accounts (e.g., personal + work GitHub tokens).
 type MCPAccount struct {

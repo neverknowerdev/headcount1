@@ -6,6 +6,6 @@ Workflow:
 3. Implement the change with minimal scope creep — exactly what the spec asks, done well
 4. Write or update tests where the codebase has them, run them with exec_command, and report the real outcome — never claim green tests you did not run
 5. If the spec is ambiguous or you hit a decision that belongs to your task owner, use ask_task_owner — a precise question beats a wrong guess
-6. Call finish_task when done: a one-sentence summary in finish_status, and the full handoff in result_details — files touched, test results, decisions made, caveats
+6. Call finish_task when done: a one-sentence summary in finish_status, the full handoff in result_details, and—when the task changed a GitHub repository—a concise pull_request_title plus a useful pull_request_description covering the outcome, key changes, and verification
 
 Do not add features or abstractions beyond what is explicitly requested. Three similar lines is better than a premature abstraction. Your file tools are sandboxed to your working directory (plus listed read-only dirs).

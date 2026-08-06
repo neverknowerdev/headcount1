@@ -21,6 +21,17 @@ const githubMCPVersion = "v1.8.0"
 
 var githubMCPReleaseBaseURL = "https://github.com/github/github-mcp-server/releases/download"
 
+type mcpBinaryDependency struct {
+	Install func(context.Context) error
+}
+
+// mcpBinaryDependencies is the declarative registry for MCP commands that
+// need more than npm packages. InstallMCPDependencies stays generic: adding a
+// future binary-backed MCP server only requires registering its command here.
+var mcpBinaryDependencies = map[string]mcpBinaryDependency{
+	"github-mcp-server": {Install: ensureGitHubMCPServer},
+}
+
 // InstallMCPDependencies installs dependencies declared by one MCP server.
 // Keeping this server-scoped lets callers persist and display failures on the
 // integration that owns them instead of failing the platform-wide setup.
@@ -28,8 +39,8 @@ func InstallMCPDependencies(ctx context.Context, server db.MCPServer) error {
 	if err := InstallNpmDeps(ctx, server.Deps); err != nil {
 		return err
 	}
-	if server.Name == "github" && server.Command == "github-mcp-server" {
-		return ensureGitHubMCPServer(ctx)
+	if dependency, ok := mcpBinaryDependencies[server.Command]; ok {
+		return dependency.Install(ctx)
 	}
 	return nil
 }
