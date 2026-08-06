@@ -109,8 +109,15 @@ func TestListRemoteBranches(t *testing.T) {
 	command := exec.Command("git", "init")
 	command.Dir = directory
 	require.NoError(t, command.Run())
-	require.NoError(t, exec.Command("git", "-C", directory, "commit", "--allow-empty", "-m", "initial").Run())
+	initial := exec.Command("git", "-C", directory, "commit", "--allow-empty", "-m", "initial")
+	initial.Env = append(os.Environ(), "GIT_AUTHOR_DATE=2024-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2024-01-01T00:00:00Z")
+	require.NoError(t, initial.Run())
 	require.NoError(t, exec.Command("git", "-C", directory, "branch", "feature/base").Run())
+	feature := exec.Command("git", "-C", directory, "checkout", "feature/base")
+	require.NoError(t, feature.Run())
+	newer := exec.Command("git", "-C", directory, "commit", "--allow-empty", "-m", "feature")
+	newer.Env = append(os.Environ(), "GIT_AUTHOR_DATE=2025-01-01T00:00:00Z", "GIT_COMMITTER_DATE=2025-01-01T00:00:00Z")
+	require.NoError(t, newer.Run())
 	require.NoError(t, exec.Command("git", "-C", directory, "remote", "add", "origin", directory).Run())
 	require.NoError(t, exec.Command("git", "-C", directory, "fetch", "origin").Run())
 	currentBranch, err := exec.Command("git", "-C", directory, "branch", "--show-current").Output()
@@ -118,6 +125,7 @@ func TestListRemoteBranches(t *testing.T) {
 
 	branches, err := NewGitManager(directory, "").ListRemoteBranches(context.Background())
 	require.NoError(t, err)
+	require.Equal(t, "feature/base", branches[0])
 	require.Contains(t, branches, strings.TrimSpace(string(currentBranch)))
 	require.Contains(t, branches, "feature/base")
 }

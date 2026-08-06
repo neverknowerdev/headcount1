@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"sort"
 	"strconv"
 	"strings"
 
@@ -185,9 +184,8 @@ func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
 // names can never be enumerated through this endpoint.
 func (api *API) ListProjectBranches(w http.ResponseWriter, r *http.Request) {
 	project := api.projectFromCtx(r)
-	branches := []string{db.DefaultTaskGitBaseBranch}
 	if project.RepositoryUrl == "" {
-		api.respondJSON(w, http.StatusOK, branches)
+		api.respondJSON(w, http.StatusOK, []string{db.DefaultTaskGitBaseBranch})
 		return
 	}
 	company, err := api.q.GetCompany(r.Context(), project.CompanyID)
@@ -212,15 +210,20 @@ func (api *API) ListProjectBranches(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusServiceUnavailable, err.Error())
 		return
 	}
-	seen := map[string]bool{db.DefaultTaskGitBaseBranch: true}
+	branches := make([]string, 0, len(remoteBranches)+1)
+	seen := make(map[string]bool, len(remoteBranches)+1)
 	for _, branch := range remoteBranches {
+		if seen[branch] {
+			continue
+		}
 		seen[branch] = true
-	}
-	branches = branches[:0]
-	for branch := range seen {
 		branches = append(branches, branch)
 	}
-	sort.Strings(branches)
+	if !seen[db.DefaultTaskGitBaseBranch] {
+		// Keep main available for repositories whose remote has not been
+		// initialized yet. Remote branches retain their newest-first order.
+		branches = append(branches, db.DefaultTaskGitBaseBranch)
+	}
 	api.respondJSON(w, http.StatusOK, branches)
 }
 

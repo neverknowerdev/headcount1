@@ -167,10 +167,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 			.then(res => {
 				if (cancelled) return;
 				const branches = Array.isArray(res.data) ? res.data : [];
-				setProjectBranches(Array.from(new Set(['main', formData.git_base_branch, ...branches])).filter(Boolean).sort());
+				// Preserve the server's newest-first order. A deleted saved branch is
+				// kept at the end so the task remains readable/editable.
+				setProjectBranches(Array.from(new Set([...branches, formData.git_base_branch, 'main'])).filter(Boolean));
 			})
 			.catch(() => {
-				if (!cancelled) setProjectBranches(Array.from(new Set(['main', formData.git_base_branch])).filter(Boolean).sort());
+				if (!cancelled) setProjectBranches(Array.from(new Set([formData.git_base_branch, 'main'])).filter(Boolean));
 			})
 			.finally(() => { if (!cancelled) setBranchesLoading(false); });
 		return () => { cancelled = true; };

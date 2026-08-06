@@ -264,9 +264,11 @@ func ValidateBranchName(ctx context.Context, branch string) error {
 	return nil
 }
 
-// ListRemoteBranches refreshes remote references, then returns the names of
-// branches on origin without the refs/remotes/origin/ prefix. It never changes
-// the caller's checkout.
+// ListRemoteBranches refreshes remote references, then returns branch names on
+// origin ordered by the newest tip commit first. Git does not store a remote
+// branch creation timestamp; its tip commit time is the stable, repository
+// native proxy for "recently created" branches. It never changes the caller's
+// checkout.
 func (g *GitManager) ListRemoteBranches(ctx context.Context) ([]string, error) {
 	fetch := exec.CommandContext(ctx, "git", "fetch", "--prune", "origin")
 	fetch.Dir = g.repoPath
@@ -274,7 +276,7 @@ func (g *GitManager) ListRemoteBranches(ctx context.Context) ([]string, error) {
 	if out, err := fetch.CombinedOutput(); err != nil {
 		return nil, fmt.Errorf("could not refresh remote branches: %v, output: %s", err, string(out))
 	}
-	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin")
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:strip=3)", "refs/remotes/origin")
 	cmd.Dir = g.repoPath
 	cmd.Env = g.withGitEnv()
 	out, err := cmd.CombinedOutput()
