@@ -66,3 +66,24 @@ func TestGitHubOAuthAccountUsesAuthenticatedGitHubLoginAsName(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "octocat-renamed", account.Name)
 }
+
+func TestGitHubAccountChooserIsOnlyUsedWhenAddingAnotherAccount(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.MCPAccount{}))
+	api := NewAPI(database, nil, nil)
+
+	selectAccount, err := api.shouldSelectGitHubAccount(7, 11, 0)
+	require.NoError(t, err)
+	require.False(t, selectAccount, "the first GitHub connection uses the normal OAuth page")
+
+	userID := int32(11)
+	require.NoError(t, database.Create(&db.MCPAccount{MCPServerID: 7, Name: "octocat", UserID: &userID}).Error)
+	selectAccount, err = api.shouldSelectGitHubAccount(7, 11, 0)
+	require.NoError(t, err)
+	require.True(t, selectAccount, "adding another account opens GitHub's account chooser")
+
+	selectAccount, err = api.shouldSelectGitHubAccount(7, 11, 1)
+	require.NoError(t, err)
+	require.False(t, selectAccount, "re-authentication does not need an account chooser")
+}

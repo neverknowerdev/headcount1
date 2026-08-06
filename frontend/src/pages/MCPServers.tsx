@@ -247,34 +247,40 @@ export const MCPServers: React.FC = () => {
 
     // ── Account handlers ────────────────────────────────────────────────────────
     const openAddAccountModal = (s: MCPServer) => {
+		if (s.auth_type === 'github-app') {
+			void startGitHubAuthorization(s.id);
+			return;
+		}
         setAccountError(null);
         setAccountForm({ name: '', auth_token: '', credentials_json: '' });
         setAccountModal({ mode: 'create', serverId: s.id, serverDisplayName: s.display_name, authType: s.auth_type, accountId: null, accountName: '' });
     };
 
     const openReauthModal = (s: MCPServer, acc: MCPAccount) => {
+		if (s.auth_type === 'github-app') {
+			void startGitHubAuthorization(s.id, acc.id);
+			return;
+		}
         setAccountError(null);
         setAccountForm({ name: acc.name, auth_token: '', credentials_json: '' });
         setAccountModal({ mode: 'reauth', serverId: s.id, serverDisplayName: s.display_name, authType: s.auth_type, accountId: acc.id, accountName: acc.name });
     };
 
+    const startGitHubAuthorization = async (serverId: number, accountId = 0) => {
+		try {
+			const res = await axios.post(`/api/mcp-servers/${serverId}/github-oauth`, {
+				account_id: accountId,
+				return_path: window.location.pathname,
+			});
+			window.location.assign(res.data.authorize_url);
+		} catch (e: any) {
+			window.alert(e.response?.data?.error || 'Failed to start GitHub authorization');
+		}
+	};
+
     const handleSaveAccount = async () => {
         if (!accountModal) return;
         setAccountError(null);
-
-		// OAuth integrations launch their provider flow instead of saving a manually-entered token.
-		if (accountModal.authType === 'github-app') {
-			try {
-				const res = await axios.post(`/api/mcp-servers/${accountModal.serverId}/github-oauth`, {
-					account_id: accountModal.accountId || 0,
-					return_path: window.location.pathname,
-				});
-				window.location.assign(res.data.authorize_url);
-			} catch (e: any) {
-				setAccountError(e.response?.data?.error || 'Failed to start GitHub authorization');
-			}
-			return;
-		}
 
 		// Google OAuth uses a separate two-step flow — start it instead of the normal save.
         if (accountModal.authType === 'google-oauth') {

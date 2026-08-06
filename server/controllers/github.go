@@ -144,6 +144,11 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
+	selectAccount, err := api.shouldSelectGitHubAccount(server.ID, api.currentUserID(r), input.AccountID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "could not start GitHub authorization")
+		return
+	}
 	b := make([]byte, 32)
 	_, _ = rand.Read(b)
 	state := hex.EncodeToString(b)
@@ -152,8 +157,23 @@ func (api *API) StartMCPGitHubOAuth(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "could not start GitHub authorization")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback, githubapp.AuthorizeOptions{SelectAccount: input.AccountID == 0}), "install_url": c.InstallURL()})
+	api.respondJSON(w, http.StatusOK, map[string]string{"authorize_url": c.AuthorizeURL(state, callback, githubapp.AuthorizeOptions{SelectAccount: selectAccount}), "install_url": c.InstallURL()})
 }
+
+// shouldSelectGitHubAccount requests GitHub's identity chooser only when a
+// user is adding another GitHub account. The first connection uses GitHub's
+// normal OAuth page, while re-authentication stays bound to its account.
+func (api *API) shouldSelectGitHubAccount(serverID, userID, accountID int32) (bool, error) {
+	if accountID != 0 {
+		return false, nil
+	}
+	var count int64
+	if err := api.db.Model(&db.MCPAccount{}).Where("mcp_server_id = ? AND user_id = ?", serverID, userID).Count(&count).Error; err != nil {
+		return false, err
+	}
+	return count > 0, nil
+}
+
 func (api *API) GitHubCallback(w http.ResponseWriter, r *http.Request) {
 	state := r.URL.Query().Get("state")
 	code := r.URL.Query().Get("code")
