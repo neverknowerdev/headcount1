@@ -723,7 +723,7 @@ export const MCPServers: React.FC = () => {
                             <p className="text-sm text-gray-500 mb-4">This will create a new connected account for {accountModal.serverDisplayName}.</p>
                         )}
                         <div className="space-y-4 mt-4">
-                            {accountModal.mode === 'create' && (
+                            {accountModal.mode === 'create' && accountModal.authType !== 'github-app' && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Account name</label>
                                     <input type="text" value={accountForm.name}
