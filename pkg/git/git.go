@@ -220,6 +220,13 @@ func (g *GitManager) CreateWorktree(ctx context.Context, baseRepoDir, targetWork
 	cmd.Env = g.withGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A caller that selected a specific base branch must never silently get
+		// a worktree from whichever branch happens to be checked out locally.
+		// The main/master compatibility fallback below is only for legacy
+		// repositories whose default branch is master.
+		if baseBranch != "origin/main" {
+			return fmt.Errorf("git worktree add from %s failed: %v, output: %s", baseBranch, err, string(out))
+		}
 		// try master if main failed
 		if baseBranch == "origin/main" {
 			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "-b", branchName, targetWorktreeDir, "origin/master")
@@ -239,6 +246,49 @@ func (g *GitManager) CreateWorktree(ctx context.Context, baseRepoDir, targetWork
 		}
 	}
 	return nil
+}
+
+// ValidateBranchName uses Git's own branch-name rules. Keeping this check
+// close to git execution lets API callers reject malformed base branches early
+// while still supporting valid names such as release/2026.08.
+func ValidateBranchName(ctx context.Context, branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("branch name is required")
+	}
+	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("invalid branch name %q: %s", branch, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ListRemoteBranches refreshes remote references, then returns the names of
+// branches on origin without the refs/remotes/origin/ prefix. It never changes
+// the caller's checkout.
+func (g *GitManager) ListRemoteBranches(ctx context.Context) ([]string, error) {
+	fetch := exec.CommandContext(ctx, "git", "fetch", "--prune", "origin")
+	fetch.Dir = g.repoPath
+	fetch.Env = g.withGitEnv()
+	if out, err := fetch.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("could not refresh remote branches: %v, output: %s", err, string(out))
+	}
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin")
+	cmd.Dir = g.repoPath
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("could not list remote branches: %v, output: %s", err, string(out))
+	}
+	var branches []string
+	for _, branch := range strings.Fields(string(out)) {
+		if branch == "HEAD" || branch == "" {
+			continue
+		}
+		branches = append(branches, branch)
+	}
+	return branches, nil
 }
 
 func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {

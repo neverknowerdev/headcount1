@@ -361,6 +361,9 @@ type Skill struct {
 const (
 	TaskTypePlanAndImplement = "plan and implement"
 	TaskTypeImplement        = "implement"
+	// DefaultTaskGitBaseBranch is used by new and legacy tasks when no base
+	// branch was explicitly selected.
+	DefaultTaskGitBaseBranch = "main"
 )
 
 type Task struct {
@@ -396,8 +399,19 @@ type Task struct {
 	GitHubPRNumber     int        `json:"github_pr_number"`
 	GitHubPRURL        string     `json:"github_pr_url"`
 	GitHubBranch       string     `json:"github_branch"`
+	GitBaseBranch      string     `json:"git_base_branch" gorm:"not null;default:'main'"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// EffectiveGitBaseBranch returns the branch used to create this task's
+// worktree. Empty values are possible on tasks created before this field was
+// added, and continue to mean main.
+func (t Task) EffectiveGitBaseBranch() string {
+	if branch := strings.TrimSpace(t.GitBaseBranch); branch != "" {
+		return branch
+	}
+	return DefaultTaskGitBaseBranch
 }
 
 // GitHubOAuthState is short lived and prevents authorization callbacks from

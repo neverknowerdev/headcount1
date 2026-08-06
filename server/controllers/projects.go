@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
+	"sort"
 	"strconv"
 	"strings"
 
@@ -177,6 +178,50 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, api.projectFromCtx(r)) // loaded + authorized by LoadProject
+}
+
+// ListProjectBranches returns branches already fetched in the project's local
+// repository. It is scoped by LoadProject, so another company's repository
+// names can never be enumerated through this endpoint.
+func (api *API) ListProjectBranches(w http.ResponseWriter, r *http.Request) {
+	project := api.projectFromCtx(r)
+	branches := []string{db.DefaultTaskGitBaseBranch}
+	if project.RepositoryUrl == "" {
+		api.respondJSON(w, http.StatusOK, branches)
+		return
+	}
+	company, err := api.q.GetCompany(r.Context(), project.CompanyID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, "could not load project company")
+		return
+	}
+	settings := LoadSettings()
+	keyPath, cleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, company)
+	defer cleanup()
+	manager := git.NewGitManager(filesystem.NewManager(settings.BasePath).GetProjectRepoPath(company, project), keyPath)
+	if project.GitHubInstallationID != 0 {
+		token, tokenErr := GitHubTokenForProject(r.Context(), project)
+		if tokenErr != nil || token == "" {
+			api.respondError(w, http.StatusBadGateway, "could not authenticate to GitHub to list branches")
+			return
+		}
+		manager.WithHTTPToken(token)
+	}
+	remoteBranches, err := manager.ListRemoteBranches(r.Context())
+	if err != nil {
+		api.respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	seen := map[string]bool{db.DefaultTaskGitBaseBranch: true}
+	for _, branch := range remoteBranches {
+		seen[branch] = true
+	}
+	branches = branches[:0]
+	for branch := range seen {
+		branches = append(branches, branch)
+	}
+	sort.Strings(branches)
+	api.respondJSON(w, http.StatusOK, branches)
 }
 
 func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {

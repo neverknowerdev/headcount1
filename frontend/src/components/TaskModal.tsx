@@ -59,6 +59,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         sprint_id: '',
         agent_id: '',
         priority: 'Normal',
+        git_base_branch: 'main',
         due_date: '',
         parent_id: '',
         status: 'backlog',
@@ -67,6 +68,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
     // Metadata
     const [projects, setProjects] = useState<any[]>([]);
+	const [projectBranches, setProjectBranches] = useState<string[]>(['main']);
+	const [branchesLoading, setBranchesLoading] = useState(false);
     const [sprints, setSprints] = useState<any[]>([]);
     const [agents, setAgents] = useState<any[]>([]);
     const [allTasks, setAllTasks] = useState<any[]>([]);
@@ -135,6 +138,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     sprint_id: t.sprint_id ? t.sprint_id.toString() : '',
                     agent_id: t.agent_id ? t.agent_id.toString() : '',
                     priority: t.priority,
+					git_base_branch: t.git_base_branch || 'main',
                     due_date: t.due_date ? t.due_date.split('T')[0] : '',
                     parent_id: t.parent_id ? t.parent_id.toString() : '',
                     status: t.status,
@@ -149,6 +153,28 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // fetchActivity is stable (useCallback on taskId), so this effectively depends only on taskId
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [taskId]);
+
+	// Branches are project-specific. Fetch them only after the project is known,
+	// preserving the task's saved branch even if it was deleted remotely later.
+	useEffect(() => {
+		if (!formData.project_id) {
+			setProjectBranches(['main']);
+			return;
+		}
+		let cancelled = false;
+		setBranchesLoading(true);
+		axios.get(`/api/projects/${formData.project_id}/branches`)
+			.then(res => {
+				if (cancelled) return;
+				const branches = Array.isArray(res.data) ? res.data : [];
+				setProjectBranches(Array.from(new Set(['main', formData.git_base_branch, ...branches])).filter(Boolean).sort());
+			})
+			.catch(() => {
+				if (!cancelled) setProjectBranches(Array.from(new Set(['main', formData.git_base_branch])).filter(Boolean).sort());
+			})
+			.finally(() => { if (!cancelled) setBranchesLoading(false); });
+		return () => { cancelled = true; };
+	}, [formData.project_id]);
 
     // Re-sync after a (re)connect: recover comments/runs/status changes whose
     // WS events were missed while disconnected. Deliberately does not touch
@@ -230,6 +256,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 title: formData.title,
                 description: formData.description,
                 priority: formData.priority,
+				git_base_branch: formData.git_base_branch,
             };
             if (!taskId) {
                 payload.company_id = selectedCompanyId;
@@ -814,6 +841,24 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                 {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                             </select>
                         </div>
+						{formData.project_id && (
+							<div>
+								<label className="block text-sm font-medium text-gray-700 mb-1">Base branch</label>
+								<select
+									value={formData.git_base_branch}
+									disabled={branchesLoading || ['in-progress', 'in-review', 'done'].includes(formData.status)}
+									onChange={e => setFormData({...formData, git_base_branch: e.target.value})}
+									className="w-full border rounded p-2 text-sm shadow-sm disabled:bg-gray-100 disabled:text-gray-500"
+								>
+									{projectBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+								</select>
+								<p className="mt-1 text-xs text-gray-500">
+									{['in-progress', 'in-review', 'done'].includes(formData.status)
+										? 'The base branch is locked after work starts.'
+										: branchesLoading ? 'Loading repository branches…' : 'New worktree and pull request start from this branch.'}
+								</p>
+							</div>
+						)}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Sprint</label>
                             <select required value={formData.sprint_id} onChange={e => setFormData({...formData, sprint_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">

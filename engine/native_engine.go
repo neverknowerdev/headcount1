@@ -581,7 +581,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 				// Git refuses to add a worktree into the placeholder directory
 				// created with the task. It contains only disposable task memory.
 				_ = os.RemoveAll(workspacePath)
-				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/main"); wtErr != nil {
+				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
 					e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
 					gitProject = false
 				}
@@ -1221,10 +1221,7 @@ func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyL
 		return
 	}
 	title, description := pullRequestContent(task, finish)
-	baseBranch := project.GitHubDefaultBranch
-	if baseBranch == "" {
-		baseBranch = "main"
-	}
+	baseBranch := task.EffectiveGitBaseBranch()
 	number, prURL, err := gh.CreatePullRequest(ctx, token, repositorySlug, title, branch, baseBranch, description)
 	if err != nil {
 		e.logInfo(logger, "GitHub PR creation failed: "+err.Error())

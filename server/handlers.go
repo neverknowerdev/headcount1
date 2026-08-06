@@ -228,6 +228,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadProject)
 			r.Get("/", api.GetProject)
+			r.Get("/branches", api.ListProjectBranches)
 			r.Put("/", api.UpdateProject)
 			r.Get("/codegraph", api.GetProjectCodegraph)
 		})

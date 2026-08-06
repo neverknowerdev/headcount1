@@ -96,3 +96,28 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, string(message), headcount1CoAuthorTrailer)
 }
+
+func TestValidateBranchName(t *testing.T) {
+	ctx := context.Background()
+	require.NoError(t, ValidateBranchName(ctx, "release/2026.08"))
+	require.Error(t, ValidateBranchName(ctx, "bad branch name"))
+	require.Error(t, ValidateBranchName(ctx, ""))
+}
+
+func TestListRemoteBranches(t *testing.T) {
+	directory := t.TempDir()
+	command := exec.Command("git", "init")
+	command.Dir = directory
+	require.NoError(t, command.Run())
+	require.NoError(t, exec.Command("git", "-C", directory, "commit", "--allow-empty", "-m", "initial").Run())
+	require.NoError(t, exec.Command("git", "-C", directory, "branch", "feature/base").Run())
+	require.NoError(t, exec.Command("git", "-C", directory, "remote", "add", "origin", directory).Run())
+	require.NoError(t, exec.Command("git", "-C", directory, "fetch", "origin").Run())
+	currentBranch, err := exec.Command("git", "-C", directory, "branch", "--show-current").Output()
+	require.NoError(t, err)
+
+	branches, err := NewGitManager(directory, "").ListRemoteBranches(context.Background())
+	require.NoError(t, err)
+	require.Contains(t, branches, strings.TrimSpace(string(currentBranch)))
+	require.Contains(t, branches, "feature/base")
+}
