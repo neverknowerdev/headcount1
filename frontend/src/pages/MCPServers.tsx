@@ -980,8 +980,10 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                         <div className="space-y-2">
                             <div className="flex items-center gap-2 flex-wrap">
                                 <button onClick={onAddAccount}
-                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700">
-                                    <Key size={13} /> Authorize
+                                    className={isGitHub
+                                        ? 'inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-sm rounded hover:bg-gray-700'
+                                        : 'inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700'}>
+                                    {isGitHub ? <><ExternalLink size={13} /> Continue to GitHub</> : <><Key size={13} /> Authorize</>}
                                 </button>
                                 {setup && (
                                     <button onClick={() => setShowSetup(v => !v)}
@@ -1054,7 +1056,7 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                                                     </button>
                                                     <button onClick={() => onReauthAccount(acc)}
                                                         className="text-xs text-gray-600 hover:text-gray-900 px-2 py-0.5 border border-gray-200 rounded flex items-center gap-1">
-                                                        <Key size={11} /> Re-auth
+                                                        {isGitHub ? <><ExternalLink size={11} /> Reconnect on GitHub</> : <><Key size={11} /> Re-auth</>}
                                                     </button>
                                                     <button onClick={() => onDeleteAccount(acc.id)}
                                                         className="text-xs text-red-400 hover:text-red-600 px-1.5 py-0.5 border border-red-100 rounded flex items-center">
@@ -1071,8 +1073,10 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                             </div>
                             <div className="flex items-center gap-2 flex-wrap pt-1">
                                 <button onClick={onAddAccount}
-                                    className="text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1 border border-indigo-200 rounded flex items-center gap-1 hover:bg-indigo-50">
-                                    <Plus size={12} /> Add account
+                                    className={isGitHub
+                                        ? 'text-xs text-gray-700 hover:text-gray-950 px-2 py-1 border border-gray-300 rounded flex items-center gap-1 hover:bg-gray-100'
+                                        : 'text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1 border border-indigo-200 rounded flex items-center gap-1 hover:bg-indigo-50'}>
+                                    {isGitHub ? <><ExternalLink size={12} /> Connect another account</> : <><Plus size={12} /> Add account</>}
                                 </button>
                                 <button onClick={() => setShowDetails(v => !v)}
                                     className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded flex items-center gap-1">
