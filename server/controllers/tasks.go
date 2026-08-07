@@ -13,6 +13,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/githubapp"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -123,6 +124,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		TaskType        string  `json:"task_type"`
 		Description     string  `json:"description"`
 		Priority        string  `json:"priority"`
+		GitBaseBranch   string  `json:"git_base_branch"`
 		DueDate         *string `json:"due_date"`
 		AgentConfigName string  `json:"agent_config_name"`
 	}
@@ -145,6 +147,14 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	taskType := req.TaskType
 	if taskType == "" {
 		taskType = db.TaskTypePlanAndImplement
+	}
+	gitBaseBranch := strings.TrimSpace(req.GitBaseBranch)
+	if gitBaseBranch == "" {
+		gitBaseBranch = db.DefaultTaskGitBaseBranch
+	}
+	if err := git.ValidateBranchName(r.Context(), gitBaseBranch); err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	if req.CompanyID == 0 {
@@ -172,6 +182,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		ParentID:        req.ParentID,
 		Description:     req.Description,
 		Priority:        priority,
+		GitBaseBranch:   gitBaseBranch,
 		DueDate:         dueDate,
 		AgentConfigName: req.AgentConfigName,
 	}
@@ -212,6 +223,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		TaskType        string  `json:"task_type"`
 		Description     string  `json:"description"`
 		Priority        string  `json:"priority"`
+		GitBaseBranch   string  `json:"git_base_branch"`
 		DueDate         *string `json:"due_date"`
 		Status          string  `json:"status"`
 		IsArchived      *bool   `json:"is_archived"`
@@ -249,6 +261,18 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Priority != "" {
 		task.Priority = req.Priority
+	}
+	if req.GitBaseBranch != "" && req.GitBaseBranch != task.GitBaseBranch {
+		if task.Status == "in-progress" || task.Status == "in-review" || task.Status == "done" {
+			api.respondError(w, http.StatusConflict, "base branch cannot be changed after work has started")
+			return
+		}
+		branch := strings.TrimSpace(req.GitBaseBranch)
+		if err := git.ValidateBranchName(r.Context(), branch); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		task.GitBaseBranch = branch
 	}
 
 	if req.ProjectID != nil {
@@ -351,6 +375,20 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	gitMgr := git.NewGitManager(repoDir, keyPath)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)
+	if project.GitHubInstallationID != 0 {
+		if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+			gitMgr.WithHTTPToken(token)
+		} else if tokenErr != nil {
+			fmt.Printf("Warning: failed to create GitHub App token for project %d: %v\n", project.ID, tokenErr)
+			return
+		}
+		// GitHub-backed projects publish a draft PR. Never merge or force-push
+		// the default branch as part of task status changes.
+		branchName = fmt.Sprintf("headcount1/task-%d", task.ID)
+		if newStatus == "done" {
+			return
+		}
+	}
 
 	if newStatus == "done" {
 		// Merge worktree branch into main
@@ -374,7 +412,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 		}
 		// Pull latest and recreate worktree
 		gitMgr.Pull(ctx)
-		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
+		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
 			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
 		} else {
 			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)

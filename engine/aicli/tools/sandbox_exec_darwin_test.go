@@ -15,7 +15,7 @@ import (
 
 func TestSeatbeltProfileContents(t *testing.T) {
 	workspace := t.TempDir()
-	profile, err := seatbeltProfile(workspace)
+	profile, err := seatbeltProfile(workspace, nil)
 	if err != nil {
 		t.Fatal(err)
 	}

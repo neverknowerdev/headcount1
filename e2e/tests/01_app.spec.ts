@@ -128,7 +128,7 @@ test.describe.serial('Headcount1 App', () => {
         await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
         // Wait for the comment created by the agent run
-        await waitForComment('http://localhost:8080', taskId, 60_000);
+        await waitForComment(process.env.E2E_BASE_URL || 'http://localhost:8080', taskId, 60_000);
 
         // Verify run log file exists on filesystem
         const runsRes = await request.get(`/api/tasks/${taskId}/runs`);

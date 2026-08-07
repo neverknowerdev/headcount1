@@ -186,16 +186,19 @@ type Company struct {
 }
 
 type Project struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	CompanyID       int32     `json:"company_id" gorm:"not null"`
-	Company         Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Name            string    `json:"name" gorm:"not null"`
-	Description     string    `json:"description"`
-	WorkspaceFolder string    `json:"workspace_folder"`
-	RepositoryUrl   string    `json:"repository_url"`
-	IsExternal      bool      `json:"is_external" gorm:"not null;default:false"`
-	CreatedAt       time.Time `json:"created_at"`
-	UpdatedAt       time.Time `json:"updated_at"`
+	ID                   int32     `json:"id" gorm:"primaryKey"`
+	CompanyID            int32     `json:"company_id" gorm:"not null"`
+	Company              Company   `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Name                 string    `json:"name" gorm:"not null"`
+	Description          string    `json:"description"`
+	WorkspaceFolder      string    `json:"workspace_folder"`
+	RepositoryUrl        string    `json:"repository_url"`
+	GitHubRepositoryID   int64     `json:"github_repository_id" gorm:"index"`
+	GitHubInstallationID int64     `json:"github_installation_id" gorm:"index"`
+	GitHubDefaultBranch  string    `json:"github_default_branch"`
+	IsExternal           bool      `json:"is_external" gorm:"not null;default:false"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
 }
 
 type Sprint struct {
@@ -358,6 +361,9 @@ type Skill struct {
 const (
 	TaskTypePlanAndImplement = "plan and implement"
 	TaskTypeImplement        = "implement"
+	// DefaultTaskGitBaseBranch is used by new and legacy tasks when no base
+	// branch was explicitly selected.
+	DefaultTaskGitBaseBranch = "main"
 )
 
 type Task struct {
@@ -390,6 +396,110 @@ type Task struct {
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
 	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
+	GitHubPRNumber     int        `json:"github_pr_number"`
+	GitHubPRURL        string     `json:"github_pr_url"`
+	GitHubBranch       string     `json:"github_branch"`
+	GitBaseBranch      string     `json:"git_base_branch" gorm:"not null;default:'main'"`
+	CreatedAt          time.Time  `json:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at"`
+}
+
+// EffectiveGitBaseBranch returns the branch used to create this task's
+// worktree. Empty values are possible on tasks created before this field was
+// added, and continue to mean main.
+func (t Task) EffectiveGitBaseBranch() string {
+	if branch := strings.TrimSpace(t.GitBaseBranch); branch != "" {
+		return branch
+	}
+	return DefaultTaskGitBaseBranch
+}
+
+// GitHubOAuthState is short lived and prevents authorization callbacks from
+// being attached to an unrelated Headcount1 session.
+type GitHubOAuthState struct {
+	ID          string `json:"-" gorm:"primaryKey"`
+	RedirectURL string `json:"-"`
+	// MCPAccount details bind an OAuth callback to the account the user chose
+	// from the integrations screen.  This keeps personal and work identities
+	// separate even when they use the same GitHub App installation.
+	MCPServerID  int32      `json:"-" gorm:"default:0"`
+	UserID       int32      `json:"-" gorm:"default:0"`
+	MCPAccountID int32      `json:"-" gorm:"default:0"`
+	ReturnPath   string     `json:"-"`
+	ExpiresAt    time.Time  `json:"-"`
+	UsedAt       *time.Time `json:"-"`
+	CreatedAt    time.Time
+}
+
+// GitHubConnection links one GitHub App installation to an MCP account. A
+// person may connect multiple GitHub identities (or the same identity with
+// different repository selections) without exposing them to other users.
+type GitHubConnection struct {
+	ID int32 `json:"id" gorm:"primaryKey"`
+	// One account may only record an installation once. The installation is
+	// intentionally not globally unique: personal and work MCP accounts may
+	// both be allowed to use the same organisation installation.
+	InstallationID int64     `json:"installation_id" gorm:"index"`
+	MCPAccountID   int32     `json:"mcp_account_id" gorm:"index"`
+	UserID         int32     `json:"user_id" gorm:"index"`
+	AccountLogin   string    `json:"account_login"`
+	ConnectedAt    time.Time `json:"connected_at"`
+	CreatedAt      time.Time
+	UpdatedAt      time.Time
+}
+
+// GitHubIdentity is the durable, GitHub-only uniqueness boundary for OAuth
+// accounts. A generic MCP account may have any number of credentials, while a
+// given Headcount1 user must never connect the same GitHub person twice to the
+// same GitHub MCP server.
+type GitHubIdentity struct {
+	ID           int32  `json:"id" gorm:"primaryKey"`
+	MCPAccountID int32  `json:"mcp_account_id" gorm:"not null;uniqueIndex"`
+	MCPServerID  int32  `json:"mcp_server_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	UserID       int32  `json:"user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	GitHubUserID int64  `json:"github_user_id" gorm:"not null;uniqueIndex:idx_github_identity"`
+	GitHubLogin  string `json:"github_login"`
+	CreatedAt    time.Time
+	UpdatedAt    time.Time
+}
+
+// GitHubWebhookDelivery records the lifecycle of a verified GitHub delivery.
+// A delivery is complete only after its task comments have been committed; a
+// failed delivery remains retryable by GitHub (and, when configured, by the
+// staging relay).
+type GitHubWebhookDelivery struct {
+	ID          int32      `json:"id" gorm:"primaryKey"`
+	DeliveryID  string     `json:"delivery_id" gorm:"uniqueIndex"`
+	Event       string     `json:"event"`
+	Status      string     `json:"status" gorm:"not null;default:'processing'"` // processing | failed | completed
+	ForwardedAt *time.Time `json:"forwarded_at"`
+	CompletedAt *time.Time `json:"completed_at"`
+	LastError   string     `json:"last_error" gorm:"type:text"`
+	// AttemptToken and LeaseExpiresAt form a compare-and-swap lease. They keep
+	// a redelivery from completing or failing work claimed by a newer request.
+	AttemptToken   string     `json:"-" gorm:"index"`
+	LeaseExpiresAt *time.Time `json:"-"`
+	Attempts       int        `json:"attempts" gorm:"not null;default:0"`
+	CreatedAt      time.Time  `json:"created_at"`
+	UpdatedAt      time.Time  `json:"updated_at"`
+}
+
+// GitHubWebhookTarget makes each delivery/task pair idempotent. Comments and
+// their target rows are created in one transaction, so a partial retry can
+// never duplicate a comment that was already committed.
+type GitHubWebhookTarget struct {
+	ID         int32  `json:"id" gorm:"primaryKey"`
+	DeliveryID string `json:"delivery_id" gorm:"not null;uniqueIndex:idx_github_delivery_task"`
+	TaskID     int32  `json:"task_id" gorm:"not null;uniqueIndex:idx_github_delivery_task"`
+	CommentID  int32  `json:"comment_id" gorm:"not null"`
+	// A committed comment is an outbox item until the matching agent wake has
+	// succeeded. This makes a failed engine invocation retryable without ever
+	// creating the comment twice.
+	WakeStatus         string     `json:"wake_status" gorm:"not null;default:'pending'"`
+	WakeAttemptToken   string     `json:"-" gorm:"index"`
+	WakeLeaseExpiresAt *time.Time `json:"-"`
+	WakeAttempts       int        `json:"wake_attempts" gorm:"not null;default:0"`
+	WakeLastError      string     `json:"wake_last_error" gorm:"type:text"`
 	CreatedAt          time.Time  `json:"created_at"`
 	UpdatedAt          time.Time  `json:"updated_at"`
 }
@@ -512,6 +622,16 @@ type MCPServer struct {
 	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
+}
+
+const (
+	MCPServerNameGitHub  = "github"
+	MCPAuthTypeGitHubApp = "github-app"
+	MCPTransportBuiltin  = "builtin"
+)
+
+func (s MCPServer) IsGitHub() bool {
+	return s.Builtin && s.Name == MCPServerNameGitHub && s.AuthType == MCPAuthTypeGitHubApp
 }
 
 // MCPAccount holds credentials for one identity on an MCPServer.

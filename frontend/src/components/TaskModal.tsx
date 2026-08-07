@@ -50,6 +50,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [artifacts, setArtifacts] = useState<any[]>([]);
     const [artifactsExpanded, setArtifactsExpanded] = useState(false);
     const [expandedArtifactIds, setExpandedArtifactIds] = useState<Set<number>>(new Set());
+	// Git branch selection is an advanced, opt-in task setting. Keep it
+	// collapsed by default so task creation stays focused on the work itself.
+	const [gitOptionsExpanded, setGitOptionsExpanded] = useState(false);
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -59,6 +62,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         sprint_id: '',
         agent_id: '',
         priority: 'Normal',
+        git_base_branch: 'main',
         due_date: '',
         parent_id: '',
         status: 'backlog',
@@ -67,6 +71,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
     // Metadata
     const [projects, setProjects] = useState<any[]>([]);
+	const [projectBranches, setProjectBranches] = useState<string[]>(['main']);
+	const [branchesLoading, setBranchesLoading] = useState(false);
     const [sprints, setSprints] = useState<any[]>([]);
     const [agents, setAgents] = useState<any[]>([]);
     const [allTasks, setAllTasks] = useState<any[]>([]);
@@ -135,6 +141,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     sprint_id: t.sprint_id ? t.sprint_id.toString() : '',
                     agent_id: t.agent_id ? t.agent_id.toString() : '',
                     priority: t.priority,
+					git_base_branch: t.git_base_branch || 'main',
                     due_date: t.due_date ? t.due_date.split('T')[0] : '',
                     parent_id: t.parent_id ? t.parent_id.toString() : '',
                     status: t.status,
@@ -149,6 +156,30 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // fetchActivity is stable (useCallback on taskId), so this effectively depends only on taskId
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [taskId]);
+
+	// Branches are project-specific. Fetch them only after the project is known,
+	// preserving the task's saved branch even if it was deleted remotely later.
+	useEffect(() => {
+		if (!formData.project_id) {
+			setProjectBranches(['main']);
+			return;
+		}
+		let cancelled = false;
+		setBranchesLoading(true);
+		axios.get(`/api/projects/${formData.project_id}/branches`)
+			.then(res => {
+				if (cancelled) return;
+				const branches = Array.isArray(res.data) ? res.data : [];
+				// Preserve the server's newest-first order. A deleted saved branch is
+				// kept at the end so the task remains readable/editable.
+				setProjectBranches(Array.from(new Set([...branches, formData.git_base_branch, 'main'])).filter(Boolean));
+			})
+			.catch(() => {
+				if (!cancelled) setProjectBranches(Array.from(new Set([formData.git_base_branch, 'main'])).filter(Boolean));
+			})
+			.finally(() => { if (!cancelled) setBranchesLoading(false); });
+		return () => { cancelled = true; };
+	}, [formData.project_id]);
 
     // Re-sync after a (re)connect: recover comments/runs/status changes whose
     // WS events were missed while disconnected. Deliberately does not touch
@@ -230,6 +261,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 title: formData.title,
                 description: formData.description,
                 priority: formData.priority,
+				git_base_branch: formData.git_base_branch,
             };
             if (!taskId) {
                 payload.company_id = selectedCompanyId;
@@ -301,6 +333,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 <div className="flex flex-col min-w-0">
                     <span className="text-xs font-mono text-gray-400">{task.ref_key || `${prefix}-${task.id}`}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
                     <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
+					{task.github_pr_url && <a href={task.github_pr_url} target="_blank" rel="noreferrer" className="text-sm text-indigo-600 hover:underline">PR #{task.github_pr_number}</a>}
                 </div>
             ) : (
                 <h2 className="text-xl font-bold text-gray-900">Create New Task</h2>
@@ -813,6 +846,40 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                 {projects.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                             </select>
                         </div>
+						{formData.project_id && (
+							<div className="rounded-lg border border-gray-200 bg-gray-50/70">
+								<button
+									type="button"
+									onClick={() => setGitOptionsExpanded(value => !value)}
+									className="w-full px-3 py-2.5 flex items-center justify-between gap-3 text-left text-sm hover:bg-gray-100 rounded-lg"
+									aria-expanded={gitOptionsExpanded}
+								>
+									<span className="font-medium text-gray-700">Git options</span>
+									<span className="flex items-center gap-1.5 text-xs text-gray-500">
+										Base: <code className="font-mono text-gray-700">{formData.git_base_branch}</code>
+										{gitOptionsExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+									</span>
+								</button>
+								{gitOptionsExpanded && (
+									<div className="border-t border-gray-200 px-3 pb-3 pt-2.5">
+										<label className="block text-sm font-medium text-gray-700 mb-1">Base branch</label>
+										<select
+											value={formData.git_base_branch}
+											disabled={branchesLoading || ['in-progress', 'in-review', 'done'].includes(formData.status)}
+											onChange={e => setFormData({...formData, git_base_branch: e.target.value})}
+											className="w-full border rounded p-2 text-sm shadow-sm disabled:bg-gray-100 disabled:text-gray-500"
+										>
+											{projectBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+										</select>
+										<p className="mt-1 text-xs text-gray-500">
+											{['in-progress', 'in-review', 'done'].includes(formData.status)
+												? 'The base branch is locked after work starts.'
+												: branchesLoading ? 'Loading repository branches…' : 'New worktree and pull request start from this branch.'}
+										</p>
+									</div>
+								)}
+							</div>
+						)}
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Sprint</label>
                             <select required value={formData.sprint_id} onChange={e => setFormData({...formData, sprint_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">

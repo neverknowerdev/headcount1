@@ -156,6 +156,11 @@ func main() {
 		&db.PasswordResetToken{},
 		&db.Company{},
 		&db.Project{},
+		&db.GitHubOAuthState{},
+		&db.GitHubConnection{},
+		&db.GitHubIdentity{},
+		&db.GitHubWebhookDelivery{},
+		&db.GitHubWebhookTarget{},
 		&db.Sprint{},
 		&db.LLMProvider{},
 		&db.ModelGroup{},
@@ -182,12 +187,32 @@ func main() {
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
+	// Earlier GitHub App support allowed only one row per installation. MCP
+	// accounts intentionally allow personal and work identities to connect the
+	// same installation independently, so replace that legacy unique index.
+	if database.Migrator().HasIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id") {
+		if err := database.Migrator().DropIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id"); err != nil {
+			log.Printf("GitHub connection index migration: %v", err)
+		}
+	}
+	if err := database.Migrator().CreateIndex(&db.GitHubConnection{}, "InstallationID"); err != nil {
+		log.Printf("GitHub connection index migration: %v", err)
+	}
 
 	recoverStaleRuns(database)
 
 	// Seed predefined MCP servers (headcount1, github, google-docs) if not present.
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
+	}
+	if err := db.New(database).MigrateGitHubOAuth(context.Background()); err != nil {
+		// This migration removes obsolete plaintext GitHub token storage. Starting
+		// with it only partially applied would leave credentials exposed, so fail
+		// closed rather than serving the integration in an unknown state.
+		log.Fatalf("GitHub OAuth security migration failed: %v", err)
+	}
+	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
+		log.Fatalf("GitHub connection index migration failed: %v", err)
 	}
 
 	// Builtin free-model providers (OpenRouter, OpenCode Zen) and the
@@ -340,7 +365,7 @@ func main() {
 		if err := setup.Run(); err != nil {
 			log.Printf("WARNING: startup setup failed — some features may be unavailable: %v", err)
 		}
-		srv.InstallMCPNpmDeps(context.Background())
+		srv.InstallMCPDependencies(context.Background())
 		srv.CacheMCPTools(context.Background())
 	}()
 	go srv.StartMCPCacheScheduler(context.Background())

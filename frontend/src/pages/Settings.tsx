@@ -1,8 +1,8 @@
-import { SecretLabel } from '../components/SecretField';
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
 import { useNavigate } from 'react-router-dom';
+import { ExternalLink, GitBranch, KeyRound } from 'lucide-react';
 
 interface BuildVersion {
     /** Version number: "2026.07.29" in production, "staging-<short branch>-<short commit>" on staging. */
@@ -185,7 +185,7 @@ export const Settings: React.FC = () => {
                         <p className="text-xs text-gray-500 mb-3">
                             Used as a prefix for Agent CLI runs. Max 2 characters.
                         </p>
-                        <input
+	                            <input
                             type="text"
                             maxLength={2}
                             value={companyShortName}
@@ -208,17 +208,18 @@ export const Settings: React.FC = () => {
                             placeholder="/home/user/.headcount1"
                         />
                     </div>
+					<div className="flex gap-3 rounded-lg border border-indigo-100 bg-indigo-50 p-4 text-sm text-indigo-950">
+						<GitBranch className="mt-0.5 shrink-0 text-indigo-700" size={18}/>
+						<p><span className="font-semibold">Connect GitHub in MCP Servers.</span> Add personal and work GitHub accounts separately, then choose from their permitted repositories when setting up a project. <a href={`/companies/${companyShortName}/mcp-servers`} className="inline-flex items-center gap-1 font-medium text-indigo-700 underline hover:text-indigo-900">Manage GitHub accounts <ExternalLink size={13}/></a></p>
+					</div>
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
                         Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
-                    <div>
-                        <SecretLabel>SSH Private Key</SecretLabel>
-                        <p className="text-xs text-gray-500 mb-2">
-                            Your personal key to authenticate Git operations for private repositories.
-                            Encrypted at rest under your passkey; never shared with other users. Paste the key or upload the file directly.
-                        </p>
-                        <textarea
+					<details className="rounded-lg border border-gray-200 p-4">
+						<summary className="flex cursor-pointer list-none items-center gap-2 text-sm font-medium text-gray-700"><KeyRound size={16}/> Advanced: SSH key for non-GitHub repositories</summary>
+						<p className="mt-3 text-xs text-gray-500 mb-2">Only use this for GitLab, Bitbucket, self-hosted Git, or a manually entered SSH URL. GitHub repositories connected above do not use this key.</p>
+						<textarea
                             value={sshKey}
                             onChange={e => { setSshKey(e.target.value); setSshFileName(''); }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border font-mono"
@@ -241,10 +242,10 @@ export const Settings: React.FC = () => {
                                 type="file"
                                 accept=".pem,.key,*"
                                 className="hidden"
-                                onChange={handleSshFileUpload}
-                            />
-                        </div>
-                    </div>
+	                                onChange={handleSshFileUpload}
+							/>
+						</div>
+					</details>
 
                     <div className="flex gap-4">
                         <button

@@ -2,6 +2,7 @@ package git
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"os"
 	"os/exec"
@@ -12,6 +13,22 @@ import (
 type GitManager struct {
 	repoPath   string
 	sshKeyPath string // concrete path to the private key used for `ssh -i`
+	httpToken  string
+}
+
+const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.io <headcount1@headcount1.io>"
+
+// commitMessageWithHeadcount1Attribution adds the standard Git co-author
+// trailer to commits created by Headcount1. GitHub renders this trailer as a
+// co-author when the email is associated with a GitHub account.
+func commitMessageWithHeadcount1Attribution(message string) string {
+	message = strings.TrimSpace(message)
+	for _, line := range strings.Split(message, "\n") {
+		if strings.EqualFold(strings.TrimSpace(line), headcount1CoAuthorTrailer) {
+			return message
+		}
+	}
+	return message + "\n\n" + headcount1CoAuthorTrailer
 }
 
 // NewGitManager builds a git manager. sshKeyPath is the private-key FILE to
@@ -24,6 +41,10 @@ func NewGitManager(repoPath, sshKeyPath string) *GitManager {
 		sshKeyPath: sshKeyPath,
 	}
 }
+
+// WithHTTPToken makes Git authenticate to GitHub over HTTPS without putting a
+// credential in the remote URL or command arguments.
+func (g *GitManager) WithHTTPToken(token string) *GitManager { g.httpToken = token; return g }
 
 func (g *GitManager) runGitCommand(ctx context.Context, args ...string) (string, error) {
 	cmd := exec.CommandContext(ctx, "git", args...)
@@ -42,6 +63,10 @@ func (g *GitManager) runGitCommand(ctx context.Context, args ...string) (string,
 func (g *GitManager) isLocalOnly() bool {
 	p := g.repoPath
 	return strings.HasPrefix(p, "file://") || strings.HasPrefix(p, "/") || strings.HasPrefix(p, "./") || strings.HasPrefix(p, "../")
+}
+
+func usesSSH(repoURL string) bool {
+	return strings.HasPrefix(repoURL, "git@") || strings.HasPrefix(repoURL, "ssh://")
 }
 
 func (g *GitManager) Init(ctx context.Context) error {
@@ -84,7 +109,7 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 	g.runGitCommand(ctx, "config", "user.name", "Agent Orchestrator")
 	g.runGitCommand(ctx, "config", "user.email", "agent@headcount1.local")
 
-	_, err = g.runGitCommand(ctx, "commit", "-m", message)
+	_, err = g.runGitCommand(ctx, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
 	if err != nil {
 		return err
 	}
@@ -122,7 +147,7 @@ func sshCommandFor(keyPath string) string {
 // sshEnv returns the GIT_SSH_COMMAND env string for the configured key.
 // Returns "" if the URL is a local file:// path (SSH is irrelevant).
 func (g *GitManager) sshEnv() string {
-	if g.isLocalOnly() {
+	if g.isLocalOnly() || g.sshKeyPath == "" {
 		return ""
 	}
 	return sshCommandFor(g.sshKeyPath)
@@ -133,8 +158,17 @@ func (g *GitManager) sshEnv() string {
 func (g *GitManager) withGitEnv() []string {
 	env := os.Environ()
 	env = append(env, "GIT_TERMINAL_PROMPT=0")
-	if sshCmd := g.sshEnv(); sshCmd != "" {
-		env = append(env, "GIT_SSH_COMMAND="+sshCmd)
+	if g.httpToken != "" {
+		basic := base64.StdEncoding.EncodeToString([]byte("x-access-token:" + g.httpToken))
+		env = append(env, "GIT_CONFIG_COUNT=1", "GIT_CONFIG_KEY_0=http.https://github.com/.extraheader", "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic "+basic)
+	}
+	// A GitHub App token is an HTTPS credential. Do not inject an unrelated
+	// SSH command into those operations; manual SSH repositories never have an
+	// HTTP token.
+	if g.httpToken == "" {
+		if sshCmd := g.sshEnv(); sshCmd != "" {
+			env = append(env, "GIT_SSH_COMMAND="+sshCmd)
+		}
 	}
 	return env
 }
@@ -186,6 +220,13 @@ func (g *GitManager) CreateWorktree(ctx context.Context, baseRepoDir, targetWork
 	cmd.Env = g.withGitEnv()
 	out, err := cmd.CombinedOutput()
 	if err != nil {
+		// A caller that selected a specific base branch must never silently get
+		// a worktree from whichever branch happens to be checked out locally.
+		// The main/master compatibility fallback below is only for legacy
+		// repositories whose default branch is master.
+		if baseBranch != "origin/main" {
+			return fmt.Errorf("git worktree add from %s failed: %v, output: %s", baseBranch, err, string(out))
+		}
 		// try master if main failed
 		if baseBranch == "origin/main" {
 			cmd = exec.CommandContext(ctx, "git", "worktree", "add", "-b", branchName, targetWorktreeDir, "origin/master")
@@ -207,24 +248,61 @@ func (g *GitManager) CreateWorktree(ctx context.Context, baseRepoDir, targetWork
 	return nil
 }
 
+// ValidateBranchName uses Git's own branch-name rules. Keeping this check
+// close to git execution lets API callers reject malformed base branches early
+// while still supporting valid names such as release/2026.08.
+func ValidateBranchName(ctx context.Context, branch string) error {
+	branch = strings.TrimSpace(branch)
+	if branch == "" {
+		return fmt.Errorf("branch name is required")
+	}
+	cmd := exec.CommandContext(ctx, "git", "check-ref-format", "--branch", branch)
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("invalid branch name %q: %s", branch, strings.TrimSpace(string(out)))
+	}
+	return nil
+}
+
+// ListRemoteBranches refreshes remote references, then returns branch names on
+// origin ordered by the newest tip commit first. Git does not store a remote
+// branch creation timestamp; its tip commit time is the stable, repository
+// native proxy for "recently created" branches. It never changes the caller's
+// checkout.
+func (g *GitManager) ListRemoteBranches(ctx context.Context) ([]string, error) {
+	fetch := exec.CommandContext(ctx, "git", "fetch", "--prune", "origin")
+	fetch.Dir = g.repoPath
+	fetch.Env = g.withGitEnv()
+	if out, err := fetch.CombinedOutput(); err != nil {
+		return nil, fmt.Errorf("could not refresh remote branches: %v, output: %s", err, string(out))
+	}
+	cmd := exec.CommandContext(ctx, "git", "for-each-ref", "--sort=-committerdate", "--format=%(refname:strip=3)", "refs/remotes/origin")
+	cmd.Dir = g.repoPath
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return nil, fmt.Errorf("could not list remote branches: %v, output: %s", err, string(out))
+	}
+	var branches []string
+	for _, branch := range strings.Fields(string(out)) {
+		if branch == "HEAD" || branch == "" {
+			continue
+		}
+		branches = append(branches, branch)
+	}
+	return branches, nil
+}
+
 func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 	cmd := exec.CommandContext(ctx, "git", "ls-remote", "--exit-code", repoURL)
-
-	// Build env based on the URL, not the manager's repoPath, since this can be called
-	// for arbitrary URLs during CreateProject validation.
-	env := os.Environ()
-	env = append(env, "GIT_TERMINAL_PROMPT=0")
-	if !strings.HasPrefix(repoURL, "file://") && !strings.HasPrefix(repoURL, "/") && !strings.HasPrefix(repoURL, "./") && !strings.HasPrefix(repoURL, "../") {
-		keyPath := g.sshKeyPath
-		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(keyPath))
-	}
-	cmd.Env = env
+	cmd.Env = g.validateRemoteEnv(repoURL)
 
 	out, err := cmd.CombinedOutput()
 	if err != nil {
 		output := string(out)
 		if strings.Contains(output, "Permission denied") ||
 			strings.Contains(output, "Authentication failed") ||
+			strings.Contains(output, "could not read Username") ||
 			strings.Contains(output, "Could not read from remote repository") ||
 			strings.Contains(output, "Host key verification failed") {
 			return fmt.Errorf("[auth] %s", output)
@@ -232,6 +310,20 @@ func (g *GitManager) ValidateRemote(ctx context.Context, repoURL string) error {
 		return fmt.Errorf("git remote validation failed: %v, output: %s", err, output)
 	}
 	return nil
+}
+
+// validateRemoteEnv only overrides SSH when a user actually supplied a key.
+// Without one, Git must retain its normal SSH-agent/host configuration rather
+// than being forced to run `ssh -i ` with an empty identity path.
+func (g *GitManager) validateRemoteEnv(repoURL string) []string {
+	// Build env based on the URL, not the manager's repoPath, since this can be
+	// called for arbitrary URLs during project validation.
+	env := append([]string{}, os.Environ()...)
+	env = append(env, "GIT_TERMINAL_PROMPT=0")
+	if usesSSH(repoURL) && strings.TrimSpace(g.sshKeyPath) != "" {
+		env = append(env, "GIT_SSH_COMMAND="+sshCommandFor(g.sshKeyPath))
+	}
+	return env
 }
 
 func (g *GitManager) Pull(ctx context.Context) error {
@@ -277,9 +369,7 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
-		keyPath := g.sshKeyPath
-		sshCmd := sshCommandFor(keyPath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
+		cmd.Env = g.withGitEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return "", fmt.Errorf("git %v failed: %v, output: %s", args, err, string(out))
@@ -299,8 +389,21 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	run("config", "user.name", "Agent Orchestrator")
 	run("config", "user.email", "agent@headcount1.local")
 
-	if _, err := run("commit", "-m", message); err != nil {
+	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
 		return err
+	}
+	return nil
+}
+
+// PushWorktreeBranch publishes an agent branch; callers create a PR rather
+// than merging or force-pushing the default branch.
+func (g *GitManager) PushWorktreeBranch(ctx context.Context, worktreeDir, branch string) error {
+	cmd := exec.CommandContext(ctx, "git", "push", "-u", "origin", branch)
+	cmd.Dir = worktreeDir
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("git push failed: %v, output: %s", err, string(out))
 	}
 	return nil
 }
@@ -310,9 +413,7 @@ func (g *GitManager) MergeBranch(ctx context.Context, baseRepoDir, branchName st
 	run := func(args ...string) error {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = baseRepoDir
-		keyPath := g.sshKeyPath
-		sshCmd := sshCommandFor(keyPath)
-		cmd.Env = append(os.Environ(), fmt.Sprintf("GIT_SSH_COMMAND=%s", sshCmd))
+		cmd.Env = g.withGitEnv()
 		out, err := cmd.CombinedOutput()
 		if err != nil {
 			return fmt.Errorf("git %v failed: %v, output: %s", args, err, string(out))

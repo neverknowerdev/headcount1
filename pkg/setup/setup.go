@@ -162,7 +162,7 @@ func runOnce() {
 	output := out.String()
 
 	// markitdown availability is determined by the script output, independent of
-	// whether other dependencies (e.g. github-mcp-server) failed to install.
+	// whether another dependency failed to install.
 	if strings.Contains(output, "[setup] markitdown: OK") || strings.Contains(output, "[setup] markitdown: installed") {
 		ready.Store(true)
 	}
