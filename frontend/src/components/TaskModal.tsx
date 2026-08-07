@@ -50,6 +50,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [artifacts, setArtifacts] = useState<any[]>([]);
     const [artifactsExpanded, setArtifactsExpanded] = useState(false);
     const [expandedArtifactIds, setExpandedArtifactIds] = useState<Set<number>>(new Set());
+	// Git branch selection is an advanced, opt-in task setting. Keep it
+	// collapsed by default so task creation stays focused on the work itself.
+	const [gitOptionsExpanded, setGitOptionsExpanded] = useState(false);
 
     // Form data for creating or editing
     const [formData, setFormData] = useState({
@@ -844,21 +847,37 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             </select>
                         </div>
 						{formData.project_id && (
-							<div>
-								<label className="block text-sm font-medium text-gray-700 mb-1">Base branch</label>
-								<select
-									value={formData.git_base_branch}
-									disabled={branchesLoading || ['in-progress', 'in-review', 'done'].includes(formData.status)}
-									onChange={e => setFormData({...formData, git_base_branch: e.target.value})}
-									className="w-full border rounded p-2 text-sm shadow-sm disabled:bg-gray-100 disabled:text-gray-500"
+							<div className="rounded-lg border border-gray-200 bg-gray-50/70">
+								<button
+									type="button"
+									onClick={() => setGitOptionsExpanded(value => !value)}
+									className="w-full px-3 py-2.5 flex items-center justify-between gap-3 text-left text-sm hover:bg-gray-100 rounded-lg"
+									aria-expanded={gitOptionsExpanded}
 								>
-									{projectBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
-								</select>
-								<p className="mt-1 text-xs text-gray-500">
-									{['in-progress', 'in-review', 'done'].includes(formData.status)
-										? 'The base branch is locked after work starts.'
-										: branchesLoading ? 'Loading repository branches…' : 'New worktree and pull request start from this branch.'}
-								</p>
+									<span className="font-medium text-gray-700">Git options</span>
+									<span className="flex items-center gap-1.5 text-xs text-gray-500">
+										Base: <code className="font-mono text-gray-700">{formData.git_base_branch}</code>
+										{gitOptionsExpanded ? <ChevronUp size={15} /> : <ChevronDown size={15} />}
+									</span>
+								</button>
+								{gitOptionsExpanded && (
+									<div className="border-t border-gray-200 px-3 pb-3 pt-2.5">
+										<label className="block text-sm font-medium text-gray-700 mb-1">Base branch</label>
+										<select
+											value={formData.git_base_branch}
+											disabled={branchesLoading || ['in-progress', 'in-review', 'done'].includes(formData.status)}
+											onChange={e => setFormData({...formData, git_base_branch: e.target.value})}
+											className="w-full border rounded p-2 text-sm shadow-sm disabled:bg-gray-100 disabled:text-gray-500"
+										>
+											{projectBranches.map(branch => <option key={branch} value={branch}>{branch}</option>)}
+										</select>
+										<p className="mt-1 text-xs text-gray-500">
+											{['in-progress', 'in-review', 'done'].includes(formData.status)
+												? 'The base branch is locked after work starts.'
+												: branchesLoading ? 'Loading repository branches…' : 'New worktree and pull request start from this branch.'}
+										</p>
+									</div>
+								)}
 							</div>
 						)}
                         <div>
