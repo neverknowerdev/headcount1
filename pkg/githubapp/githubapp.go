@@ -193,6 +193,24 @@ func (c *Client) UserRepositories(ctx context.Context, userToken string, install
 	return repositories, err
 }
 
+// InstallationRepositories lists repositories visible to one GitHub App
+// installation. Unlike UserRepositories it uses an installation token, so it
+// remains valid when the one-time user OAuth grant is no longer usable.
+func (c *Client) InstallationRepositories(ctx context.Context, installationToken string) ([]Repository, error) {
+	var repositories []Repository
+	err := c.getPaginated(ctx, "/installation/repositories", installationToken, func(body io.Reader) error {
+		var page struct {
+			Repositories []Repository `json:"repositories"`
+		}
+		if err := json.NewDecoder(body).Decode(&page); err != nil {
+			return err
+		}
+		repositories = append(repositories, page.Repositories...)
+		return nil
+	})
+	return repositories, err
+}
+
 // getPaginated follows GitHub's Link: rel="next" cursor so repository
 // discovery never silently drops accounts or repositories after the first
 // page. The callback receives a single JSON page at a time.
@@ -286,6 +304,46 @@ func TokenForProject(ctx context.Context, project db.Project) (string, error) {
 		return "", err
 	}
 	return c.InstallationToken(ctx, project.GitHubInstallationID, project.GitHubRepositoryID)
+}
+
+// TokenForInstallation mints a new short-lived installation token. It is
+// deliberately never persisted: callers can request a fresh token after a
+// deployment or when a long-lived MCP process reports that its previous token
+// has expired.
+func TokenForInstallation(ctx context.Context, installationID int64) (string, error) {
+	if installationID == 0 {
+		return "", errors.New("GitHub installation is not configured")
+	}
+	c, err := FromEnv()
+	if err != nil {
+		return "", err
+	}
+	return c.InstallationToken(ctx, installationID, 0)
+}
+
+// TokenForMCPAccount returns an App installation token for GitHub MCP tools.
+// The saved OAuth token remains only an identity/repository-selection grant;
+// it is not a runtime credential for agents. Project tasks use the exact
+// selected repository installation, while general MCP use selects one of the
+// account's permitted installations.
+func TokenForMCPAccount(ctx context.Context, q *db.Queries, account db.MCPAccount, project *db.Project) (string, error) {
+	if project != nil && project.GitHubInstallationID != 0 {
+		if account.UserID == nil || *account.UserID == 0 {
+			return "", errors.New("GitHub account has no owning user")
+		}
+		if _, err := q.GetGitHubConnectionForAccountInstallation(ctx, account.ID, *account.UserID, project.GitHubInstallationID); err != nil {
+			return "", fmt.Errorf("project installation is not linked to this GitHub account: %w", err)
+		}
+		return TokenForProject(ctx, *project)
+	}
+	if account.UserID == nil || *account.UserID == 0 {
+		return "", errors.New("GitHub account has no owning user")
+	}
+	connection, err := q.GetGitHubConnectionForAccount(ctx, account.ID, *account.UserID)
+	if err != nil {
+		return "", fmt.Errorf("load GitHub App installation for account: %w", err)
+	}
+	return TokenForInstallation(ctx, connection.InstallationID)
 }
 
 func RepositorySlug(repositoryURL string) (string, error) {

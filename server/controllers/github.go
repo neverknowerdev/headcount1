@@ -300,30 +300,29 @@ func (api *API) ListGitHubRepositories(w http.ResponseWriter, r *http.Request) {
 			accountStatuses = append(accountStatuses, map[string]any{"id": account.ID, "name": account.Name, "error": message})
 			continue
 		}
-		token, decryptErr := secrets.Default().Decrypt(account.AuthTokenEncrypted)
-		if decryptErr != nil || token == "" {
-			message := "GitHub credentials are unavailable. Reconnect this account."
+		if account.UserID == nil {
+			message := "GitHub account is missing its owner. Reconnect this account."
 			_ = api.q.UpdateMCPAccountLastError(r.Context(), account.ID, message)
 			accountStatuses = append(accountStatuses, map[string]any{"id": account.ID, "name": account.Name, "error": message})
 			continue
 		}
-		installs, installationsErr := c.UserInstallations(r.Context(), token)
-		if installationsErr != nil {
-			message := "GitHub authorization failed. Reconnect this account."
+		connections, connectionsErr := api.q.ListGitHubConnectionsForAccount(r.Context(), account.ID, *account.UserID)
+		if connectionsErr != nil || len(connections) == 0 {
+			message := "No GitHub App installation is linked to this account. Reconnect this account."
 			_ = api.q.UpdateMCPAccountLastError(r.Context(), account.ID, message)
 			accountStatuses = append(accountStatuses, map[string]any{"id": account.ID, "name": account.Name, "error": message})
 			continue
 		}
 		accountError := ""
-		for _, installation := range installs {
-			conn := db.GitHubConnection{InstallationID: installation.ID, MCPAccountID: account.ID, UserID: userID, AccountLogin: installation.Account.Login, ConnectedAt: time.Now()}
-			if err := api.q.UpsertGitHubConnection(r.Context(), conn); err != nil {
-				accountError = "Could not save GitHub installation metadata. Try again."
+		for _, connection := range connections {
+			token, tokenErr := c.InstallationToken(r.Context(), connection.InstallationID, 0)
+			if tokenErr != nil {
+				accountError = "Could not refresh GitHub App access. Check the deployment GitHub App configuration."
 				break
 			}
-			rs, repositoriesErr := c.UserRepositories(r.Context(), token, installation.ID)
+			rs, repositoriesErr := c.InstallationRepositories(r.Context(), token)
 			if repositoriesErr != nil {
-				accountError = "Could not load repositories for this GitHub account. Reconnect it and try again."
+				accountError = "Could not load repositories from this GitHub App installation. Check its repository permissions and try again."
 				break
 			}
 			for _, repo := range rs {
@@ -331,7 +330,7 @@ func (api *API) ListGitHubRepositories(w http.ResponseWriter, r *http.Request) {
 					continue
 				}
 				seen[repo.ID] = true
-				repos = append(repos, map[string]any{"id": repo.ID, "full_name": repo.FullName, "clone_url": repo.CloneURL, "html_url": repo.HTMLURL, "default_branch": repo.DefaultBranch, "installation_id": installation.ID, "account_id": account.ID})
+				repos = append(repos, map[string]any{"id": repo.ID, "full_name": repo.FullName, "clone_url": repo.CloneURL, "html_url": repo.HTMLURL, "default_branch": repo.DefaultBranch, "installation_id": connection.InstallationID, "account_id": account.ID})
 			}
 		}
 		if accountError != "" {
@@ -370,17 +369,23 @@ func (api *API) resolveGitHubRepository(ctx context.Context, userID int32, raw j
 	if !identityValid {
 		return githubRepositorySelection{}, githubapp.Repository{}, errors.New("GitHub account needs to be reconnected")
 	}
-	token, err := secrets.Default().Decrypt(account.AuthTokenEncrypted)
-	if err != nil || token == "" {
+	if account.UserID == nil {
 		return githubRepositorySelection{}, githubapp.Repository{}, errors.New("GitHub account needs to be reconnected")
+	}
+	if _, err := api.q.GetGitHubConnectionForAccountInstallation(ctx, account.ID, *account.UserID, selection.InstallationID); err != nil {
+		return githubRepositorySelection{}, githubapp.Repository{}, errors.New("selected GitHub installation is no longer connected to this account")
 	}
 	c, err := githubClient()
 	if err != nil {
 		return githubRepositorySelection{}, githubapp.Repository{}, err
 	}
-	repositories, err := c.UserRepositories(ctx, token, selection.InstallationID)
+	token, err := c.InstallationToken(ctx, selection.InstallationID, 0)
 	if err != nil {
-		_ = api.q.UpdateMCPAccountLastError(ctx, account.ID, "Could not load repositories for this GitHub account. Reconnect it and try again.")
+		return githubRepositorySelection{}, githubapp.Repository{}, errors.New("could not refresh GitHub App access; check deployment configuration")
+	}
+	repositories, err := c.InstallationRepositories(ctx, token)
+	if err != nil {
+		_ = api.q.UpdateMCPAccountLastError(ctx, account.ID, "Could not load repositories from this GitHub App installation. Check its repository permissions and try again.")
 		return githubRepositorySelection{}, githubapp.Repository{}, errors.New("could not verify the selected GitHub repository; refresh the list and try again")
 	}
 	for _, repository := range repositories {

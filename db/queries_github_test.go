@@ -92,3 +92,21 @@ func TestSaveGitHubOAuthAccountRejectsDuplicateIdentityForSameUser(t *testing.T)
 	require.NoError(t, database.Model(&db.MCPAccount{}).Count(&accounts).Error)
 	require.Equal(t, int64(1), accounts)
 }
+
+func TestGitHubInstallationLookupIsScopedToTheAccountOwner(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.MCPAccount{}, &db.GitHubConnection{}))
+	q := db.New(database)
+	ownerID, otherID := int32(1), int32(2)
+	account := db.MCPAccount{Name: "owner", UserID: &ownerID}
+	require.NoError(t, database.Create(&account).Error)
+	connection := db.GitHubConnection{MCPAccountID: account.ID, UserID: ownerID, InstallationID: 123, ConnectedAt: time.Now()}
+	require.NoError(t, database.Create(&connection).Error)
+
+	got, err := q.GetGitHubConnectionForAccount(t.Context(), account.ID, ownerID)
+	require.NoError(t, err)
+	require.Equal(t, int64(123), got.InstallationID)
+	_, err = q.GetGitHubConnectionForAccount(t.Context(), account.ID, otherID)
+	require.ErrorIs(t, err, gorm.ErrRecordNotFound)
+}

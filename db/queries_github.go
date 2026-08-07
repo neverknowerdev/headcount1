@@ -36,6 +36,35 @@ func (q *Queries) ListGitHubConnectionsForUser(ctx context.Context, userID int32
 	return connections, err
 }
 
+// GetGitHubConnectionForAccount returns one App installation explicitly linked
+// to an account. The user predicate is intentional: installation tokens must
+// never be minted from a connection owned by another Headcount1 user.
+func (q *Queries) GetGitHubConnectionForAccount(ctx context.Context, accountID, userID int32) (GitHubConnection, error) {
+	var connection GitHubConnection
+	err := q.db.WithContext(ctx).
+		Where("mcp_account_id = ? AND user_id = ?", accountID, userID).
+		Order("connected_at desc, id desc").
+		First(&connection).Error
+	return connection, err
+}
+
+func (q *Queries) ListGitHubConnectionsForAccount(ctx context.Context, accountID, userID int32) ([]GitHubConnection, error) {
+	var connections []GitHubConnection
+	err := q.db.WithContext(ctx).
+		Where("mcp_account_id = ? AND user_id = ?", accountID, userID).
+		Order("connected_at desc, id desc").
+		Find(&connections).Error
+	return connections, err
+}
+
+func (q *Queries) GetGitHubConnectionForAccountInstallation(ctx context.Context, accountID, userID int32, installationID int64) (GitHubConnection, error) {
+	var connection GitHubConnection
+	err := q.db.WithContext(ctx).
+		Where("mcp_account_id = ? AND user_id = ? AND installation_id = ?", accountID, userID, installationID).
+		First(&connection).Error
+	return connection, err
+}
+
 func (q *Queries) CountGitHubAccountsForUser(ctx context.Context, serverID, userID int32) (int64, error) {
 	var count int64
 	err := q.db.WithContext(ctx).Model(&MCPAccount{}).

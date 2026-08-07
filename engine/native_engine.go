@@ -842,6 +842,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return
 		}
 		msg := "Auth token invalid or expired. Re-authenticate."
+		if strings.HasPrefix(serverName, db.MCPServerNameGitHub+"/") {
+			msg = "GitHub App authorization failed. Check the app installation permissions and try again."
+		}
 		if strings.Contains(strings.ToLower(rawErr), "forbidden") ||
 			strings.Contains(strings.ToLower(rawErr), "permission denied") {
 			msg = "Permission denied. Check your auth token has the required scopes."
@@ -854,6 +857,20 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 	store := tools.NewMCPSessionStore(nil, onAuthError, onToolCall)
+	githubAccountsByServerName := make(map[string]db.MCPAccount)
+	var taskProject *db.Project
+	if task.ProjectID != nil {
+		if project, projectErr := e.q.GetProject(ctx, *task.ProjectID); projectErr == nil {
+			taskProject = &project
+		}
+	}
+	store.SetAuthTokenRefresher(func(refreshCtx context.Context, serverName string) (string, error) {
+		account, ok := githubAccountsByServerName[serverName]
+		if !ok {
+			return "", fmt.Errorf("no renewable GitHub credential for %q", serverName)
+		}
+		return githubapp.TokenForMCPAccount(refreshCtx, e.q, account, taskProject)
+	})
 
 	callTool, discoverTool := tools.NewMCPTools(store)
 	registry.Register(callTool)
@@ -929,32 +946,31 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 					continue
 				}
 			}
-			// Decrypt the account's auth token at the point of use. If the owner's
-			// vault is locked we can't recover it — skip the account rather than
-			// wire up a server that would fail every call with an empty token.
-			authToken, decErr := secrets.Default().Decrypt(acc.AuthTokenEncrypted)
-			if decErr != nil {
-				e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping MCP account %q: %v", acc.Name, decErr))
-				continue
-			}
 			synthetic := srv
-			synthetic.AuthToken = authToken
-			// GitHub uses the selected repository's short-lived App token, never a PAT.
-			if srv.IsGitHub() && task.ProjectID != nil {
-				if project, err := e.q.GetProject(ctx, *task.ProjectID); err == nil && project.GitHubInstallationID != 0 {
-					token, tokenErr := githubapp.TokenForProject(ctx, project)
-					if tokenErr != nil {
-						e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping GitHub MCP account %q: installation token failed: %v", acc.Name, tokenErr))
-						continue
-					}
-					if token == "" {
-						e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping GitHub MCP account %q: installation token is empty", acc.Name))
-						continue
-					}
-					synthetic.AuthToken = token
-				}
-			}
 			synthetic.Name = fmt.Sprintf("%s/%s", srv.Name, acc.Name)
+			if srv.IsGitHub() {
+				// User OAuth credentials are never supplied to the GitHub MCP
+				// process. Use a fresh, renewable installation token instead.
+				token, tokenErr := githubapp.TokenForMCPAccount(ctx, e.q, acc, taskProject)
+				if tokenErr != nil || token == "" {
+					if tokenErr == nil {
+						tokenErr = fmt.Errorf("empty installation token")
+					}
+					e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping GitHub MCP account %q: installation token failed: %v", acc.Name, tokenErr))
+					continue
+				}
+				synthetic.AuthToken = token
+				githubAccountsByServerName[synthetic.Name] = acc
+			} else {
+				// Other MCP integrations continue to use their encrypted account
+				// credential directly.
+				authToken, decErr := secrets.Default().Decrypt(acc.AuthTokenEncrypted)
+				if decErr != nil {
+					e.logInfo(proxyLogger, fmt.Sprintf("Warning: skipping MCP account %q: %v", acc.Name, decErr))
+					continue
+				}
+				synthetic.AuthToken = authToken
+			}
 			store.AddExternalServer(synthetic)
 			accountIDByName[synthetic.Name] = acc.ID
 			serverIDByName[synthetic.Name] = synthetic.ID

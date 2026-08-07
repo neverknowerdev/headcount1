@@ -17,6 +17,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/mcp"
 	"agent-orchestrator/pkg/filesystem"
+	"agent-orchestrator/pkg/githubapp"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/utils"
@@ -96,13 +97,27 @@ func discoverServerTools(ctx context.Context, s db.MCPServer) (string, error) {
 }
 
 // discoverServerToolsWithAccount connects using a specific account's credentials.
-func discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account db.MCPAccount) (string, error) {
+func (api *API) discoverServerToolsWithAccount(ctx context.Context, s db.MCPServer, account db.MCPAccount) (string, error) {
+	authToken, err := api.mcpAccountRuntimeToken(ctx, s, account)
+	if err != nil {
+		return "", err
+	}
+	s.AuthToken = authToken
+	return discoverServerTools(ctx, s)
+}
+
+// mcpAccountRuntimeToken separates durable user grants from runtime tokens.
+// GitHub OAuth credentials identify which installations the user approved;
+// every MCP process instead receives a newly minted, short-lived App token.
+func (api *API) mcpAccountRuntimeToken(ctx context.Context, server db.MCPServer, account db.MCPAccount) (string, error) {
+	if server.IsGitHub() {
+		return githubapp.TokenForMCPAccount(ctx, api.q, account, nil)
+	}
 	authToken, err := secrets.Default().Decrypt(account.AuthTokenEncrypted)
 	if err != nil {
 		return "", fmt.Errorf("decrypt account token: %w", err)
 	}
-	s.AuthToken = authToken
-	return discoverServerTools(ctx, s)
+	return authToken, nil
 }
 
 // DiscoverAndCacheAllMCPTools discovers and caches tools for every enabled MCP
@@ -115,7 +130,7 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 	}
 
 	for _, s := range servers {
-		if s.Name == "github" && !s.DepsInstalled {
+		if s.IsGitHub() && !s.DepsInstalled {
 			// The dependency installer persists the actionable server-level error.
 			// Avoid replacing it with a generic per-account discovery failure.
 			continue
@@ -126,7 +141,7 @@ func (api *API) DiscoverAndCacheAllMCPTools(ctx context.Context) {
 		}
 		serverCached := false
 		for _, acc := range s.Accounts {
-			toolsJSON, discErr := discoverServerToolsWithAccount(ctx, s, acc)
+			toolsJSON, discErr := api.discoverServerToolsWithAccount(ctx, s, acc)
 			if discErr != nil {
 				msg := categorizeMCPError(s.Name, discErr.Error())
 				log.Printf("MCP cache: %s/%s: %s", s.Name, acc.Name, msg)
@@ -312,7 +327,7 @@ func (api *API) DiscoverMCPServerTools(w http.ResponseWriter, r *http.Request) {
 	}
 	// Try the first account.
 	acc := s.Accounts[0]
-	toolsJSON, discErr := discoverServerToolsWithAccount(r.Context(), s, acc)
+	toolsJSON, discErr := api.discoverServerToolsWithAccount(r.Context(), s, acc)
 	if discErr != nil {
 		msg := categorizeMCPError(s.Name, discErr.Error())
 		_ = api.q.UpdateMCPAccountLastError(r.Context(), acc.ID, msg)
@@ -470,7 +485,7 @@ func (api *API) DiscoverMCPAccountTools(w http.ResponseWriter, r *http.Request) 
 		api.respondError(w, http.StatusNotFound, "server not found")
 		return
 	}
-	toolsJSON, discErr := discoverServerToolsWithAccount(r.Context(), s, acc)
+	toolsJSON, discErr := api.discoverServerToolsWithAccount(r.Context(), s, acc)
 	if discErr != nil {
 		msg := categorizeMCPError(s.Name, discErr.Error())
 		_ = api.q.UpdateMCPAccountLastError(r.Context(), int32(accountID), msg)

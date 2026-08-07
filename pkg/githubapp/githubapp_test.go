@@ -114,6 +114,19 @@ func TestUserRepositoriesFollowsPagination(t *testing.T) {
 	require.Equal(t, 2, requests)
 }
 
+func TestInstallationRepositoriesUsesAppInstallationToken(t *testing.T) {
+	client := &Client{httpClient: &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		require.Equal(t, "/installation/repositories", r.URL.Path)
+		require.Equal(t, "Bearer installation-token", r.Header.Get("Authorization"))
+		return &http.Response{StatusCode: http.StatusOK, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(`{"repositories":[{"id":7,"full_name":"acme/widgets"}]}`))}, nil
+	})}}
+
+	repositories, err := client.InstallationRepositories(context.Background(), "installation-token")
+	require.NoError(t, err)
+	require.Len(t, repositories, 1)
+	require.Equal(t, int64(7), repositories[0].ID)
+}
+
 func TestInstallationTokenScopesToSelectedRepository(t *testing.T) {
 	key, err := rsa.GenerateKey(rand.Reader, 2048)
 	require.NoError(t, err)
