@@ -13,7 +13,15 @@ import (
 	"testing"
 )
 
-func TestGitHubMCPAsset(t *testing.T) {
+func TestMCPDependencyManifestSelectsReleaseAssets(t *testing.T) {
+	manifest, err := loadMCPDependencyManifest()
+	if err != nil {
+		t.Fatal(err)
+	}
+	dependency, ok := manifest.Commands["github-mcp-server"]
+	if !ok {
+		t.Fatal("github-mcp-server dependency missing from manifest")
+	}
 	tests := []struct {
 		goos, goarch, want string
 	}{
@@ -22,17 +30,17 @@ func TestGitHubMCPAsset(t *testing.T) {
 		{"windows", "386", "github-mcp-server_Windows_i386.zip"},
 	}
 	for _, test := range tests {
-		got, err := githubMCPAsset(test.goos, test.goarch)
-		if err != nil || got != test.want {
-			t.Errorf("githubMCPAsset(%q, %q) = %q, %v; want %q", test.goos, test.goarch, got, err, test.want)
+		asset, err := dependency.releaseAsset(test.goos, test.goarch)
+		if err != nil || asset.Name != test.want {
+			t.Errorf("releaseAsset(%q, %q) = %q, %v; want %q", test.goos, test.goarch, asset.Name, err, test.want)
 		}
 	}
-	if _, err := githubMCPAsset("plan9", "amd64"); err == nil {
+	if _, err := dependency.releaseAsset("plan9", "amd64"); err == nil {
 		t.Fatal("unsupported platform should fail")
 	}
 }
 
-func TestExtractGitHubMCPTarGz(t *testing.T) {
+func TestExtractMCPArchiveTarGz(t *testing.T) {
 	dir := t.TempDir()
 	archivePath := filepath.Join(dir, "server.tar.gz")
 	archive, err := os.Create(archivePath)
@@ -56,7 +64,7 @@ func TestExtractGitHubMCPTarGz(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractGitHubMCPTarGz(archivePath, destination); err != nil {
+	if err := extractMCPArchiveTarGz(archivePath, destination, "github-mcp-server"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(destination); string(got) != string(payload) {
@@ -64,7 +72,7 @@ func TestExtractGitHubMCPTarGz(t *testing.T) {
 	}
 }
 
-func TestExtractGitHubMCPZip(t *testing.T) {
+func TestExtractMCPArchiveZip(t *testing.T) {
 	dir := t.TempDir()
 	archivePath := filepath.Join(dir, "server.zip")
 	archive, err := os.Create(archivePath)
@@ -86,7 +94,7 @@ func TestExtractGitHubMCPZip(t *testing.T) {
 	if err := os.MkdirAll(filepath.Dir(destination), 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := extractGitHubMCPZip(archivePath, destination); err != nil {
+	if err := extractMCPArchiveZip(archivePath, destination, "github-mcp-server.exe"); err != nil {
 		t.Fatal(err)
 	}
 	if got, _ := os.ReadFile(destination); string(got) != "github mcp" {
@@ -94,7 +102,7 @@ func TestExtractGitHubMCPZip(t *testing.T) {
 	}
 }
 
-func TestEnsureGitHubMCPServerDownloadsIntoApplicationBin(t *testing.T) {
+func TestInstallMCPCommandDependencyDownloadsIntoApplicationBin(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("tar fixture exercises Unix release installation")
 	}
@@ -115,13 +123,18 @@ func TestEnsureGitHubMCPServerDownloadsIntoApplicationBin(t *testing.T) {
 		w.Write(archive.Bytes())
 	}))
 	defer server.Close()
-	originalBaseURL := githubMCPReleaseBaseURL
-	githubMCPReleaseBaseURL = server.URL
-	defer func() { githubMCPReleaseBaseURL = originalBaseURL }()
-
 	t.Setenv("E2E_HEADCOUNT1_HOME", t.TempDir())
 	t.Setenv("PATH", "")
-	if err := ensureGitHubMCPServer(t.Context()); err != nil {
+	dependency := MCPCommandDependency{
+		Installer:      "release-archive",
+		Executable:     "github-mcp-server",
+		ReleaseBaseURL: server.URL,
+		Version:        "test",
+		Assets: []MCPReleaseAsset{{
+			OS: runtime.GOOS, Arch: runtime.GOARCH, Name: "server.tar.gz", Archive: "tar.gz", Binary: "github-mcp-server",
+		}},
+	}
+	if err := installMCPCommandDependency(t.Context(), dependency, runtime.GOOS, runtime.GOARCH); err != nil {
 		t.Fatal(err)
 	}
 	installed := filepath.Join(dbHomeForTest(t), ".headcount1", "bin", "github-mcp-server")

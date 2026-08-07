@@ -5,6 +5,8 @@ import (
 	"archive/zip"
 	"compress/gzip"
 	"context"
+	_ "embed"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -17,32 +19,136 @@ import (
 	"agent-orchestrator/db"
 )
 
-const githubMCPVersion = "v1.8.0"
+//go:embed mcp_dependencies.json
+var embeddedMCPDependencies []byte
 
-var githubMCPReleaseBaseURL = "https://github.com/github/github-mcp-server/releases/download"
-
-type mcpBinaryDependency struct {
-	Install func(context.Context) error
+// MCPDependencyManifest is the declarative source of non-NPM dependencies
+// required by MCP commands. Each command can opt into a generic installer
+// without coupling setup code to a particular integration.
+type MCPDependencyManifest struct {
+	Commands map[string]MCPCommandDependency `json:"commands"`
 }
 
-// mcpBinaryDependencies is the declarative registry for MCP commands that
-// need more than npm packages. InstallMCPDependencies stays generic: adding a
-// future binary-backed MCP server only requires registering its command here.
-var mcpBinaryDependencies = map[string]mcpBinaryDependency{
-	"github-mcp-server": {Install: ensureGitHubMCPServer},
+type MCPCommandDependency struct {
+	Installer      string            `json:"installer"`
+	Executable     string            `json:"executable"`
+	ReleaseBaseURL string            `json:"release_base_url"`
+	Version        string            `json:"version"`
+	Assets         []MCPReleaseAsset `json:"assets"`
+}
+
+type MCPReleaseAsset struct {
+	OS      string `json:"os"`
+	Arch    string `json:"arch"`
+	Name    string `json:"name"`
+	Archive string `json:"archive"`
+	Binary  string `json:"binary"`
+}
+
+func loadMCPDependencyManifest() (MCPDependencyManifest, error) {
+	var manifest MCPDependencyManifest
+	if err := json.Unmarshal(embeddedMCPDependencies, &manifest); err != nil {
+		return MCPDependencyManifest{}, fmt.Errorf("parse MCP dependency manifest: %w", err)
+	}
+	if manifest.Commands == nil {
+		return MCPDependencyManifest{}, fmt.Errorf("MCP dependency manifest has no commands")
+	}
+	return manifest, nil
 }
 
 // InstallMCPDependencies installs dependencies declared by one MCP server.
-// Keeping this server-scoped lets callers persist and display failures on the
-// integration that owns them instead of failing the platform-wide setup.
+// NPM dependencies remain data on MCPServer; binary dependencies are selected
+// by command from mcp_dependencies.json. Adding a new managed binary requires
+// only a manifest entry, not an integration-specific Go branch.
 func InstallMCPDependencies(ctx context.Context, server db.MCPServer) error {
 	if err := InstallNpmDeps(ctx, server.Deps); err != nil {
 		return err
 	}
-	if dependency, ok := mcpBinaryDependencies[server.Command]; ok {
-		return dependency.Install(ctx)
+	manifest, err := loadMCPDependencyManifest()
+	if err != nil {
+		return err
+	}
+	dependency, managed := manifest.Commands[server.Command]
+	if !managed {
+		return nil
+	}
+	return installMCPCommandDependency(ctx, dependency, runtime.GOOS, runtime.GOARCH)
+}
+
+func installMCPCommandDependency(ctx context.Context, dependency MCPCommandDependency, goos, goarch string) error {
+	if dependency.Installer != "release-archive" {
+		return fmt.Errorf("unsupported MCP dependency installer %q", dependency.Installer)
+	}
+	if dependency.Executable == "" || dependency.ReleaseBaseURL == "" || dependency.Version == "" {
+		return fmt.Errorf("release-archive MCP dependency is missing executable, release_base_url, or version")
+	}
+	binDir, err := mcpBinDir()
+	if err != nil {
+		return fmt.Errorf("prepare MCP binary directory: %w", err)
+	}
+	if _, err := exec.LookPath(dependency.Executable); err == nil {
+		return nil
+	}
+
+	asset, err := dependency.releaseAsset(goos, goarch)
+	if err != nil {
+		return err
+	}
+	request, err := http.NewRequestWithContext(ctx, http.MethodGet, strings.TrimRight(dependency.ReleaseBaseURL, "/")+"/"+dependency.Version+"/"+asset.Name, nil)
+	if err != nil {
+		return err
+	}
+	response, err := http.DefaultClient.Do(request)
+	if err != nil {
+		return fmt.Errorf("download %s: %w", asset.Name, err)
+	}
+	defer response.Body.Close()
+	if response.StatusCode != http.StatusOK {
+		return fmt.Errorf("download %s: release server returned %s", asset.Name, response.Status)
+	}
+
+	tmp, err := os.CreateTemp("", "headcount1-mcp-*")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	defer os.Remove(tmpPath)
+	if _, err := io.Copy(tmp, io.LimitReader(response.Body, 200<<20)); err != nil {
+		tmp.Close()
+		return fmt.Errorf("save %s: %w", asset.Name, err)
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+
+	destination := filepath.Join(binDir, asset.Binary)
+	switch asset.Archive {
+	case "tar.gz":
+		err = extractMCPArchiveTarGz(tmpPath, destination, asset.Binary)
+	case "zip":
+		err = extractMCPArchiveZip(tmpPath, destination, asset.Binary)
+	default:
+		err = fmt.Errorf("unsupported archive format %q", asset.Archive)
+	}
+	if err != nil {
+		return fmt.Errorf("extract %s: %w", asset.Name, err)
+	}
+	if _, err := exec.LookPath(dependency.Executable); err != nil {
+		return fmt.Errorf("installed executable is not available on PATH: %w", err)
 	}
 	return nil
+}
+
+func (d MCPCommandDependency) releaseAsset(goos, goarch string) (MCPReleaseAsset, error) {
+	for _, asset := range d.Assets {
+		if asset.OS == goos && asset.Arch == goarch {
+			if asset.Name == "" || asset.Archive == "" || asset.Binary == "" {
+				return MCPReleaseAsset{}, fmt.Errorf("MCP dependency asset for %s/%s is incomplete", goos, goarch)
+			}
+			return asset, nil
+		}
+	}
+	return MCPReleaseAsset{}, fmt.Errorf("MCP dependency does not publish a binary for %s/%s", goos, goarch)
 }
 
 func mcpBinDir() (string, error) {
@@ -61,78 +167,7 @@ func mcpBinDir() (string, error) {
 	return dir, nil
 }
 
-func ensureGitHubMCPServer(ctx context.Context) error {
-	binDir, err := mcpBinDir()
-	if err != nil {
-		return fmt.Errorf("prepare MCP binary directory: %w", err)
-	}
-	if _, err := exec.LookPath("github-mcp-server"); err == nil {
-		return nil
-	}
-
-	asset, err := githubMCPAsset(runtime.GOOS, runtime.GOARCH)
-	if err != nil {
-		return err
-	}
-	request, err := http.NewRequestWithContext(ctx, http.MethodGet, githubMCPReleaseBaseURL+"/"+githubMCPVersion+"/"+asset, nil)
-	if err != nil {
-		return err
-	}
-	response, err := http.DefaultClient.Do(request)
-	if err != nil {
-		return fmt.Errorf("download %s: %w", asset, err)
-	}
-	defer response.Body.Close()
-	if response.StatusCode != http.StatusOK {
-		return fmt.Errorf("download %s: GitHub returned %s", asset, response.Status)
-	}
-
-	tmp, err := os.CreateTemp("", "headcount1-github-mcp-*")
-	if err != nil {
-		return err
-	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if _, err := io.Copy(tmp, io.LimitReader(response.Body, 200<<20)); err != nil {
-		tmp.Close()
-		return fmt.Errorf("save %s: %w", asset, err)
-	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-
-	destination := filepath.Join(binDir, "github-mcp-server")
-	if runtime.GOOS == "windows" {
-		destination += ".exe"
-	}
-	if strings.HasSuffix(asset, ".zip") {
-		err = extractGitHubMCPZip(tmpPath, destination)
-	} else {
-		err = extractGitHubMCPTarGz(tmpPath, destination)
-	}
-	if err != nil {
-		return fmt.Errorf("extract %s: %w", asset, err)
-	}
-	if _, err := exec.LookPath("github-mcp-server"); err != nil {
-		return fmt.Errorf("installed executable is not available on PATH: %w", err)
-	}
-	return nil
-}
-
-func githubMCPAsset(goos, goarch string) (string, error) {
-	osName := map[string]string{"darwin": "Darwin", "linux": "Linux", "windows": "Windows"}[goos]
-	arch := map[string]string{"amd64": "x86_64", "arm64": "arm64", "386": "i386"}[goarch]
-	if osName == "" || arch == "" {
-		return "", fmt.Errorf("GitHub MCP Server does not publish a binary for %s/%s", goos, goarch)
-	}
-	ext := ".tar.gz"
-	if goos == "windows" {
-		ext = ".zip"
-	}
-	return fmt.Sprintf("github-mcp-server_%s_%s%s", osName, arch, ext), nil
-}
-
-func extractGitHubMCPTarGz(archivePath, destination string) error {
+func extractMCPArchiveTarGz(archivePath, destination, binaryName string) error {
 	file, err := os.Open(archivePath)
 	if err != nil {
 		return err
@@ -147,25 +182,25 @@ func extractGitHubMCPTarGz(archivePath, destination string) error {
 	for {
 		header, err := reader.Next()
 		if err == io.EOF {
-			return fmt.Errorf("github-mcp-server executable not found in archive")
+			return fmt.Errorf("%s executable not found in archive", binaryName)
 		}
 		if err != nil {
 			return err
 		}
-		if filepath.Base(header.Name) == "github-mcp-server" && header.Typeflag == tar.TypeReg {
+		if filepath.Base(header.Name) == binaryName && header.Typeflag == tar.TypeReg {
 			return writeExecutable(destination, reader)
 		}
 	}
 }
 
-func extractGitHubMCPZip(archivePath, destination string) error {
+func extractMCPArchiveZip(archivePath, destination, binaryName string) error {
 	reader, err := zip.OpenReader(archivePath)
 	if err != nil {
 		return err
 	}
 	defer reader.Close()
 	for _, file := range reader.File {
-		if filepath.Base(file.Name) != "github-mcp-server.exe" {
+		if filepath.Base(file.Name) != binaryName {
 			continue
 		}
 		source, err := file.Open()
@@ -176,7 +211,7 @@ func extractGitHubMCPZip(archivePath, destination string) error {
 		source.Close()
 		return err
 	}
-	return fmt.Errorf("github-mcp-server.exe not found in archive")
+	return fmt.Errorf("%s executable not found in archive", binaryName)
 }
 
 func writeExecutable(destination string, source io.Reader) error {
