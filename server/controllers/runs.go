@@ -220,13 +220,10 @@ func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
 	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 
 	filename := fmt.Sprintf("run-%d.jsonl", run.ID)
-	if name := strings.TrimSpace(run.Task.Title); name != "" {
+	if name := strings.TrimSpace(run.Name); name != "" {
 		safe := strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 				return r
-			}
-			if r == ' ' {
-				return '-'
 			}
 			return -1
 		}, name)
