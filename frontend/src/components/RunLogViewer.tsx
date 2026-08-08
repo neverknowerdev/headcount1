@@ -4,7 +4,7 @@ import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch
+  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch, Download
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -66,6 +66,7 @@ interface RunLogViewerProps {
   tokenStats?: RunTokenStats | null;
   compact?: boolean;
   agentStats?: AgentTokenStats[];
+  runId?: number;
 }
 
 // ─── Hierarchical grouping ────────────────────────────────────────────────────
@@ -1074,6 +1075,7 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
                 status={childRun.status}
                 tokenStats={childRun.token_stats}
                 autoScroll={false}
+                runId={runId}
               />
             </div>
           )}
@@ -1252,7 +1254,7 @@ export function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProp
 
 // ─── Main RunLogViewer ────────────────────────────────────────────────────────
 
-export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats }) => {
+export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats, runId }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
@@ -1343,14 +1345,27 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           )}
           <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
         </div>
-        <button
-          onClick={() => setRawMode(!rawMode)}
-          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors shrink-0"
-          title={rawMode ? 'Switch to formatted view' : 'Switch to raw JSON view'}
-        >
-          {rawMode ? <FileText size={12} /> : <Code2 size={12} />}
-          {rawMode ? 'Formatted' : 'Raw JSON'}
-        </button>
+        <div className="flex items-center gap-1 shrink-0">
+          {runId != null && (
+            <a
+              href={`/api/runs/${runId}/log/download`}
+              className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+              title="Download run log"
+              data-testid="download-run-log"
+            >
+              <Download size={12} />
+              Download
+            </a>
+          )}
+          <button
+            onClick={() => setRawMode(!rawMode)}
+            className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+            title={rawMode ? 'Switch to formatted view' : 'Switch to raw JSON view'}
+          >
+            {rawMode ? <FileText size={12} /> : <Code2 size={12} />}
+            {rawMode ? 'Formatted' : 'Raw JSON'}
+          </button>
+        </div>
       </div>
 
       {/* Failed with no captured logs */}

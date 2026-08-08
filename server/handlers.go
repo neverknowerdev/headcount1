@@ -286,6 +286,7 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadRun)
 			r.Get("/", api.GetRun)
 			r.Get("/children", api.ListChildRuns)
+			r.Get("/log/download", api.DownloadRunLog)
 			r.Post("/stop", api.StopRun)
 		})
 	})

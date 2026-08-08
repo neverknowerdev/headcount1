@@ -2,8 +2,11 @@ package endpoints
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"agent-orchestrator/db"
 
@@ -208,4 +211,58 @@ func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
 	api.engine.StopRun(r.Context(), run.ID)
 
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+}
+
+// DownloadRunLog streams the run's execution log as a JSONL attachment.
+// Prefers the on-disk log file when present; otherwise serializes log_entries
+// (or falls back to legacy log_content).
+func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+
+	filename := fmt.Sprintf("run-%d_run_log.jsonl", run.ID)
+	if name := strings.TrimSpace(run.Name); name != "" {
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return -1
+		}, name)
+		safe = strings.Trim(safe, "-")
+		if safe != "" {
+			filename = safe + "_run_log.jsonl"
+		}
+	}
+
+	if run.LogFilePath != "" {
+		if info, statErr := os.Stat(run.LogFilePath); statErr == nil && !info.IsDir() {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+			http.ServeFile(w, r, run.LogFilePath)
+			return
+		}
+	}
+
+	var body []byte
+	if run.LogEntries != "" && run.LogEntries != "[]" {
+		var entries []json.RawMessage
+		if json.Unmarshal([]byte(run.LogEntries), &entries) == nil && len(entries) > 0 {
+			var b strings.Builder
+			for _, entry := range entries {
+				b.Write(entry)
+				b.WriteByte('\n')
+			}
+			body = []byte(b.String())
+		}
+	}
+	if len(body) == 0 {
+		if run.LogContent == "" {
+			api.respondError(w, http.StatusNotFound, "run has no log")
+			return
+		}
+		body = []byte(run.LogContent)
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Write(body)
 }
