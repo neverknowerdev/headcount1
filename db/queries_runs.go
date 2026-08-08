@@ -282,3 +282,34 @@ func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key stri
 		Count(&count).Error
 	return count, err
 }
+
+// PauseRun marks a run "interrupted" and stores its serialized conversation
+// history so it can be resumed after a restart (see NativeEngine's
+// BeginDrain/ResumeInterruptedRuns). The task lock (Task.RunID) is
+// deliberately left in place — this does not call UnlockTaskRun — so no new
+// run can start on the same task until this one is either resumed or
+// explicitly failed.
+func (q *Queries) PauseRun(ctx context.Context, runID int32, history string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{"status": "interrupted", "paused_history": history}).Error
+}
+
+// GetInterruptedRuns returns every run left paused by a graceful shutdown,
+// across all tenants — consumed once at boot to resume them.
+func (q *Queries) GetInterruptedRuns(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Where("status = ?", "interrupted").Find(&runs).Error
+	return runs, err
+}
+
+// ResumeRun marks a previously-interrupted run "running" again and clears its
+// persisted history now that the caller has loaded it back into memory. It
+// also refreshes last_message_time: without this, IsRunStale would see the
+// pre-pause heartbeat (possibly many minutes old, e.g. across a slow update)
+// and could race a concurrent ProcessTask call into treating the resumed run
+// as stale and failing it out from under the resume goroutine.
+func (q *Queries) ResumeRun(ctx context.Context, runID int32) error {
+	now := time.Now()
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{"status": "running", "paused_history": "", "last_message_time": now}).Error
+}

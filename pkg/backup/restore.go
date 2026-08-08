@@ -3,19 +3,22 @@ package backup
 import (
 	"archive/tar"
 	"compress/gzip"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 
-	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
 	"gorm.io/gorm"
 )
 
+// RestoreBackup restores a manifest-v2 archive: real files are copied back
+// under basePath and the database is rebuilt from the entities/ JSON tree
+// (with original IDs preserved). The db-snapshot/ inside the archive is a
+// disaster-recovery artifact and is never read here.
 func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 	log.Printf("Starting restore from %s...", archivePath)
 
@@ -30,15 +33,15 @@ func RestoreBackup(archivePath, basePath string, database *gorm.DB) error {
 		return fmt.Errorf("failed to extract archive: %w", err)
 	}
 
-	// Restore filesystem data
 	if err := restoreFilesystem(tempDir, basePath); err != nil {
 		log.Printf("Warning: failed to restore filesystem data: %v", err)
 	}
 
-	// Rebuild DB from filesystem
-	if err := rebuildDBFromFS(basePath, database); err != nil {
+	if err := restoreEntities(tempDir, database); err != nil {
 		return fmt.Errorf("failed to rebuild database: %w", err)
 	}
+
+	repairWorktrees(basePath)
 
 	log.Printf("Restore completed successfully")
 	return nil
@@ -67,7 +70,11 @@ func extractArchive(archivePath, destDir string) error {
 			return err
 		}
 
+		// Reject entries that would escape destDir (path traversal).
 		target := filepath.Join(destDir, header.Name)
+		if !strings.HasPrefix(target, filepath.Clean(destDir)+string(os.PathSeparator)) {
+			return fmt.Errorf("archive entry escapes destination: %s", header.Name)
+		}
 
 		switch header.Typeflag {
 		case tar.TypeDir:
@@ -78,7 +85,7 @@ func extractArchive(archivePath, destDir string) error {
 			if err := os.MkdirAll(filepath.Dir(target), 0755); err != nil {
 				return err
 			}
-			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY, os.FileMode(header.Mode))
+			f, err := os.OpenFile(target, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, os.FileMode(header.Mode))
 			if err != nil {
 				return err
 			}
@@ -92,332 +99,308 @@ func extractArchive(archivePath, destDir string) error {
 	return nil
 }
 
+// restoreFilesystem copies the archived real-file directories (files/*)
+// and settings.yaml back under basePath.
 func restoreFilesystem(tempDir, basePath string) error {
-	// Restore data directory
-	srcData := filepath.Join(tempDir, "data")
-	if _, err := os.Stat(srcData); err == nil {
-		dstData := filepath.Join(basePath, "data")
-		if err := copyDir(srcData, dstData); err != nil {
-			return fmt.Errorf("failed to restore data directory: %w", err)
+	for _, dir := range fileDirs {
+		src := filepath.Join(tempDir, "files", dir)
+		if _, err := os.Stat(src); err != nil {
+			continue
+		}
+		if err := copyDir(src, filepath.Join(basePath, dir)); err != nil {
+			return fmt.Errorf("failed to restore %s directory: %w", dir, err)
 		}
 	}
 
-	// Restore workspace directory
-	srcWorkspace := filepath.Join(tempDir, "workspace")
-	if _, err := os.Stat(srcWorkspace); err == nil {
-		dstWorkspace := filepath.Join(basePath, "workspace")
-		if err := copyDir(srcWorkspace, dstWorkspace); err != nil {
-			return fmt.Errorf("failed to restore workspace directory: %w", err)
-		}
-	}
-
-	// Restore companies directory (Manager format: settings, sprints, tasks, comments)
-	srcCompanies := filepath.Join(tempDir, "companies")
-	if _, err := os.Stat(srcCompanies); err == nil {
-		dstCompanies := filepath.Join(basePath, "companies")
-		if err := copyDir(srcCompanies, dstCompanies); err != nil {
-			return fmt.Errorf("failed to restore companies directory: %w", err)
-		}
-	}
-
-	// Restore settings.yaml
 	srcSettings := filepath.Join(tempDir, "settings.yaml")
-	if _, err := os.Stat(srcSettings); err == nil {
-		dstSettings := filepath.Join(basePath, "settings.yaml")
-		data, err := os.ReadFile(srcSettings)
-		if err == nil {
-			os.WriteFile(dstSettings, data, 0644)
-		}
+	if data, err := os.ReadFile(srcSettings); err == nil {
+		os.WriteFile(filepath.Join(basePath, "settings.yaml"), data, 0644)
 	}
 
 	return nil
 }
 
-func rebuildDBFromFS(basePath string, database *gorm.DB) error {
-	ctx := database.Statement.Context
-	if ctx == nil {
-		ctx = database.Statement.Context
+// restoreEntities wipes the entity tables and re-inserts every row from the
+// entities/ JSON tree, preserving original IDs so cross-references and
+// ID-embedding paths (logs/{co}/{taskID}/..., uploads/{taskID}/...) stay
+// valid.
+func restoreEntities(tempDir string, database *gorm.DB) error {
+	entitiesDir := filepath.Join(tempDir, "entities")
+	if _, err := os.Stat(entitiesDir); err != nil {
+		return fmt.Errorf("archive has no entities/ tree (unsupported backup version?): %w", err)
 	}
 
-	// Wipe existing data
+	// Wipe existing data (children before parents for FK enforcement). The
+	// identity graph is wiped last of all — companies (and their per-user
+	// providers) reference users/teams, so they must go first; the ephemeral
+	// auth tables (sessions, reset tokens, invites) are cleared too since
+	// they FK to users and are not part of the archive.
 	tables := []string{
-		"activity_logs", "proxy_request_logs", "runs", "comments",
-		"attachments", "tasks", "skills", "agents", "llm_providers",
-		"sprints", "projects", "companies",
+		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
+		"mcp_accounts", "mcp_servers",
+		"activity_logs", "proxy_request_logs", "artifacts", "runs", "comments",
+		"attachments", "tasks", "skills", "agents",
+		"model_group_members", "model_groups", "default_model_settings",
+		"llm_providers", "sprints", "projects", "companies",
+		"team_invites", "password_reset_tokens", "sessions",
+		"web_authn_sessions", "web_authn_credentials", "team_members", "teams", "users",
 	}
 	for _, table := range tables {
-		database.WithContext(ctx).Exec("DELETE FROM " + table)
+		database.Exec("DELETE FROM " + table)
 	}
-	database.WithContext(ctx).Exec("DELETE FROM sqlite_sequence")
+	// SQLite tracks AUTOINCREMENT counters in sqlite_sequence; clearing it lets
+	// restored explicit ids re-seed the counter. Postgres has no such table —
+	// its serial sequences are realigned after the insert (see
+	// resetPostgresSequences below), so skip this on Postgres.
+	if database.Dialector.Name() == "sqlite" {
+		database.Exec("DELETE FROM sqlite_sequence")
+	}
 
-	storage := filesystem.NewStorage(basePath)
-	fm := filesystem.NewManager(basePath)
+	byTable := map[string][]row{}
+	addRows := func(table string, rows []row) {
+		byTable[table] = append(byTable[table], rows...)
+	}
 
-	// 1. Restore LLM Providers
-	providers, err := storage.ReadProviders()
-	if err != nil {
-		log.Printf("Warning: failed to read providers: %v", err)
-	} else {
-		providerIDMap := map[int32]int32{}
-		for _, p := range providers {
-			oldID := p.ID
-			provider := db.LLMProvider{
-				Name:            p.Name,
-				BaseUrl:         p.BaseUrl,
-				ApiKey:          p.ApiKey,
-				ProviderType:    p.ProviderType,
-				DefaultModel:    p.DefaultModel,
-				SupportedModels: p.SupportedModels,
-			}
-			if err := database.WithContext(ctx).Create(&provider).Error; err != nil {
-				log.Printf("Warning: failed to restore provider %s: %v", p.Name, err)
-				continue
-			}
-			providerIDMap[oldID] = provider.ID
-		}
-
-		// 2. Restore Companies
-		companyDirs, err := storage.ListCompanyDirs()
+	// Global tables.
+	for _, g := range []struct{ file, table string }{
+		{"users.json", "users"},
+		{"teams.json", "teams"},
+		{"team-members.json", "team_members"},
+		{"webauthn-credentials.json", "web_authn_credentials"},
+		{"llm-providers.json", "llm_providers"},
+		{"model-groups.json", "model_groups"},
+		{"model-group-members.json", "model_group_members"},
+		{"default-model-settings.json", "default_model_settings"},
+		{"mcp-servers.json", "mcp_servers"},
+		{"mcp-accounts.json", "mcp_accounts"},
+		{"agent-mcp-servers.json", "agent_mcp_servers"},
+		{"agent-mcp-accounts.json", "agent_mcp_accounts"},
+		{"agent-mcp-tool-filters.json", "agent_mcp_tool_filters"},
+		{"activity-logs.json", "activity_logs"},
+	} {
+		rows, err := readRowsFile(filepath.Join(entitiesDir, g.file))
 		if err != nil {
-			return fmt.Errorf("failed to list companies: %w", err)
+			log.Printf("Warning: restore: %s: %v", g.file, err)
+			continue
+		}
+		addRows(g.table, rows)
+	}
+
+	// Company tree.
+	companiesDir := filepath.Join(entitiesDir, "companies")
+	companyEntries, _ := os.ReadDir(companiesDir)
+	for _, ce := range companyEntries {
+		if !ce.IsDir() {
+			continue
+		}
+		compDir := filepath.Join(companiesDir, ce.Name())
+
+		if r, err := readRowFile(filepath.Join(compDir, "company.json")); err == nil {
+			addRows("companies", []row{r})
+		} else {
+			log.Printf("Warning: restore: company %s: %v", ce.Name(), err)
+			continue
 		}
 
-		companyIDMap := map[int32]int32{}
-		for _, shortName := range companyDirs {
-			compMeta, err := storage.ReadCompany(shortName)
-			if err != nil {
-				log.Printf("Warning: failed to read company %s: %v", shortName, err)
+		addRows("agents", readRowDir(filepath.Join(compDir, "agents")))
+		addRows("sprints", readRowDir(filepath.Join(compDir, "sprints")))
+		if rows, err := readRowsFile(filepath.Join(compDir, "skills.json")); err == nil {
+			addRows("skills", rows)
+		}
+
+		projEntries, _ := os.ReadDir(filepath.Join(compDir, "projects"))
+		for _, pe := range projEntries {
+			if !pe.IsDir() {
 				continue
 			}
-
-			oldID := compMeta.ID
-			company := db.Company{
-				Name:      compMeta.Name,
-				ShortName: compMeta.ShortName,
-				Color:     compMeta.Color,
+			if r, err := readRowFile(filepath.Join(compDir, "projects", pe.Name(), "project.json")); err == nil {
+				addRows("projects", []row{r})
 			}
-			if err := database.WithContext(ctx).Create(&company).Error; err != nil {
-				log.Printf("Warning: failed to restore company %s: %v", shortName, err)
+		}
+
+		taskEntries, _ := os.ReadDir(filepath.Join(compDir, "tasks"))
+		for _, te := range taskEntries {
+			if !te.IsDir() {
 				continue
 			}
-			companyIDMap[oldID] = company.ID
-
-			// 3. Restore Projects for this company
-			projectDirs, err := storage.ListProjectDirs(shortName)
-			if err != nil {
-				log.Printf("Warning: failed to list projects for %s: %v", shortName, err)
+			taskDir := filepath.Join(compDir, "tasks", te.Name())
+			if r, err := readRowFile(filepath.Join(taskDir, "task.json")); err == nil {
+				addRows("tasks", []row{r})
+			} else {
+				log.Printf("Warning: restore: task %s/%s: %v", ce.Name(), te.Name(), err)
 				continue
 			}
-
-			projectIDMap := map[int32]int32{}
-			for _, projName := range projectDirs {
-				projMeta, err := storage.ReadProject(shortName, projName)
-				if err != nil {
-					log.Printf("Warning: failed to read project %s/%s: %v", shortName, projName, err)
-					continue
-				}
-
-				oldProjID := projMeta.ID
-				project := db.Project{
-					CompanyID:       company.ID,
-					Name:            projMeta.Name,
-					Description:     projMeta.Description,
-					WorkspaceFolder: projMeta.WorkspaceFolder,
-					RepositoryUrl:   projMeta.RepositoryUrl,
-				}
-				if err := database.WithContext(ctx).Create(&project).Error; err != nil {
-					log.Printf("Warning: failed to restore project %s: %v", projName, err)
-					continue
-				}
-				projectIDMap[oldProjID] = project.ID
+			if rows, err := readRowsFile(filepath.Join(taskDir, "comments.json")); err == nil {
+				addRows("comments", rows)
 			}
-
-			// 4. Restore Sprints for this company (read from companies/ Manager path)
-			sprintRecords, err := fm.ListSprintsFromDisk(shortName)
-			if err != nil {
-				log.Printf("Warning: failed to read sprints for %s: %v", shortName, err)
-				continue
+			if rows, err := readRowsFile(filepath.Join(taskDir, "attachments.json")); err == nil {
+				addRows("attachments", rows)
 			}
-
-			sprintIDMap := map[int32]int32{}
-			for _, s := range sprintRecords {
-				oldSprintID := s.ID
-				sprint := db.Sprint{
-					CompanyID: company.ID,
-					Name:      s.Name,
-					Goal:      s.Goal,
-					StartDate: s.StartDate,
-					EndDate:   s.EndDate,
-				}
-				if err := database.WithContext(ctx).Create(&sprint).Error; err != nil {
-					log.Printf("Warning: failed to restore sprint %s: %v", s.Name, err)
-					continue
-				}
-				sprintIDMap[oldSprintID] = sprint.ID
+			if rows, err := readRowsFile(filepath.Join(taskDir, "artifacts.json")); err == nil {
+				addRows("artifacts", rows)
 			}
+			addRows("runs", readRowDir(filepath.Join(taskDir, "runs")))
+		}
+	}
 
-			// 5. Restore Agents for this company
-			agents, err := storage.ReadAgents(shortName)
-			if err != nil {
-				log.Printf("Warning: failed to read agents for %s: %v", shortName, err)
-				continue
-			}
-
-			agentIDMap := map[int32]int32{}
-			for _, a := range agents {
-				oldAgentID := a.ID
-				agent := db.Agent{
-					CompanyID:    company.ID,
-					Name:         a.Name,
-					Description:  a.Description,
-					SystemPrompt: a.SystemPrompt,
-					Model:        a.Model,
-					Mode:         a.Mode,
-					Permissions:  a.Permissions,
-				}
-				if a.ProviderID != nil {
-					if newProviderID, ok := providerIDMap[*a.ProviderID]; ok {
-						agent.ProviderID = &newProviderID
-					}
-				}
-				if err := database.WithContext(ctx).Create(&agent).Error; err != nil {
-					log.Printf("Warning: failed to restore agent %s: %v", a.Name, err)
-					continue
-				}
-				agentIDMap[oldAgentID] = agent.ID
-			}
-
-			// 6. Restore Tasks for this company (read from companies/ Manager path)
-			taskRecords, err := fm.ListTasksFromDisk(shortName)
-			if err != nil {
-				log.Printf("Warning: failed to read tasks for %s: %v", shortName, err)
-				continue
-			}
-
-			taskIDMap := map[int32]int32{}
-			for _, t := range taskRecords {
-				oldTaskID := t.ID
-				task := db.Task{
-					CompanyID:   company.ID,
-					Title:       t.Title,
-					TaskType:    t.TaskType,
-					Description: t.Description,
-					Status:      t.Status,
-					Priority:    t.Priority,
-					IsArchived:  t.IsArchived,
-					SprintID:    sprintIDMap[t.SprintID],
-					DueDate:     t.DueDate,
-				}
-				if t.ProjectID != nil {
-					if newProjectID, ok := projectIDMap[*t.ProjectID]; ok {
-						task.ProjectID = &newProjectID
-					}
-				}
-				if t.AgentID != nil {
-					if newAgentID, ok := agentIDMap[*t.AgentID]; ok {
-						task.AgentID = &newAgentID
-					}
-				}
-				if t.ParentID != nil {
-					if newParentID, ok := taskIDMap[*t.ParentID]; ok {
-						task.ParentID = &newParentID
-					}
-				}
-				if err := database.WithContext(ctx).Create(&task).Error; err != nil {
-					log.Printf("Warning: failed to restore task %s: %v", t.Title, err)
-					continue
-				}
-				taskIDMap[oldTaskID] = task.ID
-
-				// 7. Restore Comments for this task (read from companies/ Manager path)
-				commentRecs, err := fm.ListTaskCommentsFromDisk(shortName, t.ID)
-				if err == nil {
-					for _, c := range commentRecs {
-						comment := db.Comment{
-							TaskID:     task.ID,
-							AuthorType: c.AuthorType,
-							Content:    c.Content,
-							AuthorID:   c.AuthorID,
-						}
-						database.WithContext(ctx).Create(&comment)
-					}
-				}
-
-				// 8. Restore Attachments for this task
-				attachments, err := storage.ReadAttachments(shortName, t.ID)
-				if err == nil {
-					for _, a := range attachments {
-						attachment := db.Attachment{
-							TaskID:   task.ID,
-							Filename: a.Filename,
-							FilePath: a.FilePath,
-							MimeType: a.MimeType,
-						}
-						database.WithContext(ctx).Create(&attachment)
-					}
-				}
-
-				// 9. Restore Runs for this task
-				runs, err := storage.ReadRuns(shortName, t.ID)
-				if err == nil {
-					for _, r := range runs {
-						run := db.Run{
-							TaskID:      task.ID,
-							AgentID:     agentIDMap[r.AgentID],
-							Status:      r.Status,
-							SessionID:   r.SessionID,
-							LogContent:  r.LogContent,
-						}
-						if r.StartedAt != "" {
-							st, _ := parseTime(r.StartedAt)
-							run.StartedAt = st
-						}
-						if r.EndedAt != "" {
-							et, _ := parseTime(r.EndedAt)
-							run.EndedAt = &et
-						}
-						database.WithContext(ctx).Create(&run)
-					}
-				}
+	// Insert in dependency order, each table's rows sorted by id so
+	// self-references (task parent_id) resolve before their children.
+	insertOrder := []string{
+		"users", "teams", "team_members", "web_authn_credentials",
+		"companies", "llm_providers", "model_groups", "model_group_members",
+		"default_model_settings", "sprints", "projects", "agents", "skills",
+		"tasks", "comments", "attachments", "artifacts", "runs",
+		"mcp_servers", "mcp_accounts",
+		"agent_mcp_servers", "agent_mcp_accounts", "agent_mcp_tool_filters",
+		"activity_logs",
+	}
+	for _, table := range insertOrder {
+		rows := byTable[table]
+		sortRowsByID(rows)
+		for _, r := range rows {
+			if err := database.Table(table).Create(&r).Error; err != nil {
+				log.Printf("Warning: restore: failed to insert into %s (id=%v): %v", table, r["id"], err)
 			}
 		}
 	}
 
-	// 10. Restore Activity Logs
-	activityLogs, err := storage.ReadActivityLogs()
-	if err == nil {
-		for _, al := range activityLogs {
-			activityLog := db.ActivityLog{
-				CompanyID:  al.CompanyID,
-				Action:     al.Action,
-				EntityID:   al.EntityID,
-				EntityType: al.EntityType,
-				Details:    al.Details,
-			}
-			if al.CreatedAt != "" {
-				t, _ := parseTime(al.CreatedAt)
-				activityLog.CreatedAt = t
-			}
-			database.WithContext(ctx).Create(&activityLog)
-		}
-	}
+	// On Postgres, rows were inserted with explicit ids, which does NOT advance
+	// the tables' serial sequences. Realign every sequence past the max restored
+	// id so the next auto-id insert doesn't collide with a restored row. On
+	// SQLite this is unnecessary (rowid allocation follows MAX(rowid)), so it's
+	// a no-op there.
+	resetPostgresSequences(database, insertOrder)
 
 	return nil
 }
 
-func parseTime(s string) (time.Time, error) {
-	// Try multiple formats
-	formats := []string{
-		"2006-01-02T15:04:05Z",
-		"2006-01-02T15:04:05-07:00",
-		"2006-01-02 15:04:05",
+// resetPostgresSequences advances each table's identity sequence past the
+// largest restored id. No-op on non-Postgres dialects and for tables without a
+// serial id column (e.g. the composite-key join tables).
+func resetPostgresSequences(database *gorm.DB, tables []string) {
+	if database.Dialector.Name() != "postgres" {
+		return
 	}
-	for _, format := range formats {
-		if t, err := time.Parse(format, s); err == nil {
-			return t, nil
+	for _, table := range tables {
+		// Skip tables without an id column (the composite-key join tables) up
+		// front — pg_get_serial_sequence raises rather than returns NULL for a
+		// missing column, which would log a spurious error.
+		var hasID bool
+		if err := database.Raw(
+			`SELECT EXISTS (SELECT 1 FROM information_schema.columns
+			 WHERE table_schema = current_schema() AND table_name = ? AND column_name = 'id')`,
+			table,
+		).Scan(&hasID).Error; err != nil || !hasID {
+			continue
+		}
+		var seq *string
+		if err := database.Raw(`SELECT pg_get_serial_sequence(?, 'id')`, table).Scan(&seq).Error; err != nil || seq == nil {
+			continue // no serial id column — nothing to realign
+		}
+		// is_called mirrors whether the table has rows: with rows, setval to
+		// MAX(id) and is_called=true so nextval yields MAX(id)+1; empty, reset to
+		// 1 with is_called=false so the first insert still gets id=1.
+		if err := database.Exec(
+			`SELECT setval(?, COALESCE((SELECT MAX(id) FROM `+table+`), 1), (SELECT MAX(id) FROM `+table+`) IS NOT NULL)`,
+			*seq,
+		).Error; err != nil {
+			log.Printf("Warning: restore: failed to realign sequence for %s: %v", table, err)
 		}
 	}
-	return time.Time{}, fmt.Errorf("failed to parse time: %s", s)
+}
+
+func sortRowsByID(rows []row) {
+	for i := 0; i < len(rows)-1; i++ {
+		for j := i + 1; j < len(rows); j++ {
+			if toID(rows[i]) > toID(rows[j]) {
+				rows[i], rows[j] = rows[j], rows[i]
+			}
+		}
+	}
+}
+
+func readRowsFile(path string) ([]row, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var rows []row
+	if err := json.Unmarshal(data, &rows); err != nil {
+		return nil, err
+	}
+	return rows, nil
+}
+
+func readRowFile(path string) (row, error) {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var r row
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, err
+	}
+	return r, nil
+}
+
+// readRowDir reads every {id}.json in dir; missing dirs yield no rows.
+func readRowDir(dir string) []row {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil
+	}
+	var rows []row
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasSuffix(e.Name(), ".json") {
+			continue
+		}
+		if r, err := readRowFile(filepath.Join(dir, e.Name())); err == nil {
+			rows = append(rows, r)
+		} else {
+			log.Printf("Warning: restore: skipping %s: %v", filepath.Join(dir, e.Name()), err)
+		}
+	}
+	return rows
+}
+
+// repairWorktrees runs `git worktree repair` for every restored repo,
+// passing the company's worktree directories, so worktrees restored to a
+// different BasePath re-link to their repos. Best-effort: failures are
+// logged, never fatal.
+func repairWorktrees(basePath string) {
+	reposDir := filepath.Join(basePath, "repos")
+	companies, err := os.ReadDir(reposDir)
+	if err != nil {
+		return
+	}
+	for _, comp := range companies {
+		if !comp.IsDir() {
+			continue
+		}
+		// Candidate worktrees for this company.
+		var worktrees []string
+		wsEntries, _ := os.ReadDir(filepath.Join(basePath, "workspace", comp.Name()))
+		for _, w := range wsEntries {
+			if w.IsDir() {
+				worktrees = append(worktrees, filepath.Join(basePath, "workspace", comp.Name(), w.Name()))
+			}
+		}
+
+		projects, _ := os.ReadDir(filepath.Join(reposDir, comp.Name()))
+		for _, proj := range projects {
+			if !proj.IsDir() {
+				continue
+			}
+			repoDir := filepath.Join(reposDir, comp.Name(), proj.Name())
+			if _, err := os.Stat(filepath.Join(repoDir, ".git")); err != nil {
+				continue
+			}
+			args := append([]string{"-C", repoDir, "worktree", "repair"}, worktrees...)
+			if out, err := exec.Command("git", args...).CombinedOutput(); err != nil {
+				log.Printf("Warning: git worktree repair for %s: %v (%s)", repoDir, err, strings.TrimSpace(string(out)))
+			}
+		}
+	}
 }
 
 func copyDir(src, dst string) error {
@@ -441,7 +424,7 @@ func copyDir(src, dst string) error {
 			return err
 		}
 
-		return os.WriteFile(dstPath, data, 0644)
+		return os.WriteFile(dstPath, data, info.Mode().Perm())
 	})
 }
 

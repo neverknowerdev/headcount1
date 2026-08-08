@@ -15,9 +15,25 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/runtokens"
+	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
+
 	"github.com/go-chi/chi/v5"
 )
+
+// internalGatewayHeaders are headers that authenticate or annotate a request
+// to the in-process LLM gateway only. They must NEVER reach an upstream
+// provider — most importantly the per-run gateway token, which would otherwise
+// be handed to (and potentially logged/replayed by) an external LLM provider.
+// Stripping them here, in the single function that talks to providers, is a
+// centralized guarantee that does not depend on each caller's skipHeaders set.
+var internalGatewayHeaders = map[string]bool{
+	strings.ToLower(runtokens.TokenHeader): true, // X-Gateway-Token
+	"x-run-id":                             true,
+	strings.ToLower(proxyLogModeHeader):    true, // X-Proxy-Log-Mode
+	"x-provider-id":                        true,
+}
 
 // Rate-limit cooldowns double per consecutive rate limit, capped so a model
 // is always retried within the hour.
@@ -211,7 +227,8 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 		return nil, err
 	}
 	for k, vv := range srcHeader {
-		if skipHeaders[strings.ToLower(k)] {
+		lk := strings.ToLower(k)
+		if skipHeaders[lk] || internalGatewayHeaders[lk] {
 			continue
 		}
 		for _, v := range vv {
@@ -221,7 +238,17 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 	if bodyBytes != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	req.Header.Set("Authorization", "Bearer "+provider.ApiKey)
+	// A locked owner (logged out, or cold after a crash) can't decrypt their
+	// provider key — surface that clearly instead of sending an empty Bearer
+	// and getting an opaque upstream 401.
+	if provider.UserID != nil && !secrets.IsUnlocked(*provider.UserID) {
+		return nil, fmt.Errorf("vault locked: this provider's owner is logged out — re-authenticate to run")
+	}
+	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+	if err != nil {
+		return nil, fmt.Errorf("decrypt provider key: %w", err)
+	}
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	return providerHTTPClient.Do(req)
 }
 
@@ -233,7 +260,7 @@ var providerHTTPClient = &http.Client{}
 func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http.Request) {
 	groupKey := chi.URLParam(r, "group_key")
 	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
-	if err != nil {
+	if err != nil || !g.mayUseGroup(r, group) {
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
@@ -245,6 +272,19 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
+	}
+
+	// Defense in depth against a cross-tenant member: every member provider
+	// must belong to the group's owner. replaceGroupMembers enforces this at
+	// write time; re-checking here means a tampered or legacy row can never
+	// cause the gateway to decrypt and spend another tenant's provider key.
+	if group.UserID != nil {
+		for _, m := range group.Members {
+			if m.Provider.UserID != nil && *m.Provider.UserID != *group.UserID {
+				http.Error(w, "Model group references a provider owned by another user", http.StatusForbidden)
+				return
+			}
+		}
 	}
 
 	bodyBytes, err := io.ReadAll(r.Body)
@@ -502,6 +542,32 @@ func (g *LLMGateway) finishRunAccounting(ctx context.Context, runID int, member 
 	}
 }
 
+// companyScopedHub adapts the gateway hub to the plain BroadcastEvent
+// interface the proxy logger expects, pinning delivery to one company.
+type companyScopedHub struct {
+	hub       GatewayHub
+	companyID int32
+}
+
+func (h companyScopedHub) BroadcastEvent(eventType string, payload interface{}) {
+	h.hub.BroadcastEventForCompany(h.companyID, eventType, payload)
+}
+
+// companyForRun resolves (and caches) the company a run belongs to, for
+// tenant-scoped run_log events. Returns -1 (matches no client) when the run
+// can't be resolved — fail closed rather than leak across tenants.
+func (g *LLMGateway) companyForRun(runID int32) int32 {
+	if v, ok := g.runCompany.Load(runID); ok {
+		return v.(int32)
+	}
+	_, task, err := g.q.GetRunWithTask(context.Background(), runID)
+	if err != nil {
+		return -1
+	}
+	g.runCompany.Store(runID, task.CompanyID)
+	return task.CompanyID
+}
+
 // loggerForRun builds a ProxyLogger when an X-Run-ID header is present,
 // mirroring the behavior of the other proxy entrypoints.
 func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceName, providerName string, bodyBytes []byte, messages []map[string]interface{}) *logging.ProxyLogger {
@@ -512,12 +578,16 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 	if err != nil || run.Task.Company.ID == 0 {
 		return nil
 	}
+	var scopedHub interface{ BroadcastEvent(string, interface{}) }
+	if g.hub != nil {
+		scopedHub = companyScopedHub{hub: g.hub, companyID: run.Task.CompanyID}
+	}
 	proxyLogger, loggerErr := logging.NewProxyLoggerWithHub(
 		g.basePath,
 		run.Task.Company.ShortName,
 		run.TaskID,
 		run.ID,
-		g.hub,
+		scopedHub,
 		g.q,
 	)
 	if loggerErr != nil {
@@ -530,10 +600,11 @@ func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceN
 	return proxyLogger
 }
 
-// logRunEvent appends a structured entry to a run's log and broadcasts it
-// over the WebSocket hub. Used in switches-only log mode, where no
-// ProxyLogger (and thus no log file) is created — the engine's session
-// logger owns the file; the router only contributes routing events.
+// logRunEvent records a routing event for a run and broadcasts it over the
+// WebSocket hub. Used in switches-only log mode, where no ProxyLogger (and
+// thus no log file) is created — the engine's session logger owns the file;
+// the router only contributes routing events, which are short enough that
+// the metadata row's preview carries the whole content.
 func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map[string]interface{}) {
 	entry := map[string]interface{}{
 		"type":    entryType,
@@ -545,7 +616,7 @@ func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map
 		entry[k] = v
 	}
 	if g.hub != nil {
-		g.hub.BroadcastEvent("run_log", map[string]interface{}{
+		g.hub.BroadcastEventForCompany(g.companyForRun(int32(runID)), "run_log", map[string]interface{}{
 			"run_id": int32(runID),
 			"entry":  entry,
 		})
@@ -636,7 +707,7 @@ func parseNonStreamUsage(respBody []byte) (normalizedUsage, string) {
 func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 	groupKey := chi.URLParam(r, "group_key")
 	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
-	if err != nil {
+	if err != nil || !g.mayUseGroup(r, group) {
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}

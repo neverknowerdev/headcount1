@@ -1,0 +1,276 @@
+name: Deploy Production
+
+# Production deploys. Triggered by landing code on main or publishing a
+# release — never from a pull request, which can only reach staging (see
+# deploy-staging.yml).
+#
+#   push to main       -> event_type=main
+#   published release  -> event_type=release
+#
+# Both get a CalVer version from scripts/version.sh (2026.07.29, then .1/.2 for
+# further builds the same day) — a release's own tag names the release, it does
+# not name the build. Every production build tags the commit it was built from
+# with its version, which both reserves the number and makes the version the app
+# reports point at an artifact that can be re-deployed.
+#
+# The SERVER decides whether to apply the event: a production server tracks
+# either releases (default) or main, per its deploy_source setting, and
+# acknowledges the other with "200 ignored". So both triggers can stay on
+# without double-deploying.
+#
+# Deploys are owner-only. The job runs in the "production" GitHub Environment —
+# GitHub special-cases that name as a production deployment — so required
+# reviewers or a wait timer configured there gate the deploy, and it is recorded
+# with a link to the live URL.
+#
+# Config lives ON THE ENVIRONMENT (Settings -> Environments -> production):
+#   vars.DEPLOY_URL        - https://app.headcount1.ai
+#   secrets.DEPLOY_API_KEY - must equal that server's HEADCOUNT1_DEPLOY_API_KEY
+#
+# Every OTHER variable and secret on the environment is delivered to the server
+# as an env var, which is how the app's own configuration is managed in GitHub
+# instead of on the box. Nothing to list. Opt a name out with
+# vars.DEPLOY_ENV_EXCLUDE (see .github/actions/collect-deploy-env).
+
+on:
+  push:
+    branches: [main]
+  release:
+    types: [published]
+
+concurrency:
+  # Never cancel a production deploy that is already shipping; queue instead.
+  group: deploy-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    # NOTE: if this repo moves to an organization, repository_owner becomes the
+    # org name and will never equal a username; switch to an actor allowlist or
+    # rely on the production environment's required reviewers instead.
+    if: github.actor == github.repository_owner
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ vars.DEPLOY_URL }}
+    permissions:
+      contents: write # tag the build and publish its release asset
+    steps:
+      - name: Resolve what to deploy
+        id: target
+        env:
+          EVENT: ${{ github.event_name }}
+          PUSH_REF: ${{ github.ref_name }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT" = "release" ]; then
+            event_type=release
+            ref="$RELEASE_TAG"
+          else
+            event_type=main
+            ref="$PUSH_REF"
+          fi
+          {
+            echo "event_type=$event_type"
+            echo "ref=$ref"
+            echo "release_tag=$RELEASE_TAG"
+            echo "commit=${SHA:0:7}"
+            echo "date=$(date -u +%Y-%m-%d)"
+          } >> "$GITHUB_OUTPUT"
+          echo "Deploying $ref @ ${SHA:0:7} to production ($event_type)"
+
+      - uses: actions/checkout@v4
+        with:
+          # Tags + full history: scripts/version.sh picks the next free CalVer by
+          # probing existing tags, which a shallow clone cannot see.
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.3'
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # Every variable and secret this environment exposes, delivered to the
+      # server as its env vars. Nothing to enumerate: add a secret in GitHub and
+      # the next deploy carries it.
+      - name: Collect delivered env
+        id: env
+        uses: ./.github/actions/collect-deploy-env
+        with:
+          exclude: ${{ vars.DEPLOY_ENV_EXCLUDE }}
+          secrets_json: ${{ toJSON(secrets) }}
+          vars_json: ${{ toJSON(vars) }}
+
+      - name: Build
+        id: build
+        run: |
+          set -euo pipefail
+          # Versions are always minted here, for every trigger — never taken from
+          # whatever tag a release happens to carry. One scheme, so "2026.07.29"
+          # means the same thing however the deploy was started.
+          VERSION=$(./scripts/version.sh production)
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "Building version $VERSION"
+          cd frontend && npm install && npm run build && cd ..
+          GOOS=linux GOARCH=arm64 go build \
+            -ldflags "-X main.Version=$VERSION -X main.CommitHash=${{ steps.target.outputs.commit }} -X main.BuildDate=${{ steps.target.outputs.date }} -X main.Branch=${{ steps.target.outputs.ref }}" \
+            -o agent-orchestrator-linux-arm64 \
+            main.go
+
+      - name: Publish release asset
+        id: publish
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.build.outputs.version }}
+          RELEASE_TAG: ${{ steps.target.outputs.release_tag }}
+          SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          if [ -n "$RELEASE_TAG" ]; then
+            # Reserve the version by tagging the commit it was built from.
+            # version.sh mints the next number by reading these tags, so without
+            # this a second release the same day would be handed the same one.
+            git tag "$VERSION" "$SHA"
+            git push origin "refs/tags/$VERSION"
+            # The release itself already exists under the tag a human chose —
+            # attach the binary there rather than opening a competing release.
+            gh release upload "$RELEASE_TAG" agent-orchestrator-linux-arm64 --clobber
+            asset_tag="$RELEASE_TAG"
+          else
+            # One release per production build, tagged with its version (which
+            # also reserves the number). Not rolling: every build stays
+            # downloadable, so a bad deploy can be rolled back to the exact bytes
+            # of the previous one.
+            # Marked prerelease so "latest release" keeps meaning a release a
+            # human published, which is what the releases deploy_source tracks.
+            gh release create "$VERSION" \
+              --prerelease \
+              --target "$SHA" \
+              --title "$VERSION (main @ ${{ steps.target.outputs.commit }})" \
+              --notes "Production deploy build for main (${{ steps.target.outputs.commit }})." \
+              agent-orchestrator-linux-arm64
+            asset_tag="$VERSION"
+          fi
+          # The server pins the artifact by digest, so publish the digest of the
+          # exact bytes we uploaded.
+          asset_url=$(gh api "repos/${{ github.repository }}/releases/tags/$asset_tag" \
+            --jq '.assets[] | select(.name=="agent-orchestrator-linux-arm64") | .url')
+          # This repository is PRIVATE, so that asset API URL only serves the
+          # binary to an authenticated caller — the server holds no GitHub
+          # credential and gets HTTP 404 from it. Resolve the redirect here,
+          # where we do have a token: GitHub hands back a short-lived signed
+          # release-assets URL that serves the same bytes without one, and
+          # release-assets.githubusercontent.com is an allowed deploy source
+          # (see pkg/updater). Integrity still rests on the sha256 below.
+          download_url=$(curl -sS -o /dev/null -w '%{redirect_url}' \
+            -H "Authorization: Bearer $GH_TOKEN" \
+            -H "Accept: application/octet-stream" \
+            "$asset_url")
+          if [ -z "$download_url" ]; then
+            echo "::error::Could not resolve a signed download URL for the release asset."
+            exit 1
+          fi
+          # Through a file, not a step output: that signed URL is itself the
+          # credential for the download, and workflow logs echo the notify step's
+          # expression expansions verbatim.
+          # (Never write an empty expression literally in a run: block, even in a
+          # shell comment — Actions scans the whole script for them and refuses to
+          # load the workflow, which shows up as a startup_failure with no logs.)
+          umask 077
+          printf '%s' "$download_url" > "$RUNNER_TEMP/download-url.txt"
+          {
+            echo "sha256=$(sha256sum agent-orchestrator-linux-arm64 | awk '{print $1}')"
+            echo "download_url_file=$RUNNER_TEMP/download-url.txt"
+          } >> "$GITHUB_OUTPUT"
+
+      - name: Notify production server
+        env:
+          BASE: ${{ vars.DEPLOY_URL }}
+          DEPLOY_KEY: ${{ secrets.DEPLOY_API_KEY }}
+          ENV_FILE: ${{ steps.env.outputs.env_file }}
+          ENV_SECRET_KEYS: ${{ steps.env.outputs.secret_keys_json }}
+          DOWNLOAD_URL_FILE: ${{ steps.publish.outputs.download_url_file }}
+        run: |
+          set -euo pipefail
+          if [ -z "$BASE" ]; then
+            echo "No DEPLOY_URL variable set on the 'production' environment."
+            exit 1
+          fi
+          # The payload carries the delivered configuration, so it goes through a
+          # 0600 file rather than an argv/variable: `curl -d "$payload"` would put
+          # secrets in this runner's process list.
+          payload_file="$RUNNER_TEMP/deploy-payload.json"
+          umask 077
+          jq -n \
+            --arg et "${{ steps.target.outputs.event_type }}" \
+            --arg ref "${{ steps.target.outputs.ref }}" \
+            --arg commit "${{ steps.target.outputs.commit }}" \
+            --arg date "${{ steps.target.outputs.date }}" \
+            --arg url "$(cat "$DOWNLOAD_URL_FILE")" \
+            --arg sha "${{ steps.publish.outputs.sha256 }}" \
+            --arg version "${{ steps.build.outputs.version }}" \
+            --slurpfile env "$ENV_FILE" \
+            --argjson skeys "$ENV_SECRET_KEYS" \
+            '{event_type:$et, ref:$ref, commit:$commit, build_date:$date,
+              version:$version, download_url:$url, sha256:$sha, target:"production",
+              env:$env[0], env_secret_keys:$skeys}' > "$payload_file"
+          echo "Delivering env: ${{ steps.env.outputs.summary }}"
+          code=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+            -H "Content-Type: application/json" \
+            -H "X-Deploy-Key: $DEPLOY_KEY" \
+            --data-binary "@$payload_file")
+          echo "Server responded HTTP $code:"; cat /tmp/resp || true; echo
+          # Names the server would not apply (PATH, LD_*, its own deploy config,
+          # ...). Expected when the environment holds secrets meant for other
+          # workflows, but they must be visible rather than vanishing.
+          skipped=$(jq -r '.env_skipped // [] | .[]' /tmp/resp 2>/dev/null || true)
+          if [ -n "$skipped" ]; then
+            echo "::warning::Server did not apply some delivered env vars:"
+            echo "$skipped" | while read -r line; do echo "  - $line"; done
+          fi
+          # The server handles the deploy synchronously: a download/digest/swap
+          # failure comes back as an HTTP error with the reason, and fails this
+          # job right here. A 202 means the binary is swapped and the server is
+          # restarting into it — confirm that completed by re-posting the same
+          # event until the NEW binary answers "already running this commit"
+          # (200). While the old process is still draining, the re-post gets 409
+          # (deploy in progress) or a connection error; both mean keep waiting.
+          # Response bodies contain only status/reason fields and env var NAMES
+          # (env_skipped) — values are never echoed back.
+          case "$code" in
+            200)
+              echo "notify ok (server acknowledged without redeploying)"
+              ;;
+            202)
+              echo "Deploy started; waiting for the server to come back on the new build..."
+              deadline=$(( $(date +%s) + 600 ))
+              confirmed=""
+              while [ "$(date +%s)" -lt "$deadline" ]; do
+                sleep 10
+                code2=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+                  -H "Content-Type: application/json" \
+                  -H "X-Deploy-Key: $DEPLOY_KEY" \
+                  --data-binary "@$payload_file" || echo 000)
+                if [ "$code2" = "200" ]; then
+                  confirmed=1
+                  echo "Server is up on the new build:"; cat /tmp/resp; echo
+                  break
+                fi
+                echo "  still deploying (HTTP $code2)"
+              done
+              if [ -z "$confirmed" ]; then
+                echo "::error::Deploy started but the server did not confirm the new build within 10 minutes."
+                exit 1
+              fi
+              ;;
+            *)
+              echo "::error::Deploy failed on the server (HTTP $code); see response above."
+              exit 1
+              ;;
+          esac
+          rm -f "$payload_file" "$ENV_FILE" "$DOWNLOAD_URL_FILE"

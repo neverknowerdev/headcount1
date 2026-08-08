@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -28,8 +29,23 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	database, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.LLMProvider{}))
+	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}))
 	return database
+}
+
+// testSeedUserID returns (creating if needed) the fixture user builtin
+// providers are seeded under, now that builtins are per-user rows.
+func testSeedUserID(t *testing.T, q *db.Queries) int32 {
+	t.Helper()
+	u, err := q.GetUserByEmail(context.Background(), "seed@test.local")
+	if err != nil {
+		u, err = q.CreateUser(context.Background(), "seed@test.local")
+		require.NoError(t, err)
+	}
+	var dek [32]byte
+	dek[0], dek[1] = byte(u.ID), 0x5e
+	secrets.Default().UnlockUser(u.ID, dek, time.Hour)
+	return u.ID
 }
 
 func TestFetchOpenRouterFreeModels_FiltersFreePricing(t *testing.T) {
@@ -400,7 +416,7 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	q := db.New(database)
 	ctx := context.Background()
 
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 	providers, err := q.ListLLMProviders(ctx)
 	require.NoError(t, err)
 	require.Len(t, providers, 2)
@@ -409,7 +425,7 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	for _, p := range providers {
 		names[p.Name] = true
 		assert.True(t, p.Builtin)
-		assert.Empty(t, p.ApiKey, "builtin providers must not ship with a baked-in API key")
+		assert.Empty(t, p.ApiKeyEncrypted, "builtin providers must not ship with a baked-in API key")
 	}
 	assert.True(t, names[db.ProviderNameOpenRouter])
 	assert.True(t, names[db.ProviderNameOpenCodeZen])
@@ -420,15 +436,19 @@ func TestEnsureBuiltinLLMProviders_SeedsBothAndIsIdempotent(t *testing.T) {
 	if openRouter.Name != db.ProviderNameOpenRouter {
 		openRouter = providers[1]
 	}
-	openRouter.ApiKey = "user-key"
+	sealedKey, err := secrets.Default().EncryptForUser(*openRouter.UserID, "user-key")
+	require.NoError(t, err)
+	openRouter.ApiKeyEncrypted = sealedKey
 	openRouter.BaseUrl = "https://custom.example.com/v1"
 	_, err = q.UpdateLLMProvider(ctx, openRouter)
 	require.NoError(t, err)
 
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 	after, err := q.GetLLMProvider(ctx, openRouter.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "user-key", after.ApiKey)
+	afterKey, err := secrets.Default().Decrypt(after.ApiKeyEncrypted)
+	require.NoError(t, err)
+	assert.Equal(t, "user-key", afterKey)
 	assert.Equal(t, "https://custom.example.com/v1", after.BaseUrl)
 
 	providersAfter, err := q.ListLLMProviders(ctx)
@@ -441,7 +461,7 @@ func TestEnsureBuiltinLLMProviders_SetsStableProviderName(t *testing.T) {
 	q := db.New(database)
 	ctx := context.Background()
 
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 	providers, err := q.ListLLMProviders(ctx)
 	require.NoError(t, err)
 
@@ -453,25 +473,6 @@ func TestEnsureBuiltinLLMProviders_SetsStableProviderName(t *testing.T) {
 	assert.True(t, byVendor[db.ProviderVendorOpenCodeZen])
 }
 
-func TestEnsureBuiltinLLMProviders_BackfillsProviderNameOnLegacyRow(t *testing.T) {
-	database := setupTestDB(t)
-	q := db.New(database)
-	ctx := context.Background()
-
-	// Simulate a row created before ProviderName existed: builtin, matching
-	// Name, but no ProviderName set.
-	legacy, err := q.CreateLLMProvider(ctx, db.LLMProvider{
-		Name: db.ProviderNameOpenRouter, BaseUrl: db.OpenRouterBaseURL, Builtin: true, Enabled: true,
-	})
-	require.NoError(t, err)
-	require.Empty(t, legacy.ProviderName)
-
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
-	after, err := q.GetLLMProvider(ctx, legacy.ID)
-	require.NoError(t, err)
-	assert.Equal(t, db.ProviderVendorOpenRouter, after.ProviderName, "a pre-existing builtin row must be backfilled with its stable ProviderName")
-}
-
 func TestBuiltinProviderDispatch_SurvivesUserRenamingDisplayName(t *testing.T) {
 	// Regression test: RediscoverProviderModels/RefreshBuiltinProviderModels
 	// used to dispatch by matching the user-editable display Name — renaming
@@ -481,7 +482,7 @@ func TestBuiltinProviderDispatch_SurvivesUserRenamingDisplayName(t *testing.T) {
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 
 	var openRouter db.LLMProvider
 	require.NoError(t, database.Where("name = ?", db.ProviderNameOpenRouter).First(&openRouter).Error)
@@ -498,7 +499,7 @@ func TestRefreshBuiltinProviderModels_FetchFailureLeavesCatalogUntouched(t *test
 	database := setupTestDB(t)
 	q := db.New(database)
 	ctx := context.Background()
-	require.NoError(t, q.EnsureBuiltinLLMProviders(ctx))
+	require.NoError(t, q.EnsureBuiltinLLMProvidersForUser(ctx, testSeedUserID(t, q)))
 
 	// Give both providers a known-good catalog first, simulating a prior
 	// successful discovery.

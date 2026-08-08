@@ -19,6 +19,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -40,6 +41,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(4)
 	require.NoError(t, database.AutoMigrate(
+		&db.User{},
 		&db.Company{},
 		&db.Project{},
 		&db.Sprint{},
@@ -88,12 +90,20 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.First(&sprint, "company_id = ?", company.ID).Error)
 
 	var provider db.LLMProvider
+	// Seal the provider key under a fixed, unlocked fixture user so the sealed
+	// column holds real "enc:u1:" ciphertext the engine can open at point of use.
+	const engineTestUserID int32 = 707070
+	var engineTestDEK [32]byte
+	engineTestDEK[0], engineTestDEK[1] = 0x70, 0x70
+	secrets.Default().UnlockUser(engineTestUserID, engineTestDEK, time.Hour)
+	sealedKey, err := secrets.Default().EncryptForUser(engineTestUserID, "test-key")
+	require.NoError(t, err)
 	require.NoError(t, database.Create(&db.LLMProvider{
-		Name:         "mock-provider",
-		BaseUrl:      mockProviderURL,
-		ApiKey:       "test-key",
-		ProviderType: "openai",
-		DefaultModel: "test-model",
+		Name:            "mock-provider",
+		BaseUrl:         mockProviderURL,
+		ApiKeyEncrypted: sealedKey,
+		ProviderType:    "openai",
+		DefaultModel:    "test-model",
 	}).Error)
 	require.NoError(t, database.First(&provider, "name = ?", "mock-provider").Error)
 
@@ -360,6 +370,110 @@ func TestNativeEngineFixtureRun(t *testing.T) {
 	updatedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "in-review", updatedTask.Status, "fixture encodes a finish_task(in-review) call")
+}
+
+// ---- graceful-drain / auto-update pause+resume tests -------------------------
+
+// waitForRunStatus polls until the given run reaches the given status or the
+// timeout expires.
+func waitForRunStatus(t *testing.T, q *db.Queries, runID int32, status string, timeout time.Duration) db.Run {
+	t.Helper()
+	deadline := time.Now().Add(timeout)
+	for time.Now().Before(deadline) {
+		run, err := q.GetRun(context.Background(), runID)
+		if err == nil && run.Status == status {
+			return run
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("run %d did not reach status %q within %v", runID, status, timeout)
+	return db.Run{}
+}
+
+// TestNativeEnginePauseAndResume verifies the full graceful-drain lifecycle
+// behind the auto-update feature: BeginDrain stops new runs from starting,
+// an in-flight run pauses right after its current turn's LLM response
+// arrives (its pending tool call is never executed), the paused run's
+// conversation is persisted and the task stays locked to it, and a *fresh*
+// NativeEngine instance backed by the same DB (simulating the restarted
+// process) picks the run back up via ResumeInterruptedRuns and completes it —
+// including actually running the tool call that was pending at pause time.
+//
+// The pending tool call is report_status: it's available to every agent
+// (including the CEO orchestrator this task routes through) and its side
+// effect — writing run.current_status — is observable in the DB, so we can
+// assert it ran on resume and not before.
+func TestNativeEnginePauseAndResume(t *testing.T) {
+	tmpHome := t.TempDir()
+	t.Setenv("E2E_HEADCOUNT1_HOME", tmpHome)
+
+	database := setupTestDB(t)
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+
+	const resumeMarker = "status set after resume"
+	var callCount atomic.Int32
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		switch callCount.Add(1) {
+		case 1:
+			// Flip the engine into drain mode BEFORE this response is served:
+			// by the time the agent loop's pause check runs (immediately after
+			// receiving this exact response), draining is already true —
+			// deterministic, no sleep/race needed.
+			eng.BeginDrain()
+			json.NewEncoder(w).Encode(toolCallJSON("pr-001", "report_status",
+				fmt.Sprintf(`{"status":%q}`, resumeMarker)))
+		default:
+			json.NewEncoder(w).Encode(toolCallJSON("pr-002", "finish_task",
+				`{"task_status":"done","finish_status":"Resumed and completed"}`))
+		}
+	})
+	mockSrv := startTestServer(t, handler)
+	task := seedTestData(t, database, mockSrv.URL)
+	q := db.New(database)
+
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+
+	run := waitForRunStatus(t, q, runID, "interrupted", 10*time.Second)
+	assert.NotEmpty(t, run.PausedHistory, "paused run must persist its conversation")
+	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
+	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")
+
+	// The task must stay locked to the interrupted run so no other run can
+	// start on it while it's waiting to resume.
+	pausedTask, err := q.GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	require.NotNil(t, pausedTask.RunID)
+	assert.Equal(t, runID, *pausedTask.RunID)
+
+	// Draining also blocks new runs outright (ProcessTask no-ops).
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+	time.Sleep(200 * time.Millisecond)
+	assert.Equal(t, int32(1), callCount.Load(), "ProcessTask must not start a new run while draining")
+
+	// Simulate the restart: a fresh NativeEngine over the same DB. Its
+	// in-memory state (cancelFuncs, the drain flag) starts empty, exactly as
+	// it would after a real process restart — only the DB carries state across.
+	eng2 := engine.NewNativeEngine(database, hub)
+	eng2.ResumeInterruptedRuns(context.Background())
+
+	finalRun := waitForRunDone(t, q, runID, 15*time.Second)
+	assert.Equal(t, "completed", finalRun.Status)
+	assert.Empty(t, finalRun.PausedHistory, "resumed history should be cleared once consumed")
+	assert.Equal(t, int32(2), callCount.Load(), "resume must replay the pending tool call locally, then make exactly one more LLM call")
+	assert.Equal(t, resumeMarker, finalRun.CurrentStatus, "the tool call pending at pause time must run on resume")
+
+	finishedTask, err := q.GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "done", finishedTask.Status)
+	// The task unlocks in a deferred step that runs just after the run is
+	// marked completed, so poll rather than checking instantly.
+	require.Eventually(t, func() bool {
+		tk, gErr := q.GetTask(context.Background(), task.ID)
+		return gErr == nil && tk.RunID == nil
+	}, 5*time.Second, 50*time.Millisecond, "task must be unlocked once the resumed run finishes")
 }
 
 // ---- subtask tests ----------------------------------------------------------
@@ -704,8 +818,15 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	require.NoError(t, q.ReplaceModelGroupMembers(context.Background(), utilityGroup.ID, []db.ModelGroupMember{
 		{ProviderID: provider.ID, Model: "cheap-model"},
 	}))
+	// Default Models are per-user: give the task's company an owner and
+	// register the setting under that owner.
+	owner, err := q.CreateUser(context.Background(), "owner@test.local")
+	require.NoError(t, err)
+	var comp db.Company
+	require.NoError(t, database.First(&comp, task.CompanyID).Error)
+	require.NoError(t, database.Model(&comp).Update("user_id", owner.ID).Error)
 	require.NoError(t, database.Create(&db.DefaultModelSetting{
-		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID,
+		Purpose: db.PurposeAskArtifact, ModelGroupID: &utilityGroup.ID, UserID: &owner.ID,
 	}).Error)
 
 	seedRun, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "completed"})

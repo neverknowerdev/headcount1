@@ -34,6 +34,18 @@ func (q *Queries) GetModelGroupByKey(ctx context.Context, key string) (ModelGrou
 	return g, err
 }
 
+// ListModelGroupsForUser returns only the user's model groups.
+func (q *Queries) ListModelGroupsForUser(ctx context.Context, userID int32) ([]ModelGroup, error) {
+	var groups []ModelGroup
+	err := q.db.WithContext(ctx).
+		Where("user_id = ?", userID).
+		Preload("Members", func(db *gorm.DB) *gorm.DB { return db.Order("priority, id") }).
+		Preload("Members.Provider").
+		Order("id").
+		Find(&groups).Error
+	return groups, err
+}
+
 func (q *Queries) ListModelGroups(ctx context.Context) ([]ModelGroup, error) {
 	var groups []ModelGroup
 	err := q.db.WithContext(ctx).

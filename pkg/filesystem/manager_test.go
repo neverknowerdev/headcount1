@@ -11,27 +11,25 @@ import (
 )
 
 func TestFilesystemManager(t *testing.T) {
-	tempDir, err := os.MkdirTemp("", "fs-manager-test-*")
-	if err != nil {
-		t.Fatalf("Failed to create temp dir: %v", err)
-	}
-	defer os.RemoveAll(tempDir)
+	tempDir := t.TempDir()
 
 	manager := NewManager(tempDir)
 	company := db.Company{ID: 1, Name: "Test Company", ShortName: "test-co"}
 
-	err = manager.SetupBaseDirectories()
+	err := manager.SetupBaseDirectories()
 	assert.NoError(t, err)
 
 	expectedDirs := []string{
+		"db",
+		"ssh",
+		"credentials",
+		"uploads",
+		"backups",
+		"repos",
 		"workspace",
-		"data",
-		"data/memory",
-		"data/artifacts",
-		"data/skills",
-		"data/skills/basic",
-		"data/logs",
-		".ssh",
+		"artifacts",
+		"logs",
+		"skills",
 	}
 
 	for _, d := range expectedDirs {
@@ -56,4 +54,7 @@ func TestFilesystemManager(t *testing.T) {
 	info, err = os.Stat(memoryPath)
 	assert.NoError(t, err)
 	assert.False(t, info.IsDir())
+
+	assert.Equal(t, filepath.Join(tempDir, "repos", "test-co", "project-1"), manager.GetProjectRepoPath(company, project))
+	assert.Equal(t, filepath.Join(tempDir, "skills", "test-co", "review"), manager.GetSkillPath(company, db.Skill{Name: "review"}))
 }

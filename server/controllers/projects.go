@@ -8,20 +8,22 @@ import (
 	"net/http"
 	"os"
 	"os/exec"
-	"path/filepath"
 	"strconv"
 	"strings"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
-	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 	projects, err := api.q.ListProjectsByCompany(r.Context(), int32(compID))
@@ -34,15 +36,21 @@ func (api *API) ListProjects(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID       int32  `json:"company_id"`
-		Name            string `json:"name"`
-		Description     string `json:"description"`
-		WorkspaceFolder string `json:"workspace_folder"`
-		RepositoryUrl   string `json:"repository_url"`
-		IsExternal      bool   `json:"is_external"`
+		CompanyID        int32           `json:"company_id"`
+		Name             string          `json:"name"`
+		Description      string          `json:"description"`
+		WorkspaceFolder  string          `json:"workspace_folder"`
+		RepositoryUrl    string          `json:"repository_url"`
+		GitHubRepository json.RawMessage `json:"github_repository"`
+		IsExternal       bool            `json:"is_external"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 
@@ -52,10 +60,11 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if req.RepositoryUrl != "" {
+	if req.RepositoryUrl != "" && len(req.GitHubRepository) == 0 {
 		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
+		keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+		defer cleanup()
+		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
 		if err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
@@ -70,6 +79,12 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 		WorkspaceFolder: req.WorkspaceFolder,
 		RepositoryUrl:   req.RepositoryUrl,
 		IsExternal:      req.IsExternal,
+	}
+	if len(req.GitHubRepository) > 0 {
+		if err := api.applyGitHubRepositorySelection(r.Context(), api.currentUserID(r), &p, req.GitHubRepository); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
 	}
 
 	var comp db.Company
@@ -106,14 +121,26 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	fsManager.CreateProjectDirectories(comp, proj)
 
-	// Write project metadata to filesystem
-	storage := filesystem.NewStorage(settings.BasePath)
-	if err := storage.WriteProject(comp, proj); err != nil {
-		log.Printf("Warning: failed to write project metadata: %v", err)
-	}
-
-	if req.RepositoryUrl != "" {
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj); err != nil {
+	// A GitHub selection supplies its canonical clone URL server-side, so this
+	// must be based on the persisted project rather than the optional client
+	// repository_url field.
+	if proj.RepositoryUrl != "" {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		var tokens []string
+		if proj.GitHubInstallationID != 0 {
+			token, tokenErr := GitHubTokenForProject(r.Context(), proj)
+			if tokenErr != nil || token == "" {
+				api.db.Delete(&proj)
+				if tokenErr == nil {
+					tokenErr = fmt.Errorf("empty installation token")
+				}
+				api.respondError(w, http.StatusBadRequest, "GitHub access token could not be created: "+tokenErr.Error())
+				return
+			}
+			tokens = []string{token}
+		}
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, proj, repoKey, tokens...); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -139,7 +166,7 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 	newCGServer, cgErr := api.q.CreateMCPServer(r.Context(), cgServer)
 	if cgErr != nil {
 		log.Printf("Warning: failed to create codegraph MCP server for project %d: %v", proj.ID, cgErr)
-	} else if req.RepositoryUrl != "" {
+	} else if proj.RepositoryUrl != "" {
 		api.startCodegraphInit(proj.ID, newCGServer.ID, repoPath)
 	}
 
@@ -149,42 +176,71 @@ func (api *API) CreateProject(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
+	api.respondJSON(w, http.StatusOK, api.projectFromCtx(r)) // loaded + authorized by LoadProject
+}
+
+// ListProjectBranches returns branches already fetched in the project's local
+// repository. It is scoped by LoadProject, so another company's repository
+// names can never be enumerated through this endpoint.
+func (api *API) ListProjectBranches(w http.ResponseWriter, r *http.Request) {
+	project := api.projectFromCtx(r)
+	if project.RepositoryUrl == "" {
+		api.respondJSON(w, http.StatusOK, []string{db.DefaultTaskGitBaseBranch})
 		return
 	}
-	project, err := api.q.GetProject(r.Context(), int32(id))
+	company, err := api.q.GetCompany(r.Context(), project.CompanyID)
 	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
+		api.respondError(w, http.StatusInternalServerError, "could not load project company")
 		return
 	}
-	api.respondJSON(w, http.StatusOK, project)
+	settings := LoadSettings()
+	keyPath, cleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, company)
+	defer cleanup()
+	manager := git.NewGitManager(filesystem.NewManager(settings.BasePath).GetProjectRepoPath(company, project), keyPath)
+	if project.GitHubInstallationID != 0 {
+		token, tokenErr := GitHubTokenForProject(r.Context(), project)
+		if tokenErr != nil || token == "" {
+			api.respondError(w, http.StatusBadGateway, "could not authenticate to GitHub to list branches")
+			return
+		}
+		manager.WithHTTPToken(token)
+	}
+	remoteBranches, err := manager.ListRemoteBranches(r.Context())
+	if err != nil {
+		api.respondError(w, http.StatusServiceUnavailable, err.Error())
+		return
+	}
+	branches := make([]string, 0, len(remoteBranches)+1)
+	seen := make(map[string]bool, len(remoteBranches)+1)
+	for _, branch := range remoteBranches {
+		if seen[branch] {
+			continue
+		}
+		seen[branch] = true
+		branches = append(branches, branch)
+	}
+	if !seen[db.DefaultTaskGitBaseBranch] {
+		// Keep main available for repositories whose remote has not been
+		// initialized yet. Remote branches retain their newest-first order.
+		branches = append(branches, db.DefaultTaskGitBaseBranch)
+	}
+	api.respondJSON(w, http.StatusOK, branches)
 }
 
 func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
-		Name            string `json:"name"`
-		Description     string `json:"description"`
-		WorkspaceFolder string `json:"workspace_folder"`
-		RepositoryUrl   string `json:"repository_url"`
+		Name             string          `json:"name"`
+		Description      string          `json:"description"`
+		WorkspaceFolder  string          `json:"workspace_folder"`
+		RepositoryUrl    string          `json:"repository_url"`
+		GitHubRepository json.RawMessage `json:"github_repository"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
 
-	project, err := api.q.GetProject(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Project not found")
-		return
-	}
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
 
 	if req.Name != "" {
 		project.Name = req.Name
@@ -196,20 +252,50 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		project.WorkspaceFolder = req.WorkspaceFolder
 	}
 
-	if req.RepositoryUrl != "" {
-		settings := LoadSettings()
-		sshDir := filepath.Join(settings.BasePath, ".ssh")
-		normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, sshDir)
-		if err != nil {
+	githubRepositorySelected := len(req.GitHubRepository) > 0
+	if githubRepositorySelected {
+		if err := api.applyGitHubRepositorySelection(r.Context(), api.currentUserID(r), &project, req.GitHubRepository); err != nil {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		project.RepositoryUrl = normalized
+		req.RepositoryUrl = project.RepositoryUrl
+	} else if req.RepositoryUrl != "" {
+		// A manual URL deliberately opts out of GitHub App authentication. Clear
+		// all GitHub metadata so later clones and PR publishing cannot reuse the
+		// previous repository's installation token.
+		clearGitHubRepositoryMetadata(&project)
+	}
+	if req.RepositoryUrl != "" {
+		settings := LoadSettings()
+		if !githubRepositorySelected {
+			keyPath, cleanup := filesystem.ResolveSSHKeyPath(r.Context(), api.q, settings.BasePath, api.currentUserID(r))
+			defer cleanup()
+			normalized, err := validateAndConnectRepo(r.Context(), req.RepositoryUrl, keyPath)
+			if err != nil {
+				api.respondError(w, http.StatusBadRequest, err.Error())
+				return
+			}
+			project.RepositoryUrl = normalized
+		}
 
 		var comp db.Company
 		api.db.First(&comp, project.CompanyID)
 		fsManager := filesystem.NewManager(settings.BasePath)
-		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project); err != nil {
+		repoKey, repoKeyCleanup := filesystem.ResolveSSHKeyPathForCompany(r.Context(), api.q, settings.BasePath, comp)
+		defer repoKeyCleanup()
+		var tokens []string
+		if project.GitHubInstallationID != 0 {
+			token, tokenErr := GitHubTokenForProject(r.Context(), project)
+			if tokenErr != nil || token == "" {
+				if tokenErr == nil {
+					tokenErr = fmt.Errorf("empty installation token")
+				}
+				api.respondError(w, http.StatusBadRequest, "GitHub access token could not be created: "+tokenErr.Error())
+				return
+			}
+			tokens = []string{token}
+		}
+		if err := fsManager.PrepareProjectRepo(r.Context(), comp, project, repoKey, tokens...); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "Failed to prepare project repo: "+err.Error())
 			return
 		}
@@ -247,25 +333,27 @@ func (api *API) UpdateProject(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	project, err = api.q.UpdateProject(r.Context(), project)
+	saved, err := api.q.UpdateProject(r.Context(), project)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	api.logActivity(project.CompanyID, "project_updated", int32(project.ID), "project", "")
-	api.respondJSON(w, http.StatusOK, project)
+	api.logActivity(saved.CompanyID, "project_updated", int32(saved.ID), "project", "")
+	api.respondJSON(w, http.StatusOK, saved)
+}
+
+func clearGitHubRepositoryMetadata(project *db.Project) {
+	project.GitHubRepositoryID = 0
+	project.GitHubInstallationID = 0
+	project.GitHubDefaultBranch = ""
 }
 
 // GetProjectCodegraph returns the codegraph MCP server record for a project,
 // including its init_status so the frontend can poll for readiness.
 func (api *API) GetProjectCodegraph(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	srv, err := api.q.GetCodegraphServerForProject(r.Context(), int32(id))
+	project := api.projectFromCtx(r) // loaded + authorized by LoadProject
+	srv, err := api.q.GetCodegraphServerForProject(r.Context(), project.ID)
 	if err != nil {
 		api.respondError(w, http.StatusNotFound, "no codegraph server for this project")
 		return
@@ -383,17 +471,16 @@ func validateGitURL(url string) error {
 
 // validateAndConnectRepo normalizes the URL, validates its format, then tests
 // remote connectivity. Returns the normalized URL on success.
-func validateAndConnectRepo(ctx context.Context, rawURL, sshDir string) (string, error) {
+func validateAndConnectRepo(ctx context.Context, rawURL, sshKeyPath string) (string, error) {
 	normalized := normalizeGitURL(rawURL)
 	if err := validateGitURL(normalized); err != nil {
 		return "", err
 	}
 
-	sshKeyPath := filepath.Join(sshDir, "id_rsa")
 	_, sshKeyStatErr := os.Stat(sshKeyPath)
 	sshKeyExists := sshKeyStatErr == nil
 
-	gitMgr := git.NewGitManager("", sshDir)
+	gitMgr := git.NewGitManager("", sshKeyPath)
 	if err := gitMgr.ValidateRemote(ctx, normalized); err != nil {
 		if strings.HasPrefix(err.Error(), "[auth]") {
 			if !sshKeyExists {

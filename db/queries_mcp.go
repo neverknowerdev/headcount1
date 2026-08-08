@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"os/exec"
@@ -16,13 +17,32 @@ func (q *Queries) CreateMCPServer(ctx context.Context, s MCPServer) (MCPServer, 
 	return s, err
 }
 
-// ListMCPServers returns all MCP servers with their accounts preloaded.
+// ListMCPServers returns MCP servers with their accounts preloaded.
 // For non-builtin servers, Enabled is computed from account presence.
 // When companyID > 0, codegraph servers (project_id IS NOT NULL) are filtered
-// to only those whose project belongs to the given company.
-func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPServer, error) {
+// to only those whose project belongs to the given company. When userID > 0,
+// visibility is tenant-scoped: builtin catalog rows, the user's own custom
+// servers, and codegraph servers whose project belongs to a company the user
+// can access; account preloads are filtered to the user's own credentials.
+// userID 0 (background cache refresh) sees all.
+func (q *Queries) ListMCPServers(ctx context.Context, companyID, userID int32) ([]MCPServer, error) {
 	var servers []MCPServer
-	db := q.db.WithContext(ctx).Order("id").Preload("Accounts").Preload("Project")
+	db := q.db.WithContext(ctx).Order("id").Preload("Project")
+	if userID > 0 {
+		// Codegraph servers (project_id set) leak project names, repository URLs
+		// and workspace paths, so they must be bounded to the caller's own tenants
+		// — projects of a company they created or whose team they belong to. A bare
+		// "project_id IS NOT NULL" would expose every tenant's projects.
+		accessibleCodegraph := "project_id IN (" +
+			"SELECT p.id FROM projects p JOIN companies c ON c.id = p.company_id WHERE " +
+			"c.team_id IN (SELECT team_id FROM team_members WHERE user_id = ?) OR " +
+			"(c.team_id IS NULL AND c.user_id = ?))"
+		db = db.
+			Preload("Accounts", "user_id = ?", userID).
+			Where("builtin = ? OR owner_user_id = ? OR ("+accessibleCodegraph+")", true, userID, userID, userID)
+	} else {
+		db = db.Preload("Accounts")
+	}
 	if companyID > 0 {
 		db = db.Where("project_id IS NULL OR project_id IN (SELECT id FROM projects WHERE company_id = ?)", companyID)
 	} else {
@@ -34,7 +54,7 @@ func (q *Queries) ListMCPServers(ctx context.Context, companyID int32) ([]MCPSer
 	}
 	for i := range servers {
 		for j := range servers[i].Accounts {
-			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthToken != ""
+			servers[i].Accounts[j].HasToken = servers[i].Accounts[j].AuthTokenEncrypted != ""
 		}
 		// For non-builtin servers, Enabled reflects account presence — EXCEPT
 		// for codegraph servers (ProjectID set) which are managed by init_status,
@@ -175,7 +195,7 @@ func (q *Queries) GetCodegraphServerForProject(ctx context.Context, projectID in
 func (q *Queries) IncrementMCPToolCallCount(ctx context.Context, serverID int32, toolName string) error {
 	return q.db.WithContext(ctx).Exec(
 		`INSERT INTO mcp_tool_stats (mcp_server_id, tool_name, call_count) VALUES (?, ?, 1)
-		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = call_count + 1`,
+		 ON CONFLICT (mcp_server_id, tool_name) DO UPDATE SET call_count = mcp_tool_stats.call_count + 1`,
 		serverID, toolName,
 	).Error
 }
@@ -196,33 +216,168 @@ func (q *Queries) GetMCPToolCallCounts(ctx context.Context, serverID int32) (map
 
 func (q *Queries) CreateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
 	err := q.db.WithContext(ctx).Create(&a).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) GetMCPAccount(ctx context.Context, id int32) (MCPAccount, error) {
 	var a MCPAccount
 	err := q.db.WithContext(ctx).First(&a, id).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) UpdateMCPAccount(ctx context.Context, a MCPAccount) (MCPAccount, error) {
+	// AuthTokenEncrypted is ciphertext: a metadata-only edit round-trips the
+	// sealed value verbatim, and a token change was re-sealed by the caller, so
+	// a plain Save can never destroy the secret.
 	err := q.db.WithContext(ctx).Save(&a).Error
-	a.HasToken = a.AuthToken != ""
+	a.HasToken = a.AuthTokenEncrypted != ""
 	return a, err
 }
 
 func (q *Queries) DeleteMCPAccount(ctx context.Context, id int32) error {
-	// Remove agent assignments first.
-	if err := q.db.WithContext(ctx).Where("mcp_account_id = ?", id).Delete(&AgentMCPAccount{}).Error; err != nil {
-		return err
-	}
-	return q.db.WithContext(ctx).Delete(&MCPAccount{}, id).Error
+	// These rows are not all covered by foreign keys in older installations.
+	// Keep their removal atomic so a failed delete cannot leave a stale GitHub
+	// identity which blocks the user from reconnecting the same account.
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("mcp_account_id = ?", id).Delete(&AgentMCPAccount{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("mcp_account_id = ?", id).Delete(&GitHubConnection{}).Error; err != nil {
+			return err
+		}
+		if err := tx.Where("mcp_account_id = ?", id).Delete(&GitHubIdentity{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&MCPAccount{}, id).Error
+	})
 }
 
 func (q *Queries) UpdateMCPAccountLastError(ctx context.Context, id int32, errMsg string) error {
 	return q.db.WithContext(ctx).Model(&MCPAccount{}).Where("id = ?", id).Update("last_error", errMsg).Error
+}
+
+// EnsureGitHubConnectionUniqueness creates the account+installation unique
+// index only after collapsing legacy duplicate rows. Keeping this out of the
+// model tags prevents AutoMigrate from failing before it can repair a database
+// produced by an older build.
+func (q *Queries) EnsureGitHubConnectionUniqueness(ctx context.Context) error {
+	database := q.db.WithContext(ctx)
+	table := database.NamingStrategy.TableName("GitHubConnection")
+	// Both supported dialects accept this portable grouped subquery. Preserve
+	// the oldest row, which is the one most likely referenced by audit data.
+	if err := database.Exec("DELETE FROM " + table + " WHERE id NOT IN (SELECT MIN(id) FROM " + table + " GROUP BY mcp_account_id, installation_id)").Error; err != nil {
+		return fmt.Errorf("deduplicate GitHub connections: %w", err)
+	}
+	if err := database.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_github_connection_account_installation ON " + table + " (mcp_account_id, installation_id)").Error; err != nil {
+		return fmt.Errorf("create GitHub connection uniqueness index: %w", err)
+	}
+	return nil
+}
+
+// MigrateGitHubOAuth removes the former GitHub token storage and creates
+// identity records for verified OAuth accounts. It is safe to run on every
+// startup. Legacy accounts with no stable GitHub user ID cannot be safely
+// deduplicated, so they are retained but marked for OAuth reconnect.
+func (q *Queries) MigrateGitHubOAuth(ctx context.Context) error {
+	database := q.db.WithContext(ctx)
+	if database.Migrator().HasColumn(&GitHubConnection{}, "user_access_token") {
+		// Use GORM's configured table name instead of spelling it out: the
+		// default naming strategy renders GitHubConnection as git_hub_connections.
+		connectionTable := database.NamingStrategy.TableName("GitHubConnection")
+		if err := database.Exec("UPDATE " + connectionTable + " SET user_access_token = ''").Error; err != nil {
+			return fmt.Errorf("clear legacy GitHub access tokens: %w", err)
+		}
+		// The legacy field is no longer part of the Go model, which makes
+		// GORM's model-based DropColumn a no-op on SQLite. Execute DDL directly
+		// and fail the startup migration if the plaintext column remains.
+		if err := database.Exec("ALTER TABLE " + connectionTable + " DROP COLUMN user_access_token").Error; err != nil {
+			return fmt.Errorf("drop legacy GitHub access token column: %w", err)
+		}
+	}
+
+	var accounts []MCPAccount
+	if err := database.Joins("JOIN mcp_servers ON mcp_servers.id = mcp_accounts.mcp_server_id").
+		Where("mcp_servers.name = ?", "github").Find(&accounts).Error; err != nil {
+		return fmt.Errorf("load GitHub accounts: %w", err)
+	}
+	type legacyIdentity struct {
+		AccountID    int32
+		GitHubUserID int64
+		GitHubLogin  string
+	}
+	legacyByAccount := map[int32]legacyIdentity{}
+	accountTable := database.NamingStrategy.TableName("MCPAccount")
+	hasLegacyIdentity := database.Migrator().HasColumn(&MCPAccount{}, "git_hub_user_id")
+	if hasLegacyIdentity {
+		var rows []legacyIdentity
+		if err := database.Table(accountTable).
+			Select("id AS account_id, git_hub_user_id, git_hub_login").
+			Scan(&rows).Error; err != nil {
+			return fmt.Errorf("load legacy GitHub identities: %w", err)
+		}
+		for _, row := range rows {
+			legacyByAccount[row.AccountID] = row
+		}
+	}
+	for _, account := range accounts {
+		var current GitHubIdentity
+		identityErr := database.Where("mcp_account_id = ?", account.ID).First(&current).Error
+		if identityErr == nil {
+			continue
+		}
+		if !errors.Is(identityErr, gorm.ErrRecordNotFound) {
+			return fmt.Errorf("load GitHub identity for account %d: %w", account.ID, identityErr)
+		}
+		legacy := legacyByAccount[account.ID]
+		if legacy.GitHubUserID == 0 || account.UserID == nil {
+			// A legacy token with no durable GitHub identity is not safe to use:
+			// it cannot be deduplicated or tied to this MCP account. Disable it
+			// until the user completes the modern OAuth flow again.
+			if err := database.Model(&MCPAccount{}).Where("id = ?", account.ID).Updates(map[string]any{
+				"auth_token": "",
+				"last_error": "Reconnect this GitHub account to verify its identity.",
+			}).Error; err != nil {
+				return fmt.Errorf("mark legacy GitHub account %d: %w", account.ID, err)
+			}
+			continue
+		}
+		identity := GitHubIdentity{MCPAccountID: account.ID, MCPServerID: account.MCPServerID, UserID: *account.UserID, GitHubUserID: legacy.GitHubUserID, GitHubLogin: legacy.GitHubLogin}
+		var existing GitHubIdentity
+		err := database.Where("mcp_server_id = ? AND user_id = ? AND git_hub_user_id = ?", identity.MCPServerID, identity.UserID, identity.GitHubUserID).First(&existing).Error
+		switch {
+		case errors.Is(err, gorm.ErrRecordNotFound):
+			if err := database.Create(&identity).Error; err != nil {
+				return fmt.Errorf("backfill GitHub identity for account %d: %w", account.ID, err)
+			}
+		case err != nil:
+			return fmt.Errorf("look up GitHub identity for account %d: %w", account.ID, err)
+		case existing.MCPAccountID != account.ID:
+			// Never leave a duplicate account usable: a token without the
+			// authoritative identity mapping can otherwise be used by repository
+			// discovery even though it lost the uniqueness race.
+			if err := database.Model(&MCPAccount{}).Where("id = ?", account.ID).Updates(map[string]any{
+				"auth_token": "",
+				"last_error": "Duplicate GitHub identity. Delete this account and reconnect it.",
+			}).Error; err != nil {
+				return fmt.Errorf("mark duplicate GitHub account %d: %w", account.ID, err)
+			}
+		}
+	}
+	if hasLegacyIdentity {
+		if err := database.Exec("DROP INDEX IF EXISTS idx_mcp_accounts_git_hub_user_id").Error; err != nil {
+			return fmt.Errorf("drop legacy GitHub identity index: %w", err)
+		}
+		for _, column := range []string{"git_hub_user_id", "git_hub_login"} {
+			if database.Migrator().HasColumn(&MCPAccount{}, column) {
+				if err := database.Exec("ALTER TABLE " + accountTable + " DROP COLUMN " + column).Error; err != nil {
+					return fmt.Errorf("drop legacy MCP account column %s: %w", column, err)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 // ListMCPAccountsForServer returns all accounts for a given server.
@@ -230,7 +385,7 @@ func (q *Queries) ListMCPAccountsForServer(ctx context.Context, serverID int32) 
 	var accounts []MCPAccount
 	err := q.db.WithContext(ctx).Where("mcp_server_id = ?", serverID).Find(&accounts).Error
 	for i := range accounts {
-		accounts[i].HasToken = accounts[i].AuthToken != ""
+		accounts[i].HasToken = accounts[i].AuthTokenEncrypted != ""
 	}
 	return accounts, err
 }
@@ -345,61 +500,18 @@ func (q *Queries) SetAgentMCPServers(ctx context.Context, agentID int32, assignm
 	})
 }
 
-// MigrateServerTokensToAccounts converts any legacy auth_token on MCPServer rows
-// into MCPAccount("Default") records, and migrates AgentMCPServer → AgentMCPAccount.
-// Safe to run on every startup (idempotent).
-func (q *Queries) MigrateServerTokensToAccounts(ctx context.Context) error {
-	// Find servers that still have a legacy auth_token.
-	type serverRow struct {
-		ID        int32
-		AuthToken string
-	}
-	var rows []serverRow
-	if err := q.db.WithContext(ctx).Raw("SELECT id, auth_token FROM mcp_servers WHERE auth_token != ''").Scan(&rows).Error; err != nil {
-		return err
-	}
-
-	for _, row := range rows {
-		// Skip if already migrated.
-		var count int64
-		q.db.WithContext(ctx).Model(&MCPAccount{}).Where("mcp_server_id = ?", row.ID).Count(&count)
-		if count > 0 {
-			q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '' WHERE id = ?", row.ID)
-			continue
-		}
-
-		acc := MCPAccount{MCPServerID: row.ID, Name: "Default", AuthToken: row.AuthToken}
-		if err := q.db.WithContext(ctx).Create(&acc).Error; err != nil {
-			log.Printf("MCP migration: failed to create account for server %d: %v", row.ID, err)
-			continue
-		}
-		// Clear the legacy token.
-		q.db.WithContext(ctx).Exec("UPDATE mcp_servers SET auth_token = '', enabled = true WHERE id = ?", row.ID)
-
-		// Migrate AgentMCPServer → AgentMCPAccount for this server.
-		var agentAssigns []AgentMCPServer
-		q.db.WithContext(ctx).Where("mcp_server_id = ?", row.ID).Find(&agentAssigns)
-		for _, a := range agentAssigns {
-			ama := AgentMCPAccount{AgentID: a.AgentID, MCPAccountID: acc.ID, Enabled: a.Enabled}
-			q.db.WithContext(ctx).Create(&ama)
-		}
-		log.Printf("MCP migration: migrated server %d auth_token → account %d", row.ID, acc.ID)
-	}
-	return nil
-}
-
 // EnsureBuiltinMCPServers creates all predefined MCP servers if they don't
 // already exist. Safe to call on every startup.
 func (q *Queries) EnsureBuiltinMCPServers(ctx context.Context) error {
 	predefined := []MCPServer{
 		{
-			Name:        "github",
+			Name:        MCPServerNameGitHub,
 			DisplayName: "GitHub",
 			Description: "Access GitHub repos, issues, pull requests, and code search.",
 			Transport:   "stdio",
 			Command:     "github-mcp-server",
 			Args:        `["stdio"]`,
-			AuthType:    "bearer",
+			AuthType:    MCPAuthTypeGitHubApp,
 			AuthEnvVar:  "GITHUB_PERSONAL_ACCESS_TOKEN",
 			Enabled:     false,
 			Builtin:     true,

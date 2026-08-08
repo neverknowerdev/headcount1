@@ -11,28 +11,42 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/tokens"
+
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
 )
 
+// GatewayHub is the event surface the gateway needs: tenant-scoped delivery
+// for run logs (the gateway serves every user's proxy traffic, so events must
+// reach only the owning user's clients).
+type GatewayHub interface {
+	BroadcastEvent(string, interface{})
+	BroadcastEventForCompany(int32, string, interface{})
+}
+
 type LLMGateway struct {
 	q           *db.Queries
 	basePath    string
-	hub         interface{ BroadcastEvent(string, interface{}) }
+	hub         GatewayHub
 	groupHealth *groupHealthState
+	// runCompany caches run → company for tenant-scoped run_log events.
+	runCompany sync.Map
+	// validateRunToken enables gateway auth (see gateway_auth.go); nil = open.
+	validateRunToken func(token string) (int32, bool)
 }
 
 func NewLLMGateway(database *gorm.DB) *LLMGateway {
 	return NewLLMGatewayWithHub(database, nil)
 }
 
-func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(string, interface{}) }) *LLMGateway {
+func NewLLMGatewayWithHub(database *gorm.DB, hub GatewayHub) *LLMGateway {
 	return &LLMGateway{
 		q:           db.New(database),
 		basePath:    db.Headcount1Home(),
@@ -42,14 +56,17 @@ func NewLLMGatewayWithHub(database *gorm.DB, hub interface{ BroadcastEvent(strin
 }
 
 func (g *LLMGateway) Mount(r chi.Router) {
-	r.Post("/v1/chat/completions", g.proxyChatCompletionsForProvider)
-	r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
-		r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
-		r.Get("/v1/models", g.getModelsForAgent)
-	})
-	r.Route("/proxy/group/{group_key}", func(r chi.Router) {
-		r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
-		r.Get("/v1/models", g.getModelsForGroup)
+	r.Group(func(r chi.Router) {
+		r.Use(g.requireGatewayAuth)
+		r.Post("/v1/chat/completions", g.proxyChatCompletionsForProvider)
+		r.Route("/proxy/agent/{agent_id}", func(r chi.Router) {
+			r.Post("/v1/chat/completions", g.proxyChatCompletionsForAgent)
+			r.Get("/v1/models", g.getModelsForAgent)
+		})
+		r.Route("/proxy/group/{group_key}", func(r chi.Router) {
+			r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
+			r.Get("/v1/models", g.getModelsForGroup)
+		})
 	})
 }
 
@@ -103,7 +120,7 @@ func (g *LLMGateway) proxyChatCompletionsForProvider(w http.ResponseWriter, r *h
 		return
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), int32(providerID))
-	if err != nil {
+	if err != nil || !g.mayUseProvider(r, provider) {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return
 	}
@@ -148,7 +165,7 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 	}
 
 	agent, err := g.q.GetAgent(r.Context(), int32(agentID))
-	if err != nil {
+	if err != nil || !g.mayUseAgent(r, agent) {
 		http.Error(w, "Agent not found", http.StatusNotFound)
 		return agentProxyTarget{}, false
 	}
@@ -157,7 +174,10 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 	// (free-first ordering, failover, per-attempt stats).
 	if agent.ModelGroupID != nil {
 		group, gErr := g.q.GetModelGroup(r.Context(), *agent.ModelGroupID)
-		if gErr != nil {
+		// Re-authorize the resolved group against the caller's tenant — the
+		// direct group path does the same (proxyChatCompletionsForGroup). An
+		// agent bound to another tenant's group_id must not spend their keys.
+		if gErr != nil || !g.mayUseGroup(r, group) {
 			http.Error(w, "Model group not found", http.StatusNotFound)
 			return agentProxyTarget{}, false
 		}
@@ -169,7 +189,9 @@ func (g *LLMGateway) resolveAgentProxyTarget(w http.ResponseWriter, r *http.Requ
 		return agentProxyTarget{}, false
 	}
 	provider, err := g.q.GetLLMProvider(r.Context(), *agent.ProviderID)
-	if err != nil {
+	// Re-authorize the resolved provider against the caller's tenant, mirroring
+	// the direct provider path (proxyChatCompletionsForProvider).
+	if err != nil || !g.mayUseProvider(r, provider) {
 		http.Error(w, "Provider not found", http.StatusNotFound)
 		return agentProxyTarget{}, false
 	}

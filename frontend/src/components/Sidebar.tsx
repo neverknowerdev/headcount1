@@ -1,7 +1,8 @@
-import React, { useMemo } from 'react';
+import React, { useMemo, useEffect, useState } from 'react';
 import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings, Cpu } from 'lucide-react';
 import { useStore } from '../store';
+import axios from 'axios';
 
 const getNavItems = (companyIdentifier: string | null) => {
   const base = companyIdentifier ? `/companies/${companyIdentifier}` : '';
@@ -21,8 +22,22 @@ const getNavItems = (companyIdentifier: string | null) => {
 export const Sidebar: React.FC = () => {
   const location = useLocation();
   const { selectedCompanyId, companies } = useStore();
+
   const currentCompany = companies.find((c) => c.id === selectedCompanyId);
   const navItems = useMemo(() => getNavItems(currentCompany ? currentCompany.short_name : null), [currentCompany]);
+
+  // version is the human-facing number (2026.07.29 in production,
+  // staging-<short branch>-<short commit> on staging); build is the exact
+  // build identity, shown on hover for support and bug reports.
+  const [version, setVersion] = useState<string>('');
+  const [build, setBuild] = useState<string>('');
+
+  useEffect(() => {
+    axios.get('/api/version').then(res => {
+      setVersion(res.data.version || 'dev');
+      setBuild(res.data.display || '');
+    }).catch(() => {});
+  }, []);
 
 
 
@@ -65,7 +80,16 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-
+      {version && (
+        <div className="px-3 py-3 border-t border-gray-100">
+          <div
+            className="text-xs text-gray-400 font-mono truncate"
+            title={build ? `${version}\n${build}` : version}
+          >
+            {version}
+          </div>
+        </div>
+      )}
     </div>
   );
 };

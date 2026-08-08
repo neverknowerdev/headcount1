@@ -1,6 +1,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { useStore } from '../store';
+import { useStore, useIsOwner } from '../store';
+import { SecretLabel } from '../components/SecretField';
 import { Plus, Trash2, Edit2, Search, Power, Shield, Terminal, Globe, Cpu, Key, CheckCircle2, AlertCircle, GitBranch, FileText, ExternalLink, Share2, SearchIcon } from 'lucide-react';
 
 interface MCPAccount {
@@ -67,6 +68,7 @@ const serverIcon = (name: string) => {
 
 const authLabel = (authType: string) => {
     if (authType === 'bearer') return 'Personal Access Token';
+	if (authType === 'github-app') return 'Connected GitHub App';
     if (authType === 'credentials-file') return 'Credentials file path';
     if (authType === 'url-token') return 'MCP URL (with your token)';
     return 'Token';
@@ -83,9 +85,13 @@ const emptyForm = {
 
 export const MCPServers: React.FC = () => {
     const { selectedCompanyId } = useStore();
+    const isOwner = useIsOwner();
 
     // ── Server modal state (for custom servers only) ───────────────────────────
     const [servers, setServers] = useState<MCPServer[]>([]);
+    const [dependencyToast, setDependencyToast] = useState<string | null>(null);
+    const [installingDependencies, setInstallingDependencies] = useState<number | null>(null);
+    const notifiedDependencyErrors = React.useRef(new Set<number>());
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [editingId, setEditingId] = useState<number | null>(null);
     const [formData, setFormData] = useState<typeof emptyForm>({ ...emptyForm });
@@ -133,6 +139,11 @@ export const MCPServers: React.FC = () => {
             const res = await axios.get(url);
             const data: MCPServer[] = res.data || [];
             setServers(data);
+            const failed = data.find(s => s.last_error?.startsWith('Dependency setup failed:') && !notifiedDependencyErrors.current.has(s.id));
+            if (failed) {
+                notifiedDependencyErrors.current.add(failed.id);
+                setDependencyToast(`${failed.display_name || failed.name}: ${failed.last_error}`);
+            }
             const cached: Record<number, MCPTool[]> = {};
             for (const s of data) {
                 if (s.name === 'headcount1') {
@@ -148,6 +159,32 @@ export const MCPServers: React.FC = () => {
     }, [selectedCompanyId]);
 
     useEffect(() => { fetchServers(); }, [fetchServers]);
+    useEffect(() => {
+        // MCP dependency installation starts immediately after platform setup.
+        // A user can reach this page during that short window, so refresh until
+        // GitHub installation either succeeds or produces its scoped error.
+        const githubPending = servers.some(s => s.name === 'github' && !s.deps_installed && !s.last_error);
+        if (!githubPending) return;
+        const timer = window.setTimeout(fetchServers, 2000);
+        return () => window.clearTimeout(timer);
+    }, [servers, fetchServers]);
+
+    const retryDependencyInstall = async (server: MCPServer) => {
+        setInstallingDependencies(server.id);
+        try {
+            await axios.post(`/api/mcp-servers/${server.id}/install-dependencies`);
+            const account = server.accounts?.find(a => a.has_token);
+            if (account) {
+                await axios.post(`/api/mcp-accounts/${account.id}/discover`);
+            }
+            setDependencyToast(null);
+        } catch (e: any) {
+            setDependencyToast(`${server.display_name || server.name}: ${e.response?.data?.error || 'Dependency installation failed'}`);
+        } finally {
+            setInstallingDependencies(null);
+            await fetchServers();
+        }
+    };
 
     // ── Custom server modal ─────────────────────────────────────────────────────
     const openModal = (s?: MCPServer) => {
@@ -210,22 +247,42 @@ export const MCPServers: React.FC = () => {
 
     // ── Account handlers ────────────────────────────────────────────────────────
     const openAddAccountModal = (s: MCPServer) => {
+		if (s.auth_type === 'github-app') {
+			void startGitHubAuthorization(s.id);
+			return;
+		}
         setAccountError(null);
         setAccountForm({ name: '', auth_token: '', credentials_json: '' });
         setAccountModal({ mode: 'create', serverId: s.id, serverDisplayName: s.display_name, authType: s.auth_type, accountId: null, accountName: '' });
     };
 
     const openReauthModal = (s: MCPServer, acc: MCPAccount) => {
+		if (s.auth_type === 'github-app') {
+			void startGitHubAuthorization(s.id, acc.id);
+			return;
+		}
         setAccountError(null);
         setAccountForm({ name: acc.name, auth_token: '', credentials_json: '' });
         setAccountModal({ mode: 'reauth', serverId: s.id, serverDisplayName: s.display_name, authType: s.auth_type, accountId: acc.id, accountName: acc.name });
     };
 
+    const startGitHubAuthorization = async (serverId: number, accountId = 0) => {
+		try {
+			const res = await axios.post(`/api/mcp-servers/${serverId}/github-oauth`, {
+				account_id: accountId,
+				return_path: window.location.pathname,
+			});
+			window.location.assign(res.data.authorize_url);
+		} catch (e: any) {
+			window.alert(e.response?.data?.error || 'Failed to start GitHub authorization');
+		}
+	};
+
     const handleSaveAccount = async () => {
         if (!accountModal) return;
         setAccountError(null);
 
-        // Google OAuth uses a separate two-step flow — start it instead of the normal save.
+		// Google OAuth uses a separate two-step flow — start it instead of the normal save.
         if (accountModal.authType === 'google-oauth') {
             if (!accountForm.credentials_json) {
                 setAccountError('Please select your OAuth client credentials JSON file.');
@@ -339,6 +396,18 @@ export const MCPServers: React.FC = () => {
 
     return (
         <div className="h-full flex flex-col space-y-6">
+            {dependencyToast && (
+                <div role="alert" className="fixed top-4 right-4 z-50 max-w-lg rounded-lg border border-red-200 bg-white p-4 shadow-xl">
+                    <div className="flex items-start gap-3">
+                        <AlertCircle size={18} className="mt-0.5 flex-shrink-0 text-red-600" />
+                        <div className="min-w-0 flex-1">
+                            <p className="text-sm font-semibold text-red-800">MCP server setup failed</p>
+                            <p className="mt-1 break-words text-xs text-red-700">{dependencyToast}</p>
+                        </div>
+                        <button aria-label="Dismiss notification" onClick={() => setDependencyToast(null)} className="text-gray-400 hover:text-gray-700">×</button>
+                    </div>
+                </div>
+            )}
             <div className="flex justify-between items-center">
                 <div>
                     <h1 className="text-2xl font-bold">MCP Servers</h1>
@@ -399,6 +468,8 @@ export const MCPServers: React.FC = () => {
                                 onReauthAccount={(acc) => openReauthModal(s, acc)}
                                 onDeleteAccount={handleDeleteAccount}
                                 onDiscoverAccount={(accId) => handleDiscover(accId, s.id)}
+                                installingDependencies={installingDependencies === s.id}
+                                onInstallDependencies={() => retryDependencyInstall(s)}
                             />
                         ))}
                     </div>
@@ -477,9 +548,11 @@ export const MCPServers: React.FC = () => {
                                         <button onClick={() => openModal(s)} className="p-1.5 text-gray-500 hover:text-gray-700 rounded">
                                             <Edit2 size={16} />
                                         </button>
-                                        <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
-                                            <Trash2 size={16} />
-                                        </button>
+                                        {isOwner && (
+                                            <button onClick={() => handleDelete(s.id)} className="p-1.5 text-red-500 hover:text-red-700 rounded">
+                                                <Trash2 size={16} />
+                                            </button>
+                                        )}
                                     </div>
                                 </div>
                                 {discoverErrors[s.id] && (
@@ -617,9 +690,9 @@ export const MCPServers: React.FC = () => {
                             </div>
                             {formData.auth_type !== 'none' && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         {authLabel(formData.auth_type)} {editingId && '(leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <input type="password" value={formData.auth_token}
                                         onChange={e => setFormData({ ...formData, auth_token: e.target.value })}
                                         className="w-full border rounded p-2 text-sm" />
@@ -652,11 +725,11 @@ export const MCPServers: React.FC = () => {
                                 ? `Authorize ${accountModal.serverDisplayName}`
                                 : `Re-authenticate "${accountModal.accountName}"`}
                         </h2>
-                        {accountModal.mode === 'create' && (
+			{accountModal.mode === 'create' && accountModal.authType !== 'github-app' && (
                             <p className="text-sm text-gray-500 mb-4">This will create a new connected account for {accountModal.serverDisplayName}.</p>
                         )}
                         <div className="space-y-4 mt-4">
-                            {accountModal.mode === 'create' && (
+                            {accountModal.mode === 'create' && accountModal.authType !== 'github-app' && (
                                 <div>
                                     <label className="block text-sm font-medium text-gray-700 mb-1">Account name</label>
                                     <input type="text" value={accountForm.name}
@@ -668,9 +741,7 @@ export const MCPServers: React.FC = () => {
                             )}
                             {accountModal.authType === 'google-oauth' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
-                                        OAuth client credentials JSON
-                                    </label>
+                                    <SecretLabel>OAuth client credentials JSON</SecretLabel>
                                     <label className={`flex items-center gap-2 w-full border-2 border-dashed rounded p-3 cursor-pointer transition-colors ${accountForm.credentials_json ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
                                         <input type="file" accept=".json,application/json" className="hidden"
                                             onChange={e => {
@@ -698,10 +769,10 @@ export const MCPServers: React.FC = () => {
                                 </div>
                             ) : accountModal.authType === 'credentials-file' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         Credentials JSON file
                                         {accountModal.mode === 'reauth' && ' (leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <label className={`flex items-center gap-2 w-full border-2 border-dashed rounded p-3 cursor-pointer transition-colors ${accountForm.credentials_json ? 'border-green-300 bg-green-50' : 'border-gray-200 hover:border-indigo-300 hover:bg-indigo-50'}`}>
                                         <input type="file" accept=".json,application/json" className="hidden"
                                             onChange={e => {
@@ -727,25 +798,18 @@ export const MCPServers: React.FC = () => {
                                         {' '}and download the JSON key file.
                                     </p>
                                 </div>
+								) : accountModal.authType === 'github-app' ? (
+									<div className="rounded-md border border-indigo-100 bg-indigo-50 p-3 text-sm text-indigo-950"><p className="font-medium">Connect another GitHub identity</p><p className="mt-1 text-indigo-800">GitHub will show its account picker so you can select a different personal or work identity. Headcount1 detects the GitHub username automatically after approval.</p><p className="mt-2 text-indigo-800">If you select an identity that is already connected, Headcount1 will return without creating a duplicate. Repository access is selected separately through the GitHub App installation page.</p></div>
                             ) : accountModal.authType !== 'none' ? (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">
+                                    <SecretLabel>
                                         {authLabel(accountModal.authType)}
                                         {accountModal.mode === 'reauth' && ' (leave blank to keep existing)'}
-                                    </label>
+                                    </SecretLabel>
                                     <input type={accountModal.authType === 'url-token' ? 'text' : 'password'} value={accountForm.auth_token}
                                         onChange={e => setAccountForm(f => ({ ...f, auth_token: e.target.value }))}
                                         placeholder={accountModal.authType === 'url-token' ? 'https://mcp.postiz.com/mcp/...' : ''}
                                         className="w-full border rounded p-2 text-sm font-mono" />
-                                    {accountModal.serverDisplayName === 'GitHub' && (
-                                        <p className="text-xs text-gray-400 mt-1">
-                                            Generate at{' '}
-                                            <a href="https://github.com/settings/tokens/new" target="_blank" rel="noopener noreferrer" className="text-indigo-600 hover:underline inline-flex items-center gap-0.5">
-                                                github.com/settings/tokens<ExternalLink size={10} className="ml-0.5" />
-                                            </a>
-                                            {' '}with <code>repo</code>, <code>read:user</code>, and <code>read:org</code> scopes.
-                                        </p>
-                                    )}
                                     {accountModal.serverDisplayName === 'Postiz' && (
                                         <p className="text-xs text-gray-400 mt-1">
                                             In your Postiz dashboard go to <strong>Settings → MCP</strong>, copy the full personal URL (looks like <code>https://mcp.postiz.com/mcp/...</code>) and paste it above.
@@ -767,7 +831,7 @@ export const MCPServers: React.FC = () => {
                         <div className="flex justify-end gap-3 pt-4 border-t mt-4">
                             <button type="button" onClick={() => setAccountModal(null)} className="text-gray-500 hover:text-gray-700 px-4 py-2 text-sm">Cancel</button>
                             <button onClick={handleSaveAccount} className="bg-indigo-600 text-white px-4 py-2 rounded hover:bg-indigo-700 text-sm">
-                                {accountModal.mode === 'create' ? 'Authorize' : 'Re-authenticate'}
+								{accountModal.mode === 'create' ? 'Continue to GitHub' : 'Re-authenticate'}
                             </button>
                         </div>
                     </div>
@@ -785,14 +849,13 @@ interface SetupStep {
 }
 
 const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; docsLabel: string }> = {
-    github: {
+github: {
         docsUrl: 'https://github.com/github/github-mcp-server',
-        docsLabel: 'github-mcp-server on GitHub',
+        docsLabel: 'GitHub MCP Server documentation',
         steps: [
-            { before: 'Install the MCP server binary:', code: 'brew install github-mcp-server' },
-            { before: 'Go to ', link: { text: 'github.com/settings/tokens/new', url: 'https://github.com/settings/tokens/new' }, after: ' and create a classic Personal Access Token.' },
-            { before: 'Select these scopes:', code: 'repo  read:user  read:org' },
-            { before: 'Click Authorize below and paste the token.' },
+			{ before: 'Click Authorize below and sign in to GitHub. No personal access token is required.' },
+			{ before: 'Choose the repositories Headcount1 may access in the GitHub App installation screen.' },
+			{ before: 'Add another account whenever you need separate personal and work access.' },
         ],
     },
     'brave-search': {
@@ -825,7 +888,7 @@ const SETUP_INSTRUCTIONS: Record<string, { steps: SetupStep[]; docsUrl: string; 
 };
 
 // Card for pre-defined integrations (github, google-docs, etc.)
-function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAddAccount, onReauthAccount, onDeleteAccount, onDiscoverAccount }: {
+function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAddAccount, onReauthAccount, onDeleteAccount, onDiscoverAccount, installingDependencies, onInstallDependencies }: {
     server: MCPServer;
     tools?: MCPTool[];
     discovering: number | null;
@@ -834,16 +897,25 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
     onReauthAccount: (acc: MCPAccount) => void;
     onDeleteAccount: (accountId: number) => void;
     onDiscoverAccount: (accountId: number) => void;
+    installingDependencies: boolean;
+    onInstallDependencies: () => void;
 }) {
     const [showDetails, setShowDetails] = React.useState(false);
     const [showTools, setShowTools] = React.useState(false);
     const [showSetup, setShowSetup] = React.useState(false);
     const hasAccounts = server.accounts && server.accounts.length > 0;
-    const isConnected = hasAccounts && !!server.tools_cache;
+    const hasAuthorizedAccount = !!server.accounts?.some(account => account.has_token);
+    // Git clone/pull/push and PR creation use short-lived GitHub App installation
+    // tokens, independently of github-mcp-server tool-process health.
+    const isGitHub = server.name === 'github';
+    const isConnected = isGitHub ? hasAuthorizedAccount : hasAccounts && !!server.tools_cache;
+    const needsReconnect = isGitHub && hasAccounts && !hasAuthorizedAccount;
+    const dependencySetupFailed = server.last_error?.startsWith('Dependency setup failed:');
+    const dependencyName = isGitHub ? 'github-mcp-server' : (server.command || 'the MCP dependency');
     const setup = SETUP_INSTRUCTIONS[server.name];
 
-    const borderClass = isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
-    const iconClass = isConnected ? 'bg-green-50 text-green-700' : hasAccounts ? 'bg-amber-50 text-amber-600' : 'bg-gray-100 text-gray-500';
+    const borderClass = dependencySetupFailed ? 'border-red-200' : isConnected ? 'border-green-200' : hasAccounts ? 'border-amber-200' : 'border-gray-200';
+    const iconClass = dependencySetupFailed ? 'bg-red-50 text-red-700' : isConnected ? 'bg-green-50 text-green-700' : hasAccounts ? 'bg-amber-50 text-amber-600' : 'bg-gray-100 text-gray-500';
 
     return (
         <div className={`bg-white rounded-lg border shadow-sm p-5 ${borderClass}`}>
@@ -861,6 +933,10 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-green-100 text-green-700">
                                 <CheckCircle2 size={10} /> Connected
                             </span>
+                        ) : needsReconnect ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
+                                <AlertCircle size={10} /> Reconnect required
+                            </span>
                         ) : hasAccounts ? (
                             <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-amber-100 text-amber-700">
                                 <AlertCircle size={10} /> Setup required
@@ -870,16 +946,44 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                                 <AlertCircle size={10} /> Not connected
                             </span>
                         )}
+                        {dependencySetupFailed && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-medium bg-red-100 text-red-700">
+                                <AlertCircle size={10} /> Tool setup error
+                            </span>
+                        )}
                     </div>
                     <p className="text-sm text-gray-600 mb-3">{server.description}</p>
+                    {dependencySetupFailed && (
+                        <div className="mb-3 rounded-lg border border-red-200 bg-red-50 p-3 text-xs text-red-800">
+                            <p className="font-semibold">Agent tools could not be installed</p>
+                            <p className="mt-1 break-words">{server.last_error.replace('Dependency setup failed:', '').trim()}</p>
+                            <p className="mt-2 text-red-700">
+                                Headcount1 installs this dependency automatically. Retry now, or install <span className="font-mono">{dependencyName}</span> on the Headcount1 host and ensure it is available on PATH.
+                            </p>
+                            <div className="mt-2 flex flex-wrap items-center gap-2">
+                                <button onClick={onInstallDependencies} disabled={installingDependencies}
+                                    className="rounded bg-red-700 px-2.5 py-1 text-white hover:bg-red-800 disabled:opacity-60">
+                                    {installingDependencies ? 'Installing…' : 'Retry installation'}
+                                </button>
+                                {isGitHub && (
+                                    <a href="https://github.com/github/github-mcp-server/releases" target="_blank" rel="noopener noreferrer"
+                                        className="inline-flex items-center gap-1 font-medium text-red-700 hover:underline">
+                                        Manual installation instructions <ExternalLink size={11} />
+                                    </a>
+                                )}
+                            </div>
+                        </div>
+                    )}
 
                     {!hasAccounts ? (
                         /* No accounts — compact by default, setup steps on demand */
                         <div className="space-y-2">
                             <div className="flex items-center gap-2 flex-wrap">
                                 <button onClick={onAddAccount}
-                                    className="inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700">
-                                    <Key size={13} /> Authorize
+                                    className={isGitHub
+                                        ? 'inline-flex items-center gap-1.5 px-3 py-1.5 bg-gray-900 text-white text-sm rounded hover:bg-gray-700'
+                                        : 'inline-flex items-center gap-1.5 px-3 py-1.5 bg-indigo-600 text-white text-sm rounded hover:bg-indigo-700'}>
+                                    {isGitHub ? <><ExternalLink size={13} /> Continue to GitHub</> : <><Key size={13} /> Authorize</>}
                                 </button>
                                 {setup && (
                                     <button onClick={() => setShowSetup(v => !v)}
@@ -952,7 +1056,7 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                                                     </button>
                                                     <button onClick={() => onReauthAccount(acc)}
                                                         className="text-xs text-gray-600 hover:text-gray-900 px-2 py-0.5 border border-gray-200 rounded flex items-center gap-1">
-                                                        <Key size={11} /> Re-auth
+                                                        {isGitHub ? <><ExternalLink size={11} /> Reconnect on GitHub</> : <><Key size={11} /> Re-auth</>}
                                                     </button>
                                                     <button onClick={() => onDeleteAccount(acc.id)}
                                                         className="text-xs text-red-400 hover:text-red-600 px-1.5 py-0.5 border border-red-100 rounded flex items-center">
@@ -969,8 +1073,10 @@ function PredefinedServerCard({ server, tools, discovering, discoverErrors, onAd
                             </div>
                             <div className="flex items-center gap-2 flex-wrap pt-1">
                                 <button onClick={onAddAccount}
-                                    className="text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1 border border-indigo-200 rounded flex items-center gap-1 hover:bg-indigo-50">
-                                    <Plus size={12} /> Add account
+                                    className={isGitHub
+                                        ? 'text-xs text-gray-700 hover:text-gray-950 px-2 py-1 border border-gray-300 rounded flex items-center gap-1 hover:bg-gray-100'
+                                        : 'text-xs text-indigo-600 hover:text-indigo-800 px-2 py-1 border border-indigo-200 rounded flex items-center gap-1 hover:bg-indigo-50'}>
+                                    {isGitHub ? <><ExternalLink size={12} /> Connect another account</> : <><Plus size={12} /> Add account</>}
                                 </button>
                                 <button onClick={() => setShowDetails(v => !v)}
                                     className="text-xs text-gray-500 hover:text-gray-700 px-2 py-1 border border-gray-200 rounded flex items-center gap-1">

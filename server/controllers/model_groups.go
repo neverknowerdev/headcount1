@@ -2,15 +2,25 @@ package endpoints
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"regexp"
-	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
-	"github.com/go-chi/chi/v5"
 )
+
+// respondReplaceMembersErr maps a replaceGroupMembers failure to a status: an
+// ownership violation on a referenced provider is a client error (400), not a
+// server error.
+func (api *API) respondReplaceMembersErr(w http.ResponseWriter, err error) {
+	if errors.Is(err, errNotOwned) {
+		api.respondError(w, http.StatusBadRequest, "one or more members reference a provider you do not own")
+		return
+	}
+	api.respondError(w, http.StatusInternalServerError, err.Error())
+}
 
 type modelGroupMemberReq struct {
 	ProviderID int32  `json:"provider_id"`
@@ -33,7 +43,7 @@ func slugify(name string) string {
 }
 
 func (api *API) ListModelGroups(w http.ResponseWriter, r *http.Request) {
-	groups, err := api.q.ListModelGroups(r.Context())
+	groups, err := api.q.ListModelGroupsForUser(r.Context(), api.currentUserID(r))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -57,9 +67,11 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	uid := api.currentUserID(r)
 	group, err := api.q.CreateModelGroup(r.Context(), db.ModelGroup{
 		Name:        req.Name,
 		Slug:        slug,
+		UserID:      &uid,
 		Description: req.Description,
 	})
 	if err != nil {
@@ -67,7 +79,7 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
+		api.respondReplaceMembersErr(w, err)
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -75,22 +87,13 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
 	var req modelGroupReq
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
 
-	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
 	if strings.TrimSpace(req.Name) != "" {
 		group.Name = req.Name
 	}
@@ -100,7 +103,7 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondError(w, http.StatusInternalServerError, err.Error())
+		api.respondReplaceMembersErr(w, err)
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -108,12 +111,8 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	if err := api.q.DeleteModelGroup(r.Context(), int32(id)); err != nil {
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
+	if err := api.q.DeleteModelGroup(r.Context(), group.ID); err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -125,6 +124,19 @@ func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers [
 	for _, m := range reqMembers {
 		if m.ProviderID == 0 {
 			continue
+		}
+		// A group member may not reference ANOTHER tenant's provider. Without
+		// this check any user could add another tenant's provider id (a small
+		// sequential int) as a member and, at serve time, spend that tenant's
+		// decrypted API key — the gateway only authorizes the group owner, not
+		// each member provider. Providers owned by the caller and ownerless
+		// shared/builtin providers (UserID nil) are allowed.
+		prov, err := api.q.GetLLMProvider(r.Context(), m.ProviderID)
+		if err != nil {
+			return errNotOwned
+		}
+		if prov.UserID != nil && *prov.UserID != api.currentUserID(r) {
+			return errNotOwned
 		}
 		if m.AllModels {
 			members = append(members, db.ModelGroupMember{ProviderID: m.ProviderID, AllModels: true, IsFree: m.IsFree})
@@ -174,21 +186,12 @@ type statsBucket struct {
 // an hourly time series over the last 3 days for the charts. Bucketing is
 // done in Go so the query stays portable across SQLite and Postgres.
 func (api *API) GetModelGroupStats(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	group, err := api.q.GetModelGroup(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "model group not found")
-		return
-	}
+	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
 
 	now := time.Now()
 	since3d := now.Add(-72 * time.Hour)
 	since5h := now.Add(-5 * time.Hour)
-	groupID := int32(id)
+	groupID := group.ID
 	stats, err := api.q.ListModelRequestStatsSince(r.Context(), &groupID, since3d)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())

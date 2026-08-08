@@ -24,6 +24,7 @@ let serverProcess: ChildProcessWithoutNullStreams | null = null;
  */
 export default async function globalSetup(config: FullConfig): Promise<void> {
     const baseURL = config.projects[0]?.use?.baseURL || 'http://localhost:8080';
+    const port = new URL(baseURL).port || '80';
 
     // 1. Create isolated home directory for E2E tests
     const e2eHome = createE2EHome();
@@ -53,9 +54,17 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     Object.assign(env, envData);
     env.E2E_MODE = 'true';
     env.E2E_HEADCOUNT1_HOME = e2eHome;
+    env.PORT = port;
 
     const projectRoot = path.resolve(__dirname, '..');
-    serverProcess = spawn('go', ['run', '.'], {
+    // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module
+    // download + compilation happen in their own step instead of racing the
+    // 60s server-ready timeout below on a cold module cache. Local runs (no
+    // prebuilt binary) fall back to `go run .`.
+    const prebuiltBinary = path.join(projectRoot, 'agent-orchestrator');
+    const usePrebuilt = fs.existsSync(prebuiltBinary);
+    console.log(`[globalSetup] starting server via ${usePrebuilt ? prebuiltBinary : 'go run .'}`);
+    serverProcess = spawn(usePrebuilt ? prebuiltBinary : 'go', usePrebuilt ? [] : ['run', '.'], {
         cwd: projectRoot,
         env,
         stdio: ['ignore', 'pipe', 'pipe'],
@@ -89,7 +98,10 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     console.log(`[globalSetup] wiped database via /api/e2e/wipe-db`);
 }
 
-async function waitForServer(url: string, timeoutMs = 60_000): Promise<void> {
+// 120s: generous enough to cover a `go run .` cold-compile fallback (no
+// prebuilt binary) on a slow machine, while the CI-prebuilt-binary path
+// above starts in well under a second.
+async function waitForServer(url: string, timeoutMs = 120_000): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
         try {

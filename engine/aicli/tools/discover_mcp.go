@@ -29,6 +29,55 @@ type MCPSessionStore struct {
 	disabledTools map[string]map[string]bool // serverName → toolName → disabled
 	onAuthError   func(serverName, errMsg string)
 	onToolCall    func(serverName, toolName string)
+	authRefresher func(context.Context, string) (string, error)
+}
+
+// SetAuthTokenRefresher configures optional runtime token renewal for external
+// servers with short-lived credentials. Refreshing closes the old process so a
+// new one receives the replacement token through its environment.
+func (s *MCPSessionStore) SetAuthTokenRefresher(refresher func(context.Context, string) (string, error)) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.authRefresher = refresher
+}
+
+func (s *MCPSessionStore) refreshServerAuth(ctx context.Context, serverName string) error {
+	s.mu.Lock()
+	refresher := s.authRefresher
+	_, exists := s.servers[serverName]
+	s.mu.Unlock()
+	if !exists {
+		return fmt.Errorf("unknown MCP server %q", serverName)
+	}
+	if refresher == nil {
+		return fmt.Errorf("no credential renewal is available for %q", serverName)
+	}
+	token, err := refresher(ctx, serverName)
+	if err != nil {
+		return err
+	}
+	if token == "" {
+		return fmt.Errorf("credential renewal returned an empty token")
+	}
+
+	s.mu.Lock()
+	srv, exists := s.servers[serverName]
+	if !exists {
+		s.mu.Unlock()
+		return fmt.Errorf("unknown MCP server %q", serverName)
+	}
+	srv.AuthToken = token
+	s.servers[serverName] = srv
+	oldSession := s.sessions[serverName]
+	delete(s.sessions, serverName)
+	s.mu.Unlock()
+	if oldSession != nil {
+		// The replacement credential is already installed in the store. A
+		// best-effort close must not suppress the retry just because a dead MCP
+		// process cannot shut down cleanly.
+		_ = oldSession.client.Close()
+	}
+	return nil
 }
 
 // NewMCPSessionStore creates a session store with the given server configs.
@@ -331,6 +380,15 @@ func (t *CallMCPTool) Execute(ctx context.Context, args json.RawMessage) (string
 	callCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 	defer cancel()
 	result, callErr := sess.client.CallTool(callCtx, p.Tool, p.Input)
+	if callErr != nil && isMCPAuthError(callErr) {
+		// Installation tokens expire after a short period. Renew once and create
+		// a fresh MCP process before reporting an authentication failure.
+		if refreshErr := t.store.refreshServerAuth(ctx, p.Server); refreshErr == nil {
+			if refreshed, connectErr := t.store.getOrConnect(ctx, p.Server); connectErr == nil {
+				result, callErr = refreshed.client.CallTool(callCtx, p.Tool, p.Input)
+			}
+		}
+	}
 	if callErr != nil {
 		if t.store.onAuthError != nil && isMCPAuthError(callErr) {
 			t.store.onAuthError(p.Server, callErr.Error())

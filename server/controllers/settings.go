@@ -3,67 +3,47 @@ package endpoints
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"path/filepath"
+	"strings"
 
-	"agent-orchestrator/db"
-	"gopkg.in/yaml.v3"
+	"agent-orchestrator/pkg/appsettings"
+	"agent-orchestrator/pkg/secrets"
+	"agent-orchestrator/pkg/utils"
 )
 
-type Settings struct {
-	BasePath         string   `json:"base_path" yaml:"base_path"`
-	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
-	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
-	GitHubPAT        string   `json:"github_pat" yaml:"github_pat"`
-}
+type Settings = appsettings.Settings
 
 type SSHKeyPayload struct {
 	Key string `json:"key"`
 }
 
-func getSettingsFilePath() string {
-	return db.SettingsFilePath()
-}
-
 func LoadSettings() Settings {
-	settingsPath := getSettingsFilePath()
-	data, err := os.ReadFile(settingsPath)
-
-	if err != nil {
-		return Settings{BasePath: db.Headcount1Home(), WorkspaceFolders: []string{}}
-	}
-
-	var settings Settings
-	if err := yaml.Unmarshal(data, &settings); err != nil {
-		return Settings{BasePath: db.Headcount1Home(), WorkspaceFolders: []string{}}
-	}
-
-	if settings.BasePath == "" {
-		settings.BasePath = db.Headcount1Home()
-	}
-	return settings
+	return appsettings.Load()
 }
 
 func SaveSettings(settings Settings) error {
-	settingsPath := getSettingsFilePath()
-	if err := os.MkdirAll(filepath.Dir(settingsPath), 0755); err != nil {
-		return err
-	}
-	data, err := yaml.Marshal(&settings)
-	if err != nil {
-		return err
-	}
-	return os.WriteFile(settingsPath, data, 0644)
+	return appsettings.Save(settings)
 }
 
 func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
+	// BasePath (the server's filesystem layout) and WorkspaceFolders (a list
+	// built from every tenant's company/project names) are instance-global and
+	// must not leak to an ordinary self-registered user. Expose them only to the
+	// operator, mirroring the gate on UpdateSettings.
+	if !utils.IsE2E() && !globalAdminAPIEnabled() {
+		settings.BasePath = ""
+		settings.WorkspaceFolders = nil
+	}
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
 }
 
 func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
-	var settings Settings
+	// Decode ON TOP of the current settings so a caller that sends only some
+	// fields doesn't silently reset the rest. Decoding into a zero value would
+	// wipe workspace_folders and — because AutoDeploy defaults to true — turn
+	// an omitted auto_deploy into "deploys disabled".
+	settings := LoadSettings()
 	if err := json.NewDecoder(r.Body).Decode(&settings); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
@@ -74,29 +54,36 @@ func (api *API) UpdateSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Deploy settings (deploy_source, auto_deploy) are read fresh from the file
+	// by the deploy webhook on each event, so there's no live updater state to
+	// propagate here — saving is enough.
+
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(settings)
 }
 
+// UploadSSHKey stores the caller's own git SSH private key, encrypted at rest
+// under their per-user DEK (like provider keys). It is per-user: one account can
+// no longer overwrite a shared identity. Requires the vault to be unlocked so
+// the key can be sealed.
 func (api *API) UploadSSHKey(w http.ResponseWriter, r *http.Request) {
 	var payload SSHKeyPayload
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-
-	settings := LoadSettings()
-	sshDir := filepath.Join(settings.BasePath, ".ssh")
-	if err := os.MkdirAll(sshDir, 0700); err != nil {
+	if strings.TrimSpace(payload.Key) == "" {
+		api.respondError(w, http.StatusBadRequest, "key is required")
+		return
+	}
+	uid := api.currentUserID(r)
+	if !secrets.IsUnlocked(uid) {
+		api.respondError(w, http.StatusConflict, "vault locked — unlock with your passkey before saving a key")
+		return
+	}
+	if err := api.q.UpsertUserSSHKey(r.Context(), uid, payload.Key); err != nil {
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
-
-	keyPath := filepath.Join(sshDir, "id_rsa")
-	if err := os.WriteFile(keyPath, []byte(payload.Key), 0600); err != nil {
-		http.Error(w, err.Error(), http.StatusInternalServerError)
-		return
-	}
-
 	w.WriteHeader(http.StatusOK)
 }

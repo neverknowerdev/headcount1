@@ -2,19 +2,40 @@ package endpoints
 
 import (
 	"encoding/json"
-	"log"
 	"net/http"
 	"strconv"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/pkg/filesystem"
-	"github.com/go-chi/chi/v5"
 )
+
+// authorizeAgentBindings verifies the provider and model group an agent is
+// bound to belong to the caller. Providers/groups are per-user and keyed by
+// sequential int32, and secrets.Decrypt routes by the owner embedded in the
+// ciphertext — so without this check an agent could point at another tenant's
+// provider_id and spend their API key. Nil bindings are fine (agent falls back
+// to the owner's default models).
+func (api *API) authorizeAgentBindings(r *http.Request, providerID, modelGroupID *int32) error {
+	if providerID != nil {
+		if _, err := api.authorizeProvider(r, *providerID); err != nil {
+			return err
+		}
+	}
+	if modelGroupID != nil {
+		if _, err := api.authorizeModelGroup(r, *modelGroupID); err != nil {
+			return err
+		}
+	}
+	return nil
+}
 
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
 	agents, err := api.q.ListAgentsByCompany(r.Context(), int32(compID))
@@ -26,29 +47,10 @@ func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
-	agent, err := api.q.GetAgent(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
-	api.respondJSON(w, http.StatusOK, agent)
+	api.respondJSON(w, http.StatusOK, api.agentFromCtx(r)) // loaded + authorized by LoadAgent
 }
 
 func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-
 	var req struct {
 		Name         string `json:"name"`
 		Description  string `json:"description"`
@@ -64,11 +66,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	agent, err := api.q.GetAgent(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "agent not found")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 
 	if req.Name != "" {
 		agent.Name = req.Name
@@ -86,33 +84,24 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Permissions != "" {
 		agent.Permissions = req.Permissions
 	}
+	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
+		return
+	}
 	agent.ProviderID = req.ProviderID
 	agent.ModelGroupID = req.ModelGroupID
 
-	agent, err = api.q.UpdateAgent(r.Context(), agent)
+	updated, err := api.q.UpdateAgent(r.Context(), agent)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	var comp db.Company
-	api.db.First(&comp, agent.CompanyID)
-	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write agent metadata: %v", err)
-	}
-
-	api.respondJSON(w, http.StatusOK, agent)
+	api.respondJSON(w, http.StatusOK, updated)
 }
 
 func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
-	idStr := chi.URLParam(r, "id")
-	id, err := strconv.Atoi(idStr)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 
 	var stats struct {
 		TotalRequests    int `json:"total_requests"`
@@ -122,7 +111,7 @@ func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
 	}
 
 	api.db.Model(&db.ProxyRequestLog{}).
-		Where("agent_id = ?", id).
+		Where("agent_id = ?", agent.ID).
 		Select("count(*) as total_requests, sum(total_tokens) as total_tokens, sum(prompt_tokens) as prompt_tokens, sum(completion_tokens) as completion_tokens").
 		Scan(&stats)
 
@@ -145,6 +134,14 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
+		return
+	}
 	p := db.Agent{
 		CompanyID:    req.CompanyID,
 		Name:         req.Name,
@@ -163,28 +160,15 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Write agent metadata to filesystem
-	settings := LoadSettings()
-	storage := filesystem.NewStorage(settings.BasePath)
-	var comp db.Company
-	api.db.First(&comp, req.CompanyID)
-	if err := storage.WriteAgent(agent, comp.ShortName); err != nil {
-		log.Printf("Warning: failed to write agent metadata: %v", err)
-	}
-
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
 
 	api.respondJSON(w, http.StatusCreated, agent)
 }
 
 func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
+	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 	var runs []db.Run
-	if err := api.db.Where("agent_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Where("agent_id = ?", agent.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

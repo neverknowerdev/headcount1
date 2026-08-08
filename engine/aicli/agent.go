@@ -18,6 +18,30 @@ import (
 // distinguish a runaway loop from a hard LLM/tool failure.
 var ErrMaxTurns = errors.New("agent loop exceeded max turns without a final answer")
 
+// ErrPaused is returned (wrapped) by RunWithHistory when a PauseRequested
+// callback asked the loop to stop. It is not a failure: the caller is
+// expected to persist the returned history and treat this as "paused, not
+// finished" — a later RunWithHistory call seeded with that same history
+// resumes exactly where this one left off.
+var ErrPaused = errors.New("agent run paused")
+
+// PauseRequested is polled once per turn, right after that turn's LLM
+// response has fully arrived and before any of its tool calls execute — the
+// one point in the loop where nothing is in flight and the conversation is
+// in a state that's safe to snapshot. When it returns true and the turn
+// produced tool calls (i.e. there is more work to do), RunWithHistory stops
+// there instead of continuing, returning ErrPaused together with the history
+// captured so far (including the just-received assistant message with its
+// pending tool calls).
+//
+// If the turn's response has no tool calls, the run was finishing anyway —
+// it completes normally rather than pausing one step from done. A tool call
+// already in progress from a prior turn is never interrupted: this callback
+// is never consulted mid-turn, only between turns.
+//
+// May be nil, in which case the loop never pauses.
+type PauseRequested func() bool
+
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
 var mcpDispatcherTools = map[string]bool{
@@ -161,7 +185,7 @@ func New(cfg Config) *Agent {
 
 // Run executes the agent loop starting with systemPrompt and userMessage.
 // It returns the final text response from the LLM after all tool calls are
-// exhausted, or an error if the loop fails.
+// exhausted, or an error if the loop fails. Never pauses (see RunWithHistory).
 func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (string, error) {
 	return a.RunWithMessages(ctx, systemPrompt, []Message{{Role: "user", Content: userMessage}})
 }
@@ -169,14 +193,44 @@ func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (stri
 // RunWithMessages executes the agent loop with an explicit slice of initial
 // messages (after the system prompt). Use this when the initial context
 // contains multiple turns, e.g. task description + per-comment messages.
+// Runs to completion or failure — it never pauses; callers that need
+// pause/resume support (a single long-lived session that may be interrupted
+// by a graceful server restart) should call RunWithHistory directly.
 func (a *Agent) RunWithMessages(ctx context.Context, systemPrompt string, initialMessages []Message) (string, error) {
+	result, _, err := a.RunWithHistory(ctx, BuildHistory(systemPrompt, initialMessages), nil)
+	return result, err
+}
+
+// BuildHistory assembles a session's opening conversation: the system prompt
+// (if any) followed by the given messages. The result is a valid initial
+// value for RunWithHistory.
+func BuildHistory(systemPrompt string, messages []Message) []Message {
+	history := []Message{}
+	if systemPrompt != "" {
+		history = append(history, Message{Role: "system", Content: systemPrompt})
+	}
+	history = append(history, messages...)
+	return history
+}
+
+// RunWithHistory executes the agent loop starting from an existing message
+// history — either a freshly built one (see BuildHistory) or a previously
+// paused run's history being resumed. If the last message in history is an
+// assistant message with tool calls that were never executed (exactly the
+// state a pause leaves behind — see PauseRequested), those tool calls are
+// executed first, before the loop continues as normal.
+//
+// Returns the final text answer and the full resulting history on normal
+// completion. On early termination it returns the history as of that point
+// alongside either ErrPaused (see PauseRequested) or another error.
+func (a *Agent) RunWithHistory(ctx context.Context, history []Message, pause PauseRequested) (string, []Message, error) {
 	switch a.Mode {
 	case ModeMessageHistory, "":
-		return a.runMessageHistory(ctx, systemPrompt, initialMessages, "")
+		return a.runMessageHistory(ctx, history, "", pause)
 	case ModeCompactThinking:
-		return a.runMessageHistory(ctx, systemPrompt, initialMessages, a.reasoningEffort())
+		return a.runMessageHistory(ctx, history, a.reasoningEffort(), pause)
 	default:
-		return "", fmt.Errorf("unsupported agent mode: %s", a.Mode)
+		return "", history, fmt.Errorf("unsupported agent mode: %s", a.Mode)
 	}
 }
 
@@ -197,17 +251,33 @@ func (a *Agent) reasoningEffort() string {
 // runMessageHistory maintains a rolling conversation history and sends the
 // full history to the LLM on every turn. reasoningEffort is passed verbatim
 // as the request's reasoning_effort field when non-empty.
-func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, initialMessages []Message, reasoningEffort string) (string, error) {
-	history := []Message{}
-	if systemPrompt != "" {
-		history = append(history, Message{Role: "system", Content: systemPrompt})
+//
+// history may arrive "mid-turn": if it was captured by a prior pause (see
+// PauseRequested), its last message is an assistant turn whose tool calls
+// were never executed. That step is replayed first, before the main loop
+// begins, so resuming is indistinguishable from having never paused.
+func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reasoningEffort string, pause PauseRequested) (string, []Message, error) {
+	if n := len(history); n > 0 {
+		last := history[n-1]
+		if last.Role == "assistant" && len(last.ToolCalls) > 0 {
+			toolMessages, terminalDone, err := a.executeToolCalls(ctx, last.ToolCalls)
+			if err != nil {
+				return "", history, fmt.Errorf("resume: tool execution failed: %w", err)
+			}
+			if a.logger != nil {
+				a.logger.LogToolResultsFromRequest(a.Client.Model, a.ProviderName, msgsToMap(toolMessages))
+			}
+			history = append(history, toolMessages...)
+			if terminalDone {
+				return strings.TrimSpace(last.Content), history, nil
+			}
+		}
 	}
-	history = append(history, initialMessages...)
 
 	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
-			return "", ctx.Err()
+			return "", history, ctx.Err()
 		}
 
 		req := ChatRequest{
@@ -224,7 +294,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 
 		resp, rawBody, err := a.Client.Complete(ctx, req)
 		if err != nil {
-			return "", fmt.Errorf("turn %d: LLM call failed: %w", turn, err)
+			return "", history, fmt.Errorf("turn %d: LLM call failed: %w", turn, err)
 		}
 
 		// Log the response.
@@ -276,7 +346,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		}
 
 		if len(resp.Choices) == 0 {
-			return "", fmt.Errorf("turn %d: LLM returned no choices", turn)
+			return "", history, fmt.Errorf("turn %d: LLM returned no choices", turn)
 		}
 		choice := resp.Choices[0]
 		assistantMsg := choice.Message
@@ -287,13 +357,22 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 
 		if len(assistantMsg.ToolCalls) == 0 {
 			// No tools to invoke — the assistant's text is the final answer.
-			return strings.TrimSpace(assistantMsg.Content), nil
+			return strings.TrimSpace(assistantMsg.Content), history, nil
+		}
+
+		// Safe pause point: this turn's response has fully arrived and is
+		// captured in history; nothing is executing right now. If asked to
+		// pause, stop here instead of running this turn's tools — the caller
+		// persists history and can resume later via RunWithHistory, which
+		// replays exactly this step before continuing.
+		if pause != nil && pause() {
+			return "", history, ErrPaused
 		}
 
 		// Execute each tool call and build the tool-result messages.
 		toolMessages, terminalDone, err := a.executeToolCalls(ctx, assistantMsg.ToolCalls)
 		if err != nil {
-			return "", fmt.Errorf("turn %d: tool execution failed: %w", turn, err)
+			return "", history, fmt.Errorf("turn %d: tool execution failed: %w", turn, err)
 		}
 
 		// Log tool results from the messages we're about to append (so the
@@ -308,11 +387,11 @@ func (a *Agent) runMessageHistory(ctx context.Context, systemPrompt string, init
 		// A terminal tool (e.g. finish_task) completed — the run is over.
 		// Skip the extra wrap-up LLM round; the finish summary already exists.
 		if terminalDone {
-			return strings.TrimSpace(assistantMsg.Content), nil
+			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 	}
 
-	return "", fmt.Errorf("%w (%d turns)", ErrMaxTurns, maxTurns)
+	return "", history, fmt.Errorf("%w (%d turns)", ErrMaxTurns, maxTurns)
 }
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each
@@ -422,9 +501,6 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-// appendRunLog persists a structured log entry to the run's log_entries column
-// and broadcasts it over WebSocket via db.Queries. It is a fire-and-forget
-// goroutine so it never blocks the agent loop.
 func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
 	if a.q == nil || a.runID <= 0 {
 		return

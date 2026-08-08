@@ -4,10 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"log"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
@@ -15,7 +13,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
-	"github.com/go-chi/chi/v5"
+	"agent-orchestrator/pkg/githubapp"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -25,6 +23,10 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	compID, _ := strconv.Atoi(compIDStr)
+	if _, err := api.authorizeCompany(r, int32(compID)); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
 
 	query := api.db.Where("company_id = ?", compID)
 
@@ -78,6 +80,39 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, tasks)
 }
 
+// authorizeTaskRefs verifies every object a task references — project, agent,
+// sprint, parent — belongs to the SAME company as the task. project_id/agent_id
+// are sequential int32; without this a user could point a task in their own
+// company at another tenant's project or agent and drive a worktree/agent from
+// a foreign record. companyID is the task's already-authorized company.
+func (api *API) authorizeTaskRefs(r *http.Request, companyID int32, projectID, agentID, sprintID, parentID *int32) error {
+	if projectID != nil {
+		proj, err := api.authorizeProject(r, *projectID)
+		if err != nil || proj.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if agentID != nil {
+		agent, err := api.authorizeAgent(r, *agentID)
+		if err != nil || agent.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if sprintID != nil && *sprintID != 0 {
+		var s db.Sprint
+		if err := api.db.WithContext(r.Context()).First(&s, *sprintID).Error; err != nil || s.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	if parentID != nil {
+		var p db.Task
+		if err := api.db.WithContext(r.Context()).First(&p, *parentID).Error; err != nil || p.CompanyID != companyID {
+			return errNotOwned
+		}
+	}
+	return nil
+}
+
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		CompanyID       int32   `json:"company_id"`
@@ -89,6 +124,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		TaskType        string  `json:"task_type"`
 		Description     string  `json:"description"`
 		Priority        string  `json:"priority"`
+		GitBaseBranch   string  `json:"git_base_branch"`
 		DueDate         *string `json:"due_date"`
 		AgentConfigName string  `json:"agent_config_name"`
 	}
@@ -112,9 +148,26 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	if taskType == "" {
 		taskType = db.TaskTypePlanAndImplement
 	}
+	gitBaseBranch := strings.TrimSpace(req.GitBaseBranch)
+	if gitBaseBranch == "" {
+		gitBaseBranch = db.DefaultTaskGitBaseBranch
+	}
+	if err := git.ValidateBranchName(r.Context(), gitBaseBranch); err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	if req.CompanyID == 0 {
 		api.respondError(w, http.StatusBadRequest, "company_id is required")
+		return
+	}
+	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+	sprintPtr := &req.SprintID
+	if err := api.authorizeTaskRefs(r, req.CompanyID, req.ProjectID, req.AgentID, sprintPtr, req.ParentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
 		return
 	}
 
@@ -129,6 +182,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		ParentID:        req.ParentID,
 		Description:     req.Description,
 		Priority:        priority,
+		GitBaseBranch:   gitBaseBranch,
 		DueDate:         dueDate,
 		AgentConfigName: req.AgentConfigName,
 	}
@@ -138,27 +192,17 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("task_created", task)
+	api.hub.BroadcastEventForCompany(task.CompanyID, "task_created", task)
 
 	var comp db.Company
 	api.db.First(&comp, req.CompanyID)
 
-	settings := LoadSettings()
-	fsManager := filesystem.NewManager(settings.BasePath)
-
 	if req.ProjectID != nil {
+		settings := LoadSettings()
 		var proj db.Project
 		api.db.First(&proj, *req.ProjectID)
-		fsManager.CreateTaskWorkspace(comp, proj, task)
-
-		// Write task metadata to filesystem
-		storage := filesystem.NewStorage(settings.BasePath)
-		if err := storage.WriteTask(task, comp.ShortName); err != nil {
-			log.Printf("Warning: failed to write task metadata: %v", err)
-		}
+		filesystem.NewManager(settings.BasePath).CreateTaskWorkspace(comp, proj, task)
 	}
-
-	fsManager.SaveTask(comp, task)
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
@@ -166,34 +210,20 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
-	task, err := api.q.GetTask(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, err.Error())
-		return
-	}
-	api.respondJSON(w, http.StatusOK, task)
+	api.respondJSON(w, http.StatusOK, api.taskFromCtx(r)) // loaded + authorized by LoadTask
 }
 
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
 	var req struct {
-		ProjectID   *int32  `json:"project_id"`
-		AgentID     *int32  `json:"agent_id"`
-		SprintID    *int32  `json:"sprint_id"`
-		ParentID    *int32  `json:"parent_id"`
-		Title       string  `json:"title"`
-		TaskType    string  `json:"task_type"`
-		Description string  `json:"description"`
-		Priority    string  `json:"priority"`
+		ProjectID       *int32  `json:"project_id"`
+		AgentID         *int32  `json:"agent_id"`
+		SprintID        *int32  `json:"sprint_id"`
+		ParentID        *int32  `json:"parent_id"`
+		Title           string  `json:"title"`
+		TaskType        string  `json:"task_type"`
+		Description     string  `json:"description"`
+		Priority        string  `json:"priority"`
+		GitBaseBranch   string  `json:"git_base_branch"`
 		DueDate         *string `json:"due_date"`
 		Status          string  `json:"status"`
 		IsArchived      *bool   `json:"is_archived"`
@@ -204,9 +234,12 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	task, err := api.q.GetTask(r.Context(), int32(id))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "Task not found")
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+
+	// Referenced objects must belong to the task's company (same tenancy check
+	// as CreateTask) — a foreign project_id/agent_id must never be bound here.
+	if err := api.authorizeTaskRefs(r, task.CompanyID, req.ProjectID, req.AgentID, req.SprintID, req.ParentID); err != nil {
+		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
 		return
 	}
 
@@ -228,6 +261,18 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Priority != "" {
 		task.Priority = req.Priority
+	}
+	if req.GitBaseBranch != "" && req.GitBaseBranch != task.GitBaseBranch {
+		if task.Status == "in-progress" || task.Status == "in-review" || task.Status == "done" {
+			api.respondError(w, http.StatusConflict, "base branch cannot be changed after work has started")
+			return
+		}
+		branch := strings.TrimSpace(req.GitBaseBranch)
+		if err := git.ValidateBranchName(r.Context(), branch); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		task.GitBaseBranch = branch
 	}
 
 	if req.ProjectID != nil {
@@ -254,12 +299,13 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.DueDate = &t
 	}
 
-	task, err = api.q.UpdateTask(r.Context(), task)
+	updatedTask, err := api.q.UpdateTask(r.Context(), task)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.hub.BroadcastEvent("task_updated", task)
+	task = updatedTask
+	api.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", task)
 
 	if statusChanged {
 		content, _ := json.Marshal(map[string]string{"from": prevStatus, "to": task.Status})
@@ -269,14 +315,8 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			CommentType: "status_change",
 			Content:     string(content),
 		}); err == nil {
-			api.hub.BroadcastEvent("comment_created", sc)
+			api.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", sc)
 		}
-	}
-
-	var taskComp db.Company
-	if api.db.First(&taskComp, task.CompanyID).Error == nil {
-		taskSettings := LoadSettings()
-		filesystem.NewManager(taskSettings.BasePath).SaveTask(taskComp, task)
 	}
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
@@ -293,20 +333,16 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	// take minutes. The agent updates task status via tool calls, and tests
 	// poll for status changes.
 	if statusChanged {
-		go api.engine.ProcessTask(context.Background(), int32(id))
+		go api.engine.ProcessTask(context.Background(), task.ID)
 	}
 
 	api.respondJSON(w, http.StatusOK, task)
 }
 
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
-	id, err := strconv.Atoi(chi.URLParam(r, "id"))
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid id")
-		return
-	}
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	var runs []db.Run
-	if err := api.db.Where("task_id = ?", id).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -334,10 +370,25 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
 	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
-	sshDir := filepath.Join(settings.BasePath, ".ssh")
-	gitMgr := git.NewGitManager(repoDir, sshDir)
+	keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
+	defer keyCleanup()
+	gitMgr := git.NewGitManager(repoDir, keyPath)
 
 	branchName := fmt.Sprintf("task-%d", task.ID)
+	if project.GitHubInstallationID != 0 {
+		if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+			gitMgr.WithHTTPToken(token)
+		} else if tokenErr != nil {
+			fmt.Printf("Warning: failed to create GitHub App token for project %d: %v\n", project.ID, tokenErr)
+			return
+		}
+		// GitHub-backed projects publish a draft PR. Never merge or force-push
+		// the default branch as part of task status changes.
+		branchName = fmt.Sprintf("headcount1/task-%d", task.ID)
+		if newStatus == "done" {
+			return
+		}
+	}
 
 	if newStatus == "done" {
 		// Merge worktree branch into main
@@ -361,7 +412,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 		}
 		// Pull latest and recreate worktree
 		gitMgr.Pull(ctx)
-		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
+		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
 			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
 		} else {
 			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)

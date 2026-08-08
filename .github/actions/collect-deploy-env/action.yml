@@ -1,0 +1,126 @@
+name: Collect deploy env
+description: >-
+  Collect the configuration a deploy should deliver to the server: every
+  variable and secret this job's GitHub Environment exposes, as a JSON object
+  for the deploy webhook payload.
+
+# Everything the job can see is delivered — no list to maintain. Add a secret or
+# variable to the environment and the next deploy carries it; change one and the
+# next deploy updates it on the server.
+#
+# "Everything the job can see" is GitHub's own resolution: organization, then
+# repository, then environment, with the most specific winning. So a value set on
+# the production environment overrides a repository-wide one of the same name,
+# which is what makes production and staging able to differ.
+#
+# Two things are NOT delivered:
+#
+#   1. CI's own credentials (GITHUB_TOKEN, DEPLOY_API_KEY). They belong to the
+#      deploy machinery, not to the app, and the server must never hold them.
+#      DEPLOY_URL is intentionally delivered because the app uses it to build
+#      OAuth callbacks and public links.
+#   2. Anything named in vars.DEPLOY_ENV_EXCLUDE (one name per line), the escape
+#      hatch for a repository secret that exists for some other workflow and has
+#      no business on the app server.
+#
+# The server drops a third category on arrival — names that would let a delivered
+# value execute code (PATH, LD_PRELOAD, NODE_OPTIONS, ...) — and reports them in
+# its response, which the notify step prints. See pkg/envstore.
+#
+# A name present as both a secret and a variable is taken from the secret, so it
+# stays marked secret and gets scrubbed from the agent shell.
+
+inputs:
+  exclude:
+    description: Newline/comma separated names NOT to deliver (vars.DEPLOY_ENV_EXCLUDE).
+    required: false
+    default: ''
+  secrets_json:
+    description: toJSON(secrets) from the calling workflow.
+    required: true
+  vars_json:
+    description: toJSON(vars) from the calling workflow.
+    required: true
+
+outputs:
+  env_file:
+    description: >-
+      Path to a file under RUNNER_TEMP holding the delivered NAME->value pairs as
+      a JSON object (`{}` when the environment has nothing). Deliberately a file
+      and not a step output: step outputs are recorded with the run, and these
+      values include secrets.
+    value: ${{ steps.collect.outputs.env_file }}
+  secret_keys_json:
+    description: JSON array of the delivered names whose values came from secrets (names only).
+    value: ${{ steps.collect.outputs.secret_keys_json }}
+  summary:
+    description: Human-readable list of delivered names, for the job log.
+    value: ${{ steps.collect.outputs.summary }}
+
+runs:
+  using: composite
+  steps:
+    - id: collect
+      shell: bash
+      env:
+        EXCLUDE: ${{ inputs.exclude }}
+        SECRETS_JSON: ${{ inputs.secrets_json }}
+        VARS_JSON: ${{ inputs.vars_json }}
+      run: |
+        set -euo pipefail
+        umask 077
+
+        # Via files, never argv: `jq --argjson x "$SECRETS_JSON"` would put every
+        # secret in this runner's process list.
+        printf '%s' "$SECRETS_JSON" > "$RUNNER_TEMP/.secrets.json"
+        printf '%s' "$VARS_JSON"    > "$RUNNER_TEMP/.vars.json"
+
+        # CI's own credentials, plus whatever the environment opted out. The
+        # secrets context spells GITHUB_TOKEN lowercase, so matching happens
+        # after the keys are upper-cased below.
+        {
+          echo "GITHUB_TOKEN"
+          echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
+          echo "ACTIONS_ID_TOKEN_REQUEST_URL"
+          echo "DEPLOY_API_KEY"
+          echo "DEPLOY_ENV_EXCLUDE"
+          printf '%s\n' "$EXCLUDE" | tr ',' '\n' | sed 's/#.*//; s/[[:space:]]//g'
+        } | grep -v '^$' | tr '[:lower:]' '[:upper:]' | sort -u > "$RUNNER_TEMP/.excluded.txt"
+
+        env_file="$RUNNER_TEMP/deploy-env.json"
+        jq -n \
+          --slurpfile secrets "$RUNNER_TEMP/.secrets.json" \
+          --slurpfile vars "$RUNNER_TEMP/.vars.json" \
+          --rawfile excluded "$RUNNER_TEMP/.excluded.txt" \
+          '
+          ($excluded | split("\n") | map(select(length > 0))) as $skip
+          # Upper-case every name: the server only accepts UPPER_SNAKE_CASE, and
+          # it makes the exclusion match case-insensitively.
+          | (($vars[0] // {}) | with_entries(.key |= ascii_upcase)) as $v
+          | (($secrets[0] // {}) | with_entries(.key |= ascii_upcase)) as $s
+          # Secrets win over variables of the same name, so a value that is a
+          # secret anywhere stays treated as one.
+          | ($v + $s) | with_entries(select((.key | IN($skip[])) | not))
+          ' > "$env_file"
+
+        # -c matters: a step output has to be one line unless it is written with
+        # a heredoc delimiter.
+        secret_keys=$(jq -nc \
+          --slurpfile secrets "$RUNNER_TEMP/.secrets.json" \
+          --rawfile excluded "$RUNNER_TEMP/.excluded.txt" \
+          '
+          ($excluded | split("\n") | map(select(length > 0))) as $skip
+          | (($secrets[0] // {}) | keys | map(ascii_upcase) | map(select((. | IN($skip[])) | not)))
+          ')
+
+        rm -f "$RUNNER_TEMP/.secrets.json" "$RUNNER_TEMP/.vars.json"
+
+        # Only ever print names. GitHub masks secret values in logs, but the
+        # summary is read by humans and shouldn't have to rely on that.
+        summary=$(jq -r 'keys | join(", ")' "$env_file")
+        {
+          echo "env_file=$env_file"
+          echo "secret_keys_json=$secret_keys"
+          echo "summary=${summary:-<none>}"
+        } >> "$GITHUB_OUTPUT"
+        echo "Delivering $(jq 'length' "$env_file") env vars: ${summary:-<none>}"
