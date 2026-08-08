@@ -166,6 +166,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Get("/", api.ListCompanyRuns)
 		r.Get("/{id}", api.GetRun)
 		r.Get("/{id}/children", api.ListChildRuns)
+		r.Get("/{id}/log/download", api.DownloadRunLog)
 		r.Post("/{id}/stop", api.StopRun)
 	})
 

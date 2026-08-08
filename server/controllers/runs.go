@@ -2,8 +2,12 @@ package endpoints
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"agent-orchestrator/db"
 
@@ -230,4 +234,69 @@ func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
 	api.engine.StopRun(r.Context(), int32(id))
 
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+}
+
+// DownloadRunLog streams the run's execution log as a JSONL attachment.
+// Prefers the on-disk log file when present; otherwise serializes log_entries
+// (or falls back to legacy log_content).
+func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
+	id, err := strconv.Atoi(chi.URLParam(r, "id"))
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid id")
+		return
+	}
+	run, err := api.q.GetRun(r.Context(), int32(id))
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "run not found")
+		return
+	}
+
+	filename := fmt.Sprintf("run-%d.jsonl", run.ID)
+	if run.Name != "" {
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return '-'
+		}, run.Name)
+		if safe != "" {
+			filename = fmt.Sprintf("run-%d-%s.jsonl", run.ID, safe)
+		}
+	}
+
+	if run.LogFilePath != "" {
+		if info, statErr := os.Stat(run.LogFilePath); statErr == nil && !info.IsDir() {
+			if base := filepath.Base(run.LogFilePath); base != "" && base != "." {
+				filename = base
+			}
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+			http.ServeFile(w, r, run.LogFilePath)
+			return
+		}
+	}
+
+	var body []byte
+	if run.LogEntries != "" && run.LogEntries != "[]" {
+		var entries []json.RawMessage
+		if json.Unmarshal([]byte(run.LogEntries), &entries) == nil && len(entries) > 0 {
+			var b strings.Builder
+			for _, entry := range entries {
+				b.Write(entry)
+				b.WriteByte('\n')
+			}
+			body = []byte(b.String())
+		}
+	}
+	if len(body) == 0 {
+		if run.LogContent == "" {
+			api.respondError(w, http.StatusNotFound, "run has no log")
+			return
+		}
+		body = []byte(run.LogContent)
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Write(body)
 }
