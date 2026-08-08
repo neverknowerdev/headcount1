@@ -219,7 +219,7 @@ func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
 func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
 	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 
-	filename := fmt.Sprintf("run-%d.jsonl", run.ID)
+	filename := fmt.Sprintf("run-%d_run_log.jsonl", run.ID)
 	if name := strings.TrimSpace(run.Name); name != "" {
 		safe := strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
@@ -229,7 +229,7 @@ func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
 		}, name)
 		safe = strings.Trim(safe, "-")
 		if safe != "" {
-			filename = safe + ".jsonl"
+			filename = safe + "_run_log.jsonl"
 		}
 	}
 
