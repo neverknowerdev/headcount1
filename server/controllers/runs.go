@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"net/http"
 	"os"
-	"path/filepath"
 	"strconv"
 	"strings"
 
@@ -221,23 +220,24 @@ func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
 	run := api.runFromCtx(r) // loaded + authorized by LoadRun
 
 	filename := fmt.Sprintf("run-%d.jsonl", run.ID)
-	if run.Name != "" {
+	if name := strings.TrimSpace(run.Task.Title); name != "" {
 		safe := strings.Map(func(r rune) rune {
 			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
 				return r
 			}
-			return '-'
-		}, run.Name)
+			if r == ' ' {
+				return '-'
+			}
+			return -1
+		}, name)
+		safe = strings.Trim(safe, "-")
 		if safe != "" {
-			filename = fmt.Sprintf("run-%d-%s.jsonl", run.ID, safe)
+			filename = safe + ".jsonl"
 		}
 	}
 
 	if run.LogFilePath != "" {
 		if info, statErr := os.Stat(run.LogFilePath); statErr == nil && !info.IsDir() {
-			if base := filepath.Base(run.LogFilePath); base != "" && base != "." {
-				filename = base
-			}
 			w.Header().Set("Content-Type", "application/x-ndjson")
 			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
 			http.ServeFile(w, r, run.LogFilePath)
