@@ -427,7 +427,9 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		return string(out), nil
 	}
 
-	if _, err := run("add", "."); err != nil {
+	// memory.md is task execution metadata created in every worktree, not a
+	// project change. Exclude it even when source changes are being committed.
+	if _, err := run("add", "-A", "--", ".", ":(exclude)memory.md"); err != nil {
 		return err
 	}
 

@@ -3,14 +3,11 @@ package engine
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"strings"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
-	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
 )
 
@@ -21,6 +18,7 @@ func (e *NativeEngine) askArtifact(
 	runID, rootTaskID int32,
 	provider db.LLMProvider,
 	sessionModel string,
+	gatewayAuth runGatewayAuth,
 	filename, question string,
 	logger *logging.ProxyLogger,
 ) (string, error) {
@@ -53,17 +51,8 @@ func (e *NativeEngine) askArtifact(
 				Model:        model,
 				ProviderName: readerProvider.Name,
 			}
-			if isModelGroupProxyBaseURL(readerProvider.BaseUrl) && runID > 0 {
-				// A fallback to the asking session's model group uses a synthetic
-				// localhost provider with no API key, so authenticate it with the
-				// same short-lived run token as the main session.
-				token := runtokens.Default().Issue(runID)
-				target.Cleanup = func() { runtokens.Default().Revoke(runID) }
-				target.ExtraHeaders = map[string]string{
-					runtokens.TokenHeader: token,
-					"X-Run-ID":            fmt.Sprintf("%d", runID),
-					"X-Proxy-Log-Mode":    "switches-only",
-				}
+			if err := gatewayAuth.configureClientTarget(&target, readerProvider); err != nil {
+				return tools.ArtifactReaderTarget{}, fmt.Errorf("artifact reader: %w", err)
 			}
 			return target, nil
 		},
@@ -96,9 +85,4 @@ func (e *NativeEngine) askArtifact(
 		},
 	}
 	return reader.Answer(ctx, filename, question)
-}
-
-func isModelGroupProxyBaseURL(baseURL string) bool {
-	u, err := url.Parse(baseURL)
-	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
 }

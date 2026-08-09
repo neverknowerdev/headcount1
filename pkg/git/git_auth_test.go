@@ -9,7 +9,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -87,6 +86,7 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	command.Dir = directory
 	require.NoError(t, command.Run())
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "memory.md"), []byte("task metadata\n"), 0o644))
 
 	manager := NewGitManager(directory, "")
 	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change", CommitAuthor{Name: "user@example.com", Email: "user@example.com"}))
@@ -102,17 +102,24 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	author, err := command.Output()
 	require.NoError(t, err)
 	require.Equal(t, "user@example.com <user@example.com>\n", string(author))
+
+	command = exec.Command("git", "ls-tree", "--name-only", "HEAD", "memory.md")
+	command.Dir = directory
+	files, err := command.Output()
+	require.NoError(t, err)
+	require.Empty(t, strings.TrimSpace(string(files)), "task memory must not be committed")
 }
 
 func TestGetStatusInDirIncludesUntrackedFiles(t *testing.T) {
 	directory := t.TempDir()
-	manager := NewGitManager(directory, "")
-	require.NoError(t, manager.Init(context.Background()))
-	require.NoError(t, os.WriteFile(filepath.Join(directory, "new.txt"), []byte("new"), 0644))
+	command := exec.Command("git", "init")
+	command.Dir = directory
+	require.NoError(t, command.Run())
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "untracked.txt"), []byte("change\n"), 0o644))
 
-	status, err := manager.GetStatusInDir(context.Background(), directory)
+	status, err := NewGitManager(directory, "").GetStatusInDir(context.Background(), directory)
 	require.NoError(t, err)
-	assert.Contains(t, status, "?? new.txt")
+	require.Contains(t, status, "?? untracked.txt")
 }
 
 func TestValidateBranchName(t *testing.T) {
