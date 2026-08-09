@@ -365,6 +365,20 @@ func (g *GitManager) GetDiffInDir(ctx context.Context, dir string) (string, erro
 	return string(out), nil
 }
 
+// GetStatusInDir returns porcelain status, including untracked files. A
+// plain git diff does not report untracked files, so callers deciding whether
+// a commit/PR is warranted must use this method instead.
+func (g *GitManager) GetStatusInDir(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--untracked-files=all")
+	cmd.Dir = dir
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git status failed: %v, output: %s", err, string(out))
+	}
+	return string(out), nil
+}
+
 func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)

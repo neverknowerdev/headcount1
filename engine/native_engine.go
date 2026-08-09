@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -906,9 +907,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
-	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
+	// Apply tool filter from the built-in role config (if set). An empty
+	// AllowedTools means all tools. Built-in configs use the runtime registry
+	// names (bash/read/write/ls), not the legacy UI names.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
+	} else if agentCfg == nil && strings.TrimSpace(agent.Permissions) != "" {
+		// Custom DB agents store the UI permission names in JSON. Native runs
+		// use different concrete tool names, so translate the UI aliases before
+		// enforcing deny settings. Built-in delegated roles remain governed by
+		// their role config above.
+		filtered, permErr := applyStoredToolPermissions(registry, agent.Permissions)
+		if permErr != nil {
+			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
+		} else {
+			registry = filtered
+		}
 	}
 
 	// Append the authoritative tool listing so prose tool references in agent
@@ -1000,6 +1014,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	} else if mcpErr != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP accounts for agent: %v", mcpErr))
 	}
+	e.logInfo(proxyLogger, "Effective tools: "+strings.Join(registry.Names(), ", "))
 
 	// Determine agent mode and reasoning level from config.
 	agentMode := aicli.ModeMessageHistory
@@ -1145,8 +1160,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == runStatusCompleted {
-		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
-		if task.ProjectID != nil {
+		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
+		if committed && task.ProjectID != nil {
 			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
 		}
 	}
@@ -1836,11 +1851,26 @@ Document %q:
 
 Question: %s`, filename, content, truncNote, question)
 
-	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
-	if err != nil {
-		return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
+	apiKey := ""
+	if provider.ApiKeyEncrypted != "" {
+		apiKey, err = secrets.Default().Decrypt(provider.ApiKeyEncrypted)
+		if err != nil {
+			return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
+		}
 	}
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
+	if isModelGroupProxyBaseURL(provider.BaseUrl) && runID > 0 {
+		// When the reader falls back to the asking session's model group, the
+		// provider is a synthetic localhost gateway target with no API key.
+		// Authenticate it with the same per-run token used by the main session.
+		token := runtokens.Default().Issue(runID)
+		defer runtokens.Default().Revoke(runID)
+		client.ExtraHeaders = map[string]string{
+			runtokens.TokenHeader: token,
+			"X-Run-ID":            fmt.Sprintf("%d", runID),
+			"X-Proxy-Log-Mode":    "switches-only",
+		}
+	}
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 500,
@@ -1866,6 +1896,48 @@ Question: %s`, filename, content, truncNote, question)
 	}
 	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
+}
+
+// isModelGroupProxyBaseURL identifies the synthetic provider target created
+// for native runs whose agent is bound to a model group. It is intentionally
+// path-based so local test servers and non-default ports work too.
+func isModelGroupProxyBaseURL(baseURL string) bool {
+	u, err := url.Parse(baseURL)
+	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
+}
+
+// applyStoredToolPermissions translates the legacy/UI permission labels to
+// native registry names. The UI treats an omitted key as allowed, so only
+// explicit "deny" values remove tools. Lifecycle tools remain available even
+// when the UI has no corresponding checkbox; otherwise an agent could never
+// finish its task or report progress.
+func applyStoredToolPermissions(registry *aicli.Registry, raw string) (*aicli.Registry, error) {
+	var permissions map[string]string
+	if err := json.Unmarshal([]byte(raw), &permissions); err != nil {
+		return registry, err
+	}
+	aliases := map[string][]string{
+		"bash":      {"bash"},
+		"read":      {"read"},
+		"edit":      {"write"},
+		"glob":      {"ls"},
+		"grep":      {"grep"},
+		"webfetch":  {"web_fetch"},
+		"websearch": {"web_fetch"},
+		"task":      {"create_subtask", "create_task", "answer_subtask_question", "ask_task_owner"},
+		// Also accept native names for API clients that bypass the legacy UI.
+		"write":       {"write"},
+		"ls":          {"ls"},
+		"web_fetch":   {"web_fetch"},
+		"create_task": {"create_task"},
+	}
+	var denied []string
+	for label, names := range aliases {
+		if strings.EqualFold(strings.TrimSpace(permissions[label]), "deny") {
+			denied = append(denied, names...)
+		}
+	}
+	return registry.Exclude(denied), nil
 }
 
 // logAskArtifact persists one ask_artifact reader exchange to its own file in
@@ -2021,23 +2093,33 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) {
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) bool {
 	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
 	// creation failed or the task has a bare directory workspace) instead of
 	// letting `git diff` fail with usage noise.
 	if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); statErr != nil {
 		e.logInfo(logger, "Workspace is not a git worktree; skipping commit")
-		return
+		return false
 	}
 	e.logInfo(logger, "Checking for changes to commit in worktree...")
+	status, err := gitMgr.GetStatusInDir(ctx, workspacePath)
+	if err != nil {
+		e.logInfo(logger, fmt.Sprintf("Warning: failed to get worktree status: %v", err))
+		return false
+	}
+	if strings.TrimSpace(status) == "" {
+		e.logInfo(logger, "No changes to commit")
+		return false
+	}
 	diff, err := gitMgr.GetDiffInDir(ctx, workspacePath)
 	if err != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to get diff: %v", err))
-		return
+		return false
 	}
+	// git diff omits untracked files; status is still enough to prove that a
+	// commit is needed and gives the commit-message model useful context.
 	if strings.TrimSpace(diff) == "" {
-		e.logInfo(logger, "No changes to commit")
-		return
+		diff = status
 	}
 
 	// Generate commit message via LLM.
@@ -2049,8 +2131,10 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 
 	if commitErr := gitMgr.CommitInWorktree(ctx, workspacePath, commitMsg); commitErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to commit: %v", commitErr))
+		return false
 	} else {
 		e.logInfo(logger, fmt.Sprintf("Committed changes: %s", commitMsg))
+		return true
 	}
 }
 

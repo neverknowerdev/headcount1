@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -95,6 +96,17 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	message, err := command.Output()
 	require.NoError(t, err)
 	require.Contains(t, string(message), headcount1CoAuthorTrailer)
+}
+
+func TestGetStatusInDirIncludesUntrackedFiles(t *testing.T) {
+	directory := t.TempDir()
+	manager := NewGitManager(directory, "")
+	require.NoError(t, manager.Init(context.Background()))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "new.txt"), []byte("new"), 0644))
+
+	status, err := manager.GetStatusInDir(context.Background(), directory)
+	require.NoError(t, err)
+	assert.Contains(t, status, "?? new.txt")
 }
 
 func TestValidateBranchName(t *testing.T) {

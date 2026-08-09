@@ -71,6 +71,10 @@ var blockingTools = map[string]bool{
 const toolCallTimeout = 10 * time.Minute
 
 const (
+	// maxTurns is the safety cap for one agent session. Delegated workflows
+	// can legitimately require many tool/LLM round trips before finish_task.
+	maxTurns = 300
+
 	// maxToolOutputChars caps a single tool result appended to history.
 	// Pathologically large outputs (full-file dumps, huge search results)
 	// are truncated with a marker so the agent can re-query more narrowly.
@@ -274,7 +278,6 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		}
 	}
 
-	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()

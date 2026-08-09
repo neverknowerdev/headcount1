@@ -59,7 +59,8 @@ var ceoTools = []string{
 }
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
-// specs as artifacts, and delegates implementation.
+// specs as artifacts, and delegates implementation. These names must match
+// the runtime registry names in engine/aicli/tools/default.go.
 var ctoTools = []string{
 	"codegraph_*",
 	"create_subtask",
@@ -68,8 +69,8 @@ var ctoTools = []string{
 	"ask_human",
 	"report_status",
 	"finish_task",
-	"read_file",
-	"list_dir",
+	"read",
+	"ls",
 	"grep",
 	"list_artifacts",
 	"read_artifact",
@@ -93,12 +94,15 @@ var cmoTools = []string{
 	"write_artifact",
 }
 
-// implementerTools: full workspace access for agents that write code.
+// implementerTools: full workspace access for agents that write code. Keep
+// these names aligned with the actual Tool.Def names: the previous
+// read_file/write_file/exec_command/list_dir names filtered out the tools and
+// left Coder with no shell or edit capability.
 var implementerTools = []string{
-	"read_file",
-	"write_file",
-	"exec_command",
-	"list_dir",
+	"read",
+	"write",
+	"bash",
+	"ls",
 	"grep",
 	"codegraph_*",
 	"ask_task_owner",
@@ -111,10 +115,10 @@ var implementerTools = []string{
 
 // qaTools: QA verifies — reads, runs, and drives a browser, but never edits.
 var qaTools = []string{
-	"read_file",
-	"list_dir",
+	"read",
+	"ls",
 	"grep",
-	"exec_command",
+	"bash",
 	"web_fetch",
 	"browser_use",
 	"ask_task_owner",
@@ -127,7 +131,7 @@ var qaTools = []string{
 
 // contentTools: research + artifact writing for content/design specialists.
 var contentTools = []string{
-	"read_file",
+	"read",
 	"web_fetch",
 	"ask_task_owner",
 	"report_status",

@@ -139,6 +139,12 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Empty(t, cfg.AllowedModels)
+	for _, tool := range []string{"bash", "read", "write", "ls", "grep"} {
+		assert.True(t, cfg.IsToolAllowed(tool), "Coder should be allowed to use runtime tool %q", tool)
+	}
+	for _, legacy := range []string{"exec_command", "read_file", "write_file", "list_dir"} {
+		assert.False(t, cfg.IsToolAllowed(legacy), "legacy tool name %q must not be used in the runtime allowlist", legacy)
+	}
 }
 
 func TestDefaultFactory_GetConfig_NotFound(t *testing.T) {
