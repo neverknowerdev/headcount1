@@ -45,6 +45,17 @@ func (api *API) currentUserID(r *http.Request) int32 {
 	return authctx.UserID(r.Context())
 }
 
+// isInstanceAdmin reports whether the authenticated account is the first one
+// registered on this instance. Deployment settings affect the whole server,
+// so this decision belongs to the database rather than the browser.
+func (api *API) isInstanceAdmin(ctx context.Context, userID int32) bool {
+	if api.q == nil || userID == 0 {
+		return false
+	}
+	first, err := api.q.FirstUser(ctx)
+	return err == nil && first.ID == userID
+}
+
 // errNotOwned is returned by the authorize* helpers on any ownership
 // mismatch. Handlers translate it (and load failures) to 404 — never 403 —
 // so other tenants' IDs are indistinguishable from nonexistent ones.

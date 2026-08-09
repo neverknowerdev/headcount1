@@ -38,8 +38,9 @@ interface DeployStatus {
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
-    const { selectedCompanyId, companies, setCompanies } = useStore();
+    const { selectedCompanyId, companies, setCompanies, user } = useStore();
     const isOwner = useIsOwner();
+    const isAdmin = user?.is_admin === true;
 
     const [companyShortName, setCompanyShortName] = useState('');
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
@@ -80,13 +81,17 @@ export const Settings: React.FC = () => {
     }, []);
 
     const fetchDeployStatus = useCallback(async () => {
+        if (!isAdmin) {
+            setDeployStatus(null);
+            return;
+        }
         try {
             const res = await axios.get('/api/deploy/status');
             setDeployStatus(res.data);
         } catch (e) {
             console.error(e);
         }
-    }, []);
+    }, [isAdmin]);
 
     useEffect(() => {
         fetchDeployStatus();
@@ -102,18 +107,14 @@ export const Settings: React.FC = () => {
                 setSshKey('');
             }
 
-            // The workspace root and deploy config are instance-global
-            // (operator-managed). Saving them is only possible when the operator
-            // has enabled the global admin API; a 404 there is expected for
-            // regular users, so don't fail the save.
-            try {
+            // The workspace root and deploy config are instance-global and only
+            // the first registered user can change them.
+            if (isAdmin) {
                 await axios.post('/api/settings', {
                     base_path: basePath,
                     deploy_source: deploySource,
                     auto_deploy: autoDeploy,
                 });
-            } catch (err: any) {
-                if (err?.response?.status !== 404) throw err;
             }
 
             const currentCompany = companies.find(c => c.id === selectedCompanyId);
@@ -130,6 +131,22 @@ export const Settings: React.FC = () => {
         } catch (e) {
             console.error(e);
             alert('Failed to save settings');
+        } finally {
+            setSaving(false);
+        }
+    };
+
+    const handleSaveDeployment = async () => {
+        setSaving(true);
+        try {
+            await axios.post('/api/settings', {
+                deploy_source: deploySource,
+                auto_deploy: autoDeploy,
+            });
+            alert('Deployment settings saved!');
+        } catch (e) {
+            console.error(e);
+            alert('Failed to save deployment settings');
         } finally {
             setSaving(false);
         }
@@ -269,7 +286,7 @@ export const Settings: React.FC = () => {
                 </form>
             </div>
 
-            <div className="bg-white p-6 rounded-lg shadow-sm border mt-8">
+            {isAdmin && deployStatus && deployStatus.environment !== 'staging' && <div className="bg-white p-6 rounded-lg shadow-sm border mt-8">
                 <div className="flex items-center justify-between border-b pb-2 mb-4">
                     <h2 className="text-lg font-medium text-gray-900">Deployment</h2>
                     {deployStatus && (
@@ -359,7 +376,18 @@ export const Settings: React.FC = () => {
                         </label>
                     </div>
                 </div>
-            </div>
+
+                <div className="mt-6 flex justify-end">
+                    <button
+                        type="button"
+                        onClick={handleSaveDeployment}
+                        disabled={saving}
+                        className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
+                    >
+                        {saving ? 'Saving...' : 'Save Deployment Settings'}
+                    </button>
+                </div>
+            </div>}
 
             {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
                 <h2 className="text-lg font-medium text-red-600 border-b border-red-200 pb-2 mb-4">Danger Zone</h2>

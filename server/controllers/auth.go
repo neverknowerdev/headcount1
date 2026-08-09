@@ -26,8 +26,9 @@ import (
 // middleware, logout/me, the E2E bypass, and the mailer used by recovery.
 
 type userResponse struct {
-	ID    int32  `json:"id"`
-	Email string `json:"email"`
+	ID      int32  `json:"id"`
+	Email   string `json:"email"`
+	IsAdmin bool   `json:"is_admin"`
 }
 
 // ── mailer (used by passkey recovery) ────────────────────────────────────────
@@ -114,7 +115,8 @@ func (api *API) authStateResponse(ctx context.Context, user db.User) map[string]
 		// role drives the frontend hiding of owner-only actions (create/delete
 		// company & project, delete MCP server). "owner" for solo users and team
 		// creators; "member" for invited users. The backend enforces regardless.
-		"role": api.teamRole(ctx, user.ID),
+		"role":     api.teamRole(ctx, user.ID),
+		"is_admin": api.isInstanceAdmin(ctx, user.ID),
 	}
 	if exp, err := api.q.GetSessionAbsoluteExpiry(ctx, user.ID); err == nil && !exp.IsZero() {
 		reauthAt := exp.Add(-db.SessionReauthGap())

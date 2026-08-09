@@ -7,7 +7,6 @@ import (
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/secrets"
-	"agent-orchestrator/pkg/utils"
 )
 
 type Settings = appsettings.Settings
@@ -30,11 +29,19 @@ func (api *API) GetSettings(w http.ResponseWriter, r *http.Request) {
 	// built from every tenant's company/project names) are instance-global and
 	// must not leak to an ordinary self-registered user. Expose them only to the
 	// operator, mirroring the gate on UpdateSettings.
-	if !utils.IsE2E() && !globalAdminAPIEnabled() {
-		settings.BasePath = ""
-		settings.WorkspaceFolders = nil
-	}
+	admin := api.isInstanceAdmin(r.Context(), api.currentUserID(r))
 	w.Header().Set("Content-Type", "application/json")
+	if !admin {
+		// Deployment configuration is instance-global and must not be disclosed
+		// to ordinary users through this shared settings endpoint. Omit the keys
+		// entirely rather than returning zero values that look like real settings.
+		json.NewEncoder(w).Encode(map[string]any{
+			"base_path":         "",
+			"workspace_folders": nil,
+			"git_remote_url":    settings.GitRemoteURL,
+		})
+		return
+	}
 	json.NewEncoder(w).Encode(settings)
 }
 

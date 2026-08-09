@@ -35,6 +35,14 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	return users, err
 }
 
+// FirstUser returns the account that registered first. CreatedAt defines
+// "first"; the ID tie-breaker keeps fixtures/imports deterministic.
+func (q *Queries) FirstUser(ctx context.Context) (User, error) {
+	var user User
+	err := q.db.WithContext(ctx).Order("created_at ASC, id ASC").First(&user).Error
+	return user, err
+}
+
 // SetUserReenrollTicket records the hashed re-enroll ticket and its expiry on a
 // just-recovered account, gating the re-enrollment that follows recovery.
 func (q *Queries) SetUserReenrollTicket(ctx context.Context, userID int32, tokenHash string, expiresAt time.Time) error {
