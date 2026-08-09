@@ -6,6 +6,7 @@ import (
 	"strconv"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli"
 )
 
 // authorizeAgentBindings verifies the provider and model group an agent is
@@ -44,6 +45,13 @@ func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.respondJSON(w, http.StatusOK, agents)
+}
+
+// GetToolNames returns the canonical native tool names used by the custom
+// agent permissions UI. Keeping the list server-owned prevents frontend and
+// runtime tool names from drifting apart.
+func (api *API) GetToolNames(w http.ResponseWriter, _ *http.Request) {
+	api.respondJSON(w, http.StatusOK, aicli.ConfigurableToolNames())
 }
 
 func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {

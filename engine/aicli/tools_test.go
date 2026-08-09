@@ -60,3 +60,13 @@ func TestRegistry_PromptListing(t *testing.T) {
 	assert.Contains(t, listing, strings.Repeat("x", 140)+"…")
 	assert.NotContains(t, listing, strings.Repeat("x", 141))
 }
+
+func TestRegistry_ExcludeAndNames(t *testing.T) {
+	reg := aicli.NewRegistry()
+	reg.Register(&listingStubTool{name: "read", desc: "Read."})
+	reg.Register(&listingStubTool{name: "write", desc: "Write."})
+
+	filtered := reg.Exclude([]string{"write"})
+	assert.Equal(t, []string{"read"}, filtered.Names())
+	assert.Equal(t, []string{"read", "write"}, reg.Names(), "Exclude must not mutate the source registry")
+}
