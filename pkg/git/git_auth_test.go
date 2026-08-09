@@ -86,6 +86,7 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	command.Dir = directory
 	require.NoError(t, command.Run())
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "memory.md"), []byte("task metadata\n"), 0o644))
 
 	manager := NewGitManager(directory, "")
 	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change"))
@@ -95,6 +96,24 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	message, err := command.Output()
 	require.NoError(t, err)
 	require.Contains(t, string(message), headcount1CoAuthorTrailer)
+
+	command = exec.Command("git", "ls-tree", "--name-only", "HEAD", "memory.md")
+	command.Dir = directory
+	files, err := command.Output()
+	require.NoError(t, err)
+	require.Empty(t, strings.TrimSpace(string(files)), "task memory must not be committed")
+}
+
+func TestGetStatusInDirIncludesUntrackedFiles(t *testing.T) {
+	directory := t.TempDir()
+	command := exec.Command("git", "init")
+	command.Dir = directory
+	require.NoError(t, command.Run())
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "untracked.txt"), []byte("change\n"), 0o644))
+
+	status, err := NewGitManager(directory, "").GetStatusInDir(context.Background(), directory)
+	require.NoError(t, err)
+	require.Contains(t, status, "?? untracked.txt")
 }
 
 func TestValidateBranchName(t *testing.T) {
