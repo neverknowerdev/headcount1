@@ -39,9 +39,15 @@ func requestAsUser(req *http.Request, user db.User) *http.Request {
 	return req.WithContext(authctx.WithUser(req.Context(), user))
 }
 
-func TestRequireInstanceAdminUsesFirstRegisteredUser(t *testing.T) {
+func TestRequireInstanceAdminUsesPersistedFlag(t *testing.T) {
 	database, api, first, second := setupDeploymentSettingsTest(t)
 	defer func() { sqlDB, _ := database.DB(); sqlDB.Close() }()
+	require.True(t, first.IsAdmin)
+	require.False(t, second.IsAdmin)
+	// Authorization follows the persisted attribute, not the user's position in
+	// registration order.
+	require.NoError(t, database.Model(&db.User{}).Where("id = ?", first.ID).Update("is_admin", false).Error)
+	require.NoError(t, database.Model(&db.User{}).Where("id = ?", second.ID).Update("is_admin", true).Error)
 
 	next := http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) { w.WriteHeader(http.StatusOK) })
 	h := api.RequireInstanceAdmin(next)
@@ -49,12 +55,12 @@ func TestRequireInstanceAdminUsesFirstRegisteredUser(t *testing.T) {
 	adminReq := requestAsUser(httptest.NewRequest(http.MethodGet, "/deploy/status", nil), first)
 	adminW := httptest.NewRecorder()
 	h.ServeHTTP(adminW, adminReq)
-	require.Equal(t, http.StatusOK, adminW.Code)
+	require.Equal(t, http.StatusForbidden, adminW.Code)
 
 	memberReq := requestAsUser(httptest.NewRequest(http.MethodGet, "/deploy/status", nil), second)
 	memberW := httptest.NewRecorder()
 	h.ServeHTTP(memberW, memberReq)
-	require.Equal(t, http.StatusForbidden, memberW.Code)
+	require.Equal(t, http.StatusOK, memberW.Code)
 }
 
 func TestDeploymentSettingsAreRedactedAndAdminCanSave(t *testing.T) {

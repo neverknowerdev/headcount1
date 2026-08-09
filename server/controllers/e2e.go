@@ -163,7 +163,7 @@ func (api *API) E2ERegister(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email, IsAdmin: api.isInstanceAdmin(r.Context(), user.ID)}})
+	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email, IsAdmin: user.IsAdmin}})
 }
 
 // E2ELock evicts the fixture user's DEK so tests can exercise the locked

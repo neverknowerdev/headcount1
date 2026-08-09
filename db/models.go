@@ -14,6 +14,7 @@ import (
 type User struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Email     string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
+	IsAdmin   bool      `json:"is_admin" gorm:"not null;default:false"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	// ReenrollTokenHash / ReenrollExpiresAt bind the re-enrollment that follows a
