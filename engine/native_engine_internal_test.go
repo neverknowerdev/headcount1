@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 
 	"github.com/stretchr/testify/require"
@@ -35,11 +36,20 @@ func TestIsModelGroupProxyBaseURL(t *testing.T) {
 	require.False(t, isModelGroupProxyBaseURL("https://api.openai.com/v1"))
 }
 
-func TestModelGroupGatewayHeadersReuseTheProvidedRunToken(t *testing.T) {
-	headers := modelGroupGatewayHeaders(42, "rt_parent")
+func TestRunGatewayAuthReusesTheProvidedRunToken(t *testing.T) {
+	client := aicli.NewClient("http://localhost/api/proxy/group/free-first", "", "model")
+	auth := runGatewayAuth{runID: 42, token: "rt_parent"}
+	require.NoError(t, auth.configure(client, db.LLMProvider{BaseUrl: client.BaseURL}))
+	headers := client.ExtraHeaders
 	require.Equal(t, "rt_parent", headers["X-Gateway-Token"])
 	require.Equal(t, "42", headers["X-Run-ID"])
 	require.Equal(t, "switches-only", headers["X-Proxy-Log-Mode"])
+}
+
+func TestRunGatewayAuthRejectsMissingTokenForProxyProvider(t *testing.T) {
+	client := aicli.NewClient("http://localhost/api/proxy/group/free-first", "", "model")
+	auth := runGatewayAuth{runID: 42}
+	require.ErrorContains(t, auth.configure(client, db.LLMProvider{BaseUrl: client.BaseURL}), "gateway token is unavailable")
 }
 
 func TestFinishAllowsGitOnlyForSuccessfulVerdicts(t *testing.T) {

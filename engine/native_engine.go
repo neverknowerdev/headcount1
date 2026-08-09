@@ -639,9 +639,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	var taskFinished bool
 	var finishResult tools.FinishTaskResult
 	// The model-group gateway token belongs to the whole execution session.
-	// Nested calls such as ask_artifact must reuse it; issuing another token
-	// for the same run invalidates this one in the registry.
-	var gatewayToken string
+	// Nested LLM calls must reuse it; issuing another token for the same run
+	// invalidates this one in the registry.
+	var gatewayAuth runGatewayAuth
+	gatewayAuth.runID = run.ID
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, result tools.FinishTaskResult) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -780,7 +781,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// call — the artifact never enters this session's context, only the short
 	// answer does. Uses the configured "ask_artifact" Default Model when set.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
-		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayToken, filename, question, proxyLogger)
+		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayAuth, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
 	// The set of sub-agents an agent may delegate to comes from its config's
@@ -1041,9 +1042,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// below already does that). The gateway token authenticates this run
 		// to the (otherwise locked) local proxy — it is only ever sent to the
 		// in-process gateway, never to an external provider.
-		gatewayToken = runtokens.Default().Issue(run.ID)
+		gatewayAuth.token = runtokens.Default().Issue(run.ID)
 		defer runtokens.Default().Revoke(run.ID)
-		llmClient.ExtraHeaders = modelGroupGatewayHeaders(run.ID, gatewayToken)
+		if err := gatewayAuth.configure(llmClient, provider); err != nil {
+			e.failRun(ctx, run.ID, err.Error())
+			return "failed"
+		}
 	}
 	agentCfgObj := aicli.Config{
 		Client:                llmClient,
@@ -1153,7 +1157,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == runStatusCompleted && finishAllowsGit(finishResult) {
-		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
+		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
 		if committed && task.ProjectID != nil {
 			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
 		}
@@ -1809,7 +1813,7 @@ func (e *NativeEngine) askArtifact(
 	runID, rootTaskID int32,
 	provider db.LLMProvider,
 	sessionModel string,
-	gatewayToken string,
+	gatewayAuth runGatewayAuth,
 	filename, question string,
 	logger *logging.ProxyLogger,
 ) (string, error) {
@@ -1853,14 +1857,8 @@ Question: %s`, filename, content, truncNote, question)
 		}
 	}
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
-	if isModelGroupProxyBaseURL(provider.BaseUrl) {
-		if gatewayToken == "" {
-			return "", fmt.Errorf("artifact reader: model-group gateway token is unavailable")
-		}
-		// Reuse the parent session token. runtokens.Issue(runID) would replace
-		// the active token, and a nested defer-Revoke would then invalidate the
-		// parent session before its next LLM turn.
-		client.ExtraHeaders = modelGroupGatewayHeaders(runID, gatewayToken)
+	if err := gatewayAuth.configure(client, provider); err != nil {
+		return "", fmt.Errorf("artifact reader: %w", err)
 	}
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
@@ -1895,6 +1893,22 @@ Question: %s`, filename, content, truncNote, question)
 func isModelGroupProxyBaseURL(baseURL string) bool {
 	u, err := url.Parse(baseURL)
 	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
+}
+
+type runGatewayAuth struct {
+	runID int32
+	token string
+}
+
+func (a runGatewayAuth) configure(client *aicli.Client, provider db.LLMProvider) error {
+	if !isModelGroupProxyBaseURL(provider.BaseUrl) {
+		return nil
+	}
+	if a.token == "" {
+		return fmt.Errorf("model-group gateway token is unavailable")
+	}
+	client.ExtraHeaders = modelGroupGatewayHeaders(a.runID, a.token)
+	return nil
 }
 
 func modelGroupGatewayHeaders(runID int32, token string) map[string]string {
@@ -2058,7 +2072,7 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) bool {
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, gatewayAuth runGatewayAuth) bool {
 	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
 	// creation failed or the task has a bare directory workspace) instead of
 	// letting `git diff` fail with usage noise.
@@ -2089,7 +2103,7 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 	}
 
 	// Generate commit message via LLM.
-	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task)
+	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task, gatewayAuth)
 	if msgErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to generate commit message: %v, using fallback", msgErr))
 		commitMsg = fmt.Sprintf("Agent run for task %d", task.ID)
@@ -2129,7 +2143,7 @@ func commitRelevantGitStatus(status string) string {
 }
 
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.
-func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task) (string, error) {
+func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task, gatewayAuth runGatewayAuth) (string, error) {
 	if agent.ProviderID == nil {
 		return "", fmt.Errorf("no provider configured")
 	}
@@ -2161,6 +2175,9 @@ Changes:
 		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
 	}
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
+	if err := gatewayAuth.configure(client, provider); err != nil {
+		return "", fmt.Errorf("commit message: %w", err)
+	}
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 200,
