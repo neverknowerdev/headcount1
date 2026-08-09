@@ -38,3 +38,27 @@ func Names(names ...ToolName) []string {
 	}
 	return result
 }
+
+// ConfigurableToolNames returns the native tools that can be enabled or
+// disabled from the custom-agent permissions UI. Lifecycle tools stay out of
+// this list so an agent cannot be configured without a way to finish or report
+// its task.
+func ConfigurableToolNames() []string {
+	return Names(
+		ToolBash,
+		ToolRead,
+		ToolWrite,
+		ToolListDir,
+		ToolGrep,
+		ToolWebFetch,
+		ToolBrowserUse,
+		ToolWriteArtifact,
+		ToolListArtifacts,
+		ToolReadArtifact,
+		ToolAskArtifact,
+		ToolCreateSubtask,
+		ToolAnswerSubtaskQuestion,
+		ToolAskTaskOwner,
+		ToolCreateTask,
+	)
+}

@@ -252,6 +252,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
+	r.Get("/tool-names", api.GetToolNames)
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
