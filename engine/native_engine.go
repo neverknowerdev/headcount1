@@ -637,6 +637,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
 	var finishResult tools.FinishTaskResult
+	// The model-group gateway token belongs to the whole execution session.
+	// Nested LLM calls must reuse it; issuing another token for the same run
+	// invalidates this one in the registry.
+	var gatewayAuth runGatewayAuth
+	gatewayAuth.runID = run.ID
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, result tools.FinishTaskResult) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -775,7 +780,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// call — the artifact never enters this session's context, only the short
 	// answer does. Uses the configured "ask_artifact" Default Model when set.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
-		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question, proxyLogger)
+		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayAuth, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
 	// The set of sub-agents an agent may delegate to comes from its config's
@@ -1074,12 +1079,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// below already does that). The gateway token authenticates this run
 		// to the (otherwise locked) local proxy — it is only ever sent to the
 		// in-process gateway, never to an external provider.
-		gatewayToken := runtokens.Default().Issue(run.ID)
+		gatewayAuth.token = runtokens.Default().Issue(run.ID)
 		defer runtokens.Default().Revoke(run.ID)
-		llmClient.ExtraHeaders = map[string]string{
-			"X-Run-ID":            fmt.Sprintf("%d", run.ID),
-			"X-Proxy-Log-Mode":    "switches-only",
-			runtokens.TokenHeader: gatewayToken,
+		if err := gatewayAuth.configure(llmClient, provider); err != nil {
+			e.failRun(ctx, run.ID, err.Error())
+			return "failed"
 		}
 	}
 	agentCfgObj := aicli.Config{
@@ -1178,12 +1182,17 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
+			status = "failed"
+			runErrMsg = fmt.Sprintf("finish_task was not called and the forced follow-up failed: %v", followErr)
+		} else if !taskFinished {
+			status = "failed"
+			runErrMsg = "agent ended without calling finish_task, including during the forced follow-up"
 		}
 	}
 
 	// Git commit if there are changes.
-	if gitProject && gitMgr != nil && status == runStatusCompleted {
-		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
+	if gitProject && gitMgr != nil && status == runStatusCompleted && finishAllowsGit(finishResult) {
+		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
 		if committed && task.ProjectID != nil {
 			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
 		}
@@ -1950,7 +1959,7 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) bool {
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, gatewayAuth runGatewayAuth) bool {
 	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
 	// creation failed or the task has a bare directory workspace) instead of
 	// letting `git diff` fail with usage noise.
@@ -1964,6 +1973,7 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to get worktree status: %v", err))
 		return false
 	}
+	status = commitRelevantGitStatus(status)
 	if strings.TrimSpace(status) == "" {
 		e.logInfo(logger, "No changes to commit")
 		return false
@@ -1973,14 +1983,14 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to get diff: %v", err))
 		return false
 	}
-	// git diff omits untracked files; status is still enough to prove that a
-	// commit is needed and gives the commit-message model useful context.
+	// git diff omits untracked and staged-only changes. Status proves that a
+	// commit is needed and still gives the message generator useful context.
 	if strings.TrimSpace(diff) == "" {
 		diff = status
 	}
 
 	// Generate commit message via LLM.
-	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task)
+	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task, gatewayAuth)
 	if msgErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to generate commit message: %v, using fallback", msgErr))
 		commitMsg = fmt.Sprintf("Agent run for task %d", task.ID)
@@ -1996,7 +2006,7 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 }
 
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.
-func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task) (string, error) {
+func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task, gatewayAuth runGatewayAuth) (string, error) {
 	if agent.ProviderID == nil {
 		return "", fmt.Errorf("no provider configured")
 	}
@@ -2028,6 +2038,9 @@ Changes:
 		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
 	}
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
+	if err := gatewayAuth.configure(client, provider); err != nil {
+		return "", fmt.Errorf("commit message: %w", err)
+	}
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 200,
@@ -2045,4 +2058,28 @@ Changes:
 	}
 
 	return msg, nil
+}
+
+// finishAllowsGit limits repository publication to successful agent verdicts.
+// A blocked/refinement result may have touched the worktree while preparing a
+// handoff, but it must not be turned into an automatic commit or PR.
+func finishAllowsGit(result tools.FinishTaskResult) bool {
+	return result.Status == "done" || result.Status == "in-review"
+}
+
+// commitRelevantGitStatus removes the per-task memory file from publication.
+// It is created automatically in every task worktree and is execution
+// metadata, not a project change.
+func commitRelevantGitStatus(status string) string {
+	var relevant []string
+	for _, line := range strings.Split(status, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) >= 3 && strings.TrimSpace(line[3:]) == "memory.md" {
+			continue
+		}
+		relevant = append(relevant, line)
+	}
+	return strings.Join(relevant, "\n")
 }

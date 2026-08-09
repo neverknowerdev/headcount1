@@ -17,8 +17,8 @@ type AskArtifact struct {
 }
 
 // ArtifactReaderTarget describes the one-shot model endpoint used by the
-// ask_artifact tool. Cleanup is called after the request, which lets callers
-// revoke short-lived gateway credentials.
+// ask_artifact tool. Cleanup is called after the request for any caller-owned
+// temporary resources.
 type ArtifactReaderTarget struct {
 	BaseURL      string
 	APIKey       string
