@@ -23,7 +23,7 @@ func (t *ReportStatus) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: string(ToolReportStatus),
+			Name: string(aicli.ToolReportStatus),
 			Description: "Report a short one-line progress status for the current run (e.g. \"Refining requirements\", " +
 				"\"Implementing API endpoint\"). Call it whenever you start a new stage of work so progress is visible.",
 			Parameters: json.RawMessage(`{

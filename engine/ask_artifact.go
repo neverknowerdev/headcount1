@@ -80,7 +80,7 @@ func (e *NativeEngine) askArtifact(
 		},
 		LogRequest: func(model, provider string, body []byte) {
 			if logger != nil {
-				logger.LogRequest(model, string(tools.ToolAskArtifact), provider, body)
+				logger.LogRequest(model, string(aicli.ToolAskArtifact), provider, body)
 			}
 		},
 		LogResponse: func(model, provider string, body []byte, usage aicli.Usage) {

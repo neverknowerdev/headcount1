@@ -335,7 +335,7 @@ func (t *CallMCPTool) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        string(ToolCallMCP),
+			Name:        string(aicli.ToolCallMCP),
 			Description: "Invoke a tool on an MCP server.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
@@ -410,7 +410,7 @@ func (t *DiscoverMCPTool) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        string(ToolDiscoverMCP),
+			Name:        string(aicli.ToolDiscoverMCP),
 			Description: "Get the full description and parameter details for a specific MCP tool before calling it.",
 			Parameters: json.RawMessage(`{
 				"type":"object",

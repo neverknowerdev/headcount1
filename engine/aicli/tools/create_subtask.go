@@ -58,7 +58,7 @@ func (t *CreateSubtask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: string(ToolCreateSubtask),
+			Name: string(aicli.ToolCreateSubtask),
 			Description: "Create a subtask and assign it to a sub-agent. Runs the subtask as a nested session and waits: " +
 				"returns the sub-agent's final result and produced artifacts when it finishes, or the sub-agent's question " +
 				"(answer it with answer_subtask_question) when it needs input from you. Only one subtask can run at a time.",

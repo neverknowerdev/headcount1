@@ -52,7 +52,7 @@ func (t *WriteArtifactFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: string(ToolWriteArtifact),
+			Name: string(aicli.ToolWriteArtifact),
 			Description: "Write an output artifact for the current task. " +
 				"Use this for deliverables: reports (.md), specifications, diagrams (.svg), " +
 				"images (.png, .jpg), PDFs, audio, video, or any non-code output. " +

@@ -108,7 +108,7 @@ func (t *AskArtifact) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: string(ToolAskArtifact),
+			Name: string(aicli.ToolAskArtifact),
 			Description: "Ask a question about an artifact's content and get a short answer, without reading the artifact " +
 				"into your own context (a separate lightweight reader answers from the document). " +
 				"Use it to verify deliverables: \"Does it contain a Roadmap section?\", \"Which files does it say were changed?\". " +

@@ -44,7 +44,7 @@ func (t *FinishTask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: string(ToolFinishTask),
+			Name: string(aicli.ToolFinishTask),
 			Description: "MUST be called at the end of every run to record the outcome and update the task status. " +
 				statusGuidance +
 				"Use 'blocked' when you are stuck and need user input — including when you cannot actually verify or complete " +

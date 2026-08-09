@@ -916,11 +916,31 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// use different concrete tool names, so translate the UI aliases before
 		// enforcing deny settings. Built-in delegated roles remain governed by
 		// their role config above.
-		filtered, permErr := applyStoredToolPermissions(registry, agent.Permissions)
-		if permErr != nil {
+		var permissions map[string]string
+		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
 			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
 		} else {
-			registry = filtered
+			aliases := map[string][]string{
+				"bash":        {string(aicli.ToolBash)},
+				"read":        {string(aicli.ToolRead)},
+				"edit":        {string(aicli.ToolWrite)},
+				"glob":        {string(aicli.ToolListDir)},
+				"grep":        {string(aicli.ToolGrep)},
+				"webfetch":    {string(aicli.ToolWebFetch)},
+				"websearch":   {string(aicli.ToolWebFetch)},
+				"task":        {string(aicli.ToolCreateSubtask), string(aicli.ToolCreateTask), string(aicli.ToolAnswerSubtaskQuestion), string(aicli.ToolAskTaskOwner)},
+				"write":       {string(aicli.ToolWrite)},
+				"ls":          {string(aicli.ToolListDir)},
+				"web_fetch":   {string(aicli.ToolWebFetch)},
+				"create_task": {string(aicli.ToolCreateTask)},
+			}
+			var denied []string
+			for label, names := range aliases {
+				if strings.EqualFold(strings.TrimSpace(permissions[label]), "deny") {
+					denied = append(denied, names...)
+				}
+			}
+			registry = registry.Exclude(denied)
 		}
 	}
 
@@ -1064,7 +1084,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
 		AgentName:             agentDisplayName,
-		TerminalTools:         []string{string(tools.ToolFinishTask)},
+		TerminalTools:         []string{string(aicli.ToolFinishTask)},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -1191,7 +1211,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case taskFinished && forcedFinish:
 			endReason = "finish_task_forced"
 		case taskFinished:
-			endReason = string(tools.ToolFinishTask)
+			endReason = string(aicli.ToolFinishTask)
 		}
 		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}

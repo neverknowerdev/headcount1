@@ -24,7 +24,7 @@ func (t *ExecCommand) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        string(ToolBash),
+			Name:        string(aicli.ToolBash),
 			Description: "Execute a shell command inside the workspace. Runs with the workspace as the working directory. Only use relative paths — paths outside the workspace are rejected.",
 			Parameters: json.RawMessage(`{
 				"type":"object",
