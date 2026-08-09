@@ -2,13 +2,9 @@ package engine
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"net/url"
-	"os"
-	"path/filepath"
 	"strings"
-	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
@@ -52,9 +48,10 @@ func (e *NativeEngine) askArtifact(
 				}
 			}
 			target := tools.ArtifactReaderTarget{
-				BaseURL: readerProvider.BaseUrl,
-				APIKey:  apiKey,
-				Model:   model,
+				BaseURL:      readerProvider.BaseUrl,
+				APIKey:       apiKey,
+				Model:        model,
+				ProviderName: readerProvider.Name,
 			}
 			if isModelGroupProxyBaseURL(readerProvider.BaseUrl) && runID > 0 {
 				// A fallback to the asking session's model group uses a synthetic
@@ -81,8 +78,21 @@ func (e *NativeEngine) askArtifact(
 				fmt.Printf("Warning: failed to record ask_artifact token stats: %v\n", err)
 			}
 		},
-		LogExchange: func(name, model, q, prompt, answer string, promptTokens, completionTokens int) {
-			e.logAskArtifact(logger, runID, name, model, q, prompt, answer, promptTokens, completionTokens)
+		LogRequest: func(model, provider string, body []byte) {
+			if logger != nil {
+				logger.LogRequest(model, string(tools.ToolAskArtifact), provider, body)
+			}
+		},
+		LogResponse: func(model, provider string, body []byte, usage aicli.Usage) {
+			if logger != nil {
+				logger.LogResponse(model, provider, 200, body, "", logging.Usage{
+					PromptTokens:     usage.PromptTokens,
+					CompletionTokens: usage.CompletionTokens,
+					TotalTokens:      usage.TotalTokens,
+					ReasoningTokens:  usage.CompletionTokensDetails.ReasoningTokens,
+					CachedTokens:     usage.PromptTokensDetails.CachedTokens,
+				})
+			}
 		},
 	}
 	return reader.Answer(ctx, filename, question)
@@ -91,64 +101,4 @@ func (e *NativeEngine) askArtifact(
 func isModelGroupProxyBaseURL(baseURL string) bool {
 	u, err := url.Parse(baseURL)
 	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
-}
-
-// applyStoredToolPermissions translates the legacy/UI permission labels to
-// native registry names. The UI treats an omitted key as allowed, so only
-// explicit "deny" values remove tools. Lifecycle tools remain available even
-// when the UI has no corresponding checkbox; otherwise an agent could never
-// finish its task or report progress.
-func applyStoredToolPermissions(registry *aicli.Registry, raw string) (*aicli.Registry, error) {
-	var permissions map[string]string
-	if err := json.Unmarshal([]byte(raw), &permissions); err != nil {
-		return registry, err
-	}
-	aliases := map[string][]string{
-		"bash":        {string(tools.ToolBash)},
-		"read":        {string(tools.ToolRead)},
-		"edit":        {string(tools.ToolWrite)},
-		"glob":        {string(tools.ToolListDir)},
-		"grep":        {string(tools.ToolGrep)},
-		"webfetch":    {string(tools.ToolWebFetch)},
-		"websearch":   {string(tools.ToolWebFetch)},
-		"task":        {string(tools.ToolCreateSubtask), string(tools.ToolCreateTask), string(tools.ToolAnswerSubtaskQuestion), string(tools.ToolAskTaskOwner)},
-		"write":       {string(tools.ToolWrite)},
-		"ls":          {string(tools.ToolListDir)},
-		"web_fetch":   {string(tools.ToolWebFetch)},
-		"create_task": {string(tools.ToolCreateTask)},
-	}
-	var denied []string
-	for label, names := range aliases {
-		if strings.EqualFold(strings.TrimSpace(permissions[label]), "deny") {
-			denied = append(denied, names...)
-		}
-	}
-	return registry.Exclude(denied), nil
-}
-
-func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
-	if logger == nil {
-		return
-	}
-	logName := fmt.Sprintf("ask-artifact-%d-%d.log", runID, time.Now().UnixMilli())
-	logPath := filepath.Join(filepath.Dir(logger.FilePath()), logName)
-	content := fmt.Sprintf(`=== ask_artifact ===
-Time: %s
-Asking run: #%d
-Artifact: %s
-Reader model: %s
-Question: %s
-Usage: prompt_tokens=%d completion_tokens=%d
-
---- Reader prompt (artifact content as sent) ---
-%s
-
---- Answer ---
-%s
-`, time.Now().UTC().Format(time.RFC3339), runID, filename, model, question, promptTokens, completionTokens, prompt, answer)
-	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to write ask_artifact log: %v", err))
-		return
-	}
-	e.logInfo(logger, fmt.Sprintf("ask_artifact %q (model %s) — full exchange in %s", filename, model, logName))
 }

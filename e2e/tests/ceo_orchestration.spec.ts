@@ -356,14 +356,12 @@ test.describe.serial('CEO orchestration flow', () => {
             expect(sessionEntries.some(e => e.type === 'request')).toBeTruthy();
         }
 
-        // The ask_artifact reader exchange got its own log file in the run
-        // folder, holding the full prompt (artifact content) and the answer.
-        const askLogs = fs.readdirSync(runDir).filter(f => f.startsWith(`ask-artifact-${rootRun.id}-`) && f.endsWith('.log'));
-        expect(askLogs.length).toBe(1);
-        const askLogContent = fs.readFileSync(path.join(runDir, askLogs[0]), 'utf8');
-        expect(askLogContent).toContain('Does the report confirm the greeting is casual?');
-        expect(askLogContent).toContain('Implemented the casual greeting.');
-        expect(askLogContent).toContain('casual greeting was implemented');
+        // The ask_artifact reader exchange is recorded in the normal JSONL
+        // stream alongside the rest of the session's LLM traffic.
+        const mainLogContent = JSON.stringify(mainEntries);
+        expect(mainLogContent).toContain('Does the report confirm the greeting is casual?');
+        expect(mainLogContent).toContain('Implemented the casual greeting.');
+        expect(mainLogContent).toContain('casual greeting was implemented');
 
         // ── UI: Run Log view shows the main flow with expandable sessions ────
         await page.goto(`/companies/ceo-co/run-logs/${rootRun.id}`);

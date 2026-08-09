@@ -23,6 +23,7 @@ type ArtifactReaderTarget struct {
 	BaseURL      string
 	APIKey       string
 	Model        string
+	ProviderName string
 	ExtraHeaders map[string]string
 	Cleanup      func()
 }
@@ -34,7 +35,8 @@ type ArtifactReader struct {
 	FindArtifact  func(ctx context.Context, filename string) (string, error)
 	ResolveTarget func(ctx context.Context) (ArtifactReaderTarget, error)
 	RecordUsage   func(ctx context.Context, usage aicli.Usage)
-	LogExchange   func(filename, model, question, prompt, answer string, promptTokens, completionTokens int)
+	LogRequest    func(model, provider string, body []byte)
+	LogResponse   func(model, provider string, body []byte, usage aicli.Usage)
 }
 
 // Answer reads one artifact through a separate model call and returns only a
@@ -67,12 +69,23 @@ Question: %s`, filename, content, truncNote, question)
 	}
 	client := aicli.NewClient(target.BaseURL, target.APIKey, target.Model)
 	client.ExtraHeaders = target.ExtraHeaders
-	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
+	request := aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 500,
-	})
+	}
+	requestBody, err := json.Marshal(request)
+	if err != nil {
+		return "", fmt.Errorf("artifact reader: marshal request: %w", err)
+	}
+	if r.LogRequest != nil {
+		r.LogRequest(target.Model, target.ProviderName, requestBody)
+	}
+	resp, responseBody, err := client.Complete(ctx, request)
 	if err != nil {
 		return "", fmt.Errorf("artifact reader call failed: %w", err)
+	}
+	if r.LogResponse != nil {
+		r.LogResponse(target.Model, target.ProviderName, responseBody, resp.Usage)
 	}
 	if len(resp.Choices) == 0 {
 		return "", fmt.Errorf("artifact reader returned no answer")
@@ -83,9 +96,6 @@ Question: %s`, filename, content, truncNote, question)
 	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
 	if answer == "" {
 		return "", fmt.Errorf("artifact reader returned an empty answer")
-	}
-	if r.LogExchange != nil {
-		r.LogExchange(filename, target.Model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
 	}
 	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
 }
