@@ -77,7 +77,7 @@ func TestCommitMessageIncludesHeadcount1CoAuthor(t *testing.T) {
 }
 
 func TestCommitMessageDoesNotDuplicateHeadcount1CoAuthor(t *testing.T) {
-	original := "Fix repository discovery\n\nco-authored-by: HEADCOUNT1.IO <HEADCOUNT1@HEADCOUNT1.IO>"
+	original := "Fix repository discovery\n\nco-authored-by: HEADCOUNT1.AI <HEADCOUNT1@HEADCOUNT1.AI>"
 	require.Equal(t, original, commitMessageWithHeadcount1Attribution(original))
 }
 
@@ -89,13 +89,19 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
 
 	manager := NewGitManager(directory, "")
-	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change"))
+	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change", CommitAuthor{Name: "user@example.com", Email: "user@example.com"}))
 
 	command = exec.Command("git", "log", "-1", "--format=%B")
 	command.Dir = directory
 	message, err := command.Output()
 	require.NoError(t, err)
 	require.Contains(t, string(message), headcount1CoAuthorTrailer)
+	require.Contains(t, string(message), "Co-authored-by: headcount1.ai <headcount1@headcount1.ai>")
+
+	command = exec.Command("git", "-C", directory, "log", "-1", "--format=%an <%ae>")
+	author, err := command.Output()
+	require.NoError(t, err)
+	require.Equal(t, "user@example.com <user@example.com>\n", string(author))
 }
 
 func TestGetStatusInDirIncludesUntrackedFiles(t *testing.T) {

@@ -6,6 +6,18 @@ import (
 	"strings"
 )
 
+const taskGitBranchPrefix = "headcount1/"
+
+// TaskGitBranch returns the stable, human-readable branch for a task key,
+// e.g. headcount1/HC1-2.
+func TaskGitBranch(refKey string, taskID int32) string {
+	refKey = strings.TrimSpace(refKey)
+	if refKey == "" {
+		refKey = fmt.Sprintf("TASK-%d", taskID)
+	}
+	return taskGitBranchPrefix + refKey
+}
+
 func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 	err := q.db.WithContext(ctx).Create(&t).Error
 	if err != nil {
@@ -20,7 +32,48 @@ func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 			}
 		}
 	}
+	if err := q.EnsureTaskGitBranch(ctx, &t); err != nil {
+		return t, fmt.Errorf("assign task git branch: %w", err)
+	}
 	return t, err
+}
+
+// ensureTaskGitBranch assigns one canonical branch to a task tree. New root
+// tasks get a branch from their RefKey; subtasks inherit the root branch.
+// Existing non-empty branches are preserved for backwards compatibility.
+func (q *Queries) EnsureTaskGitBranch(ctx context.Context, t *Task) error {
+	root := *t
+	if t.ParentID != nil {
+		resolved, err := q.GetRootTask(ctx, t.ID)
+		if err != nil {
+			return err
+		}
+		root = resolved
+	}
+
+	branch := strings.TrimSpace(root.GitHubBranch)
+	if branch == "" {
+		branch = TaskGitBranch(root.RefKey, root.ID)
+		if err := q.db.WithContext(ctx).Model(&Task{}).
+			Where("id = ?", root.ID).Update("git_hub_branch", branch).Error; err != nil {
+			return err
+		}
+	}
+	if strings.TrimSpace(t.GitHubBranch) == "" {
+		t.GitHubBranch = branch
+		if err := q.db.WithContext(ctx).Model(&Task{}).
+			Where("id = ?", t.ID).Update("git_hub_branch", branch).Error; err != nil {
+			return err
+		}
+	}
+	if t.CreatedByUserID == nil && root.CreatedByUserID != nil {
+		t.CreatedByUserID = root.CreatedByUserID
+		if err := q.db.WithContext(ctx).Model(&Task{}).
+			Where("id = ?", t.ID).Update("created_by_user_id", *root.CreatedByUserID).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // computeTaskRefKey builds the task key: main tasks get

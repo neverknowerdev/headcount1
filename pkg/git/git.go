@@ -16,7 +16,13 @@ type GitManager struct {
 	httpToken  string
 }
 
-const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.io <headcount1@headcount1.io>"
+const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.ai <headcount1@headcount1.ai>"
+
+// CommitAuthor is the human identity that owns a task's Git changes.
+type CommitAuthor struct {
+	Name  string
+	Email string
+}
 
 // commitMessageWithHeadcount1Attribution adds the standard Git co-author
 // trailer to commits created by Headcount1. GitHub renders this trailer as a
@@ -93,7 +99,7 @@ func (g *GitManager) SetRemote(ctx context.Context, remoteURL string) error {
 	return err
 }
 
-func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
+func (g *GitManager) CommitAndPush(ctx context.Context, message string, author CommitAuthor) error {
 	_, err := g.runGitCommand(ctx, "add", ".")
 	if err != nil {
 		return err
@@ -105,9 +111,9 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 		return nil // Nothing to commit
 	}
 
-	// Make sure user config exists
-	g.runGitCommand(ctx, "config", "user.name", "Agent Orchestrator")
-	g.runGitCommand(ctx, "config", "user.email", "agent@headcount1.local")
+	if err := configureCommitAuthor(ctx, g.repoPath, author); err != nil {
+		return err
+	}
 
 	_, err = g.runGitCommand(ctx, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
 	if err != nil {
@@ -365,6 +371,36 @@ func (g *GitManager) GetDiffInDir(ctx context.Context, dir string) (string, erro
 	return string(out), nil
 }
 
+// HasChangesFromBase reports whether HEAD differs from the configured base
+// ref. It is used as the final guard before pushing a task branch or creating
+// a PR, so a clean/no-op task cannot publish an empty PR.
+func (g *GitManager) HasChangesFromBase(ctx context.Context, worktreeDir, baseBranch string) (bool, error) {
+	refs := []string{strings.TrimSpace(baseBranch)}
+	if !strings.HasPrefix(refs[0], "origin/") {
+		refs = append(refs, "origin/"+refs[0])
+	}
+	var lastErr error
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "git", "diff", "--quiet", ref+"...HEAD")
+		cmd.Dir = worktreeDir
+		cmd.Env = g.withGitEnv()
+		if err := cmd.Run(); err == nil {
+			return false, nil
+		} else if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return true, nil
+		} else {
+			lastErr = fmt.Errorf("git diff %s...HEAD failed: %w", ref, err)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no base branch ref available")
+	}
+	return false, lastErr
+}
+
 // GetStatusInDir returns porcelain status, including untracked files. A
 // plain git diff does not report untracked files, so callers deciding whether
 // a commit/PR is warranted must use this method instead.
@@ -379,7 +415,7 @@ func (g *GitManager) GetStatusInDir(ctx context.Context, dir string) (string, er
 	return string(out), nil
 }
 
-func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string) error {
+func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string, author CommitAuthor) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
@@ -400,13 +436,33 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		return nil
 	}
 
-	run("config", "user.name", "Agent Orchestrator")
-	run("config", "user.email", "agent@headcount1.local")
+	if err := configureCommitAuthor(ctx, worktreeDir, author); err != nil {
+		return err
+	}
 
 	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
 		return err
 	}
 	return nil
+}
+
+func configureCommitAuthor(ctx context.Context, dir string, author CommitAuthor) error {
+	name := strings.TrimSpace(author.Name)
+	email := strings.TrimSpace(author.Email)
+	if name == "" || email == "" {
+		return fmt.Errorf("git commit author is required")
+	}
+	run := func(key, value string) error {
+		cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", key, value)
+		if out, err := cmd.CombinedOutput(); err != nil {
+			return fmt.Errorf("git config %s failed: %v, output: %s", key, err, string(out))
+		}
+		return nil
+	}
+	if err := run("user.name", name); err != nil {
+		return err
+	}
+	return run("user.email", email)
 }
 
 // PushWorktreeBranch publishes an agent branch; callers create a PR rather
