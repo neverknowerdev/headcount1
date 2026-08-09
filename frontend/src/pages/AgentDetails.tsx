@@ -268,7 +268,7 @@ export const AgentDetails: React.FC = () => {
                             <div className="pt-4">
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
                                 <div className="space-y-2">
-                                    {['bash', 'read', 'edit', 'glob', 'grep', 'webfetch', 'task', 'todowrite', 'websearch', 'lsp', 'skill'].map(tool => {
+                                    {['bash', 'read', 'write', 'ls', 'grep', 'web_fetch', 'browser_use', 'write_artifact', 'list_artifacts', 'read_artifact', 'ask_artifact', 'create_subtask', 'answer_subtask_question', 'ask_task_owner', 'create_task'].map(tool => {
                                         const perms = JSON.parse(formData.permissions || '{}');
                                         const isEnabled = perms[tool] !== 'deny';
                                         return (

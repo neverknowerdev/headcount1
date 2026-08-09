@@ -920,24 +920,28 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
 			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
 		} else {
-			aliases := map[string][]string{
-				"bash":        {string(aicli.ToolBash)},
-				"read":        {string(aicli.ToolRead)},
-				"edit":        {string(aicli.ToolWrite)},
-				"glob":        {string(aicli.ToolListDir)},
-				"grep":        {string(aicli.ToolGrep)},
-				"webfetch":    {string(aicli.ToolWebFetch)},
-				"websearch":   {string(aicli.ToolWebFetch)},
-				"task":        {string(aicli.ToolCreateSubtask), string(aicli.ToolCreateTask), string(aicli.ToolAnswerSubtaskQuestion), string(aicli.ToolAskTaskOwner)},
-				"write":       {string(aicli.ToolWrite)},
-				"ls":          {string(aicli.ToolListDir)},
-				"web_fetch":   {string(aicli.ToolWebFetch)},
-				"create_task": {string(aicli.ToolCreateTask)},
+			toolNames := []aicli.ToolName{
+				aicli.ToolBash,
+				aicli.ToolRead,
+				aicli.ToolWrite,
+				aicli.ToolListDir,
+				aicli.ToolGrep,
+				aicli.ToolWebFetch,
+				aicli.ToolBrowserUse,
+				aicli.ToolWriteArtifact,
+				aicli.ToolListArtifacts,
+				aicli.ToolReadArtifact,
+				aicli.ToolAskArtifact,
+				aicli.ToolCreateSubtask,
+				aicli.ToolAnswerSubtaskQuestion,
+				aicli.ToolAskTaskOwner,
+				aicli.ToolCreateTask,
 			}
 			var denied []string
-			for label, names := range aliases {
-				if strings.EqualFold(strings.TrimSpace(permissions[label]), "deny") {
-					denied = append(denied, names...)
+			for _, toolName := range toolNames {
+				name := string(toolName)
+				if strings.EqualFold(strings.TrimSpace(permissions[name]), "deny") {
+					denied = append(denied, name)
 				}
 			}
 			registry = registry.Exclude(denied)
