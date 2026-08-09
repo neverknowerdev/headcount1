@@ -23,7 +23,7 @@ func (t *AskHuman) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "ask_human",
+			Name: string(aicli.ToolAskHuman),
 			Description: "Ask the user a question and wait for their answer. Use only when the gap cannot be filled by " +
 				"research or delegation (business intent, preferences, approvals). The run pauses until the user replies.",
 			Parameters: json.RawMessage(`{

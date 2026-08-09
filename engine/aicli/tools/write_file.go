@@ -24,7 +24,7 @@ func (t *WriteFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "write",
+			Name:        string(aicli.ToolWrite),
 			Description: "Write content to a file inside the workspace. Creates parent directories as needed.",
 			Parameters: json.RawMessage(`{
 				"type":"object",

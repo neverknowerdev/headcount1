@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -912,9 +911,46 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
-	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
+	// Apply tool filter from the built-in role config (if set). An empty
+	// AllowedTools means all tools. Built-in configs use the runtime registry
+	// names (bash/read/write/ls), not the legacy UI names.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
+	} else if agentCfg == nil && strings.TrimSpace(agent.Permissions) != "" {
+		// Custom DB agents store the UI permission names in JSON. Native runs
+		// use different concrete tool names, so translate the UI aliases before
+		// enforcing deny settings. Built-in delegated roles remain governed by
+		// their role config above.
+		var permissions map[string]string
+		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
+			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
+		} else {
+			toolNames := []aicli.ToolName{
+				aicli.ToolBash,
+				aicli.ToolRead,
+				aicli.ToolWrite,
+				aicli.ToolListDir,
+				aicli.ToolGrep,
+				aicli.ToolWebFetch,
+				aicli.ToolBrowserUse,
+				aicli.ToolWriteArtifact,
+				aicli.ToolListArtifacts,
+				aicli.ToolReadArtifact,
+				aicli.ToolAskArtifact,
+				aicli.ToolCreateSubtask,
+				aicli.ToolAnswerSubtaskQuestion,
+				aicli.ToolAskTaskOwner,
+				aicli.ToolCreateTask,
+			}
+			var denied []string
+			for _, toolName := range toolNames {
+				name := string(toolName)
+				if strings.EqualFold(strings.TrimSpace(permissions[name]), "deny") {
+					denied = append(denied, name)
+				}
+			}
+			registry = registry.Exclude(denied)
+		}
 	}
 
 	// Append the authoritative tool listing so prose tool references in agent
@@ -1006,6 +1042,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	} else if mcpErr != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP accounts for agent: %v", mcpErr))
 	}
+	e.logInfo(proxyLogger, "Effective tools: "+strings.Join(registry.Names(), ", "))
 
 	// Determine agent mode and reasoning level from config.
 	agentMode := aicli.ModeMessageHistory
@@ -1055,7 +1092,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
 		AgentName:             agentDisplayName,
-		TerminalTools:         []string{"finish_task"},
+		TerminalTools:         []string{string(aicli.ToolFinishTask)},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -1136,9 +1173,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logError(proxyLogger, fmt.Sprintf("Agent error: %v", agentErr))
 	}
 
-	// If finish_task was not called, force a follow-up turn. A plain-text
-	// response is not a successful completion: the agent must execute the
-	// terminal tool so that the task status and handoff are persisted.
+	// If finish_task was not called, force a follow-up turn.
 	forcedFinish := false
 	if agentErr == nil && !taskFinished {
 		forcedFinish = true
@@ -1189,7 +1224,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case taskFinished && forcedFinish:
 			endReason = "finish_task_forced"
 		case taskFinished:
-			endReason = "finish_task"
+			endReason = string(aicli.ToolFinishTask)
 		}
 		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}
@@ -1802,154 +1837,6 @@ func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, pu
 	return sessionProvider, sessionModel
 }
 
-// askArtifact answers a question about one artifact via a separate one-shot
-// LLM call, so the artifact's content never enters the asking agent's
-// context — only the short answer is returned as the tool result. It uses the
-// configured "ask_artifact" Default Model when set, falling back to the asking
-// session's model, and bills the reader call's tokens to the asking run.
-// Each reader call is logged to its own file in the run's log folder.
-func (e *NativeEngine) askArtifact(
-	ctx context.Context,
-	runID, rootTaskID int32,
-	provider db.LLMProvider,
-	sessionModel string,
-	gatewayAuth runGatewayAuth,
-	filename, question string,
-	logger *logging.ProxyLogger,
-) (string, error) {
-	arts, err := e.q.ListArtifactsByTaskTree(ctx, rootTaskID)
-	if err != nil {
-		return "", err
-	}
-	content, found := "", false
-	for i := len(arts) - 1; i >= 0; i-- {
-		if arts[i].Filename == filename {
-			content = arts[i].Content
-			found = true
-			break
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
-	}
-
-	const maxArtifactChars = 100000
-	truncNote := ""
-	if len(content) > maxArtifactChars {
-		content = content[:maxArtifactChars]
-		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
-	}
-
-	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompanyOfTask(ctx, rootTaskID), db.PurposeAskArtifact, provider, sessionModel)
-
-	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
-
-Document %q:
-%s%s
-
-Question: %s`, filename, content, truncNote, question)
-
-	apiKey := ""
-	if provider.ApiKeyEncrypted != "" {
-		apiKey, err = secrets.Default().Decrypt(provider.ApiKeyEncrypted)
-		if err != nil {
-			return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
-		}
-	}
-	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
-	if err := gatewayAuth.configure(client, provider); err != nil {
-		return "", fmt.Errorf("artifact reader: %w", err)
-	}
-	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
-		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
-		MaxTokens: 500,
-	})
-	if err != nil {
-		return "", fmt.Errorf("artifact reader call failed: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("artifact reader returned no answer")
-	}
-	// Bill the reader call to the asking session's run.
-	if runID > 0 {
-		if statErr := e.q.AddRunTokenStats(context.Background(), runID, db.RunTokenStats{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-		}); statErr != nil {
-			fmt.Printf("Warning: failed to record ask_artifact token stats: %v\n", statErr)
-		}
-	}
-	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if answer == "" {
-		return "", fmt.Errorf("artifact reader returned an empty answer")
-	}
-	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
-}
-
-// isModelGroupProxyBaseURL identifies the synthetic provider target used for
-// native runs whose agent is bound to a model group. It is path-based so local
-// test servers and non-default ports work too.
-func isModelGroupProxyBaseURL(baseURL string) bool {
-	u, err := url.Parse(baseURL)
-	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
-}
-
-type runGatewayAuth struct {
-	runID int32
-	token string
-}
-
-func (a runGatewayAuth) configure(client *aicli.Client, provider db.LLMProvider) error {
-	if !isModelGroupProxyBaseURL(provider.BaseUrl) {
-		return nil
-	}
-	if a.token == "" {
-		return fmt.Errorf("model-group gateway token is unavailable")
-	}
-	client.ExtraHeaders = modelGroupGatewayHeaders(a.runID, a.token)
-	return nil
-}
-
-func modelGroupGatewayHeaders(runID int32, token string) map[string]string {
-	return map[string]string{
-		runtokens.TokenHeader: token,
-		"X-Run-ID":            fmt.Sprintf("%d", runID),
-		"X-Proxy-Log-Mode":    "switches-only",
-	}
-}
-
-// logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
-// answer in the session log can always be traced back to the full reader
-// prompt and the exact artifact content it saw.
-func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
-	if logger == nil {
-		return
-	}
-	logName := fmt.Sprintf("ask-artifact-%d-%d.log", runID, time.Now().UnixMilli())
-	logPath := filepath.Join(filepath.Dir(logger.FilePath()), logName)
-	content := fmt.Sprintf(`=== ask_artifact ===
-Time: %s
-Asking run: #%d
-Artifact: %s
-Reader model: %s
-Question: %s
-Usage: prompt_tokens=%d completion_tokens=%d
-
---- Reader prompt (artifact content as sent) ---
-%s
-
---- Answer ---
-%s
-`, time.Now().UTC().Format(time.RFC3339), runID, filename, model, question, promptTokens, completionTokens, prompt, answer)
-	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to write ask_artifact log: %v", err))
-		return
-	}
-	e.logInfo(logger, fmt.Sprintf("ask_artifact %q (model %s) — full exchange in %s", filename, model, logName))
-}
-
 // recordSubtaskQA stores an ask_task_owner question or the owner's answer as
 // a comment on the subtask, so the exchange is visible in the task activity.
 func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32, commentType, content string) {
@@ -2118,30 +2005,6 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 	}
 }
 
-// finishAllowsGit limits repository publication to successful agent verdicts.
-// A blocked/refinement result may have touched the worktree while preparing a
-// handoff, but it must not be turned into an automatic commit or PR.
-func finishAllowsGit(result tools.FinishTaskResult) bool {
-	return result.Status == "done" || result.Status == "in-review"
-}
-
-// commitRelevantGitStatus removes the per-task memory file from publication.
-// It is created automatically in every task worktree and is execution
-// metadata, not a project change.
-func commitRelevantGitStatus(status string) string {
-	var relevant []string
-	for _, line := range strings.Split(status, "\n") {
-		if strings.TrimSpace(line) == "" {
-			continue
-		}
-		if len(line) >= 3 && strings.TrimSpace(line[3:]) == "memory.md" {
-			continue
-		}
-		relevant = append(relevant, line)
-	}
-	return strings.Join(relevant, "\n")
-}
-
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.
 func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task, gatewayAuth runGatewayAuth) (string, error) {
 	if agent.ProviderID == nil {
@@ -2195,4 +2058,28 @@ Changes:
 	}
 
 	return msg, nil
+}
+
+// finishAllowsGit limits repository publication to successful agent verdicts.
+// A blocked/refinement result may have touched the worktree while preparing a
+// handoff, but it must not be turned into an automatic commit or PR.
+func finishAllowsGit(result tools.FinishTaskResult) bool {
+	return result.Status == "done" || result.Status == "in-review"
+}
+
+// commitRelevantGitStatus removes the per-task memory file from publication.
+// It is created automatically in every task worktree and is execution
+// metadata, not a project change.
+func commitRelevantGitStatus(status string) string {
+	var relevant []string
+	for _, line := range strings.Split(status, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) >= 3 && strings.TrimSpace(line[3:]) == "memory.md" {
+			continue
+		}
+		relevant = append(relevant, line)
+	}
+	return strings.Join(relevant, "\n")
 }

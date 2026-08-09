@@ -1,11 +1,15 @@
 package engine
 
 import (
+	"context"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
+	"agent-orchestrator/pkg/git"
 
 	"github.com/stretchr/testify/require"
 )
@@ -34,6 +38,20 @@ func TestIsModelGroupProxyBaseURL(t *testing.T) {
 	require.True(t, isModelGroupProxyBaseURL("http://127.0.0.1:8080/api/proxy/group/free-first"))
 	require.True(t, isModelGroupProxyBaseURL("http://test.local/api/proxy/group/free-first/v1"))
 	require.False(t, isModelGroupProxyBaseURL("https://api.openai.com/v1"))
+}
+
+func TestTryGitCommitSkipsCleanAndCommitsUntrackedChanges(t *testing.T) {
+	workspace := t.TempDir()
+	manager := git.NewGitManager(workspace, "")
+	require.NoError(t, manager.Init(context.Background()))
+	engine := &NativeEngine{}
+
+	require.False(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, runGatewayAuth{}))
+	require.NoError(t, os.WriteFile(filepath.Join(workspace, "new.txt"), []byte("new\n"), 0644))
+	require.True(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, runGatewayAuth{}))
+	status, err := manager.GetStatusInDir(context.Background(), workspace)
+	require.NoError(t, err)
+	require.Empty(t, status, "a successful commit should leave no worktree changes")
 }
 
 func TestRunGatewayAuthReusesTheProvidedRunToken(t *testing.T) {
