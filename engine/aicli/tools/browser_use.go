@@ -32,7 +32,7 @@ func (b *BrowserUse) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "browser_use",
+			Name: string(ToolBrowserUse),
 			Description: "Interact with web pages using a headless browser that executes JavaScript. " +
 				"Unlike web_fetch, this renders pages fully including JS-generated content. " +
 				"Call 'navigate' first to load a page, then use other actions on the loaded page.",

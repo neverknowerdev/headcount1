@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"net/url"
 	"os"
 	"path/filepath"
 	"sort"
@@ -1065,7 +1064,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
 		AgentName:             agentDisplayName,
-		TerminalTools:         []string{"finish_task"},
+		TerminalTools:         []string{string(tools.ToolFinishTask)},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -1192,7 +1191,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case taskFinished && forcedFinish:
 			endReason = "finish_task_forced"
 		case taskFinished:
-			endReason = "finish_task"
+			endReason = string(tools.ToolFinishTask)
 		}
 		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}
@@ -1803,172 +1802,6 @@ func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, pu
 	}
 
 	return sessionProvider, sessionModel
-}
-
-// askArtifact answers a question about one artifact via a separate one-shot
-// LLM call, so the artifact's content never enters the asking agent's
-// context — only the short answer is returned as the tool result. It uses the
-// configured "ask_artifact" Default Model when set, falling back to the asking
-// session's model, and bills the reader call's tokens to the asking run.
-// Each reader call is logged to its own file in the run's log folder.
-func (e *NativeEngine) askArtifact(
-	ctx context.Context,
-	runID, rootTaskID int32,
-	provider db.LLMProvider,
-	sessionModel string,
-	filename, question string,
-	logger *logging.ProxyLogger,
-) (string, error) {
-	arts, err := e.q.ListArtifactsByTaskTree(ctx, rootTaskID)
-	if err != nil {
-		return "", err
-	}
-	content, found := "", false
-	for i := len(arts) - 1; i >= 0; i-- {
-		if arts[i].Filename == filename {
-			content = arts[i].Content
-			found = true
-			break
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
-	}
-
-	const maxArtifactChars = 100000
-	truncNote := ""
-	if len(content) > maxArtifactChars {
-		content = content[:maxArtifactChars]
-		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
-	}
-
-	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompanyOfTask(ctx, rootTaskID), db.PurposeAskArtifact, provider, sessionModel)
-
-	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
-
-Document %q:
-%s%s
-
-Question: %s`, filename, content, truncNote, question)
-
-	apiKey := ""
-	if provider.ApiKeyEncrypted != "" {
-		apiKey, err = secrets.Default().Decrypt(provider.ApiKeyEncrypted)
-		if err != nil {
-			return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
-		}
-	}
-	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
-	if isModelGroupProxyBaseURL(provider.BaseUrl) && runID > 0 {
-		// When the reader falls back to the asking session's model group, the
-		// provider is a synthetic localhost gateway target with no API key.
-		// Authenticate it with the same per-run token used by the main session.
-		token := runtokens.Default().Issue(runID)
-		defer runtokens.Default().Revoke(runID)
-		client.ExtraHeaders = map[string]string{
-			runtokens.TokenHeader: token,
-			"X-Run-ID":            fmt.Sprintf("%d", runID),
-			"X-Proxy-Log-Mode":    "switches-only",
-		}
-	}
-	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
-		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
-		MaxTokens: 500,
-	})
-	if err != nil {
-		return "", fmt.Errorf("artifact reader call failed: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("artifact reader returned no answer")
-	}
-	// Bill the reader call to the asking session's run.
-	if runID > 0 {
-		if statErr := e.q.AddRunTokenStats(context.Background(), runID, db.RunTokenStats{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-		}); statErr != nil {
-			fmt.Printf("Warning: failed to record ask_artifact token stats: %v\n", statErr)
-		}
-	}
-	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if answer == "" {
-		return "", fmt.Errorf("artifact reader returned an empty answer")
-	}
-	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
-}
-
-// isModelGroupProxyBaseURL identifies the synthetic provider target created
-// for native runs whose agent is bound to a model group. It is intentionally
-// path-based so local test servers and non-default ports work too.
-func isModelGroupProxyBaseURL(baseURL string) bool {
-	u, err := url.Parse(baseURL)
-	return err == nil && strings.HasPrefix(u.Path, "/api/proxy/group/")
-}
-
-// applyStoredToolPermissions translates the legacy/UI permission labels to
-// native registry names. The UI treats an omitted key as allowed, so only
-// explicit "deny" values remove tools. Lifecycle tools remain available even
-// when the UI has no corresponding checkbox; otherwise an agent could never
-// finish its task or report progress.
-func applyStoredToolPermissions(registry *aicli.Registry, raw string) (*aicli.Registry, error) {
-	var permissions map[string]string
-	if err := json.Unmarshal([]byte(raw), &permissions); err != nil {
-		return registry, err
-	}
-	aliases := map[string][]string{
-		"bash":      {"bash"},
-		"read":      {"read"},
-		"edit":      {"write"},
-		"glob":      {"ls"},
-		"grep":      {"grep"},
-		"webfetch":  {"web_fetch"},
-		"websearch": {"web_fetch"},
-		"task":      {"create_subtask", "create_task", "answer_subtask_question", "ask_task_owner"},
-		// Also accept native names for API clients that bypass the legacy UI.
-		"write":       {"write"},
-		"ls":          {"ls"},
-		"web_fetch":   {"web_fetch"},
-		"create_task": {"create_task"},
-	}
-	var denied []string
-	for label, names := range aliases {
-		if strings.EqualFold(strings.TrimSpace(permissions[label]), "deny") {
-			denied = append(denied, names...)
-		}
-	}
-	return registry.Exclude(denied), nil
-}
-
-// logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
-// answer in the session log can always be traced back to the full reader
-// prompt and the exact artifact content it saw.
-func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
-	if logger == nil {
-		return
-	}
-	logName := fmt.Sprintf("ask-artifact-%d-%d.log", runID, time.Now().UnixMilli())
-	logPath := filepath.Join(filepath.Dir(logger.FilePath()), logName)
-	content := fmt.Sprintf(`=== ask_artifact ===
-Time: %s
-Asking run: #%d
-Artifact: %s
-Reader model: %s
-Question: %s
-Usage: prompt_tokens=%d completion_tokens=%d
-
---- Reader prompt (artifact content as sent) ---
-%s
-
---- Answer ---
-%s
-`, time.Now().UTC().Format(time.RFC3339), runID, filename, model, question, promptTokens, completionTokens, prompt, answer)
-	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to write ask_artifact log: %v", err))
-		return
-	}
-	e.logInfo(logger, fmt.Sprintf("ask_artifact %q (model %s) — full exchange in %s", filename, model, logName))
 }
 
 // recordSubtaskQA stores an ask_task_owner question or the owner's answer as

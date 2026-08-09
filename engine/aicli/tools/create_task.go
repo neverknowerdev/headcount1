@@ -38,7 +38,7 @@ func (t *CreateTask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "create_task",
+			Name: string(ToolCreateTask),
 			Description: "Create a new TOP-LEVEL task on the board (a sibling of the current task, not a subtask). " +
 				"Use it for planning: recording decided-on work as separate tasks with their own lifecycle. " +
 				"The call returns immediately — nothing is executed now. Tasks created in \"backlog\" (default) wait for " +

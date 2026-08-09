@@ -24,7 +24,7 @@ func (t *AnswerSubtaskQuestion) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "answer_subtask_question",
+			Name: string(ToolAnswerSubtaskQuestion),
 			Description: "Answer a pending question from a subtask's sub-agent (asked via ask_task_owner). " +
 				"The sub-agent resumes with your answer; the call then waits and returns the subtask's final result " +
 				"or its next question. Only valid while a subtask has a pending question.",

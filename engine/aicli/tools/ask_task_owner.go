@@ -24,7 +24,7 @@ func (t *AskTaskOwner) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "ask_task_owner",
+			Name: string(ToolAskTaskOwner),
 			Description: "Ask the agent that created your subtask (your task owner) a question and wait for the answer. " +
 				"Use it when your instructions are ambiguous or you need a decision that belongs to the owner. " +
 				"Your session pauses until the owner replies.",

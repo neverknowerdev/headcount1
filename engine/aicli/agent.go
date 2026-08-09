@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli/toolnames"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/tokens"
 )
@@ -45,8 +46,8 @@ type PauseRequested func() bool
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
 var mcpDispatcherTools = map[string]bool{
-	"call_mcp_tool":     true,
-	"discover_mcp_tool": true,
+	string(toolnames.ToolCallMCP):     true,
+	string(toolnames.ToolDiscoverMCP): true,
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
@@ -58,11 +59,11 @@ var mcpDispatcherTools = map[string]bool{
 // between turns and lose all navigation state. Its operations carry their
 // own internal timeouts instead.
 var blockingTools = map[string]bool{
-	"ask_human":               true,
-	"create_subtask":          true,
-	"answer_subtask_question": true,
-	"ask_task_owner":          true,
-	"browser_use":             true,
+	string(toolnames.ToolAskHuman):              true,
+	string(toolnames.ToolCreateSubtask):         true,
+	string(toolnames.ToolAnswerSubtaskQuestion): true,
+	string(toolnames.ToolAskTaskOwner):          true,
+	string(toolnames.ToolBrowserUse):            true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool
