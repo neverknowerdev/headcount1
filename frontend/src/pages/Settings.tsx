@@ -135,6 +135,26 @@ export const Settings: React.FC = () => {
         }
     };
 
+    const handleDeploymentSave = async (e: React.FormEvent) => {
+        e.preventDefault();
+        setSaving(true);
+        try {
+            const res = await axios.post('/api/settings', {
+                deploy_source: deploySource,
+                auto_deploy: autoDeploy,
+            });
+            setDeploySource(res.data.deploy_source === 'main' ? 'main' : 'releases');
+            setAutoDeploy(res.data.auto_deploy !== false);
+            void fetchDeployStatus();
+            alert('Deployment settings saved!');
+        } catch (e) {
+            console.error(e);
+            alert('Failed to save deployment settings');
+        } finally {
+            setSaving(false);
+        }
+    };
+
     const handleSshFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
         const file = e.target.files?.[0];
         if (!file) return;
@@ -328,7 +348,7 @@ export const Settings: React.FC = () => {
                     <code>LD_*</code>, …) are dropped and reported back to the deploy job.
                 </p>
 
-                <div className="space-y-4">
+                <form onSubmit={handleDeploymentSave} className="space-y-4">
                     <div>
                         <label className="block text-sm font-medium text-gray-700 mb-1">
                             Update source
@@ -358,7 +378,14 @@ export const Settings: React.FC = () => {
                             Auto-deploy matching builds (uncheck to pause deployments on this server)
                         </label>
                     </div>
-                </div>
+                    <button
+                        type="submit"
+                        disabled={saving}
+                        className="bg-indigo-600 text-white px-4 py-2 rounded-md shadow-sm hover:bg-indigo-700 disabled:bg-indigo-400"
+                    >
+                        {saving ? 'Saving...' : 'Save Deployment Settings'}
+                    </button>
+                </form>
             </div>
 
             {isOwner && <div className="bg-white p-6 rounded-lg shadow-sm border border-red-200 mt-8">
