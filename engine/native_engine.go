@@ -14,7 +14,6 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
@@ -339,7 +338,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		task = full
 	}
 
-	agent, err := e.prepareTaskAgent(ctx, &task)
+	agent, err := e.q.GetAgent(ctx, *task.AgentID)
 	if err != nil {
 		return "failed"
 	}
@@ -348,15 +347,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if resumeRun != nil {
 		run = *resumeRun
 	} else {
-		newRun := db.Run{
-			TaskID:    task.ID,
-			AgentID:   agent.ID,
-			Status:    "running",
-			StartedAt: time.Now(),
-			// Kept as a historical display label; AgentID is the only runtime
-			// configuration source.
-			AgentConfigName: agent.RoleKey,
-		}
+		newRun := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: time.Now()}
 		if parent != nil {
 			parentID := parent.parentRunID
 			rootID := parent.rootRunID
@@ -470,7 +461,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if resumeRun == nil {
 		shortName := agent.ShortName
 		if shortName == "" {
-			shortName = agentconfig.DeriveShortName(agent.Name)
+			shortName = agent.Name
 		}
 		taskRef := task.RefKey
 		if taskRef == "" {
@@ -792,7 +783,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		pending := &pendingSubtasks{m: make(map[int32]*delegationState)}
 		registry.Register(tools.NewCreateSubtask(
-			e.makeCreateSubtaskFunc(task, agent, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, subagents, pending),
+			e.makeCreateSubtaskFunc(task, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, subagents, pending),
 			subagents,
 		))
 		registry.Register(tools.NewAnswerSubtaskQuestion(func(aCtx context.Context, subtaskID int32, answer string) (string, error) {
@@ -1443,7 +1434,6 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 // the question, to be answered with answer_subtask_question).
 func (e *NativeEngine) makeCreateSubtaskFunc(
 	parentTask db.Task,
-	parentAgent db.Agent,
 	parentRun db.Run,
 	parentLogger *logging.ProxyLogger,
 	rootRunID, rootTaskID int32,
@@ -1475,12 +1465,9 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 		}
 
 		parentID := parentTask.ID
-		// The requested role is also a selectable, UI-managed Agent. Bind the
-		// child task to that row so its provider/model and permissions follow
-		// the agent the user configured. Keep the parent as a compatibility
-		// fallback for companies that only use the built-in role configs and do
-		// not have a matching database Agent row.
-		targetAgent, targetErr := e.ensureAgentForRole(callCtx, parentTask.CompanyID, agentName, parentAgent)
+		// Bind the child task to the selected database Agent so its complete
+		// runtime configuration follows the row the user configured.
+		targetAgent, targetErr := e.findAgentForRole(callCtx, parentTask.CompanyID, agentName)
 		if targetErr != nil {
 			return "", targetErr
 		}
@@ -1498,7 +1485,6 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			TaskType:           db.TaskTypeImplement,
 			Status:             "in-progress",
 			Priority:           "Normal",
-			AgentConfigName:    agentName,
 			GitHubBranch:       parentTask.GitHubBranch,
 		})
 		if err != nil {
@@ -1687,17 +1673,12 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		taskType = db.TaskTypePlanAndImplement
 	}
 	selectedAgentID := agentID
-	if p.AgentConfigName != "" {
-		creatorAgent, err := e.q.GetAgent(ctx, agentID)
-		if err != nil {
-			return "", fmt.Errorf("load creator agent: %w", err)
-		}
-		targetAgent, targetErr := e.ensureAgentForRole(ctx, company.ID, p.AgentConfigName, creatorAgent)
+	if p.AgentName != "" {
+		targetAgent, targetErr := e.findAgentForRole(ctx, company.ID, p.AgentName)
 		if targetErr != nil {
 			return "", targetErr
 		}
 		selectedAgentID = targetAgent.ID
-		p.AgentConfigName = targetAgent.RoleKey
 	}
 
 	sprintID := creator.SprintID
@@ -1726,18 +1707,17 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	}
 
 	newTask, err := e.q.CreateTask(ctx, db.Task{
-		CompanyID:       company.ID,
-		ProjectID:       projectID,
-		SprintID:        sprintID,
-		AgentID:         &selectedAgentID,
-		Title:           p.Title,
-		Description:     p.Description,
-		TaskType:        taskType,
-		Status:          status,
-		Priority:        priority,
-		DueDate:         dueDate,
-		AgentConfigName: p.AgentConfigName,
-		GitHubBranch:    creator.GitHubBranch,
+		CompanyID:    company.ID,
+		ProjectID:    projectID,
+		SprintID:     sprintID,
+		AgentID:      &selectedAgentID,
+		Title:        p.Title,
+		Description:  p.Description,
+		TaskType:     taskType,
+		Status:       status,
+		Priority:     priority,
+		DueDate:      dueDate,
+		GitHubBranch: creator.GitHubBranch,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)

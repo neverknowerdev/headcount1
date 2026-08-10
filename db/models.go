@@ -411,12 +411,8 @@ type Task struct {
 	DueDate            *time.Time `json:"due_date"`
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
-	// AgentConfigName is a legacy selector/display label. New execution binds
-	// directly to AgentID; the engine only reads this field to repair old child
-	// tasks during migration.
-	AgentConfigName string `json:"agent_config_name" gorm:"default:''"`
-	GitHubPRNumber  int    `json:"github_pr_number"`
-	GitHubPRURL     string `json:"github_pr_url"`
+	GitHubPRNumber     int        `json:"github_pr_number"`
+	GitHubPRURL        string     `json:"github_pr_url"`
 	// GitHubBranch is canonical on the root task. Subtasks copy the same value
 	// so every run in the task tree operates on one branch.
 	GitHubBranch  string    `json:"github_branch" gorm:"index"`
@@ -564,8 +560,6 @@ type Run struct {
 	// it equals ID for root runs so log files can be grouped per main run.
 	ParentRunID *int32 `json:"parent_run_id" gorm:"index"`
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
-	// Historical role label for the UI. AgentID is the runtime source of truth.
-	AgentConfigName string `json:"agent_config_name" gorm:"default:''"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
 	CurrentStatus     string     `json:"current_status" gorm:"default:''"`

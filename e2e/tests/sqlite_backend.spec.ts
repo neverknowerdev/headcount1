@@ -232,7 +232,7 @@ const SKILL_KEYS = ['id', 'company_id', 'name', 'description'];
 const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status', 'task_type'];
 const MCP_KEYS = ['id', 'name', 'transport', 'url', 'display_name', 'auth_type'];
 const MCP_ACCOUNT_KEYS = ['id', 'mcp_server_id', 'name', 'has_token'];
-const RUN_KEYS = ['id', 'task_id', 'agent_id', 'status', 'current_status', 'result_description', 'agent_config_name'];
+const RUN_KEYS = ['id', 'task_id', 'agent_id', 'status', 'current_status', 'result_description'];
 
 function pick(obj: any, keys: string[]): Record<string, unknown> {
     return Object.fromEntries(keys.map((k) => [k, obj?.[k]]));

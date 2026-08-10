@@ -20,9 +20,6 @@ type CreateTaskParams struct {
 	DueDate     string `json:"due_date"`
 	// AgentName is the database Agent role key or display name to assign.
 	AgentName string `json:"agent_name"`
-	// AgentConfigName is retained as a wire-compatibility alias for older
-	// prompts and clients. It is resolved to a database Agent before execution.
-	AgentConfigName string `json:"agent_config_name"`
 }
 
 // CreateTask creates a new TOP-LEVEL task on the board, alongside the tasks
@@ -106,9 +103,6 @@ func (t *CreateTask) Execute(ctx context.Context, args json.RawMessage) (string,
 	}
 	if p.Description == "" {
 		return "", fmt.Errorf("description is required")
-	}
-	if p.AgentConfigName == "" {
-		p.AgentConfigName = p.AgentName
 	}
 	return t.fn(ctx, p)
 }

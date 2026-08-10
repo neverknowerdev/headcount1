@@ -211,6 +211,9 @@ func main() {
 		// closed rather than serving the integration in an unknown state.
 		log.Fatalf("GitHub OAuth security migration failed: %v", err)
 	}
+	if err := db.New(database).MigrateDropAgentConfigNames(context.Background()); err != nil {
+		log.Fatalf("agent assignment schema migration failed: %v", err)
+	}
 	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
 		log.Fatalf("GitHub connection index migration failed: %v", err)
 	}

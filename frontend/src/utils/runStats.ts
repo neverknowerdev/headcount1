@@ -22,9 +22,9 @@ export function buildAgentStats(root: any, sessions: any[]): AgentTokenStats[] {
             (agg as any)[k] = ((agg as any)[k] || 0) + (s[k] || 0);
         }
     };
-    add(root.agent_config_name || root.agent?.name || 'agent', root.token_stats);
+    add(root.agent?.name || 'agent', root.token_stats);
     for (const s of sessions) {
-        add(s.agent_config_name || s.agent?.name || `run #${s.id}`, s.token_stats);
+        add(s.agent?.name || `run #${s.id}`, s.token_stats);
     }
     return order.map(agent => ({ agent, stats: byAgent.get(agent)! }));
 }

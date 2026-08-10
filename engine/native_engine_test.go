@@ -113,10 +113,35 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.Create(&db.Agent{
 		CompanyID:    company.ID,
 		Name:         "Test Agent",
+		RoleKey:      "CEO",
+		ShortName:    "CEO",
 		SystemPrompt: "You are a helpful agent.",
 		ProviderID:   &providerID,
 		Model:        "test-model",
+		Subagents:    `["CTO", "CMO", "Designer"]`,
 	}).Error)
+	for _, definition := range []struct {
+		name      string
+		subagents string
+	}{
+		{name: "CTO", subagents: `["Coder", "Debugger", "QA"]`},
+		{name: "CMO"},
+		{name: "Coder"},
+		{name: "Debugger"},
+		{name: "QA"},
+		{name: "Designer"},
+	} {
+		require.NoError(t, database.Create(&db.Agent{
+			CompanyID:    company.ID,
+			Name:         definition.name,
+			RoleKey:      definition.name,
+			ShortName:    definition.name,
+			SystemPrompt: "You are a test agent.",
+			ProviderID:   &providerID,
+			Model:        "test-model",
+			Subagents:    definition.subagents,
+		}).Error)
+	}
 	require.NoError(t, database.First(&agent, "company_id = ?", company.ID).Error)
 
 	agentID := agent.ID
@@ -558,7 +583,10 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
 	assert.Equal(t, task.ID, *subtask.ParentID)
 	assert.Equal(t, "subtask A", subtask.Title)
-	assert.Equal(t, "CTO", subtask.AgentConfigName)
+	require.NotNil(t, subtask.AgentID)
+	var subtaskAgent db.Agent
+	require.NoError(t, database.First(&subtaskAgent, "id = ?", *subtask.AgentID).Error)
+	assert.Equal(t, "CTO", subtaskAgent.RoleKey)
 	assert.Equal(t, "done", subtask.Status, "child session should have finished the subtask")
 	// Delegated subtasks carry no raw user input: the orchestrator's
 	// instructions land in RefinedDescription, and Description stays empty.
@@ -658,15 +686,13 @@ func TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings(t *testing.T) {
 		SupportedModels: "cto-model",
 	}
 	require.NoError(t, database.Create(&ctoProvider).Error)
-	ctoAgent := db.Agent{
-		CompanyID:    parentAgent.CompanyID,
-		Name:         "CTO",
-		SystemPrompt: "You are the configured CTO.",
-		ProviderID:   &ctoProvider.ID,
-		Model:        "cto-model",
-		Permissions:  `{"read":"deny","grep":"deny"}`,
-	}
-	require.NoError(t, database.Create(&ctoAgent).Error)
+	var ctoAgent db.Agent
+	require.NoError(t, database.First(&ctoAgent, "company_id = ? AND role_key = ?", parentAgent.CompanyID, "CTO").Error)
+	ctoAgent.SystemPrompt = "You are the configured CTO."
+	ctoAgent.ProviderID = &ctoProvider.ID
+	ctoAgent.Model = "cto-model"
+	ctoAgent.Permissions = `{"read":"deny","grep":"deny"}`
+	require.NoError(t, database.Save(&ctoAgent).Error)
 
 	eng := engine.NewNativeEngine(database, eventhub.NewHub())
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
@@ -751,9 +777,15 @@ func TestNativeEngineDelegationDepthLimit(t *testing.T) {
 
 	// Depth 1: the CTO subtask exists. Depth 2: the Coder subtask exists.
 	ctoTask := waitForSubtask(t, database, task.ID, 5*time.Second)
-	assert.Equal(t, "CTO", ctoTask.AgentConfigName)
+	require.NotNil(t, ctoTask.AgentID)
+	var ctoAgent db.Agent
+	require.NoError(t, database.First(&ctoAgent, "id = ?", *ctoTask.AgentID).Error)
+	assert.Equal(t, "CTO", ctoAgent.RoleKey)
 	coderTask := waitForSubtask(t, database, ctoTask.ID, 5*time.Second)
-	assert.Equal(t, "Coder", coderTask.AgentConfigName)
+	require.NotNil(t, coderTask.AgentID)
+	var coderAgent db.Agent
+	require.NoError(t, database.First(&coderAgent, "id = ?", *coderTask.AgentID).Error)
+	assert.Equal(t, "Coder", coderAgent.RoleKey)
 
 	// Depth 3 must not exist: the Coder's delegation attempt was rejected.
 	greatGrandchildren, err := q.ListSubtasksByParent(context.Background(), coderTask.ID)

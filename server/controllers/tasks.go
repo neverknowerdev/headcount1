@@ -115,18 +115,17 @@ func (api *API) authorizeTaskRefs(r *http.Request, companyID int32, projectID, a
 
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID       int32   `json:"company_id"`
-		ProjectID       *int32  `json:"project_id"`
-		AgentID         *int32  `json:"agent_id"`
-		SprintID        int32   `json:"sprint_id"`
-		ParentID        *int32  `json:"parent_id"`
-		Title           string  `json:"title"`
-		TaskType        string  `json:"task_type"`
-		Description     string  `json:"description"`
-		Priority        string  `json:"priority"`
-		GitBaseBranch   string  `json:"git_base_branch"`
-		DueDate         *string `json:"due_date"`
-		AgentConfigName string  `json:"agent_config_name"`
+		CompanyID     int32   `json:"company_id"`
+		ProjectID     *int32  `json:"project_id"`
+		AgentID       *int32  `json:"agent_id"`
+		SprintID      int32   `json:"sprint_id"`
+		ParentID      *int32  `json:"parent_id"`
+		Title         string  `json:"title"`
+		TaskType      string  `json:"task_type"`
+		Description   string  `json:"description"`
+		Priority      string  `json:"priority"`
+		GitBaseBranch string  `json:"git_base_branch"`
+		DueDate       *string `json:"due_date"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -172,19 +171,18 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := db.Task{
-		CompanyID:       req.CompanyID,
-		ProjectID:       req.ProjectID,
-		Title:           req.Title,
-		TaskType:        taskType,
-		Status:          "backlog",
-		AgentID:         req.AgentID,
-		SprintID:        req.SprintID,
-		ParentID:        req.ParentID,
-		Description:     req.Description,
-		Priority:        priority,
-		GitBaseBranch:   gitBaseBranch,
-		DueDate:         dueDate,
-		AgentConfigName: req.AgentConfigName,
+		CompanyID:     req.CompanyID,
+		ProjectID:     req.ProjectID,
+		Title:         req.Title,
+		TaskType:      taskType,
+		Status:        "backlog",
+		AgentID:       req.AgentID,
+		SprintID:      req.SprintID,
+		ParentID:      req.ParentID,
+		Description:   req.Description,
+		Priority:      priority,
+		GitBaseBranch: gitBaseBranch,
+		DueDate:       dueDate,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
@@ -215,19 +213,18 @@ func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectID       *int32  `json:"project_id"`
-		AgentID         *int32  `json:"agent_id"`
-		SprintID        *int32  `json:"sprint_id"`
-		ParentID        *int32  `json:"parent_id"`
-		Title           string  `json:"title"`
-		TaskType        string  `json:"task_type"`
-		Description     string  `json:"description"`
-		Priority        string  `json:"priority"`
-		GitBaseBranch   string  `json:"git_base_branch"`
-		DueDate         *string `json:"due_date"`
-		Status          string  `json:"status"`
-		IsArchived      *bool   `json:"is_archived"`
-		AgentConfigName string  `json:"agent_config_name"`
+		ProjectID     *int32  `json:"project_id"`
+		AgentID       *int32  `json:"agent_id"`
+		SprintID      *int32  `json:"sprint_id"`
+		ParentID      *int32  `json:"parent_id"`
+		Title         string  `json:"title"`
+		TaskType      string  `json:"task_type"`
+		Description   string  `json:"description"`
+		Priority      string  `json:"priority"`
+		GitBaseBranch string  `json:"git_base_branch"`
+		DueDate       *string `json:"due_date"`
+		Status        string  `json:"status"`
+		IsArchived    *bool   `json:"is_archived"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -290,10 +287,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if req.IsArchived != nil {
 		task.IsArchived = *req.IsArchived
 	}
-	if req.AgentConfigName != "" {
-		task.AgentConfigName = req.AgentConfigName
-	}
-
 	if req.DueDate != nil {
 		t, _ := time.Parse(time.RFC3339, *req.DueDate)
 		task.DueDate = &t
