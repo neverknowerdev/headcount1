@@ -486,7 +486,16 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// a synthetic provider pointing at the local gateway; otherwise the
 	// agent's fixed provider+model is used directly.
 	groupMode := agent.ModelGroupID != nil
-	provider, model, err := resolveProvider(ctx, e.q, agent, agentCfg)
+	// A delegated task can carry both a role config (the prompt, hierarchy and
+	// conversation settings) and a database Agent row (the UI-owned model and
+	// permissions). When the names match, the database row is the authoritative
+	// execution target; role configs must not silently override it.
+	dbAgentOwnsSettings := agentCfg != nil && sameAgentName(agent.Name, task.AgentConfigName)
+	modelCfg := agentCfg
+	if dbAgentOwnsSettings {
+		modelCfg = nil
+	}
+	provider, model, err := resolveProvider(ctx, e.q, agent, modelCfg)
 	if err != nil {
 		e.failRun(ctx, run.ID, err.Error())
 		return "failed"
@@ -914,13 +923,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Apply tool filter from the built-in role config (if set). An empty
 	// AllowedTools means all tools. Built-in configs use the runtime registry
 	// names (bash/read/write/ls), not the legacy UI names.
-	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
+	if agentCfg != nil && !dbAgentOwnsSettings && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
-	} else if agentCfg == nil && strings.TrimSpace(agent.Permissions) != "" {
-		// Custom DB agents store the UI permission names in JSON. Native runs
-		// use different concrete tool names, so translate the UI aliases before
-		// enforcing deny settings. Built-in delegated roles remain governed by
-		// their role config above.
+	} else if (agentCfg == nil || dbAgentOwnsSettings) && strings.TrimSpace(agent.Permissions) != "" {
+		// Database agents store the UI permission names in JSON. Native runs use
+		// different concrete tool names, so translate the UI aliases before
+		// enforcing deny settings.
 		var permissions map[string]string
 		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
 			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
@@ -1453,6 +1461,29 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	}
 }
 
+// sameAgentName compares a role config name with a database Agent name. Agent
+// names are user-facing, so tolerate casing and surrounding whitespace while
+// keeping distinct names distinct.
+func sameAgentName(agentName, configName string) bool {
+	return strings.EqualFold(strings.TrimSpace(agentName), strings.TrimSpace(configName))
+}
+
+// delegatedAgent resolves the requested role to the company's UI-managed
+// Agent row. Built-in role configs remain usable in companies that have no
+// corresponding row, so the delegating agent is retained as a fallback.
+func (e *NativeEngine) delegatedAgent(ctx context.Context, companyID int32, configName string, fallback db.Agent) (db.Agent, error) {
+	agents, err := e.q.ListAgentsByCompany(ctx, companyID)
+	if err != nil {
+		return db.Agent{}, fmt.Errorf("failed to resolve delegated agent %q: %w", configName, err)
+	}
+	for _, candidate := range agents {
+		if sameAgentName(candidate.Name, configName) {
+			return candidate, nil
+		}
+	}
+	return fallback, nil
+}
+
 // makeCreateSubtaskFunc returns the callback behind the create_subtask tool.
 // It creates a child task, runs it as a nested session linked to the parent
 // run, and blocks until the sub-agent either finishes (returning its result
@@ -1498,7 +1529,16 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 		}
 
 		parentID := parentTask.ID
-		agentID := parentAgent.ID
+		// The requested role is also a selectable, UI-managed Agent. Bind the
+		// child task to that row so its provider/model and permissions follow
+		// the agent the user configured. Keep the parent as a compatibility
+		// fallback for companies that only use the built-in role configs and do
+		// not have a matching database Agent row.
+		targetAgent, targetErr := e.delegatedAgent(callCtx, parentTask.CompanyID, agentName, parentAgent)
+		if targetErr != nil {
+			return "", targetErr
+		}
+		agentID := targetAgent.ID
 		subtask, err := e.q.CreateTask(callCtx, db.Task{
 			CompanyID: parentTask.CompanyID,
 			ProjectID: parentTask.ProjectID,

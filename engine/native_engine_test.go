@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -586,6 +587,106 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 		return strings.Contains(parentRun.LogEntries, "session_started") &&
 			strings.Contains(parentRun.LogEntries, "session_ended")
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
+}
+
+// TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings verifies that a
+// delegated role is resolved to its own database Agent row. The child must use
+// that row's model and permissions even though it also receives the built-in
+// role config for its prompt and delegation behavior.
+func TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings(t *testing.T) {
+	type capturedRequest struct {
+		Model string `json:"model"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+
+	var requestsMu sync.Mutex
+	var requests []capturedRequest
+	var callCount atomic.Int32
+	mockSrv := startTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read mock request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req capturedRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("decode mock request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestsMu.Lock()
+		requests = append(requests, req)
+		requestsMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch callCount.Add(1) {
+		case 1:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-001", "create_subtask",
+				`{"title":"configured child","description":"use the CTO settings","agent_name":"CTO"}`))
+		case 2:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-002", "finish_task",
+				`{"task_status":"done","finish_status":"child done"}`))
+		default:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-003", "finish_task",
+				`{"task_status":"done","finish_status":"parent done"}`))
+		}
+	}))
+
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	var parentAgent db.Agent
+	require.NoError(t, database.First(&parentAgent, "id = ?", *task.AgentID).Error)
+	var parentProvider db.LLMProvider
+	require.NoError(t, database.First(&parentProvider, "id = ?", *parentAgent.ProviderID).Error)
+
+	ctoProvider := db.LLMProvider{
+		Name:            "cto-provider",
+		BaseUrl:         mockSrv.URL,
+		ApiKeyEncrypted: parentProvider.ApiKeyEncrypted,
+		ProviderType:    "openai",
+		DefaultModel:    "cto-model",
+		SupportedModels: "cto-model",
+	}
+	require.NoError(t, database.Create(&ctoProvider).Error)
+	ctoAgent := db.Agent{
+		CompanyID:    parentAgent.CompanyID,
+		Name:         "CTO",
+		SystemPrompt: "You are the configured CTO.",
+		ProviderID:   &ctoProvider.ID,
+		Model:        "cto-model",
+		Permissions:  `{"read":"deny","grep":"deny"}`,
+	}
+	require.NoError(t, database.Create(&ctoAgent).Error)
+
+	eng := engine.NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	parentRunID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	assert.Equal(t, "completed", waitForRunDone(t, q, parentRunID, 30*time.Second).Status)
+	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	require.NotNil(t, subtask.AgentID)
+	assert.Equal(t, ctoAgent.ID, *subtask.AgentID, "delegation must bind the child to the requested Agent row")
+
+	requestsMu.Lock()
+	gotRequests := append([]capturedRequest(nil), requests...)
+	requestsMu.Unlock()
+	require.GreaterOrEqual(t, len(gotRequests), 2)
+	assert.Equal(t, "cto-model", gotRequests[1].Model, "the child must use the CTO Agent's model")
+
+	childTools := make(map[string]bool, len(gotRequests[1].Tools))
+	for _, tool := range gotRequests[1].Tools {
+		childTools[tool.Function.Name] = true
+	}
+	assert.True(t, childTools["ls"], "the child should retain explicitly allowed tools")
+	assert.False(t, childTools["read"], "the child must not receive a denied tool")
+	assert.False(t, childTools["grep"], "the child must not receive a denied tool")
 }
 
 // TestNativeEngineDelegationDepthLimit verifies the two-level depth cap:
