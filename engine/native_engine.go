@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -492,24 +493,39 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
-	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". A resumed run already has its name
-	// from before it paused — recomputing would double-count it against
-	// CountRunsByNameKey (its own row now matches the key) and rename it.
+	// Assign the human-readable run name. Every run uses the root task name and
+	// carries the main-session ordinal. Delegated sessions add their ordinal for
+	// that agent within the main session:
+	//   HC1-2-CEO-1
+	//   HC1-2-CTO-2-1
+	//   HC1-2-CTO-2-2
+	// A resumed run already has its name from before it paused.
 	if resumeRun == nil {
 		shortName := agentconfig.DeriveShortName(agent.Name)
 		if agentCfg != nil {
 			shortName = agentCfg.EffectiveShortName()
 		}
 		taskRef := task.RefKey
-		if taskRef == "" {
-			taskRef = fmt.Sprintf("TASK-%d", task.ID)
+		if rootTaskID != task.ID {
+			if rootTask, rootErr := e.q.GetTask(ctx, rootTaskID); rootErr == nil && rootTask.RefKey != "" {
+				taskRef = rootTask.RefKey
+			}
 		}
-		runKey := taskRef + "-" + shortName
-		// prior = earlier runs with this key (this run's name is still empty, so
-		// it is not counted). The second run becomes "<key>-2", and so on.
-		if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
-			runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
+		if taskRef == "" {
+			taskRef = fmt.Sprintf("TASK-%d", rootTaskID)
+		}
+
+		mainRunNumber := int64(1)
+		if prior, cErr := e.q.CountRootRunsThrough(ctx, rootTaskID, rootRunID); cErr == nil && prior > 0 {
+			mainRunNumber = prior
+		}
+		runKey := fmt.Sprintf("%s-%s-%s", taskRef, shortName, strconv.FormatInt(mainRunNumber, 10))
+		if parent != nil {
+			subRunNumber := int64(1)
+			if prior, cErr := e.q.CountSubsessionRunsThrough(ctx, rootRunID, run.ID, agent.ID, task.AgentConfigName); cErr == nil && prior > 0 {
+				subRunNumber = prior
+			}
+			runKey += "-" + strconv.FormatInt(subRunNumber, 10)
 		}
 		run.Name = runKey
 		if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
@@ -1060,7 +1076,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	aiAgent := aicli.New(agentCfgObj)
 
-	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
+	taskName := task.RefKey
+	if taskName == "" {
+		taskName = fmt.Sprintf("%s-%d", strings.ToUpper(company.ShortName), task.ID)
+	}
+	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %s (mode=%s model=%s provider=%s)", taskName, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
 	if agentCfg != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))

@@ -86,7 +86,7 @@ func TestCreateSubtaskReturnsRichResult(t *testing.T) {
 	childRun, err := q.GetLatestRunByTask(context.Background(), subtasks[0].ID)
 	require.NoError(t, err)
 	assert.Equal(t, "Full detail about X.", childRun.ResultExplanation)
-	assert.Equal(t, subtasks[0].RefKey+"-CTO", childRun.Name)
+	assert.Equal(t, task.RefKey+"-CTO-1-1", childRun.Name)
 }
 
 // TestCreateSubtaskRejectsAbsolutePaths: subtask descriptions pointing at

@@ -292,7 +292,7 @@ export const RunLogDetails: React.FC = () => {
                 </div>
 
                 <div className="col-span-2 bg-gray-50 rounded-lg shadow border flex flex-col min-h-0">
-                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} />
+                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} runId={run.id} />
                 </div>
             </div>
         </div>

@@ -535,8 +535,9 @@ type Run struct {
 	Task    Task  `json:"task" gorm:"foreignKey:TaskID;constraint:OnDelete:CASCADE;"`
 	AgentID int32 `json:"agent_id" gorm:"not null"`
 	Agent   Agent `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
-	// Name is the human-readable run key: "<task ref>-<AGENTSHORT>[-n]",
-	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". Set when the run starts.
+	// Name is the human-readable run key: "<root task>-<AGENTSHORT>-<main>",
+	// with delegated sessions adding "-<sub-session>". For example,
+	// "HC1-2-CEO-1" and "HC1-2-CTO-2-1". Set when the run starts.
 	Name string `json:"name" gorm:"index"`
 	// ParentRunID links a delegated session to the run that spawned it.
 	// RootRunID points at the top-level (CEO) run of the whole execution tree;
