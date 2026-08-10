@@ -78,13 +78,6 @@ func (m *Manager) CreateTaskWorkspace(company db.Company, project db.Project, ta
 		return fmt.Errorf("failed to create task workspace: %w", err)
 	}
 
-	// Init memory.md
-	memoryPath := filepath.Join(taskPath, "memory.md")
-	if _, err := os.Stat(memoryPath); os.IsNotExist(err) {
-		initialMemory := fmt.Sprintf("# Task %d: %s\nCompany: %s\n\n%s\n", task.ID, task.Title, company.Name, task.Description)
-		os.WriteFile(memoryPath, []byte(initialMemory), 0644)
-	}
-
 	return nil
 }
 

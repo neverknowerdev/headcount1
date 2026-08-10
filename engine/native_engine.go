@@ -30,10 +30,6 @@ import (
 
 const runStatusCompleted = "completed"
 
-func taskGitBranch(taskID int32) string {
-	return fmt.Sprintf("headcount1/task-%d", taskID)
-}
-
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q            *db.Queries
@@ -517,17 +513,26 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
-	// Workspace layout:
-	//   - the main task and every delegated subtask get their own directory
-	//     (a git worktree when the task belongs to a repo-backed project)
-	//   - delegated subtask sessions can additionally READ the parent task's
-	//     workdir, but never write to it
+	// Workspace layout: every run in one task tree shares the root task's
+	// worktree and canonical branch. Parent sessions are blocked while a child
+	// delegation is running, so this gives all agents one serialized working
+	// tree instead of creating disconnected child branches.
 	fsMgr := filesystem.NewManager(settings.BasePath)
-	workspacePath := fsMgr.GetTaskWorktreePath(company, task)
-	var readOnlyDirs []string
-	if parent != nil && parent.workspacePath != "" && parent.workspacePath != workspacePath {
-		readOnlyDirs = append(readOnlyDirs, parent.workspacePath)
+	rootTask, rootErr := e.q.GetRootTask(ctx, task.ID)
+	if rootErr != nil {
+		rootTask = task
 	}
+	if err := e.q.EnsureTaskGitBranch(ctx, &task); err != nil {
+		fmt.Printf("Warning: failed to ensure task Git branch: %v\n", err)
+	} else if task.ParentID != nil {
+		// EnsureTaskGitBranch resolves the root and copies its branch to this
+		// child, while rootTask carries the canonical workspace identity.
+		if refreshed, err := e.q.GetRootTask(ctx, task.ID); err == nil {
+			rootTask = refreshed
+		}
+	}
+	workspacePath := fsMgr.GetTaskWorktreePath(company, rootTask)
+	var readOnlyDirs []string
 
 	// Set up the session logger. All sessions of one main run share the
 	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
@@ -548,9 +553,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.q.UpdateRunLogFilePath(ctx, run.ID, proxyLogger.FilePath())
 	}
 
-	// Git worktree setup. Every session (main task and delegated subtasks)
-	// works inside a git worktree of the project repo on its own task-N
-	// branch and commits its changes at the end of the session.
+	// Git worktree setup. Every session in the task tree uses the root task's
+	// persisted branch and shared worktree.
 	var gitProject bool
 	var gitMgr *git.GitManager
 	if task.ProjectID != nil {
@@ -577,28 +581,33 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			// CreateTaskWorkspace creates an empty directory before the run; it
 			// still needs converting into a Git worktree.
 			if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); os.IsNotExist(statErr) {
-				branchName := taskGitBranch(task.ID)
+				branchName := strings.TrimSpace(rootTask.GitHubBranch)
+				if branchName == "" {
+					branchName = db.TaskGitBranch(rootTask.RefKey, rootTask.ID)
+					rootTask.GitHubBranch = branchName
+					if _, updateErr := e.q.UpdateTask(ctx, rootTask); updateErr != nil {
+						e.logInfo(proxyLogger, "Failed to persist task Git branch: "+updateErr.Error())
+						gitProject = false
+					}
+				}
 				// Git refuses to add a worktree into the placeholder directory
-				// created with the task. It contains only disposable task memory.
+				// created with the task, so remove the empty placeholder first.
 				_ = os.RemoveAll(workspacePath)
-				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
-					e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
-					gitProject = false
+				if gitProject {
+					if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/"+rootTask.EffectiveGitBaseBranch()); wtErr != nil {
+						e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
+						gitProject = false
+					}
 				}
 			}
 		}
 	}
 
-	// Ensure the workdir exists (no-op when the worktree was just created)
-	// and seed the task memory file.
+	// Ensure the workdir exists (no-op when the worktree was just created).
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
 		return "failed"
 	}
-	if err := initTaskMemory(workspacePath, task, company); err != nil {
-		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
-	}
-
 	// Artifact (deliverable) directory: {basePath}/artifacts/{company}/{rootTaskID}.
 	// Always keyed by the root task so it matches ListArtifactsByTaskTree —
 	// every session of one execution tree shares the same deliverables dir.
@@ -617,6 +626,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt = NewSystemPromptBuilder(e.q).Build(agent, task)
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {
+		systemPrompt += fmt.Sprintf("\nTask Git branch: %s (shared by every run and sub-run in this task)", branch)
+	}
+	if rootTask.GitHubPRNumber != 0 || strings.TrimSpace(rootTask.GitHubPRURL) != "" {
+		systemPrompt += fmt.Sprintf("\nTask GitHub PR: #%d %s", rootTask.GitHubPRNumber, strings.TrimSpace(rootTask.GitHubPRURL))
+	}
 	if len(readOnlyDirs) > 0 {
 		systemPrompt += fmt.Sprintf("\nReadable (read-only) dirs: %s", strings.Join(readOnlyDirs, ", "))
 	}
@@ -1192,9 +1207,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == runStatusCompleted && finishAllowsGit(finishResult) {
-		committed := e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
-		if committed && task.ProjectID != nil {
-			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
+		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
+		// The root task owns the single branch and PR. A child may commit to
+		// that branch, but only the root publishes it.
+		if parent == nil && task.ProjectID != nil {
+			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, rootTask, finishResult)
 		}
 	}
 
@@ -1247,7 +1264,24 @@ func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyL
 	if err != nil || project.GitHubInstallationID == 0 {
 		return
 	}
-	branch := taskGitBranch(task.ID)
+	branch := strings.TrimSpace(task.GitHubBranch)
+	if branch == "" {
+		branch = db.TaskGitBranch(task.RefKey, task.ID)
+		task.GitHubBranch = branch
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			e.logInfo(logger, "Task branch persistence failed: "+err.Error())
+			return
+		}
+	}
+	changed, err := gitMgr.HasChangesFromBase(ctx, workspace, task.EffectiveGitBaseBranch())
+	if err != nil {
+		e.logInfo(logger, "Git diff against base failed: "+err.Error())
+		return
+	}
+	if !changed {
+		e.logInfo(logger, "No committed source changes; skipping push and PR")
+		return
+	}
 	if err := gitMgr.PushWorktreeBranch(ctx, workspace, branch); err != nil {
 		e.logInfo(logger, "GitHub push failed: "+err.Error())
 		return
@@ -1513,6 +1547,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			Status:             "in-progress",
 			Priority:           "Normal",
 			AgentConfigName:    agentName,
+			GitHubBranch:       parentTask.GitHubBranch,
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to create subtask: %w", err)
@@ -1742,6 +1777,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		Priority:        priority,
 		DueDate:         dueDate,
 		AgentConfigName: p.AgentConfigName,
+		GitHubBranch:    creator.GitHubBranch,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
@@ -1988,7 +2024,6 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 	if strings.TrimSpace(diff) == "" {
 		diff = status
 	}
-
 	// Generate commit message via LLM.
 	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task, gatewayAuth)
 	if msgErr != nil {
