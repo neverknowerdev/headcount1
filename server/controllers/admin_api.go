@@ -35,3 +35,15 @@ func (api *API) RequireGlobalAdminAPI(next http.Handler) http.Handler {
 		api.respondError(w, http.StatusNotFound, "not found")
 	})
 }
+
+// RequireInstanceAdmin gates settings that control this running deployment.
+// The first registered user is the instance admin.
+func (api *API) RequireInstanceAdmin(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if api.isInstanceAdmin(r.Context(), api.currentUserID(r)) {
+			next.ServeHTTP(w, r)
+			return
+		}
+		api.respondError(w, http.StatusForbidden, "only the instance admin can manage deployment settings")
+	})
+}

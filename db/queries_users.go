@@ -4,6 +4,8 @@ import (
 	"context"
 	"strings"
 	"time"
+
+	"gorm.io/gorm"
 )
 
 // NormalizeEmail canonicalizes an email for storage and lookup.
@@ -12,8 +14,15 @@ func NormalizeEmail(email string) string {
 }
 
 func (q *Queries) CreateUser(ctx context.Context, email string) (User, error) {
-	u := User{Email: NormalizeEmail(email)}
-	err := q.db.WithContext(ctx).Create(&u).Error
+	var u User
+	err := q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var count int64
+		if err := tx.Model(&User{}).Count(&count).Error; err != nil {
+			return err
+		}
+		u = User{Email: NormalizeEmail(email), IsAdmin: count == 0}
+		return tx.Create(&u).Error
+	})
 	return u, err
 }
 

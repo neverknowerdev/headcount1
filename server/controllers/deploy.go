@@ -101,6 +101,7 @@ func SetBootKeyStatus(backend string, snapshotFound bool, restoredVaults int) {
 // effective source setting, for the UI's Deployment panel. Behind auth.
 func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
+	admin := api.isInstanceAdmin(r.Context(), api.currentUserID(r))
 	resp := map[string]interface{}{
 		"environment":   utils.CurrentEnv(),
 		"deploy_source": settings.EffectiveDeploySource(),
@@ -116,7 +117,7 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		// A deploy failure message can carry internal detail (download URLs,
 		// filesystem paths), so it goes only to the operator — same gate as the
 		// instance-global fields in GetSettings.
-		if st.LastError != "" && (utils.IsE2E() || globalAdminAPIEnabled()) {
+		if st.LastError != "" && admin {
 			resp["last_error"] = st.LastError
 		}
 	}
@@ -124,7 +125,7 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	// so an operator can confirm configuration arrived without shell access to
 	// the box. Same operator-only gate as last_error: the list of secret names a
 	// server holds is itself a hint worth not publishing.
-	if utils.IsE2E() || globalAdminAPIEnabled() {
+	if admin {
 		if store, err := envstore.Load(); err == nil {
 			resp["env_key_names"] = store.Keys()
 			resp["env_updated_at"] = store.UpdatedAt

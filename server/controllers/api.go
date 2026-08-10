@@ -45,6 +45,17 @@ func (api *API) currentUserID(r *http.Request) int32 {
 	return authctx.UserID(r.Context())
 }
 
+// isInstanceAdmin reports the persisted admin flag for the authenticated
+// account. Deployment settings affect the whole server, so this decision
+// belongs to the database rather than the browser.
+func (api *API) isInstanceAdmin(ctx context.Context, userID int32) bool {
+	if api.q == nil || userID == 0 {
+		return false
+	}
+	user, err := api.q.GetUser(ctx, userID)
+	return err == nil && user.IsAdmin
+}
+
 // errNotOwned is returned by the authorize* helpers on any ownership
 // mismatch. Handlers translate it (and load failures) to 404 — never 403 —
 // so other tenants' IDs are indistinguishable from nonexistent ones.
