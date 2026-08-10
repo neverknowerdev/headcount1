@@ -355,13 +355,20 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	ctx := context.Background()
+	rootTask, rootErr := api.q.GetRootTask(ctx, task.ID)
+	if rootErr != nil {
+		rootTask = task
+	}
 
-	project, err := api.q.GetProject(ctx, *task.ProjectID)
+	if rootTask.ProjectID == nil {
+		return
+	}
+	project, err := api.q.GetProject(ctx, *rootTask.ProjectID)
 	if err != nil || project.RepositoryUrl == "" {
 		return
 	}
 
-	company, err := api.q.GetCompany(ctx, task.CompanyID)
+	company, err := api.q.GetCompany(ctx, rootTask.CompanyID)
 	if err != nil {
 		return
 	}
@@ -369,12 +376,20 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	settings := LoadSettings()
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
-	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
+	worktreeDir := fsManager.GetTaskWorktreePath(company, rootTask)
 	keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
 	defer keyCleanup()
 	gitMgr := git.NewGitManager(repoDir, keyPath)
 
-	branchName := fmt.Sprintf("task-%d", task.ID)
+	branchName := strings.TrimSpace(rootTask.GitHubBranch)
+	if branchName == "" {
+		branchName = db.TaskGitBranch(rootTask.RefKey, rootTask.ID)
+		rootTask.GitHubBranch = branchName
+		if _, updateErr := api.q.UpdateTask(ctx, rootTask); updateErr != nil {
+			fmt.Printf("Warning: failed to persist task branch %s: %v\n", branchName, updateErr)
+			return
+		}
+	}
 	if project.GitHubInstallationID != 0 {
 		if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
 			gitMgr.WithHTTPToken(token)
@@ -384,7 +399,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 		}
 		// GitHub-backed projects publish a draft PR. Never merge or force-push
 		// the default branch as part of task status changes.
-		branchName = fmt.Sprintf("headcount1/task-%d", task.ID)
+		// The task-level branch is already canonical and shared by all runs.
 		if newStatus == "done" {
 			return
 		}

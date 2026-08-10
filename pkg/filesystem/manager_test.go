@@ -50,10 +50,8 @@ func TestFilesystemManager(t *testing.T) {
 	assert.NoError(t, err)
 	assert.True(t, info.IsDir())
 
-	memoryPath := filepath.Join(taskPath, "memory.md")
-	info, err = os.Stat(memoryPath)
-	assert.NoError(t, err)
-	assert.False(t, info.IsDir())
+	_, err = os.Stat(filepath.Join(taskPath, "memory.md"))
+	assert.ErrorIs(t, err, os.ErrNotExist)
 
 	assert.Equal(t, filepath.Join(tempDir, "repos", "test-co", "project-1"), manager.GetProjectRepoPath(company, project))
 	assert.Equal(t, filepath.Join(tempDir, "skills", "test-co", "review"), manager.GetSkillPath(company, db.Skill{Name: "review"}))
