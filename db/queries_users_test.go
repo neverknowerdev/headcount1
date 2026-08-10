@@ -3,7 +3,6 @@ package db
 import (
 	"context"
 	"testing"
-	"time"
 
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/require"
@@ -30,24 +29,6 @@ func TestCreateUserMakesOnlyFirstUserAdmin(t *testing.T) {
 	second, err := q.CreateUser(context.Background(), "second@example.com")
 	require.NoError(t, err)
 
-	require.True(t, first.IsAdmin)
-	require.False(t, second.IsAdmin)
-}
-
-func TestEnsureFirstUserIsAdminBackfillsLegacyUsers(t *testing.T) {
-	database := setupUsersTestDB(t)
-	firstCreated := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
-	secondCreated := firstCreated.Add(time.Minute)
-	require.NoError(t, database.Create(&User{Email: "first@example.com", CreatedAt: firstCreated}).Error)
-	require.NoError(t, database.Create(&User{Email: "second@example.com", CreatedAt: secondCreated}).Error)
-
-	q := New(database)
-	require.NoError(t, q.EnsureFirstUserIsAdmin(context.Background()))
-
-	first, err := q.GetUserByEmail(context.Background(), "first@example.com")
-	require.NoError(t, err)
-	second, err := q.GetUserByEmail(context.Background(), "second@example.com")
-	require.NoError(t, err)
 	require.True(t, first.IsAdmin)
 	require.False(t, second.IsAdmin)
 }

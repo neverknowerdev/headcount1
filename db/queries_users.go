@@ -2,7 +2,6 @@ package db
 
 import (
 	"context"
-	"errors"
 	"strings"
 	"time"
 
@@ -43,28 +42,6 @@ func (q *Queries) ListUsers(ctx context.Context) ([]User, error) {
 	var users []User
 	err := q.db.WithContext(ctx).Order("id").Find(&users).Error
 	return users, err
-}
-
-// FirstUser returns the account that registered first. CreatedAt defines
-// "first"; the ID tie-breaker keeps fixtures/imports deterministic.
-func (q *Queries) FirstUser(ctx context.Context) (User, error) {
-	var user User
-	err := q.db.WithContext(ctx).Order("created_at ASC, id ASC").First(&user).Error
-	return user, err
-}
-
-// EnsureFirstUserIsAdmin backfills the persisted admin flag for databases
-// created before User.IsAdmin existed. New accounts receive the flag in
-// CreateUser; this is only the one-time upgrade path for an existing database.
-func (q *Queries) EnsureFirstUserIsAdmin(ctx context.Context) error {
-	first, err := q.FirstUser(ctx)
-	if errors.Is(err, gorm.ErrRecordNotFound) {
-		return nil
-	}
-	if err != nil {
-		return err
-	}
-	return q.db.WithContext(ctx).Model(&User{}).Where("id = ?", first.ID).Update("is_admin", true).Error
 }
 
 // SetUserReenrollTicket records the hashed re-enroll ticket and its expiry on a

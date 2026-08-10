@@ -71,6 +71,7 @@ func TestDeploymentSettingsAreRedactedAndAdminCanSave(t *testing.T) {
 	require.NoError(t, os.MkdirAll(base, 0o755))
 	require.NoError(t, SaveSettings(Settings{
 		BasePath: base, WorkspaceFolders: []string{"private"},
+		GitRemoteURL: "https://example.com/headcount1.git",
 		DeploySource: "releases", AutoDeploy: true,
 	}))
 
@@ -83,6 +84,7 @@ func TestDeploymentSettingsAreRedactedAndAdminCanSave(t *testing.T) {
 	_, hasAutoDeploy := redacted["auto_deploy"]
 	require.False(t, hasDeploySource)
 	require.False(t, hasAutoDeploy)
+	require.Equal(t, "https://example.com/headcount1.git", redacted["git_remote_url"])
 
 	adminReq := requestAsUser(httptest.NewRequest(http.MethodGet, "/settings", nil), first)
 	adminW := httptest.NewRecorder()

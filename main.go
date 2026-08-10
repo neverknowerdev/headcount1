@@ -187,9 +187,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
 	}
-	if err := db.New(database).EnsureFirstUserIsAdmin(context.Background()); err != nil {
-		log.Fatalf("user admin migration failed: %v", err)
-	}
 	// Earlier GitHub App support allowed only one row per installation. MCP
 	// accounts intentionally allow personal and work identities to connect the
 	// same installation independently, so replace that legacy unique index.
