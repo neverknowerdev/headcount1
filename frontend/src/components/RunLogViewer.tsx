@@ -1097,6 +1097,7 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
                 status={childRun.status}
                 tokenStats={childRun.token_stats}
                 autoScroll={false}
+                runId={runId}
               />
             </div>
           )}
@@ -1372,6 +1373,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               href={`/api/runs/${runId}/download`}
               className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
               title="Download all logs for this run and its nested sessions"
+              data-testid="download-run-log"
             >
               <Download size={12} /> Download
             </a>

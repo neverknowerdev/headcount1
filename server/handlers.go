@@ -197,9 +197,10 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Get("/settings", api.GetSettings)
 	// UpdateSettings mutates the instance-global config (base path, workspace
-	// layout) — operator-only. UploadSSHKey is per-user (see settings.go).
+	// layout, and deployment behavior) — first-registered-user-only. UploadSSHKey
+	// is per-user (see settings.go).
 	r.Group(func(r chi.Router) {
-		r.Use(api.RequireGlobalAdminAPI)
+		r.Use(api.RequireInstanceAdmin)
 		r.Post("/settings", api.UpdateSettings)
 	})
 	r.Post("/settings/ssh", api.UploadSSHKey)
@@ -252,6 +253,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
+	r.Get("/tool-names", api.GetToolNames)
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
@@ -287,6 +289,7 @@ func (s *Server) Mount(r chi.Router) {
 			r.Get("/", api.GetRun)
 			r.Get("/children", api.ListChildRuns)
 			r.Get("/download", api.DownloadRunLogs)
+			r.Get("/log/download", api.DownloadRunLog)
 			r.Post("/stop", api.StopRun)
 		})
 	})
@@ -346,11 +349,10 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/restore", api.RestoreBackup)
 	})
 
-	// Deploy state, read-only for any signed-in user (the running version +
-	// this server's environment/source). Deploys themselves are triggered by
-	// CI via the public /deploy/webhook, not from here.
+	// Deployment state contains the deployment settings, so it is instance-admin
+	// only. Deploys themselves are triggered by CI via the public webhook.
 	r.Get("/version", api.GetVersion)
-	r.Get("/deploy/status", api.GetDeployStatus)
+	r.With(api.RequireInstanceAdmin).Get("/deploy/status", api.GetDeployStatus)
 
 	r.Route("/mcp-servers", func(r chi.Router) {
 		r.Get("/", api.ListMCPServers)

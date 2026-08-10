@@ -45,8 +45,8 @@ type PauseRequested func() bool
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
 var mcpDispatcherTools = map[string]bool{
-	"call_mcp_tool":     true,
-	"discover_mcp_tool": true,
+	string(ToolCallMCP):     true,
+	string(ToolDiscoverMCP): true,
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
@@ -58,11 +58,11 @@ var mcpDispatcherTools = map[string]bool{
 // between turns and lose all navigation state. Its operations carry their
 // own internal timeouts instead.
 var blockingTools = map[string]bool{
-	"ask_human":               true,
-	"create_subtask":          true,
-	"answer_subtask_question": true,
-	"ask_task_owner":          true,
-	"browser_use":             true,
+	string(ToolAskHuman):              true,
+	string(ToolCreateSubtask):         true,
+	string(ToolAnswerSubtaskQuestion): true,
+	string(ToolAskTaskOwner):          true,
+	string(ToolBrowserUse):            true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool
@@ -71,6 +71,10 @@ var blockingTools = map[string]bool{
 const toolCallTimeout = 10 * time.Minute
 
 const (
+	// maxTurns is the safety cap for one agent session. Delegated workflows
+	// can legitimately require many tool/LLM round trips before finish_task.
+	maxTurns = 300
+
 	// maxToolOutputChars caps a single tool result appended to history.
 	// Pathologically large outputs (full-file dumps, huge search results)
 	// are truncated with a marker so the agent can re-query more narrowly.
@@ -274,7 +278,6 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		}
 	}
 
-	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()

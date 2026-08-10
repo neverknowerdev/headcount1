@@ -3,6 +3,8 @@ package agentconfig
 import (
 	_ "embed"
 	"strings"
+
+	"agent-orchestrator/engine/aicli"
 )
 
 //go:embed prompts/ceo.md
@@ -47,95 +49,99 @@ var postWriterPrompt string
 // the sub-agents' job, and the CEO acts on their finish_task handoffs.
 // read_file is withheld too — the artifacts dir is readable by the file
 // sandbox, so read_file would be a trivial bypass of that restriction.
-var ceoTools = []string{
-	"create_subtask",
-	"answer_subtask_question",
-	"create_task",
-	"ask_human",
-	"report_status",
-	"finish_task",
-	"list_artifacts",
-	"ask_artifact",
-}
+var ceoTools = aicli.Names(
+	aicli.ToolCreateSubtask,
+	aicli.ToolAnswerSubtaskQuestion,
+	aicli.ToolCreateTask,
+	aicli.ToolAskHuman,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolListArtifacts,
+	aicli.ToolAskArtifact,
+)
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
-// specs as artifacts, and delegates implementation.
-var ctoTools = []string{
-	"codegraph_*",
-	"create_subtask",
-	"answer_subtask_question",
-	"ask_task_owner",
-	"ask_human",
-	"report_status",
-	"finish_task",
-	"read_file",
-	"list_dir",
-	"grep",
-	"list_artifacts",
-	"read_artifact",
-	"ask_artifact",
-	"write_artifact",
-}
+// specs as artifacts, and delegates implementation. These names must match
+// the runtime registry names in engine/aicli/tools/default.go.
+var ctoTools = aicli.Names(
+	aicli.ToolCodegraphWildcard,
+	aicli.ToolCreateSubtask,
+	aicli.ToolAnswerSubtaskQuestion,
+	aicli.ToolAskTaskOwner,
+	aicli.ToolAskHuman,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolRead,
+	aicli.ToolListDir,
+	aicli.ToolGrep,
+	aicli.ToolListArtifacts,
+	aicli.ToolReadArtifact,
+	aicli.ToolAskArtifact,
+	aicli.ToolWriteArtifact,
+)
 
 // cmoTools: the CMO plans and delegates marketing work, owning strategy docs.
-var cmoTools = []string{
-	"create_subtask",
-	"answer_subtask_question",
-	"ask_task_owner",
-	"ask_human",
-	"report_status",
-	"finish_task",
-	"read_file",
-	"web_fetch",
-	"list_artifacts",
-	"read_artifact",
-	"ask_artifact",
-	"write_artifact",
-}
+var cmoTools = aicli.Names(
+	aicli.ToolCreateSubtask,
+	aicli.ToolAnswerSubtaskQuestion,
+	aicli.ToolAskTaskOwner,
+	aicli.ToolAskHuman,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolRead,
+	aicli.ToolWebFetch,
+	aicli.ToolListArtifacts,
+	aicli.ToolReadArtifact,
+	aicli.ToolAskArtifact,
+	aicli.ToolWriteArtifact,
+)
 
-// implementerTools: full workspace access for agents that write code.
-var implementerTools = []string{
-	"read_file",
-	"write_file",
-	"exec_command",
-	"list_dir",
-	"grep",
-	"codegraph_*",
-	"ask_task_owner",
-	"report_status",
-	"finish_task",
-	"list_artifacts",
-	"read_artifact",
-	"write_artifact",
-}
+// implementerTools: full workspace access for agents that write code. Keep
+// these names aligned with the actual Tool.Def names: the previous
+// read_file/write_file/exec_command/list_dir names filtered out the tools and
+// left Coder with no shell or edit capability.
+var implementerTools = aicli.Names(
+	aicli.ToolRead,
+	aicli.ToolWrite,
+	aicli.ToolBash,
+	aicli.ToolListDir,
+	aicli.ToolGrep,
+	aicli.ToolCodegraphWildcard,
+	aicli.ToolAskTaskOwner,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolListArtifacts,
+	aicli.ToolReadArtifact,
+	aicli.ToolWriteArtifact,
+)
 
 // qaTools: QA verifies — reads, runs, and drives a browser, but never edits.
-var qaTools = []string{
-	"read_file",
-	"list_dir",
-	"grep",
-	"exec_command",
-	"web_fetch",
-	"browser_use",
-	"ask_task_owner",
-	"report_status",
-	"finish_task",
-	"list_artifacts",
-	"read_artifact",
-	"write_artifact",
-}
+var qaTools = aicli.Names(
+	aicli.ToolRead,
+	aicli.ToolListDir,
+	aicli.ToolGrep,
+	aicli.ToolBash,
+	aicli.ToolWebFetch,
+	aicli.ToolBrowserUse,
+	aicli.ToolAskTaskOwner,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolListArtifacts,
+	aicli.ToolReadArtifact,
+	aicli.ToolWriteArtifact,
+)
 
 // contentTools: research + artifact writing for content/design specialists.
-var contentTools = []string{
-	"read_file",
-	"web_fetch",
-	"ask_task_owner",
-	"report_status",
-	"finish_task",
-	"list_artifacts",
-	"read_artifact",
-	"write_artifact",
-}
+var contentTools = aicli.Names(
+	aicli.ToolRead,
+	aicli.ToolWebFetch,
+	aicli.ToolAskTaskOwner,
+	aicli.ToolReportStatus,
+	aicli.ToolFinishTask,
+	aicli.ToolListArtifacts,
+	aicli.ToolReadArtifact,
+	aicli.ToolWriteArtifact,
+)
 
 // BuiltinConfigs returns the predefined agent configurations in their
 // canonical display order (unlike Factory.ListNames, which is unordered).

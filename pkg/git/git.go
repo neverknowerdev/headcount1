@@ -16,7 +16,7 @@ type GitManager struct {
 	httpToken  string
 }
 
-const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.io <headcount1@headcount1.io>"
+const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.ai <headcount1@headcount1.ai>"
 
 // commitMessageWithHeadcount1Attribution adds the standard Git co-author
 // trailer to commits created by Headcount1. GitHub renders this trailer as a
@@ -104,10 +104,6 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 	if strings.TrimSpace(statusOut) == "" {
 		return nil // Nothing to commit
 	}
-
-	// Make sure user config exists
-	g.runGitCommand(ctx, "config", "user.name", "Agent Orchestrator")
-	g.runGitCommand(ctx, "config", "user.email", "agent@headcount1.local")
 
 	_, err = g.runGitCommand(ctx, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
 	if err != nil {
@@ -365,6 +361,53 @@ func (g *GitManager) GetDiffInDir(ctx context.Context, dir string) (string, erro
 	return string(out), nil
 }
 
+// HasChangesFromBase reports whether HEAD differs from the configured base
+// ref. It is used as the final guard before pushing a task branch or creating
+// a PR, so a clean/no-op task cannot publish an empty PR.
+func (g *GitManager) HasChangesFromBase(ctx context.Context, worktreeDir, baseBranch string) (bool, error) {
+	refs := []string{strings.TrimSpace(baseBranch)}
+	if !strings.HasPrefix(refs[0], "origin/") {
+		refs = append(refs, "origin/"+refs[0])
+	}
+	var lastErr error
+	for _, ref := range refs {
+		if ref == "" {
+			continue
+		}
+		cmd := exec.CommandContext(ctx, "git", "diff", "--quiet", ref+"...HEAD")
+		cmd.Dir = worktreeDir
+		cmd.Env = g.withGitEnv()
+		if err := cmd.Run(); err == nil {
+			return false, nil
+		} else if exitErr, ok := err.(*exec.ExitError); ok && exitErr.ExitCode() == 1 {
+			return true, nil
+		} else {
+			lastErr = fmt.Errorf("git diff %s...HEAD failed: %w", ref, err)
+		}
+	}
+	if lastErr == nil {
+		lastErr = fmt.Errorf("no base branch ref available")
+	}
+	return false, lastErr
+}
+
+// GetStatusInDir returns porcelain status, including untracked files. A
+// plain git diff does not report untracked files, so callers deciding whether
+// a commit/PR is warranted must use this method instead.
+func (g *GitManager) GetStatusInDir(ctx context.Context, dir string) (string, error) {
+	cmd := exec.CommandContext(ctx, "git", "status", "--porcelain", "--untracked-files=all")
+	cmd.Dir = dir
+	cmd.Env = g.withGitEnv()
+	out, err := cmd.CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("git status failed: %v, output: %s", err, string(out))
+	}
+	return string(out), nil
+}
+
+// CommitInWorktree leaves the author untouched. Git is already configured by
+// the authorized Git OAuth environment, so the commit belongs to that Git
+// user; Headcount1 is added only as a co-author in the message trailer.
 func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
@@ -377,7 +420,9 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		return string(out), nil
 	}
 
-	if _, err := run("add", "."); err != nil {
+	// memory.md is task execution metadata created in every worktree, not a
+	// project change. Exclude it even when source changes are being committed.
+	if _, err := run("add", "-A", "--", ".", ":(exclude)memory.md"); err != nil {
 		return err
 	}
 
@@ -385,9 +430,6 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 	if strings.TrimSpace(statusOut) == "" {
 		return nil
 	}
-
-	run("config", "user.name", "Agent Orchestrator")
-	run("config", "user.email", "agent@headcount1.local")
 
 	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
 		return err

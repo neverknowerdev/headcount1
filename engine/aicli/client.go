@@ -280,7 +280,12 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 
 	var chatResp ChatResponse
 	if err := json.Unmarshal(rawBody, &chatResp); err != nil {
-		return nil, rawBody, fmt.Errorf("unmarshal response (status=%d): %w", httpResp.StatusCode, err)
+		bodyPreview := strings.TrimSpace(string(rawBody))
+		if len(bodyPreview) > 500 {
+			bodyPreview = bodyPreview[:500] + "…"
+		}
+		contentType := httpResp.Header.Get("Content-Type")
+		return nil, rawBody, fmt.Errorf("unmarshal response (status=%d content-type=%q body=%q): %w", httpResp.StatusCode, contentType, bodyPreview, err)
 	}
 
 	// Detect errors embedded in a 200 body (some providers do this, including

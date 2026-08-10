@@ -31,10 +31,6 @@ import (
 
 const runStatusCompleted = "completed"
 
-func taskGitBranch(taskID int32) string {
-	return fmt.Sprintf("headcount1/task-%d", taskID)
-}
-
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q            *db.Queries
@@ -533,17 +529,26 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
-	// Workspace layout:
-	//   - the main task and every delegated subtask get their own directory
-	//     (a git worktree when the task belongs to a repo-backed project)
-	//   - delegated subtask sessions can additionally READ the parent task's
-	//     workdir, but never write to it
+	// Workspace layout: every run in one task tree shares the root task's
+	// worktree and canonical branch. Parent sessions are blocked while a child
+	// delegation is running, so this gives all agents one serialized working
+	// tree instead of creating disconnected child branches.
 	fsMgr := filesystem.NewManager(settings.BasePath)
-	workspacePath := fsMgr.GetTaskWorktreePath(company, task)
-	var readOnlyDirs []string
-	if parent != nil && parent.workspacePath != "" && parent.workspacePath != workspacePath {
-		readOnlyDirs = append(readOnlyDirs, parent.workspacePath)
+	rootTask, rootErr := e.q.GetRootTask(ctx, task.ID)
+	if rootErr != nil {
+		rootTask = task
 	}
+	if err := e.q.EnsureTaskGitBranch(ctx, &task); err != nil {
+		fmt.Printf("Warning: failed to ensure task Git branch: %v\n", err)
+	} else if task.ParentID != nil {
+		// EnsureTaskGitBranch resolves the root and copies its branch to this
+		// child, while rootTask carries the canonical workspace identity.
+		if refreshed, err := e.q.GetRootTask(ctx, task.ID); err == nil {
+			rootTask = refreshed
+		}
+	}
+	workspacePath := fsMgr.GetTaskWorktreePath(company, rootTask)
+	var readOnlyDirs []string
 
 	// Set up the session logger. All sessions of one main run share the
 	// data/{company}/logs/{rootTaskID}/run-{rootRunID}/ folder: the root
@@ -564,9 +569,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.q.UpdateRunLogFilePath(ctx, run.ID, proxyLogger.FilePath())
 	}
 
-	// Git worktree setup. Every session (main task and delegated subtasks)
-	// works inside a git worktree of the project repo on its own task-N
-	// branch and commits its changes at the end of the session.
+	// Git worktree setup. Every session in the task tree uses the root task's
+	// persisted branch and shared worktree.
 	var gitProject bool
 	var gitMgr *git.GitManager
 	if task.ProjectID != nil {
@@ -593,28 +597,33 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			// CreateTaskWorkspace creates an empty directory before the run; it
 			// still needs converting into a Git worktree.
 			if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); os.IsNotExist(statErr) {
-				branchName := taskGitBranch(task.ID)
+				branchName := strings.TrimSpace(rootTask.GitHubBranch)
+				if branchName == "" {
+					branchName = db.TaskGitBranch(rootTask.RefKey, rootTask.ID)
+					rootTask.GitHubBranch = branchName
+					if _, updateErr := e.q.UpdateTask(ctx, rootTask); updateErr != nil {
+						e.logInfo(proxyLogger, "Failed to persist task Git branch: "+updateErr.Error())
+						gitProject = false
+					}
+				}
 				// Git refuses to add a worktree into the placeholder directory
-				// created with the task. It contains only disposable task memory.
+				// created with the task, so remove the empty placeholder first.
 				_ = os.RemoveAll(workspacePath)
-				if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
-					e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
-					gitProject = false
+				if gitProject {
+					if wtErr := gitMgr.CreateWorktree(ctx, projectRepoDir, workspacePath, branchName, "origin/"+rootTask.EffectiveGitBaseBranch()); wtErr != nil {
+						e.logInfo(proxyLogger, "Failed to create worktree: "+wtErr.Error())
+						gitProject = false
+					}
 				}
 			}
 		}
 	}
 
-	// Ensure the workdir exists (no-op when the worktree was just created)
-	// and seed the task memory file.
+	// Ensure the workdir exists (no-op when the worktree was just created).
 	if err := os.MkdirAll(workspacePath, 0755); err != nil {
 		e.failRun(ctx, run.ID, fmt.Sprintf("failed to create workspace: %v", err))
 		return "failed"
 	}
-	if err := initTaskMemory(workspacePath, task, company); err != nil {
-		fmt.Printf("Warning: failed to init memory.md: %v\n", err)
-	}
-
 	// Artifact (deliverable) directory: {basePath}/artifacts/{company}/{rootTaskID}.
 	// Always keyed by the root task so it matches ListArtifactsByTaskTree —
 	// every session of one execution tree shares the same deliverables dir.
@@ -633,6 +642,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt = NewSystemPromptBuilder(e.q).Build(agent, task)
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {
+		systemPrompt += fmt.Sprintf("\nTask Git branch: %s (shared by every run and sub-run in this task)", branch)
+	}
+	if rootTask.GitHubPRNumber != 0 || strings.TrimSpace(rootTask.GitHubPRURL) != "" {
+		systemPrompt += fmt.Sprintf("\nTask GitHub PR: #%d %s", rootTask.GitHubPRNumber, strings.TrimSpace(rootTask.GitHubPRURL))
+	}
 	if len(readOnlyDirs) > 0 {
 		systemPrompt += fmt.Sprintf("\nReadable (read-only) dirs: %s", strings.Join(readOnlyDirs, ", "))
 	}
@@ -653,6 +668,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// the agent's own verdict and summary for the run's outcome log entry.
 	var taskFinished bool
 	var finishResult tools.FinishTaskResult
+	// The model-group gateway token belongs to the whole execution session.
+	// Nested LLM calls must reuse it; issuing another token for the same run
+	// invalidates this one in the registry.
+	var gatewayAuth runGatewayAuth
+	gatewayAuth.runID = run.ID
 
 	registry.Register(tools.NewFinishTask(parent != nil, func(finCtx context.Context, result tools.FinishTaskResult) error {
 		t, err := e.q.GetTask(finCtx, task.ID)
@@ -791,7 +811,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// call — the artifact never enters this session's context, only the short
 	// answer does. Uses the configured "ask_artifact" Default Model when set.
 	registry.Register(tools.NewAskArtifact(func(aCtx context.Context, filename, question string) (string, error) {
-		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, filename, question, proxyLogger)
+		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayAuth, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
 	// The set of sub-agents an agent may delegate to comes from its config's
@@ -922,9 +942,46 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
-	// Apply tool filter from agent config (if set). An empty AllowedTools means all tools.
+	// Apply tool filter from the built-in role config (if set). An empty
+	// AllowedTools means all tools. Built-in configs use the runtime registry
+	// names (bash/read/write/ls), not the legacy UI names.
 	if agentCfg != nil && len(agentCfg.AllowedTools) > 0 {
 		registry = registry.Filter(agentCfg.AllowedTools)
+	} else if agentCfg == nil && strings.TrimSpace(agent.Permissions) != "" {
+		// Custom DB agents store the UI permission names in JSON. Native runs
+		// use different concrete tool names, so translate the UI aliases before
+		// enforcing deny settings. Built-in delegated roles remain governed by
+		// their role config above.
+		var permissions map[string]string
+		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
+			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
+		} else {
+			toolNames := []aicli.ToolName{
+				aicli.ToolBash,
+				aicli.ToolRead,
+				aicli.ToolWrite,
+				aicli.ToolListDir,
+				aicli.ToolGrep,
+				aicli.ToolWebFetch,
+				aicli.ToolBrowserUse,
+				aicli.ToolWriteArtifact,
+				aicli.ToolListArtifacts,
+				aicli.ToolReadArtifact,
+				aicli.ToolAskArtifact,
+				aicli.ToolCreateSubtask,
+				aicli.ToolAnswerSubtaskQuestion,
+				aicli.ToolAskTaskOwner,
+				aicli.ToolCreateTask,
+			}
+			var denied []string
+			for _, toolName := range toolNames {
+				name := string(toolName)
+				if strings.EqualFold(strings.TrimSpace(permissions[name]), "deny") {
+					denied = append(denied, name)
+				}
+			}
+			registry = registry.Exclude(denied)
+		}
 	}
 
 	// Append the authoritative tool listing so prose tool references in agent
@@ -1016,6 +1073,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	} else if mcpErr != nil {
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load MCP accounts for agent: %v", mcpErr))
 	}
+	e.logInfo(proxyLogger, "Effective tools: "+strings.Join(registry.Names(), ", "))
 
 	// Determine agent mode and reasoning level from config.
 	agentMode := aicli.ModeMessageHistory
@@ -1052,12 +1110,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// below already does that). The gateway token authenticates this run
 		// to the (otherwise locked) local proxy — it is only ever sent to the
 		// in-process gateway, never to an external provider.
-		gatewayToken := runtokens.Default().Issue(run.ID)
+		gatewayAuth.token = runtokens.Default().Issue(run.ID)
 		defer runtokens.Default().Revoke(run.ID)
-		llmClient.ExtraHeaders = map[string]string{
-			"X-Run-ID":            fmt.Sprintf("%d", run.ID),
-			"X-Proxy-Log-Mode":    "switches-only",
-			runtokens.TokenHeader: gatewayToken,
+		if err := gatewayAuth.configure(llmClient, provider); err != nil {
+			e.failRun(ctx, run.ID, err.Error())
+			return "failed"
 		}
 	}
 	agentCfgObj := aicli.Config{
@@ -1066,7 +1123,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Mode:                  agentMode,
 		ProviderName:          provider.Name,
 		AgentName:             agentDisplayName,
-		TerminalTools:         []string{"finish_task"},
+		TerminalTools:         []string{string(aicli.ToolFinishTask)},
 		ReasoningLevel:        reasoningLevel,
 		MCPListingCostPerTurn: listingCostTotal,
 		MCPServerListingCosts: listingCostByServer,
@@ -1160,14 +1217,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
+			status = "failed"
+			runErrMsg = fmt.Sprintf("finish_task was not called and the forced follow-up failed: %v", followErr)
+		} else if !taskFinished {
+			status = "failed"
+			runErrMsg = "agent ended without calling finish_task, including during the forced follow-up"
 		}
 	}
 
 	// Git commit if there are changes.
-	if gitProject && gitMgr != nil && status == runStatusCompleted {
-		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent)
-		if task.ProjectID != nil {
-			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, task, finishResult)
+	if gitProject && gitMgr != nil && status == runStatusCompleted && finishAllowsGit(finishResult) {
+		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
+		// The root task owns the single branch and PR. A child may commit to
+		// that branch, but only the root publishes it.
+		if parent == nil && task.ProjectID != nil {
+			e.publishTaskPR(ctx, proxyLogger, gitMgr, workspacePath, rootTask, finishResult)
 		}
 	}
 
@@ -1197,7 +1261,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case taskFinished && forcedFinish:
 			endReason = "finish_task_forced"
 		case taskFinished:
-			endReason = "finish_task"
+			endReason = string(aicli.ToolFinishTask)
 		}
 		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}
@@ -1220,7 +1284,24 @@ func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyL
 	if err != nil || project.GitHubInstallationID == 0 {
 		return
 	}
-	branch := taskGitBranch(task.ID)
+	branch := strings.TrimSpace(task.GitHubBranch)
+	if branch == "" {
+		branch = db.TaskGitBranch(task.RefKey, task.ID)
+		task.GitHubBranch = branch
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			e.logInfo(logger, "Task branch persistence failed: "+err.Error())
+			return
+		}
+	}
+	changed, err := gitMgr.HasChangesFromBase(ctx, workspace, task.EffectiveGitBaseBranch())
+	if err != nil {
+		e.logInfo(logger, "Git diff against base failed: "+err.Error())
+		return
+	}
+	if !changed {
+		e.logInfo(logger, "No committed source changes; skipping push and PR")
+		return
+	}
 	if err := gitMgr.PushWorktreeBranch(ctx, workspace, branch); err != nil {
 		e.logInfo(logger, "GitHub push failed: "+err.Error())
 		return
@@ -1486,6 +1567,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			Status:             "in-progress",
 			Priority:           "Normal",
 			AgentConfigName:    agentName,
+			GitHubBranch:       parentTask.GitHubBranch,
 		})
 		if err != nil {
 			return "", fmt.Errorf("failed to create subtask: %w", err)
@@ -1715,6 +1797,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		Priority:        priority,
 		DueDate:         dueDate,
 		AgentConfigName: p.AgentConfigName,
+		GitHubBranch:    creator.GitHubBranch,
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
@@ -1808,115 +1891,6 @@ func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, pu
 	}
 
 	return sessionProvider, sessionModel
-}
-
-// askArtifact answers a question about one artifact via a separate one-shot
-// LLM call, so the artifact's content never enters the asking agent's
-// context — only the short answer is returned as the tool result. It uses the
-// configured "ask_artifact" Default Model when set, falling back to the asking
-// session's model, and bills the reader call's tokens to the asking run.
-// Each reader call is logged to its own file in the run's log folder.
-func (e *NativeEngine) askArtifact(
-	ctx context.Context,
-	runID, rootTaskID int32,
-	provider db.LLMProvider,
-	sessionModel string,
-	filename, question string,
-	logger *logging.ProxyLogger,
-) (string, error) {
-	arts, err := e.q.ListArtifactsByTaskTree(ctx, rootTaskID)
-	if err != nil {
-		return "", err
-	}
-	content, found := "", false
-	for i := len(arts) - 1; i >= 0; i-- {
-		if arts[i].Filename == filename {
-			content = arts[i].Content
-			found = true
-			break
-		}
-	}
-	if !found {
-		return "", fmt.Errorf("artifact %q not found — call list_artifacts to see what exists", filename)
-	}
-
-	const maxArtifactChars = 100000
-	truncNote := ""
-	if len(content) > maxArtifactChars {
-		content = content[:maxArtifactChars]
-		truncNote = "\n\n[Document truncated for length — the answer is based on the first part only.]"
-	}
-
-	provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompanyOfTask(ctx, rootTaskID), db.PurposeAskArtifact, provider, sessionModel)
-
-	prompt := fmt.Sprintf(`You answer questions about a document. Answer concisely — a short, direct answer (a few sentences at most), quoting brief evidence from the document when helpful. Base the answer ONLY on the document; if the document does not contain the answer, say so plainly.
-
-Document %q:
-%s%s
-
-Question: %s`, filename, content, truncNote, question)
-
-	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
-	if err != nil {
-		return "", fmt.Errorf("artifact reader: decrypt provider key: %w", err)
-	}
-	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
-	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
-		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
-		MaxTokens: 500,
-	})
-	if err != nil {
-		return "", fmt.Errorf("artifact reader call failed: %w", err)
-	}
-	if len(resp.Choices) == 0 {
-		return "", fmt.Errorf("artifact reader returned no answer")
-	}
-	// Bill the reader call to the asking session's run.
-	if runID > 0 {
-		if statErr := e.q.AddRunTokenStats(context.Background(), runID, db.RunTokenStats{
-			PromptTokens:     resp.Usage.PromptTokens,
-			CompletionTokens: resp.Usage.CompletionTokens,
-		}); statErr != nil {
-			fmt.Printf("Warning: failed to record ask_artifact token stats: %v\n", statErr)
-		}
-	}
-	answer := strings.TrimSpace(resp.Choices[0].Message.Content)
-	if answer == "" {
-		return "", fmt.Errorf("artifact reader returned an empty answer")
-	}
-	e.logAskArtifact(logger, runID, filename, model, question, prompt, answer, resp.Usage.PromptTokens, resp.Usage.CompletionTokens)
-	return fmt.Sprintf("Answer about %q: %s", filename, answer), nil
-}
-
-// logAskArtifact persists one ask_artifact reader exchange to its own file in
-// the run's log folder (alongside main.jsonl / session-N.jsonl), so the short
-// answer in the session log can always be traced back to the full reader
-// prompt and the exact artifact content it saw.
-func (e *NativeEngine) logAskArtifact(logger *logging.ProxyLogger, runID int32, filename, model, question, prompt, answer string, promptTokens, completionTokens int) {
-	if logger == nil {
-		return
-	}
-	logName := fmt.Sprintf("ask-artifact-%d-%d.log", runID, time.Now().UnixMilli())
-	logPath := filepath.Join(filepath.Dir(logger.FilePath()), logName)
-	content := fmt.Sprintf(`=== ask_artifact ===
-Time: %s
-Asking run: #%d
-Artifact: %s
-Reader model: %s
-Question: %s
-Usage: prompt_tokens=%d completion_tokens=%d
-
---- Reader prompt (artifact content as sent) ---
-%s
-
---- Answer ---
-%s
-`, time.Now().UTC().Format(time.RFC3339), runID, filename, model, question, promptTokens, completionTokens, prompt, answer)
-	if err := os.WriteFile(logPath, []byte(content), 0644); err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to write ask_artifact log: %v", err))
-		return
-	}
-	e.logInfo(logger, fmt.Sprintf("ask_artifact %q (model %s) — full exchange in %s", filename, model, logName))
 }
 
 // recordSubtaskQA stores an ask_task_owner question or the owner's answer as
@@ -2041,27 +2015,37 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent) {
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, gatewayAuth runGatewayAuth) bool {
 	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
 	// creation failed or the task has a bare directory workspace) instead of
 	// letting `git diff` fail with usage noise.
 	if _, statErr := os.Stat(filepath.Join(workspacePath, ".git")); statErr != nil {
 		e.logInfo(logger, "Workspace is not a git worktree; skipping commit")
-		return
+		return false
 	}
 	e.logInfo(logger, "Checking for changes to commit in worktree...")
+	status, err := gitMgr.GetStatusInDir(ctx, workspacePath)
+	if err != nil {
+		e.logInfo(logger, fmt.Sprintf("Warning: failed to get worktree status: %v", err))
+		return false
+	}
+	status = commitRelevantGitStatus(status)
+	if strings.TrimSpace(status) == "" {
+		e.logInfo(logger, "No changes to commit")
+		return false
+	}
 	diff, err := gitMgr.GetDiffInDir(ctx, workspacePath)
 	if err != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to get diff: %v", err))
-		return
+		return false
 	}
+	// git diff omits untracked and staged-only changes. Status proves that a
+	// commit is needed and still gives the message generator useful context.
 	if strings.TrimSpace(diff) == "" {
-		e.logInfo(logger, "No changes to commit")
-		return
+		diff = status
 	}
-
 	// Generate commit message via LLM.
-	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task)
+	commitMsg, msgErr := e.generateCommitMessage(ctx, agent, diff, task, gatewayAuth)
 	if msgErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to generate commit message: %v, using fallback", msgErr))
 		commitMsg = fmt.Sprintf("Agent run for task %d", task.ID)
@@ -2069,13 +2053,15 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 
 	if commitErr := gitMgr.CommitInWorktree(ctx, workspacePath, commitMsg); commitErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to commit: %v", commitErr))
+		return false
 	} else {
 		e.logInfo(logger, fmt.Sprintf("Committed changes: %s", commitMsg))
+		return true
 	}
 }
 
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.
-func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task) (string, error) {
+func (e *NativeEngine) generateCommitMessage(ctx context.Context, agent db.Agent, diff string, task db.Task, gatewayAuth runGatewayAuth) (string, error) {
 	if agent.ProviderID == nil {
 		return "", fmt.Errorf("no provider configured")
 	}
@@ -2107,6 +2093,9 @@ Changes:
 		return "", fmt.Errorf("commit message: decrypt provider key: %w", err)
 	}
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
+	if err := gatewayAuth.configure(client, provider); err != nil {
+		return "", fmt.Errorf("commit message: %w", err)
+	}
 	resp, _, err := client.Complete(ctx, aicli.ChatRequest{
 		Messages:  []aicli.Message{{Role: "user", Content: prompt}},
 		MaxTokens: 200,
@@ -2124,4 +2113,28 @@ Changes:
 	}
 
 	return msg, nil
+}
+
+// finishAllowsGit limits repository publication to successful agent verdicts.
+// A blocked/refinement result may have touched the worktree while preparing a
+// handoff, but it must not be turned into an automatic commit or PR.
+func finishAllowsGit(result tools.FinishTaskResult) bool {
+	return result.Status == "done" || result.Status == "in-review"
+}
+
+// commitRelevantGitStatus removes the per-task memory file from publication.
+// It is created automatically in every task worktree and is execution
+// metadata, not a project change.
+func commitRelevantGitStatus(status string) string {
+	var relevant []string
+	for _, line := range strings.Split(status, "\n") {
+		if strings.TrimSpace(line) == "" {
+			continue
+		}
+		if len(line) >= 3 && strings.TrimSpace(line[3:]) == "memory.md" {
+			continue
+		}
+		relevant = append(relevant, line)
+	}
+	return strings.Join(relevant, "\n")
 }

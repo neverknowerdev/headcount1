@@ -866,21 +866,25 @@ func TestNativeEngineAskArtifact(t *testing.T) {
 	assert.Contains(t, answer, "three milestones")
 	assert.NotContains(t, answer, "- m1", "raw artifact content must not leak into the asking session")
 
-	// The reader exchange was persisted to its own log file in the run folder.
-	var askLogs []string
+	// The reader exchange was persisted to the normal JSONL run log.
+	var jsonlLogs []string
 	require.NoError(t, filepath.WalkDir(headcount1Dir, func(path string, d os.DirEntry, err error) error {
-		if err == nil && !d.IsDir() && strings.HasPrefix(d.Name(), "ask-artifact-") && strings.HasSuffix(d.Name(), ".log") {
-			askLogs = append(askLogs, path)
+		if err == nil && !d.IsDir() && strings.HasSuffix(d.Name(), ".jsonl") {
+			jsonlLogs = append(jsonlLogs, path)
 		}
 		return nil
 	}))
-	require.Len(t, askLogs, 1, "each ask_artifact call gets its own log file")
-	logContent, err := os.ReadFile(askLogs[0])
-	require.NoError(t, err)
-	assert.Contains(t, string(logContent), "Reader model: cheap-model")
-	assert.Contains(t, string(logContent), "Does the document contain a Roadmap section?")
-	assert.Contains(t, string(logContent), "## Roadmap")
-	assert.Contains(t, string(logContent), "three milestones")
+	require.NotEmpty(t, jsonlLogs)
+	var logContent string
+	for _, path := range jsonlLogs {
+		contents, readErr := os.ReadFile(path)
+		require.NoError(t, readErr)
+		logContent += string(contents)
+	}
+	assert.Contains(t, logContent, "cheap-model")
+	assert.Contains(t, logContent, "Does the document contain a Roadmap section?")
+	assert.Contains(t, logContent, "## Roadmap")
+	assert.Contains(t, logContent, "three milestones")
 }
 
 // TestNativeEngineCreateTaskOnBoard verifies create_task: a new TOP-LEVEL
@@ -1157,7 +1161,8 @@ func TestNativeEngineAskHuman(t *testing.T) {
 				}
 			}
 		}
-		json.NewEncoder(w).Encode(textJSON("ask-002", "Understood, going with Option B."))
+		json.NewEncoder(w).Encode(toolCallJSON("finish-002", "finish_task",
+			`{"task_status":"done","finish_status":"Understood, going with Option B."}`))
 	})
 
 	mockSrv := startTestServer(t, handler)

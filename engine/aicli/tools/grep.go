@@ -28,7 +28,7 @@ func (t *Grep) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "grep",
+			Name:        string(aicli.ToolGrep),
 			Description: "Search for a regex pattern in workspace files. Returns matching lines with file:line format.",
 			Parameters: json.RawMessage(`{
 				"type":"object",

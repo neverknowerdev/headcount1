@@ -14,6 +14,7 @@ import (
 type User struct {
 	ID        int32     `json:"id" gorm:"primaryKey"`
 	Email     string    `json:"email" gorm:"uniqueIndex;not null"` // stored lowercased/trimmed
+	IsAdmin   bool      `json:"is_admin" gorm:"not null;default:false"`
 	CreatedAt time.Time `json:"created_at"`
 	UpdatedAt time.Time `json:"updated_at"`
 	// ReenrollTokenHash / ReenrollExpiresAt bind the re-enrollment that follows a
@@ -398,10 +399,12 @@ type Task struct {
 	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
 	GitHubPRNumber     int        `json:"github_pr_number"`
 	GitHubPRURL        string     `json:"github_pr_url"`
-	GitHubBranch       string     `json:"github_branch"`
-	GitBaseBranch      string     `json:"git_base_branch" gorm:"not null;default:'main'"`
-	CreatedAt          time.Time  `json:"created_at"`
-	UpdatedAt          time.Time  `json:"updated_at"`
+	// GitHubBranch is canonical on the root task. Subtasks copy the same value
+	// so every run in the task tree operates on one branch.
+	GitHubBranch  string    `json:"github_branch" gorm:"index"`
+	GitBaseBranch string    `json:"git_base_branch" gorm:"not null;default:'main'"`
+	CreatedAt     time.Time `json:"created_at"`
+	UpdatedAt     time.Time `json:"updated_at"`
 }
 
 // EffectiveGitBaseBranch returns the branch used to create this task's
