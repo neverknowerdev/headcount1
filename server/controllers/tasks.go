@@ -171,14 +171,8 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	createdByUserID := api.currentUserID(r)
-	var createdBy *int32
-	if createdByUserID != 0 {
-		createdBy = &createdByUserID
-	}
 	p := db.Task{
 		CompanyID:       req.CompanyID,
-		CreatedByUserID: createdBy,
 		ProjectID:       req.ProjectID,
 		Title:           req.Title,
 		TaskType:        taskType,

@@ -367,23 +367,19 @@ const (
 )
 
 type Task struct {
-	ID        int32   `json:"id" gorm:"primaryKey"`
-	CompanyID int32   `json:"company_id" gorm:"not null"`
-	Company   Company `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	// CreatedByUserID identifies the human whose task owns the Git changes.
-	// It is optional for legacy tasks; the engine falls back to the company
-	// owner for those rows.
-	CreatedByUserID *int32   `json:"created_by_user_id" gorm:"index"`
-	ProjectID       *int32   `json:"project_id"`
-	Project         *Project `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
-	SprintID        int32    `json:"sprint_id" gorm:"not null"`
-	Sprint          Sprint   `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
-	AgentID         *int32   `json:"agent_id"`
-	Agent           *Agent   `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
-	ParentID        *int32   `json:"parent_id"`
-	Parent          *Task    `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
-	Title           string   `json:"title" gorm:"not null"`
-	TaskType        string   `json:"task_type" gorm:"not null;default:'plan and implement'"`
+	ID        int32    `json:"id" gorm:"primaryKey"`
+	CompanyID int32    `json:"company_id" gorm:"not null"`
+	Company   Company  `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	ProjectID *int32   `json:"project_id"`
+	Project   *Project `json:"project" gorm:"foreignKey:ProjectID;constraint:OnDelete:SET NULL;"`
+	SprintID  int32    `json:"sprint_id" gorm:"not null"`
+	Sprint    Sprint   `json:"sprint" gorm:"foreignKey:SprintID;constraint:OnDelete:CASCADE;"`
+	AgentID   *int32   `json:"agent_id"`
+	Agent     *Agent   `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:SET NULL;"`
+	ParentID  *int32   `json:"parent_id"`
+	Parent    *Task    `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
+	Title     string   `json:"title" gorm:"not null"`
+	TaskType  string   `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	// Description holds the user's original input, untouched. For delegated
 	// subtasks the owner's instructions land in RefinedDescription instead,
 	// shown separately in the UI.

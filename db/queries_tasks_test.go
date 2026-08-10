@@ -22,13 +22,11 @@ func TestCreateTaskAssignsHumanReadableSharedBranch(t *testing.T) {
 	sprint := Sprint{CompanyID: company.ID, Name: "Sprint 1"}
 	require.NoError(t, database.Create(&sprint).Error)
 
-	creatorID := creator.ID
 	q := New(database)
 	root, err := q.CreateTask(context.Background(), Task{
-		CompanyID:       company.ID,
-		CreatedByUserID: &creatorID,
-		SprintID:        sprint.ID,
-		Title:           "Deployment settings",
+		CompanyID: company.ID,
+		SprintID:  sprint.ID,
+		Title:     "Deployment settings",
 	})
 	require.NoError(t, err)
 	require.Equal(t, "HC1-"+strconv.Itoa(int(root.ID)), root.RefKey)
@@ -42,5 +40,4 @@ func TestCreateTaskAssignsHumanReadableSharedBranch(t *testing.T) {
 	})
 	require.NoError(t, err)
 	require.Equal(t, root.GitHubBranch, child.GitHubBranch)
-	require.Equal(t, root.CreatedByUserID, child.CreatedByUserID)
 }

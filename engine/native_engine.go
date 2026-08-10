@@ -1207,11 +1207,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Git commit if there are changes.
 	if gitProject && gitMgr != nil && status == runStatusCompleted && finishAllowsGit(finishResult) {
-		if author, authorErr := e.commitAuthorForTask(ctx, task); authorErr != nil {
-			e.logInfo(proxyLogger, "Cannot commit task changes: "+authorErr.Error())
-		} else {
-			e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, author, gatewayAuth)
-		}
+		e.tryGitCommit(ctx, proxyLogger, gitMgr, workspacePath, task, agent, gatewayAuth)
 		// The root task owns the single branch and PR. A child may commit to
 		// that branch, but only the root publishes it.
 		if parent == nil && task.ProjectID != nil {
@@ -1547,7 +1543,6 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			// Delegated subtasks have no raw user input: the owner's
 			// instructions ARE the refined description.
 			RefinedDescription: description,
-			CreatedByUserID:    parentTask.CreatedByUserID,
 			TaskType:           db.TaskTypeImplement,
 			Status:             "in-progress",
 			Priority:           "Normal",
@@ -1782,7 +1777,6 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		Priority:        priority,
 		DueDate:         dueDate,
 		AgentConfigName: p.AgentConfigName,
-		CreatedByUserID: creator.CreatedByUserID,
 		GitHubBranch:    creator.GitHubBranch,
 	})
 	if err != nil {
@@ -2001,7 +1995,7 @@ func (e *NativeEngine) logError(logger *logging.ProxyLogger, msg string) {
 }
 
 // tryGitCommit generates a commit message and commits workspace changes.
-func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, author git.CommitAuthor, gatewayAuth runGatewayAuth) bool {
+func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspacePath string, task db.Task, agent db.Agent, gatewayAuth runGatewayAuth) bool {
 	// Skip cleanly when the workspace is not a git worktree (e.g. worktree
 	// creation failed or the task has a bare directory workspace) instead of
 	// letting `git diff` fail with usage noise.
@@ -2037,39 +2031,13 @@ func (e *NativeEngine) tryGitCommit(ctx context.Context, logger *logging.ProxyLo
 		commitMsg = fmt.Sprintf("Agent run for task %d", task.ID)
 	}
 
-	if commitErr := gitMgr.CommitInWorktree(ctx, workspacePath, commitMsg, author); commitErr != nil {
+	if commitErr := gitMgr.CommitInWorktree(ctx, workspacePath, commitMsg); commitErr != nil {
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to commit: %v", commitErr))
 		return false
 	} else {
 		e.logInfo(logger, fmt.Sprintf("Committed changes: %s", commitMsg))
 		return true
 	}
-}
-
-// commitAuthorForTask resolves the human who created the root task. Legacy
-// tasks without creator metadata fall back to the company's owner; there is
-// deliberately no Headcount1 service identity used as the commit author.
-func (e *NativeEngine) commitAuthorForTask(ctx context.Context, task db.Task) (git.CommitAuthor, error) {
-	root, err := e.q.GetRootTask(ctx, task.ID)
-	if err != nil {
-		return git.CommitAuthor{}, err
-	}
-	userID := root.CreatedByUserID
-	if userID == nil && root.Company.UserID != nil {
-		userID = root.Company.UserID
-	}
-	if userID == nil || *userID == 0 {
-		return git.CommitAuthor{}, fmt.Errorf("task %s has no creating user", root.RefKey)
-	}
-	user, err := e.q.GetUser(ctx, *userID)
-	if err != nil {
-		return git.CommitAuthor{}, fmt.Errorf("load task creator %d: %w", *userID, err)
-	}
-	email := strings.TrimSpace(user.Email)
-	if email == "" {
-		return git.CommitAuthor{}, fmt.Errorf("task creator %d has no email", user.ID)
-	}
-	return git.CommitAuthor{Name: email, Email: email}, nil
 }
 
 // generateCommitMessage calls the LLM to summarise a diff into a commit message.

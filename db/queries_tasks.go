@@ -66,13 +66,6 @@ func (q *Queries) EnsureTaskGitBranch(ctx context.Context, t *Task) error {
 			return err
 		}
 	}
-	if t.CreatedByUserID == nil && root.CreatedByUserID != nil {
-		t.CreatedByUserID = root.CreatedByUserID
-		if err := q.db.WithContext(ctx).Model(&Task{}).
-			Where("id = ?", t.ID).Update("created_by_user_id", *root.CreatedByUserID).Error; err != nil {
-			return err
-		}
-	}
 	return nil
 }
 

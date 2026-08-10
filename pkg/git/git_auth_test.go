@@ -87,9 +87,11 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	require.NoError(t, command.Run())
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
 	require.NoError(t, os.WriteFile(filepath.Join(directory, "memory.md"), []byte("task metadata\n"), 0o644))
+	require.NoError(t, exec.Command("git", "-C", directory, "config", "user.name", "GitHub User").Run())
+	require.NoError(t, exec.Command("git", "-C", directory, "config", "user.email", "github-user@example.com").Run())
 
 	manager := NewGitManager(directory, "")
-	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change", CommitAuthor{Name: "user@example.com", Email: "user@example.com"}))
+	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change"))
 
 	command = exec.Command("git", "log", "-1", "--format=%B")
 	command.Dir = directory
@@ -101,7 +103,7 @@ func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	command = exec.Command("git", "-C", directory, "log", "-1", "--format=%an <%ae>")
 	author, err := command.Output()
 	require.NoError(t, err)
-	require.Equal(t, "user@example.com <user@example.com>\n", string(author))
+	require.Equal(t, "GitHub User <github-user@example.com>\n", string(author))
 
 	command = exec.Command("git", "ls-tree", "--name-only", "HEAD", "memory.md")
 	command.Dir = directory

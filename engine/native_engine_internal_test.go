@@ -46,10 +46,9 @@ func TestTryGitCommitSkipsCleanAndCommitsUntrackedChanges(t *testing.T) {
 	require.NoError(t, manager.Init(context.Background()))
 	engine := &NativeEngine{}
 
-	author := git.CommitAuthor{Name: "user@example.com", Email: "user@example.com"}
-	require.False(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, author, runGatewayAuth{}))
+	require.False(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, runGatewayAuth{}))
 	require.NoError(t, os.WriteFile(filepath.Join(workspace, "new.txt"), []byte("new\n"), 0644))
-	require.True(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, author, runGatewayAuth{}))
+	require.True(t, engine.tryGitCommit(context.Background(), nil, manager, workspace, db.Task{}, db.Agent{}, runGatewayAuth{}))
 	status, err := manager.GetStatusInDir(context.Background(), workspace)
 	require.NoError(t, err)
 	require.Empty(t, status, "a successful commit should leave no worktree changes")

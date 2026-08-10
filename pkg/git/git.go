@@ -18,12 +18,6 @@ type GitManager struct {
 
 const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.ai <headcount1@headcount1.ai>"
 
-// CommitAuthor is the human identity that owns a task's Git changes.
-type CommitAuthor struct {
-	Name  string
-	Email string
-}
-
 // commitMessageWithHeadcount1Attribution adds the standard Git co-author
 // trailer to commits created by Headcount1. GitHub renders this trailer as a
 // co-author when the email is associated with a GitHub account.
@@ -99,7 +93,7 @@ func (g *GitManager) SetRemote(ctx context.Context, remoteURL string) error {
 	return err
 }
 
-func (g *GitManager) CommitAndPush(ctx context.Context, message string, author CommitAuthor) error {
+func (g *GitManager) CommitAndPush(ctx context.Context, message string) error {
 	_, err := g.runGitCommand(ctx, "add", ".")
 	if err != nil {
 		return err
@@ -109,10 +103,6 @@ func (g *GitManager) CommitAndPush(ctx context.Context, message string, author C
 	statusOut, _ := g.runGitCommand(ctx, "status", "--porcelain")
 	if strings.TrimSpace(statusOut) == "" {
 		return nil // Nothing to commit
-	}
-
-	if err := configureCommitAuthor(ctx, g.repoPath, author); err != nil {
-		return err
 	}
 
 	_, err = g.runGitCommand(ctx, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
@@ -415,7 +405,10 @@ func (g *GitManager) GetStatusInDir(ctx context.Context, dir string) (string, er
 	return string(out), nil
 }
 
-func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string, author CommitAuthor) error {
+// CommitInWorktree leaves the author untouched. Git is already configured by
+// the authorized Git OAuth environment, so the commit belongs to that Git
+// user; Headcount1 is added only as a co-author in the message trailer.
+func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message string) error {
 	run := func(args ...string) (string, error) {
 		cmd := exec.CommandContext(ctx, "git", args...)
 		cmd.Dir = worktreeDir
@@ -438,33 +431,10 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		return nil
 	}
 
-	if err := configureCommitAuthor(ctx, worktreeDir, author); err != nil {
-		return err
-	}
-
 	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
 		return err
 	}
 	return nil
-}
-
-func configureCommitAuthor(ctx context.Context, dir string, author CommitAuthor) error {
-	name := strings.TrimSpace(author.Name)
-	email := strings.TrimSpace(author.Email)
-	if name == "" || email == "" {
-		return fmt.Errorf("git commit author is required")
-	}
-	run := func(key, value string) error {
-		cmd := exec.CommandContext(ctx, "git", "-C", dir, "config", key, value)
-		if out, err := cmd.CombinedOutput(); err != nil {
-			return fmt.Errorf("git config %s failed: %v, output: %s", key, err, string(out))
-		}
-		return nil
-	}
-	if err := run("user.name", name); err != nil {
-		return err
-	}
-	return run("user.email", email)
 }
 
 // PushWorktreeBranch publishes an agent branch; callers create a PR rather
