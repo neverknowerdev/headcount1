@@ -36,10 +36,9 @@ func taskGitBranch(taskID int32) string {
 
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
-	q            *db.Queries
-	hub          *eventhub.Hub
-	agentFactory agentconfig.Factory
-	cancelFuncs  sync.Map // runID -> context.CancelFunc
+	q           *db.Queries
+	hub         *eventhub.Hub
+	cancelFuncs sync.Map // runID -> context.CancelFunc
 
 	// draining and activeRoots back BeginDrain/WaitForActiveRuns: the
 	// graceful-shutdown path for an auto-update. draining, once set, stops
@@ -53,13 +52,13 @@ type NativeEngine struct {
 	activeRoots sync.WaitGroup
 }
 
-// NewNativeEngine creates a NativeEngine pre-loaded with the default agent
-// config factory.
+// NewNativeEngine creates a NativeEngine. Agent rows in the database contain
+// the complete runtime configuration; file-backed role definitions are used
+// only by the legacy/bootstrap path in agent_runtime.go.
 func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 	return &NativeEngine{
-		q:            db.New(database),
-		hub:          hub,
-		agentFactory: agentconfig.NewDefaultFactory(),
+		q:   db.New(database),
+		hub: hub,
 	}
 }
 
@@ -89,10 +88,6 @@ func (e *NativeEngine) WaitForActiveRuns(ctx context.Context) {
 	case <-ctx.Done():
 	}
 }
-
-// defaultOrchestratorConfig is the agent config every root task is routed
-// through: the CEO orchestrates execution via delegation to specialists.
-const defaultOrchestratorConfig = "CEO"
 
 // maxDelegationDepth caps how deep delegation sessions can nest: the main
 // task (depth 0, CEO) and first-level subtasks (depth 1, e.g. CTO/CMO) can
@@ -203,17 +198,6 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 	task, err := e.q.GetTask(ctx, taskID)
 	if err != nil {
 		return fmt.Errorf("failed to get task: %w", err)
-	}
-
-	// Route every root task through the CEO orchestrator unless the task
-	// already pins a specific agent config.
-	if task.ParentID == nil && task.AgentConfigName == "" && e.agentFactory != nil {
-		if _, cfgErr := e.agentFactory.GetConfig(defaultOrchestratorConfig); cfgErr == nil {
-			task.AgentConfigName = defaultOrchestratorConfig
-			if updated, upErr := e.q.UpdateTask(ctx, task); upErr == nil {
-				task = updated
-			}
-		}
 	}
 
 	// Deduplication: skip if a non-stale run is already active.
@@ -359,7 +343,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		task = full
 	}
 
-	agent, err := e.q.GetAgent(ctx, *task.AgentID)
+	agent, err := e.prepareTaskAgent(ctx, &task)
 	if err != nil {
 		return "failed"
 	}
@@ -369,11 +353,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		run = *resumeRun
 	} else {
 		newRun := db.Run{
-			TaskID:          task.ID,
-			AgentID:         agent.ID,
-			Status:          "running",
-			StartedAt:       time.Now(),
-			AgentConfigName: task.AgentConfigName,
+			TaskID:    task.ID,
+			AgentID:   agent.ID,
+			Status:    "running",
+			StartedAt: time.Now(),
+			// Kept as a historical display label; AgentID is the only runtime
+			// configuration source.
+			AgentConfigName: agent.RoleKey,
 		}
 		if parent != nil {
 			parentID := parent.parentRunID
@@ -470,32 +456,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		depth = parent.depth
 	}
 
-	// Load agent config early so model resolution can use AllowedModels.
-	// The proxy logger isn't ready yet, so fall back to stdout for this warning.
-	var agentCfg *agentconfig.AgentConfig
-	if task.AgentConfigName != "" && e.agentFactory != nil {
-		if cfg, cfgErr := e.agentFactory.GetConfig(task.AgentConfigName); cfgErr == nil {
-			agentCfg = cfg
-		} else {
-			fmt.Printf("Warning: agent config %q not found for task %d: %v\n", task.AgentConfigName, task.ID, cfgErr)
-		}
-	}
-
 	// Resolve the LLM target. Agents bound to a model group talk to the
 	// in-process group router (free-first ordering, failover, stats) through
 	// a synthetic provider pointing at the local gateway; otherwise the
 	// agent's fixed provider+model is used directly.
 	groupMode := agent.ModelGroupID != nil
-	// A delegated task can carry both a role config (the prompt, hierarchy and
-	// conversation settings) and a database Agent row (the UI-owned model and
-	// permissions). When the names match, the database row is the authoritative
-	// execution target; role configs must not silently override it.
-	dbAgentOwnsSettings := agentCfg != nil && sameAgentName(agent.Name, task.AgentConfigName)
-	modelCfg := agentCfg
-	if dbAgentOwnsSettings {
-		modelCfg = nil
-	}
-	provider, model, err := resolveProvider(ctx, e.q, agent, modelCfg)
+	provider, model, err := resolveProvider(ctx, e.q, agent)
 	if err != nil {
 		e.failRun(ctx, run.ID, err.Error())
 		return "failed"
@@ -506,9 +472,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// from before it paused — recomputing would double-count it against
 	// CountRunsByNameKey (its own row now matches the key) and rename it.
 	if resumeRun == nil {
-		shortName := agentconfig.DeriveShortName(agent.Name)
-		if agentCfg != nil {
-			shortName = agentCfg.EffectiveShortName()
+		shortName := agent.ShortName
+		if shortName == "" {
+			shortName = agentconfig.DeriveShortName(agent.Name)
 		}
 		taskRef := task.RefKey
 		if taskRef == "" {
@@ -617,14 +583,15 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	readOnlyDirs = append(readOnlyDirs, artifactDir)
 
 	// Build system prompt.
-	var systemPrompt string
-	if agentCfg != nil && agentCfg.Prompt != "" {
-		// Use config prompt as the base; append task context from the builder.
-		taskContext := NewSystemPromptBuilder(e.q).Build(agent, task)
-		systemPrompt = agentCfg.Prompt + "\n\n" + taskContext
-	} else {
-		systemPrompt = NewSystemPromptBuilder(e.q).Build(agent, task)
+	// Agent.SystemPrompt is the database-owned base prompt. The builder only
+	// contributes dynamic task/company context; no file-backed role prompt is
+	// consulted during execution.
+	taskContext := NewSystemPromptBuilder(e.q).Build(agent, task)
+	systemPrompt := strings.TrimSpace(agent.SystemPrompt)
+	if systemPrompt != "" {
+		systemPrompt += "\n\n"
 	}
+	systemPrompt += taskContext
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
 	if len(readOnlyDirs) > 0 {
 		systemPrompt += fmt.Sprintf("\nReadable (read-only) dirs: %s", strings.Join(readOnlyDirs, ", "))
@@ -792,14 +759,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayAuth, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
-	// The set of sub-agents an agent may delegate to comes from its config's
-	// Subagents list (falling back to every known config when unset).
+	// The set of sub-agents comes from the database Agent row.
 	if depth < maxDelegationDepth {
-		subagents := []string(nil)
-		if agentCfg != nil && len(agentCfg.Subagents) > 0 {
-			subagents = agentCfg.Subagents
-		} else if e.agentFactory != nil {
-			subagents = e.agentFactory.ListNames()
+		subagents := decodeAgentNames(agent.Subagents)
+		if len(subagents) == 0 {
+			if agents, listErr := e.q.ListAgentsByCompany(ctx, agent.CompanyID); listErr == nil {
+				for _, candidate := range agents {
+					if candidate.ID != agent.ID {
+						if candidate.RoleKey != "" {
+							subagents = append(subagents, candidate.RoleKey)
+						} else {
+							subagents = append(subagents, candidate.Name)
+						}
+					}
+				}
+			}
 		}
 		pending := &pendingSubtasks{m: make(map[int32]*delegationState)}
 		registry.Register(tools.NewCreateSubtask(
@@ -920,40 +894,17 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", cgErr))
 	}
 
-	// Apply tool filter from the built-in role config (if set). An empty
-	// AllowedTools means all tools. Built-in configs use the runtime registry
-	// names (bash/read/write/ls), not the legacy UI names.
-	if agentCfg != nil && !dbAgentOwnsSettings && len(agentCfg.AllowedTools) > 0 {
-		registry = registry.Filter(agentCfg.AllowedTools)
-	} else if (agentCfg == nil || dbAgentOwnsSettings) && strings.TrimSpace(agent.Permissions) != "" {
-		// Database agents store the UI permission names in JSON. Native runs use
-		// different concrete tool names, so translate the UI aliases before
-		// enforcing deny settings.
+	// Apply the database Agent's tool permissions. Empty permissions preserve
+	// the existing custom-agent behavior of allowing the full registered set;
+	// seeded role rows contain explicit deny entries for restricted tools.
+	if strings.TrimSpace(agent.Permissions) != "" {
 		var permissions map[string]string
 		if permErr := json.Unmarshal([]byte(agent.Permissions), &permissions); permErr != nil {
 			e.logInfo(proxyLogger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", permErr))
 		} else {
-			toolNames := []aicli.ToolName{
-				aicli.ToolBash,
-				aicli.ToolRead,
-				aicli.ToolWrite,
-				aicli.ToolListDir,
-				aicli.ToolGrep,
-				aicli.ToolWebFetch,
-				aicli.ToolBrowserUse,
-				aicli.ToolWriteArtifact,
-				aicli.ToolListArtifacts,
-				aicli.ToolReadArtifact,
-				aicli.ToolAskArtifact,
-				aicli.ToolCreateSubtask,
-				aicli.ToolAnswerSubtaskQuestion,
-				aicli.ToolAskTaskOwner,
-				aicli.ToolCreateTask,
-			}
 			var denied []string
-			for _, toolName := range toolNames {
-				name := string(toolName)
-				if strings.EqualFold(strings.TrimSpace(permissions[name]), "deny") {
+			for name, value := range permissions {
+				if strings.EqualFold(strings.TrimSpace(value), "deny") {
 					denied = append(denied, name)
 				}
 			}
@@ -983,10 +934,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			if !ok || srv.Transport == "builtin" {
 				continue
 			}
-			// Honour AllowedMCPs filter from agent config.
-			if agentCfg != nil && len(agentCfg.AllowedMCPs) > 0 {
+			// Honour the database Agent's AllowedMCPs filter.
+			allowedMCPs := decodeAgentNames(agent.AllowedMCPs)
+			if len(allowedMCPs) > 0 {
 				allowed := false
-				for _, name := range agentCfg.AllowedMCPs {
+				for _, name := range allowedMCPs {
 					if name == srv.Name {
 						allowed = true
 						break
@@ -1052,27 +1004,18 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	e.logInfo(proxyLogger, "Effective tools: "+strings.Join(registry.Names(), ", "))
 
-	// Determine agent mode and reasoning level from config.
+	// Determine agent mode and reasoning level from the database Agent row.
 	agentMode := aicli.ModeMessageHistory
-	reasoningLevel := ""
-	if agentCfg != nil {
-		switch agentCfg.ChatType {
-		case agentconfig.ChatTypeCompactThinking:
-			agentMode = aicli.ModeCompactThinking
-		}
-		reasoningLevel = string(agentCfg.ReasoningLevel)
+	reasoningLevel := agent.ReasoningLevel
+	switch agent.ChatType {
+	case "compact_thinking":
+		agentMode = aicli.ModeCompactThinking
 	}
 
 	// Wire the proxy logger as the agent's RunLogger so request/response entries
 	// appear in the log file and the DB (identical format to the gateway).
-	// The display name comes from the agent CONFIG when set — delegated
-	// sessions reuse the parent's DB agent row, and labeling every
-	// sub-session with the parent's name ("CEO") made log forensics
-	// unreliable.
+	// The display name comes from the database Agent row.
 	agentDisplayName := agent.Name
-	if agentCfg != nil && agentCfg.Name != "" {
-		agentDisplayName = agentCfg.Name
-	}
 	// Decrypt the provider key at the point of use. A locked owner surfaces as a
 	// clear provider-auth failure downstream rather than a silent empty key.
 	apiKey, keyErr := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
@@ -1112,9 +1055,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
-	if agentCfg != nil {
-		e.logInfo(proxyLogger, fmt.Sprintf("Agent config: %s (chat_type=%s reasoning=%s)", agentCfg.Name, agentCfg.ChatType, agentCfg.ReasoningLevel))
-	}
+	e.logInfo(proxyLogger, fmt.Sprintf("Agent settings: %s (role=%s chat_type=%s reasoning=%s)", agent.Name, agent.RoleKey, agent.ChatType, agent.ReasoningLevel))
 
 	// Seed the loop's history: a resumed run continues from its persisted
 	// conversation (captured mid-turn by a prior pause — see below); a fresh
@@ -1461,29 +1402,6 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	}
 }
 
-// sameAgentName compares a role config name with a database Agent name. Agent
-// names are user-facing, so tolerate casing and surrounding whitespace while
-// keeping distinct names distinct.
-func sameAgentName(agentName, configName string) bool {
-	return strings.EqualFold(strings.TrimSpace(agentName), strings.TrimSpace(configName))
-}
-
-// delegatedAgent resolves the requested role to the company's UI-managed
-// Agent row. Built-in role configs remain usable in companies that have no
-// corresponding row, so the delegating agent is retained as a fallback.
-func (e *NativeEngine) delegatedAgent(ctx context.Context, companyID int32, configName string, fallback db.Agent) (db.Agent, error) {
-	agents, err := e.q.ListAgentsByCompany(ctx, companyID)
-	if err != nil {
-		return db.Agent{}, fmt.Errorf("failed to resolve delegated agent %q: %w", configName, err)
-	}
-	for _, candidate := range agents {
-		if sameAgentName(candidate.Name, configName) {
-			return candidate, nil
-		}
-	}
-	return fallback, nil
-}
-
 // makeCreateSubtaskFunc returns the callback behind the create_subtask tool.
 // It creates a child task, runs it as a nested session linked to the parent
 // run, and blocks until the sub-agent either finishes (returning its result
@@ -1511,12 +1429,6 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 			return "", fmt.Errorf("a subtask of task %d is already running; wait for it to finish — if it asked a question, reply with answer_subtask_question first", parentTask.ID)
 		}
 
-		if e.agentFactory == nil {
-			return "", fmt.Errorf("no agent configs available for delegation")
-		}
-		if _, cfgErr := e.agentFactory.GetConfig(agentName); cfgErr != nil {
-			return "", fmt.Errorf("unknown agent config %q: %w", agentName, cfgErr)
-		}
 		allowed := len(allowedAgents) == 0
 		for _, a := range allowedAgents {
 			if a == agentName {
@@ -1534,7 +1446,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 		// the agent the user configured. Keep the parent as a compatibility
 		// fallback for companies that only use the built-in role configs and do
 		// not have a matching database Agent row.
-		targetAgent, targetErr := e.delegatedAgent(callCtx, parentTask.CompanyID, agentName, parentAgent)
+		targetAgent, targetErr := e.ensureAgentForRole(callCtx, parentTask.CompanyID, agentName, parentAgent)
 		if targetErr != nil {
 			return "", targetErr
 		}
@@ -1739,10 +1651,18 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	if taskType == "" {
 		taskType = db.TaskTypePlanAndImplement
 	}
-	if p.AgentConfigName != "" && e.agentFactory != nil {
-		if _, err := e.agentFactory.GetConfig(p.AgentConfigName); err != nil {
-			return "", fmt.Errorf("unknown agent config %q", p.AgentConfigName)
+	selectedAgentID := agentID
+	if p.AgentConfigName != "" {
+		creatorAgent, err := e.q.GetAgent(ctx, agentID)
+		if err != nil {
+			return "", fmt.Errorf("load creator agent: %w", err)
 		}
+		targetAgent, targetErr := e.ensureAgentForRole(ctx, company.ID, p.AgentConfigName, creatorAgent)
+		if targetErr != nil {
+			return "", targetErr
+		}
+		selectedAgentID = targetAgent.ID
+		p.AgentConfigName = targetAgent.RoleKey
 	}
 
 	sprintID := creator.SprintID
@@ -1774,7 +1694,7 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		CompanyID:       company.ID,
 		ProjectID:       projectID,
 		SprintID:        sprintID,
-		AgentID:         &agentID,
+		AgentID:         &selectedAgentID,
 		Title:           p.Title,
 		Description:     p.Description,
 		TaskType:        taskType,

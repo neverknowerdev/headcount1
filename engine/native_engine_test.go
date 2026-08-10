@@ -595,7 +595,11 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 // role config for its prompt and delegation behavior.
 func TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings(t *testing.T) {
 	type capturedRequest struct {
-		Model string `json:"model"`
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
 		Tools []struct {
 			Function struct {
 				Name string `json:"name"`
@@ -679,6 +683,14 @@ func TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings(t *testing.T) {
 	requestsMu.Unlock()
 	require.GreaterOrEqual(t, len(gotRequests), 2)
 	assert.Equal(t, "cto-model", gotRequests[1].Model, "the child must use the CTO Agent's model")
+	var childSystemPrompt string
+	for _, message := range gotRequests[1].Messages {
+		if message.Role == "system" {
+			childSystemPrompt = message.Content
+			break
+		}
+	}
+	assert.Contains(t, childSystemPrompt, "You are the configured CTO.", "the child prompt must come from the database Agent")
 
 	childTools := make(map[string]bool, len(gotRequests[1].Tools))
 	for _, tool := range gotRequests[1].Tools {

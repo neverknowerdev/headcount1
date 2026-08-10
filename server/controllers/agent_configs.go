@@ -6,9 +6,9 @@ import (
 	"agent-orchestrator/engine/agentconfig"
 )
 
-// AgentConfigResponse is the wire shape for a built-in agent configuration.
-// The prompt itself is included so the UI can show what each built-in agent
-// is instructed to do.
+// AgentConfigResponse is the wire shape for a built-in role template. These
+// values are read-only bootstrap/documentation data; runtime settings live on
+// the company's db.Agent row.
 type AgentConfigResponse struct {
 	Name           string   `json:"name"`
 	Description    string   `json:"description"`
@@ -20,9 +20,9 @@ type AgentConfigResponse struct {
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
 }
 
-// ListAgentConfigs returns the built-in agent configurations (CEO, CTO,
-// CMO, Coder, …) in their canonical order so the Agents page can
-// display them alongside the company's own agents.
+// ListAgentConfigs returns built-in role templates (CEO, CTO, CMO, Coder, …)
+// in canonical order so the Agents page can display available defaults
+// alongside the company's database-owned agents.
 func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 	configs := agentconfig.BuiltinConfigs()
 	out := make([]AgentConfigResponse, 0, len(configs))

@@ -10,14 +10,18 @@ import (
 
 // CreateTaskParams carries the parameters of one create_task call.
 type CreateTaskParams struct {
-	Title           string `json:"title"`
-	Description     string `json:"description"`
-	Status          string `json:"status"`
-	Priority        string `json:"priority"`
-	TaskType        string `json:"task_type"`
-	SprintID        int32  `json:"sprint_id"`
-	ProjectID       int32  `json:"project_id"`
-	DueDate         string `json:"due_date"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority"`
+	TaskType    string `json:"task_type"`
+	SprintID    int32  `json:"sprint_id"`
+	ProjectID   int32  `json:"project_id"`
+	DueDate     string `json:"due_date"`
+	// AgentName is the database Agent role key or display name to assign.
+	AgentName string `json:"agent_name"`
+	// AgentConfigName is retained as a wire-compatibility alias for older
+	// prompts and clients. It is resolved to a database Agent before execution.
 	AgentConfigName string `json:"agent_config_name"`
 }
 
@@ -81,9 +85,9 @@ func (t *CreateTask) Def() aicli.ToolDef {
 						"type":"string",
 						"description":"Optional due date, RFC3339 (e.g. \"2026-08-01T00:00:00Z\")"
 					},
-					"agent_config_name":{
+					"agent_name":{
 						"type":"string",
-						"description":"Optional agent config to pin for execution (default: routed through the CEO orchestrator)"
+						"description":"Optional database agent role key or name to assign (for example \"CTO\")"
 					}
 				},
 				"required":["title","description"]
@@ -102,6 +106,9 @@ func (t *CreateTask) Execute(ctx context.Context, args json.RawMessage) (string,
 	}
 	if p.Description == "" {
 		return "", fmt.Errorf("description is required")
+	}
+	if p.AgentConfigName == "" {
+		p.AgentConfigName = p.AgentName
 	}
 	return t.fn(ctx, p)
 }

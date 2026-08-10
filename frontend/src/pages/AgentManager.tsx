@@ -110,9 +110,9 @@ export const AgentManager: React.FC = () => {
                         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-100 transition-colors rounded-lg"
                     >
                         <div className="flex items-center gap-2">
-                            <span className="font-semibold text-gray-700">Built-in agents</span>
+                            <span className="font-semibold text-gray-700">Role templates</span>
                             <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{builtinConfigs.length}</span>
-                            <span className="text-xs text-gray-400">Specialist roles the orchestrator can delegate to</span>
+                            <span className="text-xs text-gray-400">Read-only defaults; runtime settings come from database agents</span>
                         </div>
                         <span className="text-gray-400 text-sm">{builtinExpanded ? '▾' : '▸'}</span>
                     </button>
@@ -122,7 +122,7 @@ export const AgentManager: React.FC = () => {
                                 <div key={cfg.name} className="bg-white p-4 rounded-lg border shadow-sm flex flex-col gap-2">
                                     <div className="flex justify-between items-start gap-2">
                                         <h3 className="text-sm font-bold text-gray-900">{cfg.name}</h3>
-                                        <span className="bg-violet-100 text-violet-800 text-xs px-2 py-0.5 rounded-full shrink-0">built-in</span>
+                                        <span className="bg-violet-100 text-violet-800 text-xs px-2 py-0.5 rounded-full shrink-0">template</span>
                                     </div>
                                     {cfg.description && <p className="text-xs text-gray-600">{cfg.description}</p>}
                                     <div className="flex flex-wrap gap-1 text-xs">
