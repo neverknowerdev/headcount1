@@ -765,41 +765,31 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return e.askArtifact(aCtx, run.ID, rootTaskID, provider, model, gatewayAuth, filename, question, proxyLogger)
 	}))
 	// Delegation: available until the depth cap (CEO → CTO/CMO → implementers).
-	// The set of sub-agents comes from the database Agent row.
+	// The set of sub-agents comes from the database Agent row. An empty list is
+	// intentional: it means this agent cannot delegate.
 	if depth < maxDelegationDepth {
 		subagents := decodeAgentNames(agent.Subagents)
-		if len(subagents) == 0 {
-			if agents, listErr := e.q.ListAgentsByCompany(ctx, agent.CompanyID); listErr == nil {
-				for _, candidate := range agents {
-					if candidate.ID != agent.ID {
-						if candidate.RoleKey != "" {
-							subagents = append(subagents, candidate.RoleKey)
-						} else {
-							subagents = append(subagents, candidate.Name)
-						}
-					}
+		if len(subagents) > 0 {
+			pending := &pendingSubtasks{m: make(map[int32]*delegationState)}
+			registry.Register(tools.NewCreateSubtask(
+				e.makeCreateSubtaskFunc(task, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, subagents, pending),
+				subagents,
+			))
+			registry.Register(tools.NewAnswerSubtaskQuestion(func(aCtx context.Context, subtaskID int32, answer string) (string, error) {
+				state, err := pending.take(subtaskID)
+				if err != nil {
+					return "", err
 				}
-			}
+				e.recordSubtaskQA(aCtx, state.subtaskID, run.ID, "owner_answer", answer)
+				e.logInfo(proxyLogger, fmt.Sprintf("Answered subtask #%d question", state.subtaskID))
+				select {
+				case state.answerCh <- answer:
+				case <-aCtx.Done():
+					return "", aCtx.Err()
+				}
+				return e.waitForSubtaskEvent(aCtx, state, rootTaskID, pending, proxyLogger, run)
+			}))
 		}
-		pending := &pendingSubtasks{m: make(map[int32]*delegationState)}
-		registry.Register(tools.NewCreateSubtask(
-			e.makeCreateSubtaskFunc(task, run, proxyLogger, rootRunID, rootTaskID, workspacePath, depth, subagents, pending),
-			subagents,
-		))
-		registry.Register(tools.NewAnswerSubtaskQuestion(func(aCtx context.Context, subtaskID int32, answer string) (string, error) {
-			state, err := pending.take(subtaskID)
-			if err != nil {
-				return "", err
-			}
-			e.recordSubtaskQA(aCtx, state.subtaskID, run.ID, "owner_answer", answer)
-			e.logInfo(proxyLogger, fmt.Sprintf("Answered subtask #%d question", state.subtaskID))
-			select {
-			case state.answerCh <- answer:
-			case <-aCtx.Done():
-				return "", aCtx.Err()
-			}
-			return e.waitForSubtaskEvent(aCtx, state, rootTaskID, pending, proxyLogger, run)
-		}))
 	}
 
 	// create_task: plan new TOP-LEVEL board tasks (gated to the CEO via its

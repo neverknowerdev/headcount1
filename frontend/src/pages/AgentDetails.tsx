@@ -572,7 +572,7 @@ export const AgentDetails: React.FC = () => {
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Delegated agents (JSON array)</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Can delegate to (JSON array)</label>
                                 <textarea rows={2} value={formData.subagents} onChange={e => setFormData({...formData, subagents: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["CTO", "CMO"]' />
                             </div>
                             <div>

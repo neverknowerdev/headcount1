@@ -829,6 +829,38 @@ func TestNativeEngineSubagentRestriction(t *testing.T) {
 	assert.Empty(t, subtasks, "no subtask should be created for a rejected agent")
 }
 
+// TestNativeEngineEmptySubagentsDisablesDelegation verifies that an empty
+// database subagents list is an explicit permission boundary, not a request
+// to infer every other company agent.
+func TestNativeEngineEmptySubagentsDisablesDelegation(t *testing.T) {
+	var sawDelegationTool atomic.Bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "create_subtask") {
+			sawDelegationTool.Store(true)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(toolCallJSON("no-delegate-001", "finish_task",
+			`{"task_status":"done","finish_status":"delegation is disabled"}`))
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	require.NoError(t, database.Model(&db.Agent{}).
+		Where("company_id = ? AND role_key = ?", task.CompanyID, "CEO").
+		Update("subagents", "").Error)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+	assert.False(t, sawDelegationTool.Load(), "empty subagents must not register create_subtask")
+}
+
 // TestNativeEngineAskTaskOwner covers the question/answer loop between a
 // delegated sub-agent and its task owner: the sub-agent pauses on
 // ask_task_owner, the owner receives the question as the create_subtask
