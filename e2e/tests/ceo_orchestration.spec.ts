@@ -86,7 +86,38 @@ test.describe.serial('CEO orchestration flow', () => {
         const agent = await postJSON(request, '/api/agents', {
             company_id: companyId,
             name: 'Orchestrator',
+            role_key: 'CEO',
+            short_name: 'CEO',
             system_prompt: 'You orchestrate.',
+            model: 'e2e-mock-model',
+            provider_id: provider.id,
+            subagents: '["CTO"]',
+        });
+        const ctoAgent = await postJSON(request, '/api/agents', {
+            company_id: companyId,
+            name: 'CTO',
+            role_key: 'CTO',
+            short_name: 'CTO',
+            system_prompt: 'You are the CTO.',
+            model: 'e2e-mock-model',
+            provider_id: provider.id,
+            subagents: '["Coder", "QA"]',
+        });
+        const coderAgent = await postJSON(request, '/api/agents', {
+            company_id: companyId,
+            name: 'Coder',
+            role_key: 'Coder',
+            short_name: 'CODER',
+            system_prompt: 'You are the coder.',
+            model: 'e2e-mock-model',
+            provider_id: provider.id,
+        });
+        const qaAgent = await postJSON(request, '/api/agents', {
+            company_id: companyId,
+            name: 'QA',
+            role_key: 'QA',
+            short_name: 'QA',
+            system_prompt: 'You are QA.',
             model: 'e2e-mock-model',
             provider_id: provider.id,
         });
@@ -221,7 +252,7 @@ test.describe.serial('CEO orchestration flow', () => {
         const rootRun = runs[0];
         expect(rootRun.parent_run_id).toBeFalsy();
         expect(rootRun.root_run_id).toBe(rootRun.id);
-        expect(rootRun.agent_config_name).toBe('CEO');
+        expect(rootRun.agent_id).toBe(agent.id);
         expect(rootRun.status).toBe('completed');
         expect(rootRun.current_status).toBe(STATUS_LINE);
         expect(rootRun.result_description).toBe('Greeting feature delegated, implemented and verified.');
@@ -230,14 +261,14 @@ test.describe.serial('CEO orchestration flow', () => {
         const rootChildren = await (await request.get(`/api/runs/${rootRun.id}/children`)).json();
         expect(rootChildren.length).toBe(1);
         const ctoRun = rootChildren[0];
-        expect(ctoRun.agent_config_name).toBe('CTO');
+        expect(ctoRun.agent_id).toBe(ctoAgent.id);
         expect(ctoRun.parent_run_id).toBe(rootRun.id);
         expect(ctoRun.root_run_id).toBe(rootRun.id);
         expect(ctoRun.status).toBe('completed');
 
         // Direct children of the CTO session: Coder then QA.
         const ctoChildren = await (await request.get(`/api/runs/${ctoRun.id}/children`)).json();
-        expect((ctoChildren as any[]).map(c => c.agent_config_name)).toEqual(['Coder', 'QA']);
+        expect((ctoChildren as any[]).map(c => c.agent_id)).toEqual([coderAgent.id, qaAgent.id]);
         for (const child of ctoChildren) {
             expect(child.parent_run_id).toBe(ctoRun.id);
             expect(child.root_run_id).toBe(rootRun.id);
@@ -246,7 +277,7 @@ test.describe.serial('CEO orchestration flow', () => {
 
         // ?deep=true returns the whole tree from the root.
         const deepChildren = await (await request.get(`/api/runs/${rootRun.id}/children?deep=true`)).json();
-        expect((deepChildren as any[]).map(c => c.agent_config_name).sort()).toEqual(['CTO', 'Coder', 'QA']);
+        expect((deepChildren as any[]).map(c => c.agent_id).sort((a, b) => a - b)).toEqual([ctoAgent.id, coderAgent.id, qaAgent.id].sort((a, b) => a - b));
 
         // The root run's structured log records its (single) session boundary;
         // the CTO run's log records its two.
@@ -264,7 +295,7 @@ test.describe.serial('CEO orchestration flow', () => {
         const subtasks = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
         expect(subtasks.length).toBe(1);
         const ctoTask = subtasks[0];
-        expect(ctoTask.agent_config_name).toBe('CTO');
+        expect(ctoTask.agent_id).toBe(ctoAgent.id);
         expect(ctoTask.status).toBe('done');
         // Delegated subtasks carry no raw user input — the owner's
         // instructions live in refined_description.
@@ -336,10 +367,10 @@ test.describe.serial('CEO orchestration flow', () => {
             expect(st.status).toBe('done');
         }
         const coderTask = (ctoSubtasks as any[]).find(t => t.title === 'Write greeting code');
-        expect(coderTask.agent_config_name).toBe('Coder');
+        expect(coderTask.agent_id).toBe(coderAgent.id);
         expect(coderTask.refined_description).toBe('Add a casual greeting to the home page.');
         const qaTask = (ctoSubtasks as any[]).find(t => t.title === 'Verify greeting');
-        expect(qaTask.agent_config_name).toBe('QA');
+        expect(qaTask.agent_id).toBe(qaAgent.id);
 
         // ── Filesystem: JSONL logs grouped by main run id, one file per session ─
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');

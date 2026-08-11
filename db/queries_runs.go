@@ -139,7 +139,11 @@ func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 
 func (q *Queries) GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error) {
 	var r Run
-	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").First(&r, runID).Error
+	err := q.db.WithContext(ctx).
+		Preload("Task").
+		Preload("Task.Company").
+		Preload("Agent").
+		First(&r, runID).Error
 	if err != nil {
 		return Run{}, Task{}, err
 	}

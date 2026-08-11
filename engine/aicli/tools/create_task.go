@@ -10,15 +10,16 @@ import (
 
 // CreateTaskParams carries the parameters of one create_task call.
 type CreateTaskParams struct {
-	Title           string `json:"title"`
-	Description     string `json:"description"`
-	Status          string `json:"status"`
-	Priority        string `json:"priority"`
-	TaskType        string `json:"task_type"`
-	SprintID        int32  `json:"sprint_id"`
-	ProjectID       int32  `json:"project_id"`
-	DueDate         string `json:"due_date"`
-	AgentConfigName string `json:"agent_config_name"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority"`
+	TaskType    string `json:"task_type"`
+	SprintID    int32  `json:"sprint_id"`
+	ProjectID   int32  `json:"project_id"`
+	DueDate     string `json:"due_date"`
+	// AgentName is the database Agent role key or display name to assign.
+	AgentName string `json:"agent_name"`
 }
 
 // CreateTask creates a new TOP-LEVEL task on the board, alongside the tasks
@@ -81,9 +82,9 @@ func (t *CreateTask) Def() aicli.ToolDef {
 						"type":"string",
 						"description":"Optional due date, RFC3339 (e.g. \"2026-08-01T00:00:00Z\")"
 					},
-					"agent_config_name":{
+					"agent_name":{
 						"type":"string",
-						"description":"Optional agent config to pin for execution (default: routed through the CEO orchestrator)"
+						"description":"Optional database agent role key or name to assign (for example \"CTO\")"
 					}
 				},
 				"required":["title","description"]

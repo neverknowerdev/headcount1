@@ -271,7 +271,7 @@ export const RunLogDetails: React.FC = () => {
                     )}
                     <div>
                         <p className="text-sm text-gray-500">Agent</p>
-                        <p className="font-medium">{run.agent?.name}{run.agent_config_name ? ` (${run.agent_config_name})` : ''}</p>
+                        <p className="font-medium">{run.agent?.name}</p>
                     </div>
                     {run.parent_run_id && (
                         <div>
