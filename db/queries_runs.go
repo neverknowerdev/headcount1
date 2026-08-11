@@ -288,12 +288,12 @@ func (q *Queries) CountRootRunsThrough(ctx context.Context, taskID, rootRunID in
 }
 
 // CountSubsessionRunsThrough returns the ordinal of a delegated session among
-// sessions for the same root run and agent configuration. The current run is
-// included, so callers can use the result directly as the suffix.
-func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, runID, agentID int32, agentConfigName string) (int64, error) {
+// sessions for the same root run and agent. The current run is included, so
+// callers can use the result directly as the suffix.
+func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, runID, agentID int32) (int64, error) {
 	var count int64
 	err := q.db.WithContext(ctx).Model(&Run{}).
-		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ? AND agent_config_name = ?", rootRunID, runID, agentID, agentConfigName).
+		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID).
 		Count(&count).Error
 	return count, err
 }

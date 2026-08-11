@@ -484,7 +484,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		runKey := fmt.Sprintf("%s-%s-%s", taskRef, shortName, strconv.FormatInt(mainRunNumber, 10))
 		if parent != nil {
 			subRunNumber := int64(1)
-			if prior, cErr := e.q.CountSubsessionRunsThrough(ctx, rootRunID, run.ID, agent.ID, task.AgentConfigName); cErr == nil && prior > 0 {
+			if prior, cErr := e.q.CountSubsessionRunsThrough(ctx, rootRunID, run.ID, agent.ID); cErr == nil && prior > 0 {
 				subRunNumber = prior
 			}
 			runKey += "-" + strconv.FormatInt(subRunNumber, 10)
