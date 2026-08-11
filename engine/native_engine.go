@@ -8,7 +8,6 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -455,44 +454,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Assign the human-readable run name. Every run uses the root task name and
-	// carries the main-session ordinal. Delegated sessions add their ordinal for
-	// that agent within the main session:
-	//   HC1-2-CEO-1
-	//   HC1-2-CTO-2-1
-	//   HC1-2-CTO-2-2
 	// A resumed run already has its name from before it paused.
 	if resumeRun == nil {
-		shortName := agent.ShortName
-		if shortName == "" {
-			shortName = agent.Name
-		}
-		taskRef := task.RefKey
-		if rootTaskID != task.ID {
-			if rootTask, rootErr := e.q.GetTask(ctx, rootTaskID); rootErr == nil && rootTask.RefKey != "" {
-				taskRef = rootTask.RefKey
-			}
-		}
-		if taskRef == "" {
-			taskRef = fmt.Sprintf("TASK-%d", rootTaskID)
-		}
-
-		mainRunNumber := int64(1)
-		if prior, cErr := e.q.CountRootRunsThrough(ctx, rootTaskID, rootRunID); cErr == nil && prior > 0 {
-			mainRunNumber = prior
-		}
-		runKey := fmt.Sprintf("%s-%s-%s", taskRef, shortName, strconv.FormatInt(mainRunNumber, 10))
-		if parent != nil {
-			subRunNumber := int64(1)
-			if prior, cErr := e.q.CountSubsessionRunsThrough(ctx, rootRunID, run.ID, agent.ID); cErr == nil && prior > 0 {
-				subRunNumber = prior
-			}
-			runKey += "-" + strconv.FormatInt(subRunNumber, 10)
-		}
-		run.Name = runKey
-		if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
-			fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
-		}
+		run = assignRunName(ctx, e.q, task, agent, run, parent, rootTaskID, rootRunID)
 	}
 
 	// Workspace layout: every run in one task tree shares the root task's
