@@ -18,6 +18,29 @@ func TaskGitBranch(refKey string, taskID int32) string {
 	return taskGitBranchPrefix + refKey
 }
 
+// MigrateDropAgentConfigNames removes the retired file-config selectors from
+// existing databases. Runtime task and run assignment is now represented only
+// by AgentID.
+func (q *Queries) MigrateDropAgentConfigNames(ctx context.Context) error {
+	database := q.db.WithContext(ctx)
+	for _, item := range []struct {
+		model any
+		name  string
+	}{
+		{model: &Task{}, name: "Task"},
+		{model: &Run{}, name: "Run"},
+	} {
+		if !database.Migrator().HasColumn(item.model, "agent_config_name") {
+			continue
+		}
+		table := database.NamingStrategy.TableName(item.name)
+		if err := database.Exec("ALTER TABLE " + table + " DROP COLUMN agent_config_name").Error; err != nil {
+			return fmt.Errorf("drop %s.agent_config_name: %w", table, err)
+		}
+	}
+	return nil
+}
+
 func (q *Queries) CreateTask(ctx context.Context, t Task) (Task, error) {
 	err := q.db.WithContext(ctx).Create(&t).Error
 	if err != nil {

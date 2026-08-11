@@ -27,7 +27,7 @@ export const AgentDetails: React.FC = () => {
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
     const [modelGroups, setModelGroups] = useState<any[]>([]);
-    const [formData, setFormData] = useState({ name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', mode: 'primary', permissions: '{}' });
+    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', mode: 'primary', chat_type: 'message_history', reasoning_level: '', subagents: '', allowed_mcps: '', permissions: '{}' });
 
     const fetchData = useCallback(async () => {
         try {
@@ -45,12 +45,19 @@ export const AgentDetails: React.FC = () => {
             setToolNames(toolNamesRes.data || []);
             setFormData({
                 name: agentRes.data.name,
+                role_key: agentRes.data.role_key || '',
+                short_name: agentRes.data.short_name || '',
                 description: agentRes.data.description || '',
                 system_prompt: agentRes.data.system_prompt,
                 model: agentRes.data.model || '',
                 provider_id: agentRes.data.provider_id?.toString() || '',
                 model_group_id: agentRes.data.model_group_id?.toString() || '',
-                mode: agentRes.data.mode || 'primary', permissions: agentRes.data.permissions || '{}'
+                mode: agentRes.data.mode || 'primary',
+                chat_type: agentRes.data.chat_type || 'message_history',
+                reasoning_level: agentRes.data.reasoning_level || '',
+                subagents: agentRes.data.subagents || '',
+                allowed_mcps: agentRes.data.allowed_mcps || '',
+                permissions: agentRes.data.permissions || '{}'
             });
         } catch (e) {
             console.error(e);
@@ -519,6 +526,17 @@ export const AgentDetails: React.FC = () => {
                             <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
                             <input type="text" required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded p-2" />
                         </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Role key</label>
+                                <input type="text" value={formData.role_key} onChange={e => setFormData({...formData, role_key: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. CTO" />
+                                <p className="mt-1 text-xs text-gray-500">Stable database identity used for delegation.</p>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Run short name</label>
+                                <input type="text" value={formData.short_name} onChange={e => setFormData({...formData, short_name: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. CTO" />
+                            </div>
+                        </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
                             <input type="text" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2" />
@@ -532,6 +550,36 @@ export const AgentDetails: React.FC = () => {
                             value={{ provider_id: formData.provider_id, model_group_id: formData.model_group_id, model: formData.model }}
                             onChange={v => setFormData({ ...formData, provider_id: v.provider_id, model_group_id: v.model_group_id, model: v.model })}
                         />
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Chat type</label>
+                                <select value={formData.chat_type} onChange={e => setFormData({...formData, chat_type: e.target.value})} className="w-full border rounded p-2">
+                                    <option value="message_history">Message history</option>
+                                    <option value="compact_thinking">Compact thinking</option>
+                                </select>
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Reasoning level</label>
+                                <select value={formData.reasoning_level} onChange={e => setFormData({...formData, reasoning_level: e.target.value})} className="w-full border rounded p-2">
+                                    <option value="">Provider default</option>
+                                    <option value="minimal">Minimal</option>
+                                    <option value="low">Low</option>
+                                    <option value="medium">Medium</option>
+                                    <option value="high">High</option>
+                                    <option value="max">Max</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Can delegate to (JSON array)</label>
+                                <textarea rows={2} value={formData.subagents} onChange={e => setFormData({...formData, subagents: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["CTO", "CMO"]' />
+                            </div>
+                            <div>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Allowed MCPs (JSON array)</label>
+                                <textarea rows={2} value={formData.allowed_mcps} onChange={e => setFormData({...formData, allowed_mcps: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["github"]' />
+                            </div>
+                        </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
                             <textarea required rows={5} value={formData.system_prompt} onChange={e => setFormData({...formData, system_prompt: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" />

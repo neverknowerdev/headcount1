@@ -131,7 +131,9 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
     const agentRes = await request.post('/api/agents', {
         data: {
             company_id: company.id,
-            name: 'Tool Test Agent',
+            name: 'QA',
+            role_key: 'QA',
+            short_name: 'QA',
             model: 'e2e-mock-model',
             provider_id: provider.id,
         },
@@ -160,10 +162,6 @@ async function runTask(
             title,
             task_type: 'implement',
             agent_id: agentId,
-            // Pin the QA config (web_fetch + browser_use): these tests exercise
-            // direct tool execution, not the CEO delegation flow (the default
-            // for root tasks).
-            agent_config_name: 'QA',
         },
     });
     expect(taskRes.ok(), `create task: ${await taskRes.text()}`).toBeTruthy();

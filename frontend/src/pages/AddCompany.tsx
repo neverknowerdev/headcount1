@@ -360,10 +360,15 @@ export const AddCompany: React.FC = () => {
             await axios.post('/api/agents', {
                 company_id: finalCompanyId,
                 name: ceoName,
+                role_key: 'CEO',
+                short_name: 'CEO',
                 description: 'Company CEO',
                 system_prompt: ceoPrompt,
                 model: finalProviderModel,
-                provider_id: finalProviderId
+                provider_id: finalProviderId,
+                mode: 'primary',
+                chat_type: 'compact_thinking',
+                reasoning_level: 'max'
             });
 
             // Success! Clear localstorage and redirect

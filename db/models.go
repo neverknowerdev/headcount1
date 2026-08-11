@@ -326,10 +326,15 @@ type ProviderPreset struct {
 }
 
 type Agent struct {
-	ID           int32        `json:"id" gorm:"primaryKey"`
-	CompanyID    int32        `json:"company_id" gorm:"not null"`
-	Company      Company      `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
-	Name         string       `json:"name" gorm:"not null"`
+	ID        int32   `json:"id" gorm:"primaryKey"`
+	CompanyID int32   `json:"company_id" gorm:"not null"`
+	Company   Company `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
+	Name      string  `json:"name" gorm:"not null"`
+	// RoleKey is the stable, database-owned role identity used by delegation
+	// and runtime defaults (for example "CEO" or "CTO"). Name is editable UI
+	// text and must not be used as the execution identity.
+	RoleKey      string       `json:"role_key" gorm:"index;default:''"`
+	ShortName    string       `json:"short_name" gorm:"default:''"`
 	Description  string       `json:"description"`
 	SystemPrompt string       `json:"system_prompt" gorm:"not null"`
 	ProviderID   *int32       `json:"provider_id"`
@@ -341,10 +346,20 @@ type Agent struct {
 	ModelGroup   *ModelGroup `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
 	Model        string      `json:"model"`
 	Mode         string      `json:"mode" gorm:"not null;default:'primary'"`
-	Permissions  string      `json:"permissions"`
-	CreatedAt    time.Time   `json:"created_at"`
-	UpdatedAt    time.Time   `json:"updated_at"`
-	Skills       []Skill     `json:"skills" gorm:"many2many:agent_skills;"`
+	// ChatType and ReasoningLevel used to live only in file-backed role
+	// configs. They are persisted here so the database row is the complete
+	// runtime configuration for an agent.
+	ChatType       string `json:"chat_type" gorm:"not null;default:'message_history'"`
+	ReasoningLevel string `json:"reasoning_level" gorm:"default:''"`
+	// Subagents and AllowedMCPs are JSON arrays of stable role/server names.
+	// They are intentionally stored with the Agent row: templates may seed
+	// them, but the database is authoritative after creation.
+	Subagents   string    `json:"subagents" gorm:"type:text;default:''"`
+	AllowedMCPs string    `json:"allowed_mcps" gorm:"type:text;default:''"`
+	Permissions string    `json:"permissions"`
+	CreatedAt   time.Time `json:"created_at"`
+	UpdatedAt   time.Time `json:"updated_at"`
+	Skills      []Skill   `json:"skills" gorm:"many2many:agent_skills;"`
 }
 
 type Skill struct {
@@ -396,7 +411,6 @@ type Task struct {
 	DueDate            *time.Time `json:"due_date"`
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
-	AgentConfigName    string     `json:"agent_config_name" gorm:"default:''"`
 	GitHubPRNumber     int        `json:"github_pr_number"`
 	GitHubPRURL        string     `json:"github_pr_url"`
 	// GitHubBranch is canonical on the root task. Subtasks copy the same value
@@ -545,9 +559,8 @@ type Run struct {
 	// ParentRunID links a delegated session to the run that spawned it.
 	// RootRunID points at the top-level (CEO) run of the whole execution tree;
 	// it equals ID for root runs so log files can be grouped per main run.
-	ParentRunID     *int32 `json:"parent_run_id" gorm:"index"`
-	RootRunID       *int32 `json:"root_run_id" gorm:"index"`
-	AgentConfigName string `json:"agent_config_name" gorm:"default:''"`
+	ParentRunID *int32 `json:"parent_run_id" gorm:"index"`
+	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
 	CurrentStatus     string     `json:"current_status" gorm:"default:''"`

@@ -11,6 +11,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -112,10 +113,35 @@ func seedTestData(t *testing.T, database *gorm.DB, mockProviderURL string) (task
 	require.NoError(t, database.Create(&db.Agent{
 		CompanyID:    company.ID,
 		Name:         "Test Agent",
+		RoleKey:      "CEO",
+		ShortName:    "CEO",
 		SystemPrompt: "You are a helpful agent.",
 		ProviderID:   &providerID,
 		Model:        "test-model",
+		Subagents:    `["CTO", "CMO", "Designer"]`,
 	}).Error)
+	for _, definition := range []struct {
+		name      string
+		subagents string
+	}{
+		{name: "CTO", subagents: `["Coder", "Debugger", "QA"]`},
+		{name: "CMO"},
+		{name: "Coder"},
+		{name: "Debugger"},
+		{name: "QA"},
+		{name: "Designer"},
+	} {
+		require.NoError(t, database.Create(&db.Agent{
+			CompanyID:    company.ID,
+			Name:         definition.name,
+			RoleKey:      definition.name,
+			ShortName:    definition.name,
+			SystemPrompt: "You are a test agent.",
+			ProviderID:   &providerID,
+			Model:        "test-model",
+			Subagents:    definition.subagents,
+		}).Error)
+	}
 	require.NoError(t, database.First(&agent, "company_id = ?", company.ID).Error)
 
 	agentID := agent.ID
@@ -557,7 +583,10 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
 	assert.Equal(t, task.ID, *subtask.ParentID)
 	assert.Equal(t, "subtask A", subtask.Title)
-	assert.Equal(t, "CTO", subtask.AgentConfigName)
+	require.NotNil(t, subtask.AgentID)
+	var subtaskAgent db.Agent
+	require.NoError(t, database.First(&subtaskAgent, "id = ?", *subtask.AgentID).Error)
+	assert.Equal(t, "CTO", subtaskAgent.RoleKey)
 	assert.Equal(t, "done", subtask.Status, "child session should have finished the subtask")
 	// Delegated subtasks carry no raw user input: the orchestrator's
 	// instructions land in RefinedDescription, and Description stays empty.
@@ -586,6 +615,116 @@ func TestNativeEngineCreateSubtask(t *testing.T) {
 		return strings.Contains(parentRun.LogEntries, "session_started") &&
 			strings.Contains(parentRun.LogEntries, "session_ended")
 	}, 5*time.Second, 100*time.Millisecond, "parent run log should contain session_started and session_ended")
+}
+
+// TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings verifies that a
+// delegated role is resolved to its own database Agent row. The child must use
+// that row's model and permissions even though it also receives the built-in
+// role config for its prompt and delegation behavior.
+func TestNativeEngineDelegatedSessionUsesConfiguredAgentSettings(t *testing.T) {
+	type capturedRequest struct {
+		Model    string `json:"model"`
+		Messages []struct {
+			Role    string `json:"role"`
+			Content string `json:"content"`
+		} `json:"messages"`
+		Tools []struct {
+			Function struct {
+				Name string `json:"name"`
+			} `json:"function"`
+		} `json:"tools"`
+	}
+
+	var requestsMu sync.Mutex
+	var requests []capturedRequest
+	var callCount atomic.Int32
+	mockSrv := startTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(r.Body)
+		if err != nil {
+			t.Errorf("read mock request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		var req capturedRequest
+		if err := json.Unmarshal(body, &req); err != nil {
+			t.Errorf("decode mock request: %v", err)
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		requestsMu.Lock()
+		requests = append(requests, req)
+		requestsMu.Unlock()
+
+		w.Header().Set("Content-Type", "application/json")
+		switch callCount.Add(1) {
+		case 1:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-001", "create_subtask",
+				`{"title":"configured child","description":"use the CTO settings","agent_name":"CTO"}`))
+		case 2:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-002", "finish_task",
+				`{"task_status":"done","finish_status":"child done"}`))
+		default:
+			json.NewEncoder(w).Encode(toolCallJSON("settings-003", "finish_task",
+				`{"task_status":"done","finish_status":"parent done"}`))
+		}
+	}))
+
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+
+	var parentAgent db.Agent
+	require.NoError(t, database.First(&parentAgent, "id = ?", *task.AgentID).Error)
+	var parentProvider db.LLMProvider
+	require.NoError(t, database.First(&parentProvider, "id = ?", *parentAgent.ProviderID).Error)
+
+	ctoProvider := db.LLMProvider{
+		Name:            "cto-provider",
+		BaseUrl:         mockSrv.URL,
+		ApiKeyEncrypted: parentProvider.ApiKeyEncrypted,
+		ProviderType:    "openai",
+		DefaultModel:    "cto-model",
+		SupportedModels: "cto-model",
+	}
+	require.NoError(t, database.Create(&ctoProvider).Error)
+	var ctoAgent db.Agent
+	require.NoError(t, database.First(&ctoAgent, "company_id = ? AND role_key = ?", parentAgent.CompanyID, "CTO").Error)
+	ctoAgent.SystemPrompt = "You are the configured CTO."
+	ctoAgent.ProviderID = &ctoProvider.ID
+	ctoAgent.Model = "cto-model"
+	ctoAgent.Permissions = `{"read":"deny","grep":"deny"}`
+	require.NoError(t, database.Save(&ctoAgent).Error)
+
+	eng := engine.NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	parentRunID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	assert.Equal(t, "completed", waitForRunDone(t, q, parentRunID, 30*time.Second).Status)
+	subtask := waitForSubtask(t, database, task.ID, 5*time.Second)
+	require.NotNil(t, subtask.AgentID)
+	assert.Equal(t, ctoAgent.ID, *subtask.AgentID, "delegation must bind the child to the requested Agent row")
+
+	requestsMu.Lock()
+	gotRequests := append([]capturedRequest(nil), requests...)
+	requestsMu.Unlock()
+	require.GreaterOrEqual(t, len(gotRequests), 2)
+	assert.Equal(t, "cto-model", gotRequests[1].Model, "the child must use the CTO Agent's model")
+	var childSystemPrompt string
+	for _, message := range gotRequests[1].Messages {
+		if message.Role == "system" {
+			childSystemPrompt = message.Content
+			break
+		}
+	}
+	assert.Contains(t, childSystemPrompt, "You are the configured CTO.", "the child prompt must come from the database Agent")
+
+	childTools := make(map[string]bool, len(gotRequests[1].Tools))
+	for _, tool := range gotRequests[1].Tools {
+		childTools[tool.Function.Name] = true
+	}
+	assert.True(t, childTools["ls"], "the child should retain explicitly allowed tools")
+	assert.False(t, childTools["read"], "the child must not receive a denied tool")
+	assert.False(t, childTools["grep"], "the child must not receive a denied tool")
 }
 
 // TestNativeEngineDelegationDepthLimit verifies the two-level depth cap:
@@ -638,9 +777,15 @@ func TestNativeEngineDelegationDepthLimit(t *testing.T) {
 
 	// Depth 1: the CTO subtask exists. Depth 2: the Coder subtask exists.
 	ctoTask := waitForSubtask(t, database, task.ID, 5*time.Second)
-	assert.Equal(t, "CTO", ctoTask.AgentConfigName)
+	require.NotNil(t, ctoTask.AgentID)
+	var ctoAgent db.Agent
+	require.NoError(t, database.First(&ctoAgent, "id = ?", *ctoTask.AgentID).Error)
+	assert.Equal(t, "CTO", ctoAgent.RoleKey)
 	coderTask := waitForSubtask(t, database, ctoTask.ID, 5*time.Second)
-	assert.Equal(t, "Coder", coderTask.AgentConfigName)
+	require.NotNil(t, coderTask.AgentID)
+	var coderAgent db.Agent
+	require.NoError(t, database.First(&coderAgent, "id = ?", *coderTask.AgentID).Error)
+	assert.Equal(t, "Coder", coderAgent.RoleKey)
 
 	// Depth 3 must not exist: the Coder's delegation attempt was rejected.
 	greatGrandchildren, err := q.ListSubtasksByParent(context.Background(), coderTask.ID)
@@ -682,6 +827,38 @@ func TestNativeEngineSubagentRestriction(t *testing.T) {
 	subtasks, err := q.ListSubtasksByParent(context.Background(), task.ID)
 	require.NoError(t, err)
 	assert.Empty(t, subtasks, "no subtask should be created for a rejected agent")
+}
+
+// TestNativeEngineEmptySubagentsDisablesDelegation verifies that an empty
+// database subagents list is an explicit permission boundary, not a request
+// to infer every other company agent.
+func TestNativeEngineEmptySubagentsDisablesDelegation(t *testing.T) {
+	var sawDelegationTool atomic.Bool
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		if strings.Contains(string(body), "create_subtask") {
+			sawDelegationTool.Store(true)
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(toolCallJSON("no-delegate-001", "finish_task",
+			`{"task_status":"done","finish_status":"delegation is disabled"}`))
+	})
+
+	mockSrv := startTestServer(t, handler)
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	require.NoError(t, database.Model(&db.Agent{}).
+		Where("company_id = ? AND role_key = ?", task.CompanyID, "CEO").
+		Update("subagents", "").Error)
+
+	hub := eventhub.NewHub()
+	eng := engine.NewNativeEngine(database, hub)
+	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
+
+	q := db.New(database)
+	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
+	waitForRunDone(t, q, runID, 30*time.Second)
+	assert.False(t, sawDelegationTool.Load(), "empty subagents must not register create_subtask")
 }
 
 // TestNativeEngineAskTaskOwner covers the question/answer loop between a

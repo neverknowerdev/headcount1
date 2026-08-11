@@ -75,13 +75,9 @@ func (r *Registry) Exclude(denied []string) *Registry {
 	if len(denied) == 0 {
 		return r
 	}
-	blocked := make(map[string]bool, len(denied))
-	for _, name := range denied {
-		blocked[name] = true
-	}
 	filtered := NewRegistry()
 	for name, tool := range r.tools {
-		if !blocked[name] {
+		if !nameMatchesFilter(name, denied) {
 			filtered.Register(tool)
 		}
 	}
