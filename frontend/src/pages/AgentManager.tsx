@@ -110,7 +110,7 @@ export const AgentManager: React.FC = () => {
                         className="w-full flex items-center justify-between px-4 py-3 text-left hover:bg-gray-100 transition-colors rounded-lg"
                     >
                         <div className="flex items-center gap-2">
-                            <span className="font-semibold text-gray-700">Role templates</span>
+                            <span className="font-semibold text-gray-700">Built-in agents</span>
                             <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{builtinConfigs.length}</span>
                             <span className="text-xs text-gray-400">Read-only defaults; runtime settings come from database agents</span>
                         </div>
