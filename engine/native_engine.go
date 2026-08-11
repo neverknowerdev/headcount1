@@ -454,29 +454,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 
-	// Assign the human-readable run name: "<task ref>-<AGENTSHORT>[-n]",
-	// e.g. "DEC-50-CEO", "DEC-50-2-QA-2". A resumed run already has its name
-	// from before it paused — recomputing would double-count it against
-	// CountRunsByNameKey (its own row now matches the key) and rename it.
+	// A resumed run already has its name from before it paused.
 	if resumeRun == nil {
-		shortName := agent.ShortName
-		if shortName == "" {
-			shortName = agent.Name
-		}
-		taskRef := task.RefKey
-		if taskRef == "" {
-			taskRef = fmt.Sprintf("TASK-%d", task.ID)
-		}
-		runKey := taskRef + "-" + shortName
-		// prior = earlier runs with this key (this run's name is still empty, so
-		// it is not counted). The second run becomes "<key>-2", and so on.
-		if prior, cErr := e.q.CountRunsByNameKey(ctx, task.ID, runKey); cErr == nil && prior > 0 {
-			runKey = fmt.Sprintf("%s-%d", runKey, prior+1)
-		}
-		run.Name = runKey
-		if nErr := e.q.UpdateRunName(ctx, run.ID, runKey); nErr != nil {
-			fmt.Printf("Warning: failed to store run name for run %d: %v\n", run.ID, nErr)
-		}
+		run = assignRunName(ctx, e.q, task, agent, run, parent, rootTaskID, rootRunID)
 	}
 
 	// Workspace layout: every run in one task tree shares the root task's
@@ -1049,7 +1029,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	aiAgent := aicli.New(agentCfgObj)
 
-	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
+	taskName := task.RefKey
+	if taskName == "" {
+		taskName = fmt.Sprintf("%s-%d", strings.ToUpper(company.ShortName), task.ID)
+	}
+	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %s (mode=%s model=%s provider=%s)", taskName, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
 	e.logInfo(proxyLogger, fmt.Sprintf("Agent settings: %s (role=%s chat_type=%s reasoning=%s)", agent.Name, agent.RoleKey, agent.ChatType, agent.ReasoningLevel))
 

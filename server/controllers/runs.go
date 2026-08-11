@@ -1,14 +1,18 @@
 package endpoints
 
 import (
+	"archive/zip"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/filesystem"
 
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
@@ -155,6 +159,86 @@ func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
 		out = append(out, toRunResponse(run))
 	}
 	api.respondJSON(w, http.StatusOK, out)
+}
+
+// DownloadRunLogs streams the complete log directory for an execution tree.
+// A request for either the root run or a child run resolves to the same root,
+// so nested sessions are always included in one archive.
+func (api *API) DownloadRunLogs(w http.ResponseWriter, r *http.Request) {
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+	rootRun, err := api.rootRun(r, run)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "parent run not found")
+		return
+	}
+
+	logDir := filesystem.NewPaths(LoadSettings().BasePath).RunLogsDir(rootRun.Task.Company.ShortName, rootRun.TaskID, rootRun.ID)
+	if _, err := os.Stat(logDir); err != nil {
+		if os.IsNotExist(err) {
+			api.respondError(w, http.StatusNotFound, "run logs not found")
+		} else {
+			api.respondError(w, http.StatusInternalServerError, "failed to access run logs")
+		}
+		return
+	}
+	var files []string
+	if err := filepath.WalkDir(logDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to enumerate run logs")
+		return
+	}
+	if len(files) == 0 {
+		api.respondError(w, http.StatusNotFound, "run logs not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("run-%d-logs.zip", rootRun.ID)))
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	for _, path := range files {
+		rel, err := filepath.Rel(logDir, path)
+		if err != nil {
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		writer, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			file.Close()
+			return
+		}
+		_, _ = io.Copy(writer, file)
+		file.Close()
+	}
+}
+
+func (api *API) rootRun(r *http.Request, run db.Run) (db.Run, error) {
+	if run.RootRunID != nil {
+		return api.q.GetRun(r.Context(), *run.RootRunID)
+	}
+	seen := map[int32]bool{}
+	for run.ParentRunID != nil {
+		if seen[run.ID] {
+			return db.Run{}, fmt.Errorf("run hierarchy cycle")
+		}
+		seen[run.ID] = true
+		parent, err := api.q.GetRun(r.Context(), *run.ParentRunID)
+		if err != nil {
+			return db.Run{}, err
+		}
+		run = parent
+	}
+	return run, nil
 }
 
 func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {

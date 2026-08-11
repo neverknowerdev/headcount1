@@ -276,13 +276,24 @@ func (q *Queries) UpdateRunName(ctx context.Context, id int32, name string) erro
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("name", name).Error
 }
 
-// CountRunsByNameKey counts runs on a task whose name is the given key or a
-// numbered variant of it ("<key>" or "<key>-N"). Used to pick the next run
-// name suffix.
-func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key string) (int64, error) {
+// CountRootRunsThrough returns the ordinal of rootRunID among the root runs
+// for taskID. Run ids are monotonically assigned, so this remains stable even
+// when older runs have been renamed or have an empty legacy name.
+func (q *Queries) CountRootRunsThrough(ctx context.Context, taskID, rootRunID int32) (int64, error) {
 	var count int64
 	err := q.db.WithContext(ctx).Model(&Run{}).
-		Where("task_id = ? AND (name = ? OR name LIKE ?)", taskID, key, key+"-%").
+		Where("task_id = ? AND parent_run_id IS NULL AND id <= ?", taskID, rootRunID).
+		Count(&count).Error
+	return count, err
+}
+
+// CountSubsessionRunsThrough returns the ordinal of a delegated session among
+// sessions for the same root run and agent. The current run is included, so
+// callers can use the result directly as the suffix.
+func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, runID, agentID int32) (int64, error) {
+	var count int64
+	err := q.db.WithContext(ctx).Model(&Run{}).
+		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID).
 		Count(&count).Error
 	return count, err
 }
