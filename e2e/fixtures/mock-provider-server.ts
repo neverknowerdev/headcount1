@@ -30,6 +30,8 @@ export interface ScenarioToolCall {
 export interface ScenarioEntry {
     /** Emit a tool call. */
     tool_call?: ScenarioToolCall;
+    /** Emit several tool calls in the same assistant turn. */
+    tool_calls?: ScenarioToolCall[];
     /** Emit a plain text completion. */
     text?: string;
 }
@@ -287,7 +289,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const tc = entry.tool_call!;
+    const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -298,11 +300,11 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             message: {
                 role: 'assistant' as const,
                 content: null,
-                tool_calls: [{
+                tool_calls: toolCalls.map((tc) => ({
                     id: tc.id,
                     type: 'function',
                     function: { name: tc.name, arguments: JSON.stringify(tc.arguments) },
-                }],
+                })),
             },
             finish_reason: 'tool_calls',
         }],
@@ -325,13 +327,15 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const tc = entry.tool_call!;
-        res.write(formatSSE(chunk({
-            tool_calls: [{ index: 0, id: tc.id, function: { name: tc.name, arguments: '' } }],
-        }, null)));
-        res.write(formatSSE(chunk({
-            tool_calls: [{ index: 0, function: { arguments: JSON.stringify(tc.arguments) } }],
-        }, null)));
+        const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
+        for (const [index, tc] of toolCalls.entries()) {
+            res.write(formatSSE(chunk({
+                tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
+            }, null)));
+            res.write(formatSSE(chunk({
+                tool_calls: [{ index, function: { arguments: JSON.stringify(tc.arguments) } }],
+            }, null)));
+        }
         res.write(formatSSE(chunk({}, 'tool_calls')));
     }
 

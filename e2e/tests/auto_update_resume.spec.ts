@@ -251,6 +251,8 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const markerA = 'run A resumed';
         const markerB = 'run B resumed';
 
+        if (!server || server.exitCode !== null) await startServer();
+
         // The previous test leaves the isolated process running on its resumed
         // build. Reset both stores so this test proves that the startup scan
         // handles more than one paused session in the same restart.
@@ -347,8 +349,14 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect(finalRunsB).toHaveLength(1);
         expect(finalRunsA[0].id).toBe(runAId);
         expect(finalRunsB[0].id).toBe(runBId);
-        expect((await (await fetch(`${base}/api/runs/${runAId}`)).json()).current_status).toBe(markerA);
-        expect((await (await fetch(`${base}/api/runs/${runBId}`)).json()).current_status).toBe(markerB);
+        // Concurrent activations may claim the scenario entries in either
+        // order. Assert that both side effects survived, without coupling a
+        // marker to whichever run happened to win the race for entry one.
+        const statuses = await Promise.all([
+            fetch(`${base}/api/runs/${runAId}`).then((r) => r.json()).then((run) => run.current_status),
+            fetch(`${base}/api/runs/${runBId}`).then((r) => r.json()).then((run) => run.current_status),
+        ]);
+        expect(new Set(statuses)).toEqual(new Set([markerA, markerB]));
 
         // Two initial LLM calls plus two post-resume finish calls. The two
         // report_status side effects ran from restored pending tool calls, so
@@ -363,5 +371,128 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
             request.body.messages.some((message: any) =>
                 message.role === 'system' && String(message.content).includes('This session was resumed by')),
         )).toBe(true);
+    });
+
+    test('pauses before a multi-tool turn and resumes every side effect without history loss', async () => {
+        test.setTimeout(240_000);
+        const mockUrl = mock!.baseUrl;
+        const marker = 'multi-tool resume status';
+
+        // Keep the isolated process but reset its data and provider transcript.
+        if (!server || server.exitCode !== null) await startServer();
+        expect((await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' })).ok).toBeTruthy();
+        expect((await fetch(`${mockUrl}/__test/reset`, { method: 'POST' })).ok).toBeTruthy();
+        const scenario = {
+            entries: [
+                {
+                    tool_calls: [
+                        { id: 'bash-1', name: 'bash', arguments: { command: 'printf BASH_RESUME_MARKER' } },
+                        { id: 'write-1', name: 'write', arguments: { path: 'resume-tool-marker.txt', content: 'WRITE_RESUME_MARKER' } },
+                        { id: 'read-1', name: 'read', arguments: { path: 'resume-tool-marker.txt' } },
+                        { id: 'ls-1', name: 'ls', arguments: { path: '.', recursive: false } },
+                        { id: 'grep-1', name: 'grep', arguments: { pattern: 'WRITE_RESUME_MARKER', path: 'resume-tool-marker.txt', recursive: false } },
+                        { id: 'fetch-1', name: 'web_fetch', arguments: { url: `${mockUrl}/__test/health`, to_markdown: false } },
+                        { id: 'browser-1', name: 'browser_use', arguments: { action: 'navigate', url: `${mockUrl}/__test/health` } },
+                        { id: 'status-1', name: 'report_status', arguments: { status: marker } },
+                    ],
+                },
+                { tool_call: { id: 'finish-1', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'All tools resumed.' } } },
+            ],
+        };
+        expect((await fetch(`${mockUrl}/__test/set-scenario`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scenario),
+        })).ok).toBeTruthy();
+
+        const provider = await postJSON(`${base}/api/providers`, {
+            name: 'multi-tool-mock', base_url: mockUrl, api_key: 'test-key',
+            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model',
+        });
+        const company = await postJSON(`${base}/api/companies`, {
+            name: 'Multi Tool Resume Co', short_name: 'mtr', color: '#14b8a6',
+        });
+        const sprint = await postJSON(`${base}/api/sprints`, {
+            company_id: company.id, name: 'Sprint 1', goal: 'preserve every tool result',
+        });
+        const agent = await postJSON(`${base}/api/agents`, {
+            company_id: company.id, name: 'Tool Runner', system_prompt: 'Use the requested tools.',
+            model: 'e2e-mock-model', provider_id: provider.id,
+        });
+        const task = await postJSON(`${base}/api/tasks`, {
+            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            title: 'Multi-tool resumable task', description: 'pause before tools', task_type: 'implement',
+        });
+
+        expect((await fetch(`${mockUrl}/__test/hold`, { method: 'POST' })).ok).toBeTruthy();
+        const kick = await fetch(`${base}/api/tasks/${task.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'to-do' }),
+        });
+        expect(kick.ok).toBeTruthy();
+        await expect
+            .poll(async () => (await (await fetch(`${mockUrl}/__test/requests`)).json()).completionsReceived as number,
+                { timeout: 30_000, intervals: [200], message: 'multi-tool run should reach its held first LLM call' })
+            .toBe(1);
+
+        const runs = await (await fetch(`${base}/api/tasks/${task.id}/runs`)).json();
+        expect(runs).toHaveLength(1);
+        const runId = runs[0].id;
+
+        const drainMark = serverLog.length;
+        const stopped = stopServer();
+        await expect
+            .poll(() => serverLog.slice(drainMark).includes('Draining active agent runs'),
+                { timeout: 30_000, intervals: [100], message: 'server should begin draining the multi-tool run' })
+            .toBe(true);
+        expect((await fetch(`${mockUrl}/__test/release`, { method: 'POST' })).ok).toBeTruthy();
+        await stopped;
+        expect(server?.exitCode).toBe(0);
+        expect((await (await fetch(`${mockUrl}/__test/requests`)).json()).completionsReceived).toBe(1);
+
+        const resumeMark = serverLog.length;
+        await startServer();
+        await expect
+            .poll(() => /Resuming 1 paused run/.test(serverLog.slice(resumeMark)),
+                { timeout: 30_000, intervals: [200], message: 'restart should resume the multi-tool run' })
+            .toBe(true);
+        await expect
+            .poll(async () => {
+                const rs = await (await fetch(`${base}/api/tasks/${task.id}/runs`)).json();
+                return rs.find((run: any) => run.id === runId)?.status ?? '';
+            }, { timeout: 90_000, intervals: [500], message: 'multi-tool resumed run should complete' })
+            .toBe('completed');
+
+        const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
+        expect(finalRun.current_status).toBe(marker);
+        expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-review');
+
+        const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
+        expect(finalRequests.completionsReceived).toBe(2);
+        const resumedRequest = finalRequests.requests
+            .filter((request: any) => request.path.includes('/chat/completions'))
+            .at(-1);
+        expect(resumedRequest.body.messages.some((message: any) =>
+            message.role === 'tool' && String(message.content).includes('BASH_RESUME_MARKER'))).toBe(true);
+        expect(resumedRequest.body.messages.some((message: any) =>
+            message.role === 'tool' && String(message.content).includes('WRITE_RESUME_MARKER'))).toBe(true);
+        expect(resumedRequest.body.messages.some((message: any) =>
+            message.role === 'tool' && String(message.content).includes('HTTP 200'))).toBe(true);
+        expect(resumedRequest.body.messages.some((message: any) =>
+            message.role === 'system' && String(message.content).includes('This session was resumed by'))).toBe(true);
+
+        // The downloadable JSONL is the recovery source of truth. Verify the
+        // paused assistant turn and every resumed tool result are present once
+        // in that append-only trajectory (not merely in the provider request).
+        const logResponse = await fetch(`${base}/api/runs/${runId}/log/download`);
+        expect(logResponse.ok).toBeTruthy();
+        const logLines = (await logResponse.text()).trim().split('\n').filter(Boolean).map((line) => JSON.parse(line));
+        const messageEvents = logLines.filter((entry: any) => entry.type === 'message')
+            .map((entry: any) => JSON.parse(entry.content));
+        const pausedAssistant = messageEvents.find((message: any) =>
+            message.role === 'assistant' && Array.isArray(message.tool_calls) &&
+            message.tool_calls.some((call: any) => call.id === 'write-1'));
+        expect(pausedAssistant).toBeTruthy();
+        for (const callId of ['bash-1', 'write-1', 'read-1', 'ls-1', 'grep-1', 'fetch-1', 'browser-1', 'status-1']) {
+            expect(messageEvents.filter((message: any) => message.role === 'tool' && message.tool_call_id === callId))
+                .toHaveLength(1);
+        }
     });
 });
