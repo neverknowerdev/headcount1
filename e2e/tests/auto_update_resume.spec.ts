@@ -244,4 +244,124 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const finalReqs = await (await fetch(`${mockUrl}/__test/requests`)).json();
         expect(finalReqs.completionsReceived).toBe(2);
     });
+
+    test('all active runs pause and resume without duplicate runs or tools', async () => {
+        test.setTimeout(240_000);
+        const mockUrl = mock!.baseUrl;
+        const markerA = 'run A resumed';
+        const markerB = 'run B resumed';
+
+        // The previous test leaves the isolated process running on its resumed
+        // build. Reset both stores so this test proves that the startup scan
+        // handles more than one paused session in the same restart.
+        expect((await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' })).ok).toBeTruthy();
+        expect((await fetch(`${mockUrl}/__test/reset`, { method: 'POST' })).ok).toBeTruthy();
+        await fetch(`${mockUrl}/__test/set-scenario`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+                entries: [
+                    { tool_call: { id: 'rs-a', name: 'report_status', arguments: { status: markerA } } },
+                    { tool_call: { id: 'rs-b', name: 'report_status', arguments: { status: markerB } } },
+                    { tool_call: { id: 'ft-a', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Run A resumed.' } } },
+                    { tool_call: { id: 'ft-b', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Run B resumed.' } } },
+                ],
+            }),
+        });
+
+        const provider = await postJSON(`${base}/api/providers`, {
+            name: 'mock', base_url: mockUrl, api_key: 'test-key',
+            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model',
+        });
+        const company = await postJSON(`${base}/api/companies`, {
+            name: 'Multi Resume Co', short_name: 'mrc', color: '#8b5cf6',
+        });
+        const sprint = await postJSON(`${base}/api/sprints`, {
+            company_id: company.id, name: 'Sprint 1', goal: 'resume all runs',
+        });
+        const agent = await postJSON(`${base}/api/agents`, {
+            company_id: company.id, name: 'Runner', system_prompt: 'You do the work.',
+            model: 'e2e-mock-model', provider_id: provider.id,
+        });
+        const taskA = await postJSON(`${base}/api/tasks`, {
+            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            title: 'Resumable task A', description: 'first concurrent resumable task', task_type: 'implement',
+        });
+        const taskB = await postJSON(`${base}/api/tasks`, {
+            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            title: 'Resumable task B', description: 'second concurrent resumable task', task_type: 'implement',
+        });
+
+        // Hold both first LLM responses. This makes both runs active at the
+        // exact moment SIGTERM begins draining, rather than relying on timing
+        // between two ordinary completions.
+        expect((await fetch(`${mockUrl}/__test/hold`, { method: 'POST' })).ok).toBeTruthy();
+        await Promise.all([taskA, taskB].map((task) => fetch(`${base}/api/tasks/${task.id}`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ status: 'to-do' }),
+        })));
+        await expect
+            .poll(async () => (await (await fetch(`${mockUrl}/__test/requests`)).json()).completionsReceived as number,
+                { timeout: 30_000, intervals: [200], message: 'both runs should reach their held first LLM call' })
+            .toBe(2);
+
+        const runsA = await (await fetch(`${base}/api/tasks/${taskA.id}/runs`)).json();
+        const runsB = await (await fetch(`${base}/api/tasks/${taskB.id}/runs`)).json();
+        expect(runsA).toHaveLength(1);
+        expect(runsB).toHaveLength(1);
+        const runAId = runsA[0].id;
+        const runBId = runsB[0].id;
+
+        const drainMark = serverLog.length;
+        const stopped = stopServer();
+        await expect
+            .poll(() => serverLog.slice(drainMark).includes('Draining active agent runs'),
+                { timeout: 30_000, intervals: [100], message: 'server should begin draining both runs' })
+            .toBe(true);
+        expect((await fetch(`${mockUrl}/__test/release`, { method: 'POST' })).ok).toBeTruthy();
+        await stopped;
+        expect(server?.exitCode).toBe(0);
+        expect((await (await fetch(`${mockUrl}/__test/requests`)).json()).completionsReceived).toBe(2);
+
+        const resumeMark = serverLog.length;
+        await startServer();
+        await expect
+            .poll(() => /Resuming 2 paused run/.test(serverLog.slice(resumeMark)),
+                { timeout: 30_000, intervals: [200], message: 'restart should discover both paused runs' })
+            .toBe(true);
+
+        await expect
+            .poll(async () => {
+                const [a, b] = await Promise.all([
+                    fetch(`${base}/api/tasks/${taskA.id}/runs`).then((r) => r.json()),
+                    fetch(`${base}/api/tasks/${taskB.id}/runs`).then((r) => r.json()),
+                ]);
+                return [a.find((run: any) => run.id === runAId)?.status, b.find((run: any) => run.id === runBId)?.status];
+            }, { timeout: 90_000, intervals: [500], message: 'both paused runs should complete after restart' })
+            .toEqual(['completed', 'completed']);
+
+        const [finalRunsA, finalRunsB] = await Promise.all([
+            fetch(`${base}/api/tasks/${taskA.id}/runs`).then((r) => r.json()),
+            fetch(`${base}/api/tasks/${taskB.id}/runs`).then((r) => r.json()),
+        ]);
+        expect(finalRunsA).toHaveLength(1);
+        expect(finalRunsB).toHaveLength(1);
+        expect(finalRunsA[0].id).toBe(runAId);
+        expect(finalRunsB[0].id).toBe(runBId);
+        expect((await (await fetch(`${base}/api/runs/${runAId}`)).json()).current_status).toBe(markerA);
+        expect((await (await fetch(`${base}/api/runs/${runBId}`)).json()).current_status).toBe(markerB);
+
+        // Two initial LLM calls plus two post-resume finish calls. The two
+        // report_status side effects ran from restored pending tool calls, so
+        // no tool was repeated and no extra model turn was generated.
+        const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
+        expect(finalRequests.completionsReceived).toBe(4);
+        const resumedRequests = finalRequests.requests
+            .filter((request: any) => request.path.includes('/chat/completions'))
+            .slice(-2);
+        expect(resumedRequests).toHaveLength(2);
+        expect(resumedRequests.every((request: any) =>
+            request.body.messages.some((message: any) =>
+                message.role === 'system' && String(message.content).includes('This session was resumed by')),
+        )).toBe(true);
+    });
 });
