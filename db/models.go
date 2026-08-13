@@ -574,21 +574,36 @@ type Run struct {
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
-	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
-	// captured at a durable safe point. It is retained while the run is paused,
-	// recoverable_failed, stale, or being claimed for resume. Internal plumbing,
-	// not for display — omitted from the JSON API. The legacy column name is
-	// retained for an additive migration; new code treats it as a checkpoint.
-	PausedHistory string `json:"-" gorm:"type:text"`
-	// CheckpointVersion and CheckpointPhase make the saved conversation an
-	// explicit, forward-compatible recovery contract. Version 1 is the current
-	// []aicli.Message JSON format; phase identifies whether the final assistant
-	// tool calls still need to execute or tool results are already appended.
-	CheckpointVersion    int        `json:"-" gorm:"default:0"`
-	CheckpointPhase      string     `json:"-" gorm:"default:''"`
-	RecoveryReason       string     `json:"-" gorm:"default:''"`
-	RecoveryInitiator    string     `json:"-" gorm:"default:''"`
-	RecoveryTarget       string     `json:"-" gorm:"default:''"`
+	// Snapshot contains the internal recovery checkpoint, when one exists.
+	// It is intentionally separate from the execution record and omitted from
+	// the public Run JSON representation.
+	Snapshot *RunSnapshot `json:"-" gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE;"`
+}
+
+// RunSnapshot is the durable recovery checkpoint for a Run. A run has at most
+// one current snapshot; it is replaced when a newer safe point is captured.
+// The fields here are internal recovery plumbing and are not part of the JSON
+// API. Keeping them separate from Run prevents the execution model from
+// accumulating checkpoint, lease, and retry state.
+type RunSnapshot struct {
+	ID    int32 `json:"-" gorm:"primaryKey"`
+	RunID int32 `json:"-" gorm:"not null;uniqueIndex"`
+
+	// CheckpointSequence points at the last message event in the run's JSONL
+	// trajectory that belongs to this snapshot. The JSONL file is the sole
+	// source of truth for the conversation; this row stores only the cursor and
+	// recovery metadata.
+	CheckpointSequence int64 `json:"-" gorm:"default:0"`
+	// Version 1 is the current JSONL message-event format. Phase identifies
+	// whether final assistant tool calls still need to execute or tool results
+	// are already appended.
+	CheckpointVersion int    `json:"-" gorm:"default:0"`
+	CheckpointPhase   string `json:"-" gorm:"default:''"`
+
+	RecoveryReason    string `json:"-" gorm:"default:''"`
+	RecoveryInitiator string `json:"-" gorm:"default:''"`
+	RecoveryTarget    string `json:"-" gorm:"default:''"`
+
 	ResumeLeaseOwner     string     `json:"-" gorm:"default:''"`
 	ResumeLeaseUntil     *time.Time `json:"-"`
 	ResumePreviousStatus string     `json:"-" gorm:"default:''"`

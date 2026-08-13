@@ -169,6 +169,35 @@ func (l *ProxyLogger) FilePath() string {
 	return l.filePath
 }
 
+// LogConversationMessage appends the canonical agent message event to the
+// JSONL trajectory. The message payload is intentionally kept separate from
+// display-oriented request/response entries so it can be parsed back into the
+// exact in-memory conversation during recovery.
+func (l *ProxyLogger) LogConversationMessage(messageJSON []byte) int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	entry := l.makeEntry("message", string(messageJSON), map[string]interface{}{"message_version": 1})
+	l.logEntry(entry)
+	seq, _ := entry["seq"].(int64)
+	if seq == 0 {
+		if n, ok := entry["seq"].(float64); ok {
+			seq = int64(n)
+		}
+	}
+	return seq
+}
+
+// Sync makes the JSONL trajectory durable before a checkpoint cursor is
+// stored. A snapshot must never point at a message that is still buffered.
+func (l *ProxyLogger) Sync() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.file == nil {
+		return nil
+	}
+	return l.file.Sync()
+}
+
 // makeEntry builds one structured log entry: {type, content, ts, seq,
 // ...extra}. The same entry object is used for every sink a log line goes to
 // — the run's .jsonl log file, the WebSocket stream and the runs.log_entries

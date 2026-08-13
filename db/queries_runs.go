@@ -1,12 +1,17 @@
 package db
 
 import (
+	"bufio"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 const (
@@ -21,6 +26,139 @@ const (
 func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
 	err := q.db.WithContext(ctx).Create(&r).Error
 	return r, err
+}
+
+// MigrateRunSnapshots moves checkpoints written by the first pause/resume
+// implementation into the dedicated RunSnapshot table. Older databases kept
+// the serialized history on runs; new recovery uses canonical JSONL message
+// events, so when necessary we append those legacy messages to the trajectory
+// before creating the snapshot cursor. The old columns are intentionally left
+// in place for an additive, non-destructive migration and are ignored by the
+// current model.
+func (q *Queries) MigrateRunSnapshots(ctx context.Context) error {
+	if !q.db.Migrator().HasTable(&RunSnapshot{}) || !q.db.Migrator().HasColumn(&Run{}, "paused_history") {
+		return nil
+	}
+	type legacyRun struct {
+		ID                   int32
+		Status               string
+		LogFilePath          string
+		PausedHistory        string
+		CheckpointVersion    int
+		CheckpointPhase      string
+		RecoveryReason       string
+		RecoveryInitiator    string
+		RecoveryTarget       string
+		ResumePreviousStatus string
+		ResumeAttempts       int
+		LastResumeError      string
+	}
+	var legacy []legacyRun
+	if err := q.db.WithContext(ctx).Table("runs").Select("id, status, log_file_path, paused_history, checkpoint_version, checkpoint_phase, recovery_reason, recovery_initiator, recovery_target, resume_previous_status, resume_attempts, last_resume_error").Where("paused_history <> ''").Scan(&legacy).Error; err != nil {
+		return err
+	}
+	for _, old := range legacy {
+		var existing RunSnapshot
+		if err := q.db.WithContext(ctx).Where("run_id = ?", old.ID).First(&existing).Error; err == nil {
+			continue
+		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
+			return err
+		}
+		sequence, err := migrateLegacyHistoryToJSONL(old.LogFilePath, old.PausedHistory)
+		if err != nil {
+			return fmt.Errorf("migrate run %d snapshot: %w", old.ID, err)
+		}
+		if sequence == 0 {
+			continue
+		}
+		snapshot := RunSnapshot{
+			RunID:                old.ID,
+			CheckpointSequence:   sequence,
+			CheckpointVersion:    CheckpointVersion,
+			CheckpointPhase:      old.CheckpointPhase,
+			RecoveryReason:       old.RecoveryReason,
+			RecoveryInitiator:    old.RecoveryInitiator,
+			RecoveryTarget:       old.RecoveryTarget,
+			ResumePreviousStatus: old.ResumePreviousStatus,
+			ResumeAttempts:       old.ResumeAttempts,
+			LastResumeError:      old.LastResumeError,
+		}
+		if snapshot.CheckpointPhase == "" {
+			snapshot.CheckpointPhase = "before_tools"
+		}
+		if snapshot.RecoveryReason == "" {
+			snapshot.RecoveryReason = "binary_update"
+		}
+		if err := q.db.WithContext(ctx).Create(&snapshot).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func migrateLegacyHistoryToJSONL(path, historyJSON string) (int64, error) {
+	if strings.TrimSpace(path) == "" {
+		return 0, nil
+	}
+	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0644)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return 0, nil
+		}
+		return 0, err
+	}
+	defer file.Close()
+
+	var messages []json.RawMessage
+	if err := json.Unmarshal([]byte(historyJSON), &messages); err != nil {
+		return 0, err
+	}
+	var maxSeq int64
+	var hasMessage bool
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
+	for scanner.Scan() {
+		var entry struct {
+			Type string      `json:"type"`
+			Seq  json.Number `json:"seq"`
+		}
+		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
+			return 0, err
+		}
+		if seq, err := entry.Seq.Int64(); err == nil && seq > maxSeq {
+			maxSeq = seq
+		}
+		if entry.Type == "message" {
+			hasMessage = true
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return 0, err
+	}
+	if !hasMessage {
+		for _, message := range messages {
+			maxSeq++
+			content, _ := json.Marshal(string(message))
+			entry := map[string]interface{}{
+				"type":            "message",
+				"content":         json.RawMessage(content),
+				"message_version": 1,
+				"seq":             maxSeq,
+				"ts":              time.Now().UTC().Format(time.RFC3339Nano),
+			}
+			line, err := json.Marshal(entry)
+			if err != nil {
+				return 0, err
+			}
+			if _, err := file.Write(append(line, '\n')); err != nil {
+				return 0, err
+			}
+		}
+	}
+	if err := file.Sync(); err != nil {
+		return 0, err
+	}
+	return maxSeq, nil
 }
 
 func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, status string) error {
@@ -50,7 +188,7 @@ func (q *Queries) SetRunRootID(ctx context.Context, id int32, rootID int32) erro
 func (q *Queries) ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error) {
 	var runs []Run
 	err := q.db.WithContext(ctx).
-		Preload("Task").Preload("Agent").
+		Preload("Task").Preload("Agent").Preload("Snapshot").
 		Where("parent_run_id = ?", parentRunID).
 		Order("started_at asc").
 		Find(&runs).Error
@@ -63,7 +201,7 @@ func (q *Queries) ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, 
 func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Run, error) {
 	var runs []Run
 	err := q.db.WithContext(ctx).
-		Preload("Task").Preload("Agent").
+		Preload("Task").Preload("Agent").Preload("Snapshot").
 		Where("root_run_id = ? AND id <> ?", rootRunID, rootRunID).
 		Order("started_at asc").
 		Find(&runs).Error
@@ -143,7 +281,7 @@ func (q *Queries) TouchRunLastMessageTime(ctx context.Context, id int32) error {
 
 func (q *Queries) GetRun(ctx context.Context, id int32) (Run, error) {
 	var r Run
-	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").Preload("Agent").First(&r, id).Error
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Task.Company").Preload("Agent").Preload("Snapshot").First(&r, id).Error
 	return r, err
 }
 
@@ -153,6 +291,7 @@ func (q *Queries) GetRunWithTask(ctx context.Context, runID int32) (Run, Task, e
 		Preload("Task").
 		Preload("Task.Company").
 		Preload("Agent").
+		Preload("Snapshot").
 		First(&r, runID).Error
 	if err != nil {
 		return Run{}, Task{}, err
@@ -297,28 +436,36 @@ func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key stri
 	return count, err
 }
 
-// PauseRun stores an update checkpoint and keeps the task locked to this run.
+// PauseRun stores an update checkpoint cursor and keeps the task locked to this run.
 // The legacy interrupted status is no longer written, but remains readable by
 // GetResumableRuns so older databases can migrate without losing recovery data.
-func (q *Queries) PauseRun(ctx context.Context, runID int32, history string) error {
-	return q.PauseRunWithMetadata(ctx, runID, history, "binary_update", "", "", "before_tools")
+func (q *Queries) PauseRun(ctx context.Context, runID int32, sequence int64) error {
+	return q.PauseRunWithMetadata(ctx, runID, sequence, "binary_update", "", "", "before_tools")
 }
 
 // PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
 // boundary. It is intentionally independent of the update path so the same
 // checkpoint can later back explicit failed/stale recovery.
-func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, history, reason, initiator, target, phase string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{
-			"status":             RunStatusPaused,
-			"paused_history":     history,
-			"checkpoint_version": CheckpointVersion,
-			"checkpoint_phase":   phase,
-			"recovery_reason":    reason,
-			"recovery_initiator": initiator,
-			"recovery_target":    target,
-			"last_resume_error":  "",
-		}).Error
+func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, sequence int64, reason, initiator, target, phase string) error {
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		snapshot := RunSnapshot{
+			RunID:              runID,
+			CheckpointSequence: sequence,
+			CheckpointVersion:  CheckpointVersion,
+			CheckpointPhase:    phase,
+			RecoveryReason:     reason,
+			RecoveryInitiator:  initiator,
+			RecoveryTarget:     target,
+			LastResumeError:    "",
+		}
+		if err := tx.Clauses(clause.OnConflict{
+			Columns:   []clause.Column{{Name: "run_id"}},
+			DoUpdates: clause.AssignmentColumns([]string{"checkpoint_sequence", "checkpoint_version", "checkpoint_phase", "recovery_reason", "recovery_initiator", "recovery_target", "last_resume_error"}),
+		}).Create(&snapshot).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Run{}).Where("id = ?", runID).Update("status", RunStatusPaused).Error
+	})
 }
 
 // GetInterruptedRuns is retained for callers from the first pause/resume
@@ -334,8 +481,10 @@ func (q *Queries) GetRunsByRecoveryStates(ctx context.Context, states []string) 
 		return runs, nil
 	}
 	err := q.db.WithContext(ctx).
-		Where("status IN ? AND paused_history <> ''", states).
-		Order("id asc").Find(&runs).Error
+		Joins("JOIN run_snapshots ON run_snapshots.run_id = runs.id").
+		Preload("Snapshot").
+		Where("runs.status IN ? AND run_snapshots.checkpoint_sequence > 0", states).
+		Order("runs.id asc").Find(&runs).Error
 	return runs, err
 }
 
@@ -346,32 +495,57 @@ func (q *Queries) ClaimRunForResume(ctx context.Context, runID int32, owner stri
 	if owner == "" || len(allowedStates) == 0 {
 		return false, fmt.Errorf("resume claim requires owner and allowed states")
 	}
-	result := q.db.WithContext(ctx).Model(&Run{}).
-		Where("id = ? AND status IN ? AND paused_history <> '' AND (resume_lease_until IS NULL OR resume_lease_until < ?)", runID, allowedStates, time.Now()).
-		Updates(map[string]interface{}{
-			"status":                 RunStatusResuming,
+	claimed := false
+	err := q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Run{}).
+			Where("runs.id = ? AND runs.status IN ? AND EXISTS (SELECT 1 FROM run_snapshots WHERE run_snapshots.run_id = runs.id AND run_snapshots.checkpoint_sequence > 0 AND (run_snapshots.resume_lease_until IS NULL OR run_snapshots.resume_lease_until < ?))", runID, allowedStates, time.Now()).
+			Update("status", RunStatusResuming)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return nil
+		}
+		claimed = true
+		return tx.Model(&RunSnapshot{}).Where("run_id = ?", runID).Updates(map[string]interface{}{
 			"resume_lease_owner":     owner,
 			"resume_lease_until":     lease,
 			"resume_previous_status": previousStatus,
 			"resume_attempts":        gorm.Expr("resume_attempts + 1"),
 			"last_resume_error":      "",
 			"recovery_reason":        cause,
-		})
-	return result.RowsAffected == 1, result.Error
+		}).Error
+	})
+	return claimed, err
 }
 
 // ReclaimExpiredResumeLeases returns interrupted resume attempts to the state
 // they had before claiming, preserving failed/stale policy instead of turning
 // every startup crash into an automatically paused run.
 func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time) error {
-	return q.db.WithContext(ctx).Model(&Run{}).
-		Where("status = ? AND resume_lease_until IS NOT NULL AND resume_lease_until < ?", RunStatusResuming, now).
-		Updates(map[string]interface{}{
-			"status":                 gorm.Expr("CASE WHEN resume_previous_status = '' THEN ? ELSE resume_previous_status END", RunStatusPaused),
-			"resume_lease_owner":     "",
-			"resume_lease_until":     nil,
-			"resume_previous_status": "",
-		}).Error
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var expired []RunSnapshot
+		if err := tx.Joins("JOIN runs ON runs.id = run_snapshots.run_id").Where("runs.status = ? AND run_snapshots.resume_lease_until IS NOT NULL AND run_snapshots.resume_lease_until < ?", RunStatusResuming, now).Find(&expired).Error; err != nil {
+			return err
+		}
+		for _, snapshot := range expired {
+			status := snapshot.ResumePreviousStatus
+			if status == "" {
+				status = RunStatusPaused
+			}
+			if err := tx.Model(&Run{}).Where("id = ? AND status = ?", snapshot.RunID, RunStatusResuming).Update("status", status).Error; err != nil {
+				return err
+			}
+			if err := tx.Model(&RunSnapshot{}).Where("run_id = ?", snapshot.RunID).Updates(map[string]interface{}{
+				"resume_lease_owner":     "",
+				"resume_lease_until":     nil,
+				"resume_previous_status": "",
+			}).Error; err != nil {
+				return err
+			}
+		}
+		return nil
+	})
 }
 
 // MarkRunResumeStarted transitions a claimed run to running without deleting
@@ -379,20 +553,22 @@ func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time)
 // state, so a crash during handoff remains recoverable.
 func (q *Queries) MarkRunResumeStarted(ctx context.Context, runID int32, owner string) error {
 	now := time.Now()
-	return q.db.WithContext(ctx).Model(&Run{}).
-		Where("id = ? AND status = ? AND resume_lease_owner = ?", runID, RunStatusResuming, owner).
-		Updates(map[string]interface{}{
-			"status":             "running",
-			"last_message_time":  now,
-			"resume_lease_owner": "",
-			"resume_lease_until": nil,
-		}).Error
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		result := tx.Model(&Run{}).Where("runs.id = ? AND runs.status = ? AND EXISTS (SELECT 1 FROM run_snapshots WHERE run_snapshots.run_id = runs.id AND run_snapshots.resume_lease_owner = ?)", runID, RunStatusResuming, owner).Updates(map[string]interface{}{"status": "running", "last_message_time": now})
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return fmt.Errorf("run %d resume claim is no longer active", runID)
+		}
+		return tx.Model(&RunSnapshot{}).Where("run_id = ? AND resume_lease_owner = ?", runID, owner).Updates(map[string]interface{}{"resume_lease_owner": "", "resume_lease_until": nil}).Error
+	})
 }
 
 // UpdateRunRecoveryMetadata records operator/context details without changing
 // the checkpoint or its lifecycle state.
 func (q *Queries) UpdateRunRecoveryMetadata(ctx context.Context, runID int32, reason, initiator, target string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+	return q.db.WithContext(ctx).Model(&RunSnapshot{}).Where("run_id = ?", runID).Updates(map[string]interface{}{
 		"recovery_reason":    reason,
 		"recovery_initiator": initiator,
 		"recovery_target":    target,
@@ -405,50 +581,44 @@ func (q *Queries) RecordResumeError(ctx context.Context, runID int32, resumeErr,
 	if recoverableStatus == "" {
 		recoverableStatus = RunStatusPaused
 	}
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"last_resume_error":  resumeErr,
-		"resume_lease_owner": "",
-		"resume_lease_until": nil,
-		"status":             recoverableStatus,
-	}).Error
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&RunSnapshot{}).Where("run_id = ?", runID).Updates(map[string]interface{}{"last_resume_error": resumeErr, "resume_lease_owner": "", "resume_lease_until": nil}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Run{}).Where("id = ?", runID).Update("status", recoverableStatus).Error
+	})
 }
 
 // ClearRunCheckpoint removes recovery data after a resumed run has reached a
 // durable terminal state.
 func (q *Queries) ClearRunCheckpoint(ctx context.Context, runID int32) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{
-			"paused_history":         "",
-			"checkpoint_version":     0,
-			"checkpoint_phase":       "",
-			"recovery_reason":        "",
-			"recovery_initiator":     "",
-			"recovery_target":        "",
-			"resume_previous_status": "",
-		}).Error
+	return q.db.WithContext(ctx).Where("run_id = ?", runID).Delete(&RunSnapshot{}).Error
 }
 
 // MarkRunRecoverable records a failed or stale run with a valid checkpoint for
 // future explicit recovery. Automatic startup policy deliberately excludes
 // these states for now.
-func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status, history, reason string) error {
+func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status string, sequence int64, reason string) error {
 	if status != RunStatusRecoverableFailed && status != RunStatusStale {
 		return fmt.Errorf("unsupported recoverable run status %q", status)
 	}
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"status":             status,
-		"paused_history":     history,
-		"checkpoint_version": CheckpointVersion,
-		"checkpoint_phase":   "after_tools",
-		"recovery_reason":    reason,
-		"last_resume_error":  "",
-	}).Error
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		snapshot := RunSnapshot{RunID: runID, CheckpointSequence: sequence, CheckpointVersion: CheckpointVersion, CheckpointPhase: "after_tools", RecoveryReason: reason}
+		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "run_id"}}, DoUpdates: clause.AssignmentColumns([]string{"checkpoint_sequence", "checkpoint_version", "checkpoint_phase", "recovery_reason", "last_resume_error"})}).Create(&snapshot).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Run{}).Where("id = ?", runID).Update("status", status).Error
+	})
 }
 
 // ResumeRun is the legacy helper retained for compatibility with older
 // callers. New code should claim first and call MarkRunResumeStarted.
 func (q *Queries) ResumeRun(ctx context.Context, runID int32) error {
 	now := time.Now()
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{"status": "running", "paused_history": "", "last_message_time": now, "resume_lease_owner": "", "resume_lease_until": nil}).Error
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": "running", "last_message_time": now}).Error; err != nil {
+			return err
+		}
+		return tx.Where("run_id = ?", runID).Delete(&RunSnapshot{}).Error
+	})
 }

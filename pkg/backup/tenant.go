@@ -90,6 +90,7 @@ var tenantInsertOrder = []string{
 	"skills",
 	"tasks",
 	"runs",
+	"run_snapshots",
 	"comments",
 	"attachments",
 	"artifacts",
@@ -185,6 +186,8 @@ func collectTenant(ctx context.Context, database *gorm.DB, userID int32) (*tenan
 	tables["attachments"] = read("attachments", "task_id IN ?", orNone(taskIDs))
 	tables["artifacts"] = read("artifacts", "task_id IN ?", orNone(taskIDs))
 	tables["runs"] = read("runs", "task_id IN ?", orNone(taskIDs))
+	runIDs := ids(tables["runs"])
+	tables["run_snapshots"] = read("run_snapshots", "run_id IN ?", orNone(runIDs))
 
 	// Owner-scoped global tables.
 	tables["llm_providers"] = read("llm_providers", "user_id = ?", userID)
@@ -726,6 +729,8 @@ func (imp *tenantImporter) remapFKs(table string, r row) {
 		remap("agent_id", "agents")
 		remap("parent_run_id", "runs")
 		remap("root_run_id", "runs")
+	case "run_snapshots":
+		remap("run_id", "runs")
 	case "comments":
 		remap("task_id", "tasks")
 		remap("run_id", "runs")

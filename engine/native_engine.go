@@ -41,8 +41,8 @@ const (
 )
 
 func recoveryReason(run db.Run) string {
-	if run.RecoveryReason != "" {
-		return run.RecoveryReason
+	if run.Snapshot != nil && run.Snapshot.RecoveryReason != "" {
+		return run.Snapshot.RecoveryReason
 	}
 	if run.Status == db.RunStatusRecoverableFailed || run.Status == "failed" {
 		return "a previous failure was explicitly recovered"
@@ -324,11 +324,11 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 	if err != nil {
 		return fmt.Errorf("resume run %d: load run: %w", runID, err)
 	}
-	if strings.TrimSpace(run.PausedHistory) == "" {
+	if run.Snapshot == nil || run.Snapshot.CheckpointSequence <= 0 {
 		return fmt.Errorf("resume run %d: no durable checkpoint", runID)
 	}
-	if run.CheckpointVersion != 0 && run.CheckpointVersion != db.CheckpointVersion {
-		return fmt.Errorf("resume run %d: unsupported checkpoint version %d", runID, run.CheckpointVersion)
+	if run.Snapshot.CheckpointVersion != 0 && run.Snapshot.CheckpointVersion != db.CheckpointVersion {
+		return fmt.Errorf("resume run %d: unsupported checkpoint version %d", runID, run.Snapshot.CheckpointVersion)
 	}
 
 	cause := opts.Cause
@@ -365,24 +365,22 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 
 	// Carry the claim owner in the in-memory copy. executeSession transitions
 	// resuming -> running only after it has rebuilt the runtime successfully.
-	run.ResumeLeaseOwner = owner
-	run.ResumePreviousStatus = run.Status
-	initiator := run.RecoveryInitiator
+	run.Snapshot.ResumeLeaseOwner = owner
+	run.Snapshot.ResumePreviousStatus = run.Status
+	initiator := run.Snapshot.RecoveryInitiator
 	if initiator == "" {
 		initiator = "system"
 	}
 	if opts.InitiatorID != nil {
 		initiator = fmt.Sprintf("user:%d", *opts.InitiatorID)
 	}
-	run.RecoveryReason = opts.Reason
-	if run.RecoveryReason == "" {
-		run.RecoveryReason = string(cause)
+	run.Snapshot.RecoveryReason = opts.Reason
+	if run.Snapshot.RecoveryReason == "" {
+		run.Snapshot.RecoveryReason = string(cause)
 	}
-	run.RecoveryInitiator = initiator
-	run.RecoveryTarget = opts.TargetBuild
-	if opts.Reason != "" || opts.InitiatorID != nil || opts.TargetBuild != "" {
-		_ = e.q.UpdateRunRecoveryMetadata(ctx, runID, opts.Reason, initiator, opts.TargetBuild)
-	}
+	run.Snapshot.RecoveryInitiator = initiator
+	run.Snapshot.RecoveryTarget = opts.TargetBuild
+	_ = e.q.UpdateRunRecoveryMetadata(ctx, runID, run.Snapshot.RecoveryReason, initiator, opts.TargetBuild)
 	task, err := e.q.GetTask(ctx, run.TaskID)
 	if err != nil {
 		_ = e.q.RecordResumeError(ctx, runID, err.Error(), run.Status)
@@ -428,9 +426,9 @@ func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
 // whole tree.
 //
 // resumeRun, when non-nil, re-enters a previously paused root run instead of
-// starting a fresh one: its persisted conversation (PausedHistory) seeds the
-// agent loop in place of a freshly built initial message list, and the
-// existing Run row is reused rather than creating a new one. Delegated
+// starting a fresh one: its persisted JSONL conversation, selected by the
+// RunSnapshot checkpoint cursor, seeds the agent loop in place of a freshly
+// built initial message list, and the existing Run row is reused. Delegated
 // sessions still require durable parent coordination before they can pause.
 func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run) string {
 	if task.AgentID == nil {
@@ -1152,9 +1150,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Queries:               e.q,
 		RunID:                 run.ID,
 		Logger:                proxyLogger,
+		HistoryAlreadyLogged:  resumeRun != nil,
 	}
 	if resumeRun != nil {
-		initiator := run.RecoveryInitiator
+		initiator := run.Snapshot.RecoveryInitiator
 		if initiator == "" {
 			initiator = "system"
 		}
@@ -1162,9 +1161,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	aiAgent := aicli.New(agentCfgObj)
 	if resumeRun != nil {
-		if startErr := e.q.MarkRunResumeStarted(ctx, run.ID, run.ResumeLeaseOwner); startErr != nil {
+		if startErr := e.q.MarkRunResumeStarted(ctx, run.ID, run.Snapshot.ResumeLeaseOwner); startErr != nil {
 			paused = true
-			_ = e.q.RecordResumeError(context.Background(), run.ID, startErr.Error(), run.ResumePreviousStatus)
+			_ = e.q.RecordResumeError(context.Background(), run.ID, startErr.Error(), run.Snapshot.ResumePreviousStatus)
 			return "paused"
 		}
 	}
@@ -1178,10 +1177,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// run starts from the system prompt + task-derived initial messages.
 	seedHistory := aicli.BuildHistory(systemPrompt, initialMessages)
 	if resumeRun != nil {
-		if uErr := json.Unmarshal([]byte(resumeRun.PausedHistory), &seedHistory); uErr != nil {
-			e.failRun(ctx, run.ID, fmt.Sprintf("failed to resume run: could not parse saved conversation: %v", uErr))
-			return "failed"
+		loaded, uErr := aicli.LoadMessageHistory(run.LogFilePath, run.Snapshot.CheckpointSequence)
+		if uErr != nil {
+			fmt.Printf("Warning: failed to parse JSONL history for resumed run %d (path=%s seq=%d): %v\n", run.ID, run.LogFilePath, run.Snapshot.CheckpointSequence, uErr)
+			_ = e.q.RecordResumeError(context.Background(), run.ID, fmt.Sprintf("failed to parse saved conversation: %v", uErr), run.Snapshot.ResumePreviousStatus)
+			return "paused"
 		}
+		seedHistory = loaded
 		e.logInfo(proxyLogger, fmt.Sprintf("Resuming session %d (%d saved messages)", run.ID, len(seedHistory)))
 	}
 
@@ -1202,15 +1204,28 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	_, resultHistory, agentErr := aiAgent.RunWithHistory(runCtx, seedHistory, pauseFn)
 
 	if agentErr != nil && errors.Is(agentErr, aicli.ErrPaused) {
-		historyJSON, mErr := json.Marshal(resultHistory)
-		if mErr != nil {
-			// Can't persist the conversation — pausing would silently lose it,
-			// so fail the run instead of pretending it can be resumed.
-			e.logError(proxyLogger, fmt.Sprintf("failed to serialize paused run history: %v — failing the run instead", mErr))
-			e.failRun(ctx, run.ID, fmt.Sprintf("update pause failed: could not serialize conversation: %v", mErr))
+		if proxyLogger == nil {
+			e.failRun(ctx, run.ID, "update pause failed: canonical JSONL logger is unavailable")
 			return "failed"
 		}
-		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, string(historyJSON), "binary_update", run.RecoveryInitiator, run.RecoveryTarget, "before_tools"); pErr != nil {
+		if syncErr := proxyLogger.Sync(); syncErr != nil {
+			e.logError(proxyLogger, fmt.Sprintf("failed to sync paused run history: %v — failing the run instead", syncErr))
+			e.failRun(ctx, run.ID, fmt.Sprintf("update pause failed: could not sync conversation log: %v", syncErr))
+			return "failed"
+		}
+		sequence := aiAgent.ConversationSequence()
+		if sequence <= 0 && resumeRun != nil && run.Snapshot != nil {
+			sequence = run.Snapshot.CheckpointSequence
+		}
+		if sequence <= 0 {
+			e.failRun(ctx, run.ID, "update pause failed: no canonical conversation message was logged")
+			return "failed"
+		}
+		initiator, target := "", ""
+		if run.Snapshot != nil {
+			initiator, target = run.Snapshot.RecoveryInitiator, run.Snapshot.RecoveryTarget
+		}
+		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, "binary_update", initiator, target, "before_tools"); pErr != nil {
 			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
 		}
 		e.logInfo(proxyLogger, "Run paused for server update — will resume automatically after restart")
@@ -1297,12 +1312,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	if resumeRun != nil && status == "failed" && len(resultHistory) > 0 {
-		if historyJSON, marshalErr := json.Marshal(resultHistory); marshalErr == nil {
-			// A failed recovery remains explicitly recoverable instead of losing
-			// the only valid conversation checkpoint.
-			if recoverErr := e.q.MarkRunRecoverable(ctx, run.ID, db.RunStatusRecoverableFailed, string(historyJSON), runErrMsg); recoverErr == nil {
-				status = db.RunStatusRecoverableFailed
-			}
+		sequence := aiAgent.ConversationSequence()
+		if sequence <= 0 && run.Snapshot != nil {
+			sequence = run.Snapshot.CheckpointSequence
+		}
+		// A failed recovery remains explicitly recoverable; the JSONL trajectory
+		// remains the sole source of truth for the conversation.
+		if recoverErr := e.q.MarkRunRecoverable(ctx, run.ID, db.RunStatusRecoverableFailed, sequence, runErrMsg); recoverErr == nil {
+			status = db.RunStatusRecoverableFailed
 		}
 	}
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)

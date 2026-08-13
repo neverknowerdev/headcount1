@@ -24,7 +24,7 @@ func setupLoggerTest(t *testing.T) (*logging.ProxyLogger, *db.Queries, int32, st
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.Run{}))
+	require.NoError(t, database.AutoMigrate(&db.Run{}, &db.RunSnapshot{}))
 	q := db.New(database)
 
 	run, err := q.CreateRun(context.Background(), db.Run{TaskID: 1, AgentID: 1, Status: "running"})
@@ -35,6 +35,19 @@ func setupLoggerTest(t *testing.T) (*logging.ProxyLogger, *db.Queries, int32, st
 	require.NoError(t, err)
 	t.Cleanup(func() { logger.Close() })
 	return logger, q, run.ID, basePath
+}
+
+func TestProxyLoggerCanonicalMessageEvent(t *testing.T) {
+	logger, _, _, _ := setupLoggerTest(t)
+	seq := logger.LogConversationMessage([]byte(`{"role":"assistant","content":"checkpoint"}`))
+	require.Positive(t, seq)
+	require.NoError(t, logger.Sync())
+	entries := readEntries(t, logger.FilePath())
+	require.Len(t, entries, 1)
+	assert.Equal(t, "message", entries[0]["type"])
+	assert.Equal(t, float64(seq), entries[0]["seq"])
+	assert.Equal(t, int64(1), int64(entries[0]["message_version"].(float64)))
+	assert.Equal(t, `{"role":"assistant","content":"checkpoint"}`, entries[0]["content"])
 }
 
 func readEntries(t *testing.T, path string) []map[string]interface{} {

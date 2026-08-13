@@ -63,7 +63,7 @@ func setupLoggerTestDB(t *testing.T) *gorm.DB {
 	// for :memory:, where each connection would otherwise see its own DB).
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Project{}, &db.Sprint{}, &db.Agent{}, &db.Task{}, &db.Run{}))
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Project{}, &db.Sprint{}, &db.Agent{}, &db.Task{}, &db.Run{}, &db.RunSnapshot{}))
 	return database
 }
 

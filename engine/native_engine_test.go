@@ -53,6 +53,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunSnapshot{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -463,7 +464,8 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 
 	run := waitForRunStatus(t, q, runID, db.RunStatusPaused, 10*time.Second)
-	assert.NotEmpty(t, run.PausedHistory, "paused run must persist its conversation")
+	require.NotNil(t, run.Snapshot, "paused run must persist a recovery snapshot")
+	assert.NotZero(t, run.Snapshot.CheckpointSequence, "paused run must persist a JSONL checkpoint cursor")
 	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
 	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")
 
@@ -487,7 +489,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 
 	finalRun := waitForRunDone(t, q, runID, 15*time.Second)
 	assert.Equal(t, "completed", finalRun.Status)
-	assert.Empty(t, finalRun.PausedHistory, "resumed history should be cleared once consumed")
+	assert.Nil(t, finalRun.Snapshot, "resumed snapshot should be cleared once consumed")
 	assert.Equal(t, int32(2), callCount.Load(), "resume must replay the pending tool call locally, then make exactly one more LLM call")
 	assert.Equal(t, resumeMarker, finalRun.CurrentStatus, "the tool call pending at pause time must run on resume")
 

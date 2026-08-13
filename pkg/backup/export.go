@@ -117,6 +117,7 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 		{"agent_mcp_accounts", "agent-mcp-accounts.json"},
 		{"agent_mcp_tool_filters", "agent-mcp-tool-filters.json"},
 		{"activity_logs", "activity-logs.json"},
+		{"run_snapshots", "run-snapshots.json"},
 	}
 	for _, g := range globals {
 		rows, err := readTable(database, g.table)

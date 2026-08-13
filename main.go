@@ -174,6 +174,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunSnapshot{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -186,6 +187,9 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
+	}
+	if err := db.New(database).MigrateRunSnapshots(context.Background()); err != nil {
+		log.Fatalf("RunSnapshot migration failed: %v", err)
 	}
 	// Earlier GitHub App support allowed only one row per installation. MCP
 	// accounts intentionally allow personal and work identities to connect the

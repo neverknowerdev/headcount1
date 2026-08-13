@@ -28,7 +28,7 @@ func setupGatewayAuthDB(t *testing.T) *gorm.DB {
 		&db.User{}, &db.Session{}, &db.Team{}, &db.TeamMember{},
 		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
-		&db.Task{}, &db.Run{},
+		&db.Task{}, &db.Run{}, &db.RunSnapshot{},
 	))
 	return database
 }
