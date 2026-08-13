@@ -1225,7 +1225,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if run.Snapshot != nil {
 			initiator, target = run.Snapshot.RecoveryInitiator, run.Snapshot.RecoveryTarget
 		}
-		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, "binary_update", initiator, target, "before_tools"); pErr != nil {
+		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, "binary_update", initiator, target, string(db.CheckpointPhaseBeforeTools)); pErr != nil {
 			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
 		}
 		e.logInfo(proxyLogger, "Run paused for server update — will resume automatically after restart")

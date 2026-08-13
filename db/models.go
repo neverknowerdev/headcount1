@@ -597,8 +597,8 @@ type RunSnapshot struct {
 	// Version 1 is the current JSONL message-event format. Phase identifies
 	// whether final assistant tool calls still need to execute or tool results
 	// are already appended.
-	CheckpointVersion int    `json:"-" gorm:"default:0"`
-	CheckpointPhase   string `json:"-" gorm:"default:''"`
+	CheckpointVersion int             `json:"-" gorm:"default:0"`
+	CheckpointPhase   CheckpointPhase `json:"-" gorm:"type:checkpoint_phase;default:'before_tools'"`
 
 	RecoveryReason    string `json:"-" gorm:"default:''"`
 	RecoveryInitiator string `json:"-" gorm:"default:''"`
@@ -610,6 +610,16 @@ type RunSnapshot struct {
 	ResumeAttempts       int        `json:"-" gorm:"default:0"`
 	LastResumeError      string     `json:"-" gorm:"type:text"`
 }
+
+// CheckpointPhase identifies the safe point represented by a snapshot. It is
+// intentionally a closed set: recovery must distinguish pending assistant
+// tool calls from a conversation whose tool results are already present.
+type CheckpointPhase string
+
+const (
+	CheckpointPhaseBeforeTools CheckpointPhase = "before_tools"
+	CheckpointPhaseAfterTools  CheckpointPhase = "after_tools"
+)
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to
 // Run.TokenStats as JSON so the Run Logs UI can render an overall

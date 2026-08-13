@@ -94,15 +94,20 @@ func dropEverything(t *testing.T, database *gorm.DB) {
 func TestPostgresAutoMigrate(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
+	require.NoError(t, db.EnsurePostgresEnumTypes(database))
 	require.NoError(t, database.AutoMigrate(allModels()...), "AutoMigrate against Postgres")
 
 	// AutoMigrate must be idempotent — a second run (upgrade path) must not error.
 	require.NoError(t, database.AutoMigrate(allModels()...), "second AutoMigrate must be idempotent")
+	var phaseType string
+	require.NoError(t, database.Raw(`SELECT udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'run_snapshots' AND column_name = 'checkpoint_phase'`).Scan(&phaseType).Error)
+	require.Equal(t, "checkpoint_phase", phaseType)
 }
 
 func TestPostgresQuerySurface(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
+	require.NoError(t, db.EnsurePostgresEnumTypes(database))
 	require.NoError(t, database.AutoMigrate(allModels()...))
 	q := db.New(database)
 	ctx := context.Background()

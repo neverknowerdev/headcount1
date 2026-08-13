@@ -143,6 +143,9 @@ func main() {
 	sqlDB.SetMaxOpenConns(1)
 
 	log.Println("Running AutoMigrate...")
+	if err := db.EnsurePostgresEnumTypes(database); err != nil {
+		log.Fatalf("Postgres enum type migration failed: %v", err)
+	}
 	err = database.AutoMigrate(
 		&db.User{},
 		&db.WebAuthnCredential{},

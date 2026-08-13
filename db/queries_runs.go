@@ -303,7 +303,7 @@ func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key stri
 // The legacy interrupted status is no longer written, but remains readable by
 // GetResumableRuns so older databases can migrate without losing recovery data.
 func (q *Queries) PauseRun(ctx context.Context, runID int32, sequence int64) error {
-	return q.PauseRunWithMetadata(ctx, runID, sequence, "binary_update", "", "", "before_tools")
+	return q.PauseRunWithMetadata(ctx, runID, sequence, "binary_update", "", "", string(CheckpointPhaseBeforeTools))
 }
 
 // PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
@@ -315,7 +315,7 @@ func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, sequenc
 			RunID:              runID,
 			CheckpointSequence: sequence,
 			CheckpointVersion:  CheckpointVersion,
-			CheckpointPhase:    phase,
+			CheckpointPhase:    CheckpointPhase(phase),
 			RecoveryReason:     reason,
 			RecoveryInitiator:  initiator,
 			RecoveryTarget:     target,
@@ -466,7 +466,7 @@ func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status st
 		return fmt.Errorf("unsupported recoverable run status %q", status)
 	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		snapshot := RunSnapshot{RunID: runID, CheckpointSequence: sequence, CheckpointVersion: CheckpointVersion, CheckpointPhase: "after_tools", RecoveryReason: reason}
+		snapshot := RunSnapshot{RunID: runID, CheckpointSequence: sequence, CheckpointVersion: CheckpointVersion, CheckpointPhase: CheckpointPhaseAfterTools, RecoveryReason: reason}
 		if err := tx.Clauses(clause.OnConflict{Columns: []clause.Column{{Name: "run_id"}}, DoUpdates: clause.AssignmentColumns([]string{"checkpoint_sequence", "checkpoint_version", "checkpoint_phase", "recovery_reason", "last_resume_error"})}).Create(&snapshot).Error; err != nil {
 			return err
 		}
