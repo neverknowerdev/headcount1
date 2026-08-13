@@ -2,10 +2,6 @@ package db
 
 import (
 	"context"
-	"encoding/json"
-	"os"
-	"path/filepath"
-	"strings"
 	"testing"
 	"time"
 
@@ -117,55 +113,4 @@ func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
 	assert.Equal(t, RunStatusStale, gotStale.Status)
 	assert.NotZero(t, gotFailed.Snapshot.CheckpointSequence)
 	assert.NotZero(t, gotStale.Snapshot.CheckpointSequence)
-}
-
-func TestMigrateRunSnapshotsMovesLegacyHistoryIntoJSONL(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&Run{}, &RunSnapshot{}))
-	for _, column := range []string{
-		"paused_history TEXT",
-		"checkpoint_version INTEGER DEFAULT 0",
-		"checkpoint_phase TEXT DEFAULT ''",
-		"recovery_reason TEXT DEFAULT ''",
-		"recovery_initiator TEXT DEFAULT ''",
-		"recovery_target TEXT DEFAULT ''",
-		"resume_previous_status TEXT DEFAULT ''",
-		"resume_attempts INTEGER DEFAULT 0",
-		"last_resume_error TEXT",
-	} {
-		require.NoError(t, database.Exec("ALTER TABLE runs ADD COLUMN "+column).Error)
-	}
-	logPath := filepath.Join(t.TempDir(), "run.jsonl")
-	line, err := json.Marshal(map[string]interface{}{"type": "info", "seq": 4, "content": "legacy"})
-	require.NoError(t, err)
-	require.NoError(t, os.WriteFile(logPath, append(line, '\n'), 0644))
-	run := Run{Status: RunStatusPaused, LogFilePath: logPath}
-	require.NoError(t, database.Create(&run).Error)
-	history := `[{"role":"system","content":"system"},{"role":"assistant","content":"pending"}]`
-	require.NoError(t, database.Exec("UPDATE runs SET paused_history = ?, checkpoint_phase = ?, recovery_reason = ? WHERE id = ?", history, "before_tools", "binary_update", run.ID).Error)
-
-	q := New(database)
-	require.NoError(t, q.MigrateRunSnapshots(context.Background()))
-	loaded, err := q.GetRun(context.Background(), run.ID)
-	require.NoError(t, err)
-	require.NotNil(t, loaded.Snapshot)
-	assert.Equal(t, int64(6), loaded.Snapshot.CheckpointSequence)
-	assert.Equal(t, "binary_update", loaded.Snapshot.RecoveryReason)
-
-	// The migration is idempotent and must not append the legacy messages twice.
-	require.NoError(t, q.MigrateRunSnapshots(context.Background()))
-	data, err := os.ReadFile(logPath)
-	require.NoError(t, err)
-	assert.Equal(t, 3, len(splitNonEmptyLines(string(data))))
-}
-
-func splitNonEmptyLines(value string) []string {
-	lines := []string{}
-	for _, line := range strings.Split(value, "\n") {
-		if strings.TrimSpace(line) != "" {
-			lines = append(lines, line)
-		}
-	}
-	return lines
 }

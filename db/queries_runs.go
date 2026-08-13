@@ -1,13 +1,9 @@
 package db
 
 import (
-	"bufio"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"strings"
 	"time"
 
 	"gorm.io/gorm"
@@ -26,139 +22,6 @@ const (
 func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
 	err := q.db.WithContext(ctx).Create(&r).Error
 	return r, err
-}
-
-// MigrateRunSnapshots moves checkpoints written by the first pause/resume
-// implementation into the dedicated RunSnapshot table. Older databases kept
-// the serialized history on runs; new recovery uses canonical JSONL message
-// events, so when necessary we append those legacy messages to the trajectory
-// before creating the snapshot cursor. The old columns are intentionally left
-// in place for an additive, non-destructive migration and are ignored by the
-// current model.
-func (q *Queries) MigrateRunSnapshots(ctx context.Context) error {
-	if !q.db.Migrator().HasTable(&RunSnapshot{}) || !q.db.Migrator().HasColumn(&Run{}, "paused_history") {
-		return nil
-	}
-	type legacyRun struct {
-		ID                   int32
-		Status               string
-		LogFilePath          string
-		PausedHistory        string
-		CheckpointVersion    int
-		CheckpointPhase      string
-		RecoveryReason       string
-		RecoveryInitiator    string
-		RecoveryTarget       string
-		ResumePreviousStatus string
-		ResumeAttempts       int
-		LastResumeError      string
-	}
-	var legacy []legacyRun
-	if err := q.db.WithContext(ctx).Table("runs").Select("id, status, log_file_path, paused_history, checkpoint_version, checkpoint_phase, recovery_reason, recovery_initiator, recovery_target, resume_previous_status, resume_attempts, last_resume_error").Where("paused_history <> ''").Scan(&legacy).Error; err != nil {
-		return err
-	}
-	for _, old := range legacy {
-		var existing RunSnapshot
-		if err := q.db.WithContext(ctx).Where("run_id = ?", old.ID).First(&existing).Error; err == nil {
-			continue
-		} else if !errors.Is(err, gorm.ErrRecordNotFound) {
-			return err
-		}
-		sequence, err := migrateLegacyHistoryToJSONL(old.LogFilePath, old.PausedHistory)
-		if err != nil {
-			return fmt.Errorf("migrate run %d snapshot: %w", old.ID, err)
-		}
-		if sequence == 0 {
-			continue
-		}
-		snapshot := RunSnapshot{
-			RunID:                old.ID,
-			CheckpointSequence:   sequence,
-			CheckpointVersion:    CheckpointVersion,
-			CheckpointPhase:      old.CheckpointPhase,
-			RecoveryReason:       old.RecoveryReason,
-			RecoveryInitiator:    old.RecoveryInitiator,
-			RecoveryTarget:       old.RecoveryTarget,
-			ResumePreviousStatus: old.ResumePreviousStatus,
-			ResumeAttempts:       old.ResumeAttempts,
-			LastResumeError:      old.LastResumeError,
-		}
-		if snapshot.CheckpointPhase == "" {
-			snapshot.CheckpointPhase = "before_tools"
-		}
-		if snapshot.RecoveryReason == "" {
-			snapshot.RecoveryReason = "binary_update"
-		}
-		if err := q.db.WithContext(ctx).Create(&snapshot).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
-func migrateLegacyHistoryToJSONL(path, historyJSON string) (int64, error) {
-	if strings.TrimSpace(path) == "" {
-		return 0, nil
-	}
-	file, err := os.OpenFile(path, os.O_RDWR|os.O_APPEND, 0644)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return 0, nil
-		}
-		return 0, err
-	}
-	defer file.Close()
-
-	var messages []json.RawMessage
-	if err := json.Unmarshal([]byte(historyJSON), &messages); err != nil {
-		return 0, err
-	}
-	var maxSeq int64
-	var hasMessage bool
-	scanner := bufio.NewScanner(file)
-	scanner.Buffer(make([]byte, 64*1024), 16*1024*1024)
-	for scanner.Scan() {
-		var entry struct {
-			Type string      `json:"type"`
-			Seq  json.Number `json:"seq"`
-		}
-		if err := json.Unmarshal(scanner.Bytes(), &entry); err != nil {
-			return 0, err
-		}
-		if seq, err := entry.Seq.Int64(); err == nil && seq > maxSeq {
-			maxSeq = seq
-		}
-		if entry.Type == "message" {
-			hasMessage = true
-		}
-	}
-	if err := scanner.Err(); err != nil {
-		return 0, err
-	}
-	if !hasMessage {
-		for _, message := range messages {
-			maxSeq++
-			content, _ := json.Marshal(string(message))
-			entry := map[string]interface{}{
-				"type":            "message",
-				"content":         json.RawMessage(content),
-				"message_version": 1,
-				"seq":             maxSeq,
-				"ts":              time.Now().UTC().Format(time.RFC3339Nano),
-			}
-			line, err := json.Marshal(entry)
-			if err != nil {
-				return 0, err
-			}
-			if _, err := file.Write(append(line, '\n')); err != nil {
-				return 0, err
-			}
-		}
-	}
-	if err := file.Sync(); err != nil {
-		return 0, err
-	}
-	return maxSeq, nil
 }
 
 func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, status string) error {
