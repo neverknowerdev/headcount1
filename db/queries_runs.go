@@ -3,9 +3,19 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
+)
+
+const (
+	RunStatusPaused            = "paused"
+	RunStatusLegacyInterrupted = "interrupted"
+	RunStatusRecoverableFailed = "recoverable_failed"
+	RunStatusStale             = "stale"
+	RunStatusResuming          = "resuming"
+	CheckpointVersion          = 1
 )
 
 func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
@@ -287,33 +297,158 @@ func (q *Queries) CountRunsByNameKey(ctx context.Context, taskID int32, key stri
 	return count, err
 }
 
-// PauseRun marks a run "interrupted" and stores its serialized conversation
-// history so it can be resumed after a restart (see NativeEngine's
-// BeginDrain/ResumeInterruptedRuns). The task lock (Task.RunID) is
-// deliberately left in place — this does not call UnlockTaskRun — so no new
-// run can start on the same task until this one is either resumed or
-// explicitly failed.
+// PauseRun stores an update checkpoint and keeps the task locked to this run.
+// The legacy interrupted status is no longer written, but remains readable by
+// GetResumableRuns so older databases can migrate without losing recovery data.
 func (q *Queries) PauseRun(ctx context.Context, runID int32, history string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{"status": "interrupted", "paused_history": history}).Error
+	return q.PauseRunWithMetadata(ctx, runID, history, "binary_update", "", "", "before_tools")
 }
 
-// GetInterruptedRuns returns every run left paused by a graceful shutdown,
-// across all tenants — consumed once at boot to resume them.
+// PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
+// boundary. It is intentionally independent of the update path so the same
+// checkpoint can later back explicit failed/stale recovery.
+func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, history, reason, initiator, target, phase string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{
+			"status":             RunStatusPaused,
+			"paused_history":     history,
+			"checkpoint_version": CheckpointVersion,
+			"checkpoint_phase":   phase,
+			"recovery_reason":    reason,
+			"recovery_initiator": initiator,
+			"recovery_target":    target,
+			"last_resume_error":  "",
+		}).Error
+}
+
+// GetInterruptedRuns is retained for callers from the first pause/resume
+// implementation. It now returns both the new paused state and legacy rows.
 func (q *Queries) GetInterruptedRuns(ctx context.Context) ([]Run, error) {
+	return q.GetRunsByRecoveryStates(ctx, []string{RunStatusPaused, RunStatusLegacyInterrupted})
+}
+
+// GetRunsByRecoveryStates returns checkpointed runs in the requested states.
+func (q *Queries) GetRunsByRecoveryStates(ctx context.Context, states []string) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("status = ?", "interrupted").Find(&runs).Error
+	if len(states) == 0 {
+		return runs, nil
+	}
+	err := q.db.WithContext(ctx).
+		Where("status IN ? AND paused_history <> ''", states).
+		Order("id asc").Find(&runs).Error
 	return runs, err
 }
 
-// ResumeRun marks a previously-interrupted run "running" again and clears its
-// persisted history now that the caller has loaded it back into memory. It
-// also refreshes last_message_time: without this, IsRunStale would see the
-// pre-pause heartbeat (possibly many minutes old, e.g. across a slow update)
-// and could race a concurrent ProcessTask call into treating the resumed run
-// as stale and failing it out from under the resume goroutine.
+// ClaimRunForResume atomically claims a checkpoint for one recovery attempt.
+// The checkpoint remains intact while the run is resuming, so a process crash
+// before the new runtime starts cannot strand the conversation.
+func (q *Queries) ClaimRunForResume(ctx context.Context, runID int32, owner string, cause, previousStatus string, lease time.Time, allowedStates []string) (bool, error) {
+	if owner == "" || len(allowedStates) == 0 {
+		return false, fmt.Errorf("resume claim requires owner and allowed states")
+	}
+	result := q.db.WithContext(ctx).Model(&Run{}).
+		Where("id = ? AND status IN ? AND paused_history <> '' AND (resume_lease_until IS NULL OR resume_lease_until < ?)", runID, allowedStates, time.Now()).
+		Updates(map[string]interface{}{
+			"status":                 RunStatusResuming,
+			"resume_lease_owner":     owner,
+			"resume_lease_until":     lease,
+			"resume_previous_status": previousStatus,
+			"resume_attempts":        gorm.Expr("resume_attempts + 1"),
+			"last_resume_error":      "",
+			"recovery_reason":        cause,
+		})
+	return result.RowsAffected == 1, result.Error
+}
+
+// ReclaimExpiredResumeLeases returns interrupted resume attempts to the state
+// they had before claiming, preserving failed/stale policy instead of turning
+// every startup crash into an automatically paused run.
+func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time) error {
+	return q.db.WithContext(ctx).Model(&Run{}).
+		Where("status = ? AND resume_lease_until IS NOT NULL AND resume_lease_until < ?", RunStatusResuming, now).
+		Updates(map[string]interface{}{
+			"status":                 gorm.Expr("CASE WHEN resume_previous_status = '' THEN ? ELSE resume_previous_status END", RunStatusPaused),
+			"resume_lease_owner":     "",
+			"resume_lease_until":     nil,
+			"resume_previous_status": "",
+		}).Error
+}
+
+// MarkRunResumeStarted transitions a claimed run to running without deleting
+// the checkpoint. It is cleared only when the resumed run reaches a terminal
+// state, so a crash during handoff remains recoverable.
+func (q *Queries) MarkRunResumeStarted(ctx context.Context, runID int32, owner string) error {
+	now := time.Now()
+	return q.db.WithContext(ctx).Model(&Run{}).
+		Where("id = ? AND status = ? AND resume_lease_owner = ?", runID, RunStatusResuming, owner).
+		Updates(map[string]interface{}{
+			"status":             "running",
+			"last_message_time":  now,
+			"resume_lease_owner": "",
+			"resume_lease_until": nil,
+		}).Error
+}
+
+// UpdateRunRecoveryMetadata records operator/context details without changing
+// the checkpoint or its lifecycle state.
+func (q *Queries) UpdateRunRecoveryMetadata(ctx context.Context, runID int32, reason, initiator, target string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"recovery_reason":    reason,
+		"recovery_initiator": initiator,
+		"recovery_target":    target,
+	}).Error
+}
+
+// RecordResumeError leaves a claimed run recoverable and makes a failed
+// reconstruction visible to the next explicit or automatic attempt.
+func (q *Queries) RecordResumeError(ctx context.Context, runID int32, resumeErr, recoverableStatus string) error {
+	if recoverableStatus == "" {
+		recoverableStatus = RunStatusPaused
+	}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"last_resume_error":  resumeErr,
+		"resume_lease_owner": "",
+		"resume_lease_until": nil,
+		"status":             recoverableStatus,
+	}).Error
+}
+
+// ClearRunCheckpoint removes recovery data after a resumed run has reached a
+// durable terminal state.
+func (q *Queries) ClearRunCheckpoint(ctx context.Context, runID int32) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		Updates(map[string]interface{}{
+			"paused_history":         "",
+			"checkpoint_version":     0,
+			"checkpoint_phase":       "",
+			"recovery_reason":        "",
+			"recovery_initiator":     "",
+			"recovery_target":        "",
+			"resume_previous_status": "",
+		}).Error
+}
+
+// MarkRunRecoverable records a failed or stale run with a valid checkpoint for
+// future explicit recovery. Automatic startup policy deliberately excludes
+// these states for now.
+func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status, history, reason string) error {
+	if status != RunStatusRecoverableFailed && status != RunStatusStale {
+		return fmt.Errorf("unsupported recoverable run status %q", status)
+	}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status":             status,
+		"paused_history":     history,
+		"checkpoint_version": CheckpointVersion,
+		"checkpoint_phase":   "after_tools",
+		"recovery_reason":    reason,
+		"last_resume_error":  "",
+	}).Error
+}
+
+// ResumeRun is the legacy helper retained for compatibility with older
+// callers. New code should claim first and call MarkRunResumeStarted.
 func (q *Queries) ResumeRun(ctx context.Context, runID int32) error {
 	now := time.Now()
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{"status": "running", "paused_history": "", "last_message_time": now}).Error
+		Updates(map[string]interface{}{"status": "running", "paused_history": "", "last_message_time": now, "resume_lease_owner": "", "resume_lease_until": nil}).Error
 }

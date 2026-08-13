@@ -129,6 +129,9 @@ type Agent struct {
 	ProviderName   string
 	AgentName      string
 	ReasoningLevel string // "low", "medium", "max" → mapped to API values
+	// ResumeNotice is appended after a restored pending tool result and before
+	// the first post-resume LLM request. It is runtime-only metadata.
+	ResumeNotice string
 	// MCPListingCostPerTurn is the estimated token cost of the MCP CompactListing
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
 	MCPListingCostPerTurn int
@@ -151,6 +154,7 @@ type Config struct {
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
 	ReasoningLevel        string
+	ResumeNotice          string
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
@@ -178,6 +182,7 @@ func New(cfg Config) *Agent {
 		ProviderName:          cfg.ProviderName,
 		AgentName:             cfg.AgentName,
 		ReasoningLevel:        cfg.ReasoningLevel,
+		ResumeNotice:          cfg.ResumeNotice,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
 		TerminalTools:         terminal,
@@ -276,6 +281,10 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				return strings.TrimSpace(last.Content), history, nil
 			}
 		}
+	}
+	if a.ResumeNotice != "" {
+		history = append(history, Message{Role: "system", Content: a.ResumeNotice})
+		a.ResumeNotice = ""
 	}
 
 	for turn := 0; turn < maxTurns; turn++ {

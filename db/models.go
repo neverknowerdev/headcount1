@@ -575,12 +575,25 @@ type Run struct {
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
 	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
-	// captured when a graceful shutdown (e.g. applying an auto-update) paused
-	// this run mid-flight, right after its current turn's LLM response
-	// arrived. Set only while Status == "interrupted"; consumed and cleared
-	// when the run resumes. Internal plumbing, not for display — omitted from
-	// the JSON API.
+	// captured at a durable safe point. It is retained while the run is paused,
+	// recoverable_failed, stale, or being claimed for resume. Internal plumbing,
+	// not for display — omitted from the JSON API. The legacy column name is
+	// retained for an additive migration; new code treats it as a checkpoint.
 	PausedHistory string `json:"-" gorm:"type:text"`
+	// CheckpointVersion and CheckpointPhase make the saved conversation an
+	// explicit, forward-compatible recovery contract. Version 1 is the current
+	// []aicli.Message JSON format; phase identifies whether the final assistant
+	// tool calls still need to execute or tool results are already appended.
+	CheckpointVersion    int        `json:"-" gorm:"default:0"`
+	CheckpointPhase      string     `json:"-" gorm:"default:''"`
+	RecoveryReason       string     `json:"-" gorm:"default:''"`
+	RecoveryInitiator    string     `json:"-" gorm:"default:''"`
+	RecoveryTarget       string     `json:"-" gorm:"default:''"`
+	ResumeLeaseOwner     string     `json:"-" gorm:"default:''"`
+	ResumeLeaseUntil     *time.Time `json:"-"`
+	ResumePreviousStatus string     `json:"-" gorm:"default:''"`
+	ResumeAttempts       int        `json:"-" gorm:"default:0"`
+	LastResumeError      string     `json:"-" gorm:"type:text"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to

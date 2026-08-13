@@ -462,7 +462,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 
-	run := waitForRunStatus(t, q, runID, "interrupted", 10*time.Second)
+	run := waitForRunStatus(t, q, runID, db.RunStatusPaused, 10*time.Second)
 	assert.NotEmpty(t, run.PausedHistory, "paused run must persist its conversation")
 	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
 	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")

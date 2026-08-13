@@ -29,6 +29,37 @@ import (
 
 const runStatusCompleted = "completed"
 
+// ResumeCause identifies why a persisted session is being continued. The
+// update path uses only ResumeAfterUpdate automatically; failed and stale
+// recovery are deliberately explicit callers for now.
+type ResumeCause string
+
+const (
+	ResumeAfterUpdate  ResumeCause = "binary_update"
+	ResumeAfterFailure ResumeCause = "failed_recovery"
+	ResumeAfterStale   ResumeCause = "stale_recovery"
+)
+
+func recoveryReason(run db.Run) string {
+	if run.RecoveryReason != "" {
+		return run.RecoveryReason
+	}
+	if run.Status == db.RunStatusRecoverableFailed || run.Status == "failed" {
+		return "a previous failure was explicitly recovered"
+	}
+	if run.Status == db.RunStatusStale {
+		return "a stale session was explicitly recovered"
+	}
+	return "a planned server restart"
+}
+
+type ResumeOptions struct {
+	Cause       ResumeCause
+	InitiatorID *int32
+	Reason      string
+	TargetBuild string
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q           *db.Queries
@@ -284,39 +315,114 @@ func (e *NativeEngine) resumeSession(ctx context.Context, task db.Task, run db.R
 	e.executeSession(ctx, task, "resume", nil, &run)
 }
 
-// ResumeInterruptedRuns re-enters every run left paused by a graceful
-// shutdown (see BeginDrain), picking up its conversation exactly where it
-// left off. Call once at boot, after the engine is constructed. A run whose
-// task/agent has since disappeared, or whose saved history fails to parse,
-// is marked failed and unlocked instead — the same fallback ordinary
-// stale-run recovery uses for a hard crash.
-func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
-	runs, err := e.q.GetInterruptedRuns(ctx)
+// ResumeSession claims and asynchronously resumes one checkpointed run. It is
+// intentionally code-only: callers choose the recovery policy, while this
+// function owns the single reconstruction path for paused, failed, and stale
+// sessions. The logical Run.ID is preserved.
+func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts ResumeOptions) error {
+	run, err := e.q.GetRun(ctx, runID)
 	if err != nil {
-		fmt.Printf("Warning: failed to list interrupted runs: %v\n", err)
+		return fmt.Errorf("resume run %d: load run: %w", runID, err)
+	}
+	if strings.TrimSpace(run.PausedHistory) == "" {
+		return fmt.Errorf("resume run %d: no durable checkpoint", runID)
+	}
+	if run.CheckpointVersion != 0 && run.CheckpointVersion != db.CheckpointVersion {
+		return fmt.Errorf("resume run %d: unsupported checkpoint version %d", runID, run.CheckpointVersion)
+	}
+
+	cause := opts.Cause
+	if cause == "" {
+		switch run.Status {
+		case db.RunStatusRecoverableFailed, "failed":
+			cause = ResumeAfterFailure
+		case db.RunStatusStale:
+			cause = ResumeAfterStale
+		default:
+			cause = ResumeAfterUpdate
+		}
+	}
+	allowed := []string{db.RunStatusPaused, db.RunStatusLegacyInterrupted}
+	switch cause {
+	case ResumeAfterFailure:
+		allowed = []string{db.RunStatusRecoverableFailed, "failed"}
+	case ResumeAfterStale:
+		allowed = []string{db.RunStatusStale}
+	case ResumeAfterUpdate:
+	default:
+		return fmt.Errorf("resume run %d: unsupported cause %q", runID, cause)
+	}
+
+	owner := fmt.Sprintf("pid-%d-%d", os.Getpid(), time.Now().UnixNano())
+	lease := time.Now().Add(2 * time.Minute)
+	claimed, err := e.q.ClaimRunForResume(ctx, runID, owner, string(cause), run.Status, lease, allowed)
+	if err != nil {
+		return fmt.Errorf("resume run %d: claim: %w", runID, err)
+	}
+	if !claimed {
+		return fmt.Errorf("resume run %d: already claimed or not eligible", runID)
+	}
+
+	// Carry the claim owner in the in-memory copy. executeSession transitions
+	// resuming -> running only after it has rebuilt the runtime successfully.
+	run.ResumeLeaseOwner = owner
+	run.ResumePreviousStatus = run.Status
+	initiator := run.RecoveryInitiator
+	if initiator == "" {
+		initiator = "system"
+	}
+	if opts.InitiatorID != nil {
+		initiator = fmt.Sprintf("user:%d", *opts.InitiatorID)
+	}
+	run.RecoveryReason = opts.Reason
+	if run.RecoveryReason == "" {
+		run.RecoveryReason = string(cause)
+	}
+	run.RecoveryInitiator = initiator
+	run.RecoveryTarget = opts.TargetBuild
+	if opts.Reason != "" || opts.InitiatorID != nil || opts.TargetBuild != "" {
+		_ = e.q.UpdateRunRecoveryMetadata(ctx, runID, opts.Reason, initiator, opts.TargetBuild)
+	}
+	task, err := e.q.GetTask(ctx, run.TaskID)
+	if err != nil {
+		_ = e.q.RecordResumeError(ctx, runID, err.Error(), run.Status)
+		return fmt.Errorf("resume run %d: load task: %w", runID, err)
+	}
+	go e.resumeSession(context.Background(), task, run)
+	return nil
+}
+
+// ResumeEligibleSessions is the automatic startup policy. Only sessions
+// intentionally paused for an update are selected; explicit callers can use
+// ResumeSession with failed/stale causes later.
+func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
+	if err := e.q.ReclaimExpiredResumeLeases(ctx, time.Now()); err != nil {
+		fmt.Printf("Warning: failed to reclaim resume leases: %v\n", err)
+	}
+	runs, err := e.q.GetRunsByRecoveryStates(ctx, []string{db.RunStatusPaused, db.RunStatusLegacyInterrupted})
+	if err != nil {
+		fmt.Printf("Warning: failed to list paused runs: %v\n", err)
 		return
 	}
 	if len(runs) == 0 {
 		return
 	}
-	fmt.Printf("Resuming %d interrupted run(s) after restart...\n", len(runs))
+	fmt.Printf("Resuming %d paused run(s) after restart...\n", len(runs))
 	for _, run := range runs {
-		task, taskErr := e.q.GetTask(ctx, run.TaskID)
-		if taskErr != nil {
-			fmt.Printf("Warning: could not resume run %d: task %d not found: %v\n", run.ID, run.TaskID, taskErr)
-			e.resolveStaleRun(ctx, run.ID)
-			continue
+		if resumeErr := e.ResumeSession(ctx, run.ID, ResumeOptions{Cause: ResumeAfterUpdate}); resumeErr != nil {
+			fmt.Printf("Warning: failed to resume run %d: %v\n", run.ID, resumeErr)
 		}
-		if resumeErr := e.q.ResumeRun(ctx, run.ID); resumeErr != nil {
-			fmt.Printf("Warning: failed to mark run %d as running for resume: %v\n", run.ID, resumeErr)
-			continue
-		}
-		go e.resumeSession(context.Background(), task, run)
 	}
 }
 
+// ResumeInterruptedRuns is the compatibility name used by main and older
+// integrations. It now delegates to the explicit paused-session policy.
+func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
+	e.ResumeEligibleSessions(ctx)
+}
+
 // executeSession runs one agent session for a task and returns its final run
-// status ("completed", "failed", "canceled" or "interrupted"). Root sessions
+// status ("completed", "failed", "canceled" or "paused"). Root sessions
 // (parent == nil) run detached from the caller's context; delegated child
 // sessions inherit the parent's run context so stopping the parent stops the
 // whole tree.
@@ -324,8 +430,8 @@ func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
 // resumeRun, when non-nil, re-enters a previously paused root run instead of
 // starting a fresh one: its persisted conversation (PausedHistory) seeds the
 // agent loop in place of a freshly built initial message list, and the
-// existing Run row is reused rather than creating a new one. Only root runs
-// are ever resumed — see the pause-signal wiring below.
+// existing Run row is reused rather than creating a new one. Delegated
+// sessions still require durable parent coordination before they can pause.
 func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run) string {
 	if task.AgentID == nil {
 		return "failed"
@@ -403,7 +509,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	// paused is set just before returning if this session stops via
 	// aicli.ErrPaused. In that case the task must stay locked to this run (no
-	// other run may start on it) until ResumeInterruptedRuns picks it back up
+	// other run may start on it) until the recovery coordinator picks it back up
 	// after the restart, so the unlock below is skipped.
 	paused := false
 	defer func() {
@@ -1047,7 +1153,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		RunID:                 run.ID,
 		Logger:                proxyLogger,
 	}
+	if resumeRun != nil {
+		initiator := run.RecoveryInitiator
+		if initiator == "" {
+			initiator = "system"
+		}
+		agentCfgObj.ResumeNotice = fmt.Sprintf("This session was resumed by %s because %s. Continue the existing task from the restored conversation; do not repeat completed work.", initiator, recoveryReason(run))
+	}
 	aiAgent := aicli.New(agentCfgObj)
+	if resumeRun != nil {
+		if startErr := e.q.MarkRunResumeStarted(ctx, run.ID, run.ResumeLeaseOwner); startErr != nil {
+			paused = true
+			_ = e.q.RecordResumeError(context.Background(), run.ID, startErr.Error(), run.ResumePreviousStatus)
+			return "paused"
+		}
+	}
 
 	e.logInfo(proxyLogger, fmt.Sprintf("Starting native agent for task %d (mode=%s model=%s provider=%s)", task.ID, mode, model, provider.Name))
 	e.logInfo(proxyLogger, fmt.Sprintf("Workspace: %s", workspacePath))
@@ -1062,7 +1182,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			e.failRun(ctx, run.ID, fmt.Sprintf("failed to resume run: could not parse saved conversation: %v", uErr))
 			return "failed"
 		}
-		e.logInfo(proxyLogger, fmt.Sprintf("Resuming interrupted run %d (%d saved messages)", run.ID, len(seedHistory)))
+		e.logInfo(proxyLogger, fmt.Sprintf("Resuming session %d (%d saved messages)", run.ID, len(seedHistory)))
 	}
 
 	// Only root sessions ever pause: a session with an active delegation tree
@@ -1090,13 +1210,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			e.failRun(ctx, run.ID, fmt.Sprintf("update pause failed: could not serialize conversation: %v", mErr))
 			return "failed"
 		}
-		if pErr := e.q.PauseRun(context.Background(), run.ID, string(historyJSON)); pErr != nil {
+		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, string(historyJSON), "binary_update", run.RecoveryInitiator, run.RecoveryTarget, "before_tools"); pErr != nil {
 			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
 		}
 		e.logInfo(proxyLogger, "Run paused for server update — will resume automatically after restart")
-		e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "interrupted"})
+		e.hub.BroadcastEventForCompany(task.CompanyID, "run_paused", map[string]interface{}{"run_id": run.ID, "status": db.RunStatusPaused})
 		paused = true
-		return "interrupted"
+		return db.RunStatusPaused
 	}
 
 	status := runStatusCompleted
@@ -1176,7 +1296,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		proxyLogger.LogOutcome(status, endReason, finishResult.Status, agentDisplayName, task.ID, summary)
 	}
 
+	if resumeRun != nil && status == "failed" && len(resultHistory) > 0 {
+		if historyJSON, marshalErr := json.Marshal(resultHistory); marshalErr == nil {
+			// A failed recovery remains explicitly recoverable instead of losing
+			// the only valid conversation checkpoint.
+			if recoverErr := e.q.MarkRunRecoverable(ctx, run.ID, db.RunStatusRecoverableFailed, string(historyJSON), runErrMsg); recoverErr == nil {
+				status = db.RunStatusRecoverableFailed
+			}
+		}
+	}
 	e.q.UpdateRunLog(ctx, run.ID, runErrMsg, status)
+	if resumeRun != nil && status != db.RunStatusRecoverableFailed {
+		if clearErr := e.q.ClearRunCheckpoint(context.Background(), run.ID); clearErr != nil {
+			e.logInfo(proxyLogger, "Warning: failed to clear consumed resume checkpoint: "+clearErr.Error())
+		}
+	}
 
 	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 

@@ -22,10 +22,10 @@ import { startMockProviderServer } from '../fixtures/mock-provider-server';
  *   1. Kick a run whose first LLM turn is a report_status tool call.
  *   2. Hold that LLM response so the run is provably blocked mid-turn.
  *   3. SIGTERM the server; wait until its log proves draining has engaged.
- *   4. Release the held response → the run pauses (status "interrupted",
+ *   4. Release the held response → the run pauses (status "paused",
  *      conversation persisted, task still locked) and the process exits
  *      cleanly (drain did not hang).
- *   5. Restart the binary against the same home → it resumes the interrupted
+ *   5. Restart the binary against the same home → it resumes the paused
  *      run, runs the report_status tool call that was pending at pause time,
  *      makes its next LLM call (finish_task), and completes the task.
  *
@@ -46,7 +46,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
     let serverLog = '';
 
     // Skip on the Postgres CI leg: this test deliberately runs an isolated
-    // server on its own SQLite database so its interrupted run can't be raced
+    // server on its own SQLite database so its paused run can't be raced
     // by the shared suite server. A shared Postgres backend would break that
     // isolation (both servers would resume the same run).
     test.skip(isPostgres, 'isolated-SQLite test: incompatible with a shared Postgres backend');
@@ -131,7 +131,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         }
     });
 
-    test('an interrupted run resumes and completes after restart', async () => {
+    test('a paused run resumes and completes after restart', async () => {
         test.setTimeout(180_000);
         const mockUrl = mock!.baseUrl;
         const resumeMarker = 'progress recorded after resume';
@@ -212,14 +212,14 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const afterPause = await (await fetch(`${mockUrl}/__test/requests`)).json();
         expect(afterPause.completionsReceived).toBe(1);
 
-        // ── Restart: the new process resumes the interrupted run ────────────
+        // ── Restart: the new process resumes the paused run ─────────────────
         const resumeMark = serverLog.length;
         await startServer();
 
         // Proof the resume path actually fired (not just that a fresh run ran).
         await expect
-            .poll(() => /Resuming \d+ interrupted run/.test(serverLog.slice(resumeMark)),
-                { timeout: 30_000, intervals: [200], message: 'restarted server should resume the interrupted run' })
+            .poll(() => /Resuming \d+ paused run/.test(serverLog.slice(resumeMark)),
+                { timeout: 30_000, intervals: [200], message: 'restarted server should resume the paused run' })
             .toBe(true);
 
         // The resumed run completes and the task reaches its finish status.

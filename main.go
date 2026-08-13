@@ -346,10 +346,11 @@ func main() {
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
 
-	// Pick back up any run a previous graceful shutdown (e.g. applying an
-	// auto-update) paused mid-flight — see NativeEngine.BeginDrain. Runs in
-	// the background so a large backlog never delays server startup.
-	go eng.ResumeInterruptedRuns(context.Background())
+	// Pick up sessions a previous graceful shutdown (e.g. applying an
+	// auto-update) durably paused mid-flight. The automatic startup policy is
+	// intentionally limited to update-paused sessions; explicit failed/stale
+	// recovery uses the same engine ResumeSession primitive later.
+	go eng.ResumeEligibleSessions(context.Background())
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
