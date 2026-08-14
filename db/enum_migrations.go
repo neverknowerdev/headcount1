@@ -4,7 +4,8 @@ import "gorm.io/gorm"
 
 // EnsurePostgresEnumTypes creates enum types used by models before GORM runs
 // AutoMigrate. PostgreSQL requires the type to exist before it can create the
-// RunSnapshot table; other dialects keep using their native string-like type.
+// Run table's checkpoint_phase column; other dialects keep using their native
+// string-like type.
 func EnsurePostgresEnumTypes(database *gorm.DB) error {
 	if database == nil || database.Dialector.Name() != "postgres" {
 		return nil

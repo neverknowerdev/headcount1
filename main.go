@@ -177,7 +177,6 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
-		&db.RunSnapshot{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -190,6 +189,9 @@ func main() {
 	)
 	if err != nil {
 		log.Fatalf("AutoMigrate failed: %v", err)
+	}
+	if err := db.MigrateRunRecoveryToRuns(database); err != nil {
+		log.Fatalf("run recovery migration failed: %v", err)
 	}
 	// Earlier GitHub App support allowed only one row per installation. MCP
 	// accounts intentionally allow personal and work identities to connect the
@@ -498,6 +500,9 @@ func main() {
 	httpServer := &http.Server{Addr: ":" + port, Handler: r}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// The startup sweep handles runs abandoned before this process started;
+	// the monitor covers stalls that happen while the server remains up.
+	eng.StartLivenessMonitor(ctx, time.Minute, 2*time.Minute)
 
 	go func() {
 		log.Printf("Starting server on port %s", port)
@@ -662,9 +667,12 @@ func recoverStaleRuns(database *gorm.DB) {
 
 	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
 	for _, run := range staleRuns {
-		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
-		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
-		_ = q.UnlockTaskRun(ctx, run.TaskID)
+		log.Printf("Marking run %d (task %d) stale due to inactivity", run.ID, run.TaskID)
+		if changed, markErr := q.MarkRunStale(ctx, run.ID, "server restarted while run was in progress"); markErr != nil {
+			log.Printf("Warning: failed to mark run %d stale: %v", run.ID, markErr)
+		} else if changed {
+			log.Printf("Run %d is recoverable via ResumeSession", run.ID)
+		}
 	}
 }
 

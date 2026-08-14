@@ -7,6 +7,7 @@ import (
 	"testing"
 
 	"agent-orchestrator/engine/aicli"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -39,8 +40,9 @@ func TestLoadMessageHistoryReconstructsMessagesAndHonorsCheckpointCursor(t *test
 	}
 	require.NoError(t, file.Close())
 
-	history, err := aicli.LoadMessageHistory(path, 4)
+	history, cursor, err := aicli.LoadMessageHistoryWithCursor(path, 4)
 	require.NoError(t, err)
+	assert.Equal(t, int64(4), cursor)
 	require.Len(t, history, 3)
 	assertMessageEqual(t, aicli.Message{Role: "system", Content: "system"}, history[0])
 	require.Len(t, history[1].ToolCalls, 1)

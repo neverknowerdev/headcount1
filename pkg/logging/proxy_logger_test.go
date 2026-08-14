@@ -24,7 +24,7 @@ func setupLoggerTest(t *testing.T) (*logging.ProxyLogger, *db.Queries, int32, st
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.Run{}, &db.RunSnapshot{}))
+	require.NoError(t, database.AutoMigrate(&db.Run{}))
 	q := db.New(database)
 
 	run, err := q.CreateRun(context.Background(), db.Run{TaskID: 1, AgentID: 1, Status: "running"})
@@ -48,6 +48,21 @@ func TestProxyLoggerCanonicalMessageEvent(t *testing.T) {
 	assert.Equal(t, float64(seq), entries[0]["seq"])
 	assert.Equal(t, int64(1), int64(entries[0]["message_version"].(float64)))
 	assert.Equal(t, `{"role":"assistant","content":"checkpoint"}`, entries[0]["content"])
+}
+
+func TestProxyLoggerCloseFlushesDurablyAndIsIdempotent(t *testing.T) {
+	logger, _, _, _ := setupLoggerTest(t)
+	path := logger.FilePath()
+	logger.LogConversationMessage([]byte(`{"role":"user","content":"durable"}`))
+	// Close must flush both the file and the ordered DB persistence worker.
+	require.NoError(t, logger.Close())
+	require.NoError(t, logger.Close())
+	entries := readEntries(t, path)
+	require.Len(t, entries, 1)
+	assert.Equal(t, "message", entries[0]["type"])
+	// A closed JSONL file is safe to rotate immediately during a reload.
+	rotated := path + ".rotated"
+	require.NoError(t, os.Rename(path, rotated))
 }
 
 func readEntries(t *testing.T, path string) []map[string]interface{} {

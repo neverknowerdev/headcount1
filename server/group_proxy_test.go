@@ -51,7 +51,7 @@ func setupGroupTestDB(t *testing.T) *gorm.DB {
 	if err := database.AutoMigrate(
 		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
-		&db.Sprint{}, &db.Task{}, &db.Run{}, &db.RunSnapshot{},
+		&db.Sprint{}, &db.Task{}, &db.Run{},
 	); err != nil {
 		t.Fatal(err)
 	}

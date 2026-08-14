@@ -94,6 +94,8 @@ type ProxyLogger struct {
 	persistCh     chan map[string]interface{}
 	persistDone   chan struct{}
 	persistClosed bool
+	closed        bool
+	writeErr      error
 }
 
 func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32) (*ProxyLogger, error) {
@@ -193,9 +195,12 @@ func (l *ProxyLogger) Sync() error {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	if l.file == nil {
-		return nil
+		return l.writeErr
 	}
-	return l.file.Sync()
+	if err := l.file.Sync(); err != nil && l.writeErr == nil {
+		l.writeErr = err
+	}
+	return l.writeErr
 }
 
 // makeEntry builds one structured log entry: {type, content, ts, seq,
@@ -222,12 +227,26 @@ func (l *ProxyLogger) makeEntry(entryType, content string, extra map[string]inte
 // messages+tools payload, response entries the assistant output, and
 // tool_response entries the untruncated tool results. Callers must hold l.mu.
 func (l *ProxyLogger) writeFileEntry(entry map[string]interface{}) {
-	b, err := json.Marshal(entry)
-	if err != nil {
+	if l.closed || l.file == nil {
 		return
 	}
-	l.file.Write(b)
-	l.file.WriteString("\n")
+	b, err := json.Marshal(entry)
+	if err != nil {
+		if l.writeErr == nil {
+			l.writeErr = err
+		}
+		return
+	}
+	if _, err = l.file.Write(append(b, '\n')); err != nil && l.writeErr == nil {
+		l.writeErr = err
+		return
+	}
+	// A checkpoint cursor is meaningful only when every preceding JSONL line
+	// has reached the kernel/filesystem. Sync per line trades a little I/O for
+	// recovery that cannot lose the last message on a crash or reload.
+	if err = l.file.Sync(); err != nil && l.writeErr == nil {
+		l.writeErr = err
+	}
 }
 
 func (l *ProxyLogger) broadcastEntry(entry map[string]interface{}) {
@@ -252,6 +271,9 @@ func (l *ProxyLogger) persistEntry(entry map[string]interface{}) {
 // logEntry sends one entry to all three sinks: log file, WebSocket, DB.
 // Callers must hold l.mu.
 func (l *ProxyLogger) logEntry(entry map[string]interface{}) {
+	if l.closed {
+		return
+	}
 	l.writeFileEntry(entry)
 	l.broadcastEntry(entry)
 	l.persistEntry(entry)
@@ -734,6 +756,12 @@ func (l *ProxyLogger) LogErrorMsg(msg string) {
 // database before the run is considered finished) and closes the log file.
 func (l *ProxyLogger) Close() error {
 	l.mu.Lock()
+	if l.closed {
+		err := l.writeErr
+		l.mu.Unlock()
+		return err
+	}
+	l.closed = true
 	if l.persistCh != nil && !l.persistClosed {
 		l.persistClosed = true
 		close(l.persistCh)
@@ -742,8 +770,24 @@ func (l *ProxyLogger) Close() error {
 	if l.persistDone != nil {
 		<-l.persistDone
 	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
 	if l.file != nil {
-		return l.file.Close()
+		if err := l.file.Sync(); err != nil && l.writeErr == nil {
+			l.writeErr = err
+		}
+		if err := l.file.Close(); err != nil && l.writeErr == nil {
+			l.writeErr = err
+		}
 	}
-	return nil
+	return l.writeErr
+}
+
+// LastError exposes an asynchronous file-write failure to the engine. Logging
+// methods intentionally keep their historical void API, so callers can check
+// this at a checkpoint or before marking a run complete.
+func (l *ProxyLogger) LastError() error {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return l.writeErr
 }

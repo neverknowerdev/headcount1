@@ -58,7 +58,6 @@ func allModels() []any {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
-		&db.RunSnapshot{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -100,7 +99,7 @@ func TestPostgresAutoMigrate(t *testing.T) {
 	// AutoMigrate must be idempotent — a second run (upgrade path) must not error.
 	require.NoError(t, database.AutoMigrate(allModels()...), "second AutoMigrate must be idempotent")
 	var phaseType string
-	require.NoError(t, database.Raw(`SELECT udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'run_snapshots' AND column_name = 'checkpoint_phase'`).Scan(&phaseType).Error)
+	require.NoError(t, database.Raw(`SELECT udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'runs' AND column_name = 'checkpoint_phase'`).Scan(&phaseType).Error)
 	require.Equal(t, "checkpoint_phase", phaseType)
 }
 

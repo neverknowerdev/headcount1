@@ -41,8 +41,8 @@ const (
 )
 
 func recoveryReason(run db.Run) string {
-	if run.Snapshot != nil && run.Snapshot.RecoveryReason != "" {
-		return run.Snapshot.RecoveryReason
+	if run.RecoveryReason != "" {
+		return run.RecoveryReason
 	}
 	if run.Status == db.RunStatusRecoverableFailed || run.Status == "failed" {
 		return "a previous failure was explicitly recovered"
@@ -86,6 +86,80 @@ func NewNativeEngine(database *gorm.DB, hub *eventhub.Hub) *NativeEngine {
 		q:   db.New(database),
 		hub: hub,
 	}
+}
+
+// CheckStaleRuns retires running sessions whose heartbeat has exceeded the
+// supplied threshold. It is deliberately independent from startup recovery so
+// a live server can repair a wedged session without waiting for a reload.
+func (e *NativeEngine) CheckStaleRuns(ctx context.Context, threshold time.Duration) ([]int32, error) {
+	runs, err := e.q.GetStaleRunningRuns(ctx, threshold)
+	if err != nil {
+		return nil, err
+	}
+	// A row can also be stale even with a recently-written heartbeat when the
+	// goroutine that owned it vanished and another code path refreshed the row.
+	// Cross-check the in-memory ownership map once per monitor tick; this is a
+	// cheap second line of defence against orphaned "running" rows.
+	activeRuns, activeErr := e.q.GetRunningRuns(ctx)
+	if activeErr != nil {
+		return nil, activeErr
+	}
+	known := make(map[int32]bool, len(runs))
+	for _, run := range runs {
+		known[run.ID] = true
+	}
+	cutoff := time.Now().Add(-threshold)
+	for _, run := range activeRuns {
+		if _, owned := e.cancelFuncs.Load(run.ID); owned || known[run.ID] {
+			continue
+		}
+		last := run.StartedAt
+		if run.LastMessageTime != nil {
+			last = *run.LastMessageTime
+		}
+		if last.Before(cutoff) {
+			runs = append(runs, run)
+			known[run.ID] = true
+		}
+	}
+	stale := make([]int32, 0, len(runs))
+	for _, run := range runs {
+		changed, markErr := e.q.MarkRunStale(ctx, run.ID, "session stopped heartbeating")
+		if markErr != nil {
+			return stale, markErr
+		}
+		if !changed {
+			continue
+		}
+		stale = append(stale, run.ID)
+		e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": db.RunStatusStale})
+	}
+	return stale, nil
+}
+
+// StartLivenessMonitor runs the stale-session check on a bounded cadence. The
+// context owns the goroutine, making it safe to stop during server shutdown.
+func (e *NativeEngine) StartLivenessMonitor(ctx context.Context, interval, staleAfter time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	if staleAfter <= 0 {
+		staleAfter = 2 * time.Minute
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				if _, err := e.CheckStaleRuns(context.Background(), staleAfter); err != nil {
+					fmt.Printf("Warning: stale-session monitor failed: %v\n", err)
+				}
+			}
+		}
+	}()
 }
 
 // BeginDrain flips the engine into drain mode for a graceful shutdown (e.g.
@@ -324,11 +398,8 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 	if err != nil {
 		return fmt.Errorf("resume run %d: load run: %w", runID, err)
 	}
-	if run.Snapshot == nil || run.Snapshot.CheckpointSequence <= 0 {
-		return fmt.Errorf("resume run %d: no durable checkpoint", runID)
-	}
-	if run.Snapshot.CheckpointVersion != 0 && run.Snapshot.CheckpointVersion != db.CheckpointVersion {
-		return fmt.Errorf("resume run %d: unsupported checkpoint version %d", runID, run.Snapshot.CheckpointVersion)
+	if run.CheckpointVersion != 0 && run.CheckpointVersion != db.CheckpointVersion {
+		return fmt.Errorf("resume run %d: unsupported checkpoint version %d", runID, run.CheckpointVersion)
 	}
 
 	cause := opts.Cause
@@ -355,32 +426,43 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 
 	owner := fmt.Sprintf("pid-%d-%d", os.Getpid(), time.Now().UnixNano())
 	lease := time.Now().Add(2 * time.Minute)
-	claimed, err := e.q.ClaimRunForResume(ctx, runID, owner, string(cause), run.Status, lease, allowed)
+	sequence := run.CheckpointSequence
+	if sequence <= 0 {
+		_, derived, historyErr := aicli.LoadMessageHistoryWithCursor(run.LogFilePath, 0)
+		if historyErr != nil {
+			_ = e.q.RecordResumeError(ctx, runID, historyErr.Error(), run.Status)
+			return fmt.Errorf("resume run %d: derive JSONL checkpoint: %w", runID, historyErr)
+		}
+		sequence = derived
+	}
+	claimed, err := e.q.ClaimRunForResume(ctx, runID, owner, string(cause), run.Status, lease, allowed, sequence)
 	if err != nil {
 		return fmt.Errorf("resume run %d: claim: %w", runID, err)
 	}
 	if !claimed {
 		return fmt.Errorf("resume run %d: already claimed or not eligible", runID)
 	}
+	run.CheckpointSequence = sequence
+	run.CheckpointVersion = db.CheckpointVersion
 
 	// Carry the claim owner in the in-memory copy. executeSession transitions
 	// resuming -> running only after it has rebuilt the runtime successfully.
-	run.Snapshot.ResumeLeaseOwner = owner
-	run.Snapshot.ResumePreviousStatus = run.Status
-	initiator := run.Snapshot.RecoveryInitiator
+	run.ResumeLeaseOwner = owner
+	run.ResumePreviousStatus = run.Status
+	initiator := run.RecoveryInitiator
 	if initiator == "" {
 		initiator = "system"
 	}
 	if opts.InitiatorID != nil {
 		initiator = fmt.Sprintf("user:%d", *opts.InitiatorID)
 	}
-	run.Snapshot.RecoveryReason = opts.Reason
-	if run.Snapshot.RecoveryReason == "" {
-		run.Snapshot.RecoveryReason = string(cause)
+	run.RecoveryReason = opts.Reason
+	if run.RecoveryReason == "" {
+		run.RecoveryReason = string(cause)
 	}
-	run.Snapshot.RecoveryInitiator = initiator
-	run.Snapshot.RecoveryTarget = opts.TargetBuild
-	_ = e.q.UpdateRunRecoveryMetadata(ctx, runID, run.Snapshot.RecoveryReason, initiator, opts.TargetBuild)
+	run.RecoveryInitiator = initiator
+	run.RecoveryTarget = opts.TargetBuild
+	_ = e.q.UpdateRunRecoveryMetadata(ctx, runID, run.RecoveryReason, initiator, opts.TargetBuild)
 	task, err := e.q.GetTask(ctx, run.TaskID)
 	if err != nil {
 		_ = e.q.RecordResumeError(ctx, runID, err.Error(), run.Status)
@@ -427,7 +509,7 @@ func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
 //
 // resumeRun, when non-nil, re-enters a previously paused root run instead of
 // starting a fresh one: its persisted JSONL conversation, selected by the
-// RunSnapshot checkpoint cursor, seeds the agent loop in place of a freshly
+// Run checkpoint cursor, seeds the agent loop in place of a freshly
 // built initial message list, and the existing Run row is reused. Delegated
 // sessions still require durable parent coordination before they can pause.
 func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run) string {
@@ -497,6 +579,26 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		cancel()
 		e.cancelFuncs.Delete(run.ID)
 	}()
+	// Heartbeat independently of LLM/tool logging. A provider can legitimately
+	// spend minutes inside one request, and a waiting tool may emit no log line;
+	// neither should look stale to the recovery monitor.
+	e.q.TouchRunLastMessageTime(context.Background(), run.ID)
+	heartbeatDone := make(chan struct{})
+	defer close(heartbeatDone)
+	go func() {
+		ticker := time.NewTicker(20 * time.Second)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-heartbeatDone:
+				return
+			case <-runCtx.Done():
+				return
+			case <-ticker.C:
+				e.q.TouchRunLastMessageTime(context.Background(), run.ID)
+			}
+		}
+	}()
 
 	// LockTaskRun is a conditional UPDATE (WHERE run_id IS NULL): for a fresh
 	// run it claims the task; for a resumed run the task is already locked to
@@ -516,6 +618,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		if clearErr := e.q.UnlockTaskRun(context.Background(), task.ID); clearErr != nil {
 			fmt.Printf("Warning: failed to unlock task %d: %v\n", task.ID, clearErr)
+		}
+	}()
+	// Every path after Run creation must leave a durable non-running state. The
+	// explicit branches below cover expected outcomes; this guard catches a
+	// newly-added early return or an unexpected setup error before it can leave
+	// a row marked running indefinitely.
+	defer func() {
+		if paused {
+			return
+		}
+		current, err := e.q.GetRun(context.Background(), run.ID)
+		if err == nil && (current.Status == "running" || current.Status == db.RunStatusResuming) {
+			e.failRun(context.Background(), run.ID, "session exited without a terminal status")
 		}
 	}()
 
@@ -1153,7 +1268,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		HistoryAlreadyLogged:  resumeRun != nil,
 	}
 	if resumeRun != nil {
-		initiator := run.Snapshot.RecoveryInitiator
+		initiator := run.RecoveryInitiator
 		if initiator == "" {
 			initiator = "system"
 		}
@@ -1161,9 +1276,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 	aiAgent := aicli.New(agentCfgObj)
 	if resumeRun != nil {
-		if startErr := e.q.MarkRunResumeStarted(ctx, run.ID, run.Snapshot.ResumeLeaseOwner); startErr != nil {
+		if startErr := e.q.MarkRunResumeStarted(ctx, run.ID, run.ResumeLeaseOwner); startErr != nil {
 			paused = true
-			_ = e.q.RecordResumeError(context.Background(), run.ID, startErr.Error(), run.Snapshot.ResumePreviousStatus)
+			_ = e.q.RecordResumeError(context.Background(), run.ID, startErr.Error(), run.ResumePreviousStatus)
 			return "paused"
 		}
 	}
@@ -1177,10 +1292,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// run starts from the system prompt + task-derived initial messages.
 	seedHistory := aicli.BuildHistory(systemPrompt, initialMessages)
 	if resumeRun != nil {
-		loaded, uErr := aicli.LoadMessageHistory(run.LogFilePath, run.Snapshot.CheckpointSequence)
+		loaded, uErr := aicli.LoadMessageHistory(run.LogFilePath, run.CheckpointSequence)
 		if uErr != nil {
-			fmt.Printf("Warning: failed to parse JSONL history for resumed run %d (path=%s seq=%d): %v\n", run.ID, run.LogFilePath, run.Snapshot.CheckpointSequence, uErr)
-			_ = e.q.RecordResumeError(context.Background(), run.ID, fmt.Sprintf("failed to parse saved conversation: %v", uErr), run.Snapshot.ResumePreviousStatus)
+			fmt.Printf("Warning: failed to parse JSONL history for resumed run %d (path=%s seq=%d): %v\n", run.ID, run.LogFilePath, run.CheckpointSequence, uErr)
+			_ = e.q.RecordResumeError(context.Background(), run.ID, fmt.Sprintf("failed to parse saved conversation: %v", uErr), run.ResumePreviousStatus)
 			return "paused"
 		}
 		seedHistory = loaded
@@ -1214,17 +1329,15 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return "failed"
 		}
 		sequence := aiAgent.ConversationSequence()
-		if sequence <= 0 && resumeRun != nil && run.Snapshot != nil {
-			sequence = run.Snapshot.CheckpointSequence
+		if sequence <= 0 && resumeRun != nil {
+			sequence = run.CheckpointSequence
 		}
 		if sequence <= 0 {
 			e.failRun(ctx, run.ID, "update pause failed: no canonical conversation message was logged")
 			return "failed"
 		}
 		initiator, target := "", ""
-		if run.Snapshot != nil {
-			initiator, target = run.Snapshot.RecoveryInitiator, run.Snapshot.RecoveryTarget
-		}
+		initiator, target = run.RecoveryInitiator, run.RecoveryTarget
 		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, "binary_update", initiator, target, string(db.CheckpointPhaseBeforeTools)); pErr != nil {
 			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
 		}
@@ -1313,8 +1426,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	if resumeRun != nil && status == "failed" && len(resultHistory) > 0 {
 		sequence := aiAgent.ConversationSequence()
-		if sequence <= 0 && run.Snapshot != nil {
-			sequence = run.Snapshot.CheckpointSequence
+		if sequence <= 0 && resumeRun != nil {
+			sequence = run.CheckpointSequence
 		}
 		// A failed recovery remains explicitly recoverable; the JSONL trajectory
 		// remains the sole source of truth for the conversation.

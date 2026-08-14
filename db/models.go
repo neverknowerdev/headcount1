@@ -574,44 +574,24 @@ type Run struct {
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
-	// Snapshot contains the internal recovery checkpoint, when one exists.
-	// It is intentionally separate from the execution record and omitted from
-	// the public Run JSON representation.
-	Snapshot *RunSnapshot `json:"-" gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE;"`
+
+	// Recovery fields are internal control-plane state. Conversation history
+	// remains exclusively in the append-only JSONL log; these fields store only
+	// a cursor, planned-pause metadata, and the short-lived resume lease.
+	CheckpointSequence   int64           `json:"-" gorm:"default:0"`
+	CheckpointVersion    int             `json:"-" gorm:"default:0"`
+	CheckpointPhase      CheckpointPhase `json:"-" gorm:"type:checkpoint_phase;default:'before_tools'"`
+	RecoveryReason       string          `json:"-" gorm:"default:''"`
+	RecoveryInitiator    string          `json:"-" gorm:"default:''"`
+	RecoveryTarget       string          `json:"-" gorm:"default:''"`
+	ResumeLeaseOwner     string          `json:"-" gorm:"default:''"`
+	ResumeLeaseUntil     *time.Time      `json:"-"`
+	ResumePreviousStatus string          `json:"-" gorm:"default:''"`
+	ResumeAttempts       int             `json:"-" gorm:"default:0"`
+	LastResumeError      string          `json:"-" gorm:"type:text"`
 }
 
-// RunSnapshot is the durable recovery checkpoint for a Run. A run has at most
-// one current snapshot; it is replaced when a newer safe point is captured.
-// The fields here are internal recovery plumbing and are not part of the JSON
-// API. Keeping them separate from Run prevents the execution model from
-// accumulating checkpoint, lease, and retry state.
-type RunSnapshot struct {
-	ID    int32 `json:"-" gorm:"primaryKey"`
-	RunID int32 `json:"-" gorm:"not null;uniqueIndex"`
-
-	// CheckpointSequence points at the last message event in the run's JSONL
-	// trajectory that belongs to this snapshot. The JSONL file is the sole
-	// source of truth for the conversation; this row stores only the cursor and
-	// recovery metadata.
-	CheckpointSequence int64 `json:"-" gorm:"default:0"`
-	// Version 1 is the current JSONL message-event format. Phase identifies
-	// whether final assistant tool calls still need to execute or tool results
-	// are already appended.
-	CheckpointVersion int             `json:"-" gorm:"default:0"`
-	CheckpointPhase   CheckpointPhase `json:"-" gorm:"type:checkpoint_phase;default:'before_tools'"`
-
-	RecoveryReason    string `json:"-" gorm:"default:''"`
-	RecoveryInitiator string `json:"-" gorm:"default:''"`
-	RecoveryTarget    string `json:"-" gorm:"default:''"`
-
-	ResumeLeaseOwner     string     `json:"-" gorm:"default:''"`
-	ResumeLeaseUntil     *time.Time `json:"-"`
-	ResumePreviousStatus string     `json:"-" gorm:"default:''"`
-	ResumeAttempts       int        `json:"-" gorm:"default:0"`
-	LastResumeError      string     `json:"-" gorm:"type:text"`
-}
-
-// CheckpointPhase identifies the safe point represented by a snapshot. It is
+// CheckpointPhase identifies the safe point represented by a checkpoint. It is
 // intentionally a closed set: recovery must distinguish pending assistant
 // tool calls from a conversation whose tool results are already present.
 type CheckpointPhase string

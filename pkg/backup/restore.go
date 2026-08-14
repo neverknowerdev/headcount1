@@ -138,7 +138,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	tables := []string{
 		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
 		"mcp_accounts", "mcp_servers",
-		"activity_logs", "proxy_request_logs", "artifacts", "run_snapshots", "runs", "comments",
+		"activity_logs", "proxy_request_logs", "artifacts", "runs", "comments",
 		"attachments", "tasks", "skills", "agents",
 		"model_group_members", "model_groups", "default_model_settings",
 		"llm_providers", "sprints", "projects", "companies",
@@ -177,7 +177,6 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		{"agent-mcp-accounts.json", "agent_mcp_accounts"},
 		{"agent-mcp-tool-filters.json", "agent_mcp_tool_filters"},
 		{"activity-logs.json", "activity_logs"},
-		{"run-snapshots.json", "run_snapshots"},
 	} {
 		rows, err := readRowsFile(filepath.Join(entitiesDir, g.file))
 		if err != nil {
@@ -250,7 +249,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		"users", "teams", "team_members", "web_authn_credentials",
 		"companies", "llm_providers", "model_groups", "model_group_members",
 		"default_model_settings", "sprints", "projects", "agents", "skills",
-		"tasks", "comments", "attachments", "artifacts", "runs", "run_snapshots",
+		"tasks", "comments", "attachments", "artifacts", "runs",
 		"mcp_servers", "mcp_accounts",
 		"agent_mcp_servers", "agent_mcp_accounts", "agent_mcp_tool_filters",
 		"activity_logs",

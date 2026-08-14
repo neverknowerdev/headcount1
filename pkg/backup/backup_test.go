@@ -26,7 +26,7 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
 		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
 		&db.Agent{}, &db.Skill{}, &db.Task{}, &db.Comment{}, &db.Attachment{},
-		&db.Run{}, &db.RunSnapshot{}, &db.Artifact{}, &db.ActivityLog{}, &db.ProxyRequestLog{},
+		&db.Run{}, &db.Artifact{}, &db.ActivityLog{}, &db.ProxyRequestLog{},
 		&db.MCPServer{}, &db.MCPAccount{}, &db.AgentMCPServer{},
 		&db.AgentMCPAccount{}, &db.AgentMCPToolFilter{},
 	); err != nil {
