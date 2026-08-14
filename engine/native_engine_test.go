@@ -1431,7 +1431,7 @@ func TestNativeEngineProcessTaskIgnoresTerminalStatuses(t *testing.T) {
 	eng := engine.NewNativeEngine(database, hub)
 	q := db.New(database)
 
-	for _, status := range []string{"in-review", "blocked", "done", "refinement"} {
+	for _, status := range []string{db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone, db.TaskStatusRefinement} {
 		task.Status = status
 		_, err := q.UpdateTask(context.Background(), task)
 		require.NoError(t, err)

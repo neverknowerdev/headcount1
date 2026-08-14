@@ -142,7 +142,7 @@ func (q *Queries) ListQueuedTasksForReconciliation(ctx context.Context) ([]Task,
 // needs human attention and becomes blocked.
 func (q *Queries) MigrateLegacyTaskStatuses(ctx context.Context) error {
 	var tasks []Task
-	if err := q.db.WithContext(ctx).Where("status = ?", "refinement").Find(&tasks).Error; err != nil {
+	if err := q.db.WithContext(ctx).Where("status = ?", TaskStatusRefinement).Find(&tasks).Error; err != nil {
 		return err
 	}
 	for _, task := range tasks {
@@ -150,7 +150,7 @@ func (q *Queries) MigrateLegacyTaskStatuses(ctx context.Context) error {
 		if task.RunID != nil {
 			status = TaskStatusInProgress
 		}
-		if err := q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND status = ?", task.ID, "refinement").Update("status", status).Error; err != nil {
+		if err := q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND status = ?", task.ID, TaskStatusRefinement).Update("status", status).Error; err != nil {
 			return err
 		}
 	}

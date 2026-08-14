@@ -335,7 +335,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 		return e.processTask(ctx, task.ID, forceRerun)
 	case db.TaskStatusInProgress:
 		go e.run(context.Background(), task, "implement")
-	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone, "refinement":
+	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone, db.TaskStatusRefinement:
 		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
 		// a task out of these statuses; a plain status change never does. The
 		// legacy refinement status is treated as an in-progress implementation
@@ -927,7 +927,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if err != nil {
 			return err
 		}
-		if result.Status == "refinement" {
+		if result.Status == db.TaskStatusRefinement {
 			// Compatibility for older providers/prompts; refinement is now a
 			// planning phase, and a clarification outcome is blocked.
 			result.Status = db.TaskStatusBlocked
