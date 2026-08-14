@@ -55,6 +55,7 @@ func allModels() []any {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.TaskRelation{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},

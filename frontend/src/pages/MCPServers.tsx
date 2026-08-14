@@ -47,7 +47,7 @@ interface MCPTool {
 }
 
 const HEADCOUNT1_TOOLS: MCPTool[] = [
-    { name: 'update_task_status', description: 'Update the status of the current task (to-do, in-progress, in-review, done, blocked, cancelled).' },
+    { name: 'update_task_status', description: 'Update the current task (backlog, to-do, in-progress, blocked, in-review, done). depends-on-task is managed automatically from task relations.' },
     { name: 'create_subtask', description: 'Create a new subtask and assign it to a sub-agent for execution.' },
 ];
 

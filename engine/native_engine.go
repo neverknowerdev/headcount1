@@ -166,9 +166,8 @@ func (p *pendingSubtasks) take(subtaskID int32) (*delegationState, error) {
 }
 
 // ProcessTask reacts to a task's current status and spawns a goroutine to run
-// the agent when that status implies pending work ("to-do", "in-progress").
-// Tasks in terminal or manual statuses (in-review, blocked, done, refinement)
-// are left untouched — moving a card to "done" must not restart the agent.
+// the agent when that status implies pending work. A queued task with
+// unfinished hard dependencies is moved to depends-on-task and is not run.
 func (e *NativeEngine) ProcessTask(ctx context.Context, taskID int32) error {
 	return e.processTask(ctx, taskID, false)
 }
@@ -209,45 +208,137 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 	}
 
 	switch task.Status {
-	case "to-do":
-		if task.TaskType == db.TaskTypeImplement {
-			prevStatus := task.Status
-			task.Status = "in-progress"
-			if _, err := e.q.UpdateTask(ctx, task); err != nil {
-				return err
-			}
-			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
-			e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
-			go e.run(context.Background(), task, "implement")
-		} else {
-			prevStatus := task.Status
-			task.Status = "refinement"
-			if _, err := e.q.UpdateTask(ctx, task); err != nil {
-				return err
-			}
-			e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "refinement"})
-			e.emitStatusChange(ctx, task.ID, prevStatus, "refinement")
-			go e.run(context.Background(), task, "plan")
+	case db.TaskStatusTodo:
+		return e.startQueuedTask(ctx, task, forceRerun)
+	case db.TaskStatusDependsOnTask:
+		ready, blockers, err := e.q.CanStartTask(ctx, task.ID)
+		if err != nil {
+			return err
 		}
-	case "in-progress":
-		go e.run(context.Background(), task, "implement")
-	case "in-review", "blocked", "done", "refinement":
-		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
-		// a task out of these statuses; a plain status change never does.
-		if !forceRerun {
+		if !ready {
+			if forceRerun {
+				return &TaskDependencyBlockedError{TaskID: task.ID, Blockers: blockers}
+			}
 			return nil
 		}
 		prevStatus := task.Status
-		task.Status = "in-progress"
+		task.Status = db.TaskStatusTodo
 		if _, err := e.q.UpdateTask(ctx, task); err != nil {
 			return err
 		}
-		e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", map[string]interface{}{"id": task.ID, "status": "in-progress"})
-		e.emitStatusChange(ctx, task.ID, prevStatus, "in-progress")
+		e.broadcastTaskStatus(task, prevStatus, task.Status, blockers)
+		return e.processTask(ctx, task.ID, forceRerun)
+	case db.TaskStatusInProgress:
+		go e.run(context.Background(), task, "implement")
+	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone, "refinement":
+		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
+		// a task out of these statuses; a plain status change never does. The
+		// legacy refinement status is treated as an in-progress implementation
+		// task after the status migration window.
+		if !forceRerun {
+			return nil
+		}
+		ready, blockers, err := e.q.CanStartTask(ctx, task.ID)
+		if err != nil {
+			return err
+		}
+		if !ready {
+			if task.Status != db.TaskStatusDependsOnTask {
+				prevStatus := task.Status
+				task.Status = db.TaskStatusDependsOnTask
+				if _, err := e.q.UpdateTask(ctx, task); err != nil {
+					return err
+				}
+				e.broadcastTaskStatus(task, prevStatus, task.Status, blockers)
+			}
+			if forceRerun {
+				return &TaskDependencyBlockedError{TaskID: task.ID, Blockers: blockers}
+			}
+			return nil
+		}
+		prevStatus := task.Status
+		task.Status = db.TaskStatusInProgress
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			return err
+		}
+		e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
 		go e.run(context.Background(), task, "implement")
 	}
 
 	return nil
+}
+
+func (e *NativeEngine) startQueuedTask(ctx context.Context, task db.Task, forceRerun bool) error {
+	ready, blockers, err := e.q.CanStartTask(ctx, task.ID)
+	if err != nil {
+		return err
+	}
+	if !ready {
+		prevStatus := task.Status
+		task.Status = db.TaskStatusDependsOnTask
+		if _, err := e.q.UpdateTask(ctx, task); err != nil {
+			return err
+		}
+		e.broadcastTaskStatus(task, prevStatus, task.Status, blockers)
+		if forceRerun {
+			return &TaskDependencyBlockedError{TaskID: task.ID, Blockers: blockers}
+		}
+		return nil
+	}
+
+	prevStatus := task.Status
+	task.Status = db.TaskStatusInProgress
+	if _, err := e.q.UpdateTask(ctx, task); err != nil {
+		return err
+	}
+	e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
+	mode := "implement"
+	if task.TaskType != db.TaskTypeImplement {
+		mode = "plan"
+	}
+	go e.run(context.Background(), task, mode)
+	return nil
+}
+
+func (e *NativeEngine) broadcastTaskStatus(task db.Task, from, to string, blockers []db.Task) {
+	payload := map[string]interface{}{"id": task.ID, "status": to}
+	if len(blockers) > 0 {
+		payload["blocked_by"] = blockers
+	}
+	e.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", payload)
+	e.emitStatusChange(context.Background(), task.ID, from, to)
+}
+
+// ReconcileDependents rechecks every task which depends on a completed or
+// otherwise changed prerequisite. ProcessTask performs the final dependency
+// check and run de-duplication, so repeated reconciliation is safe.
+func (e *NativeEngine) ReconcileDependents(ctx context.Context, prerequisiteTaskID int32) {
+	dependents, err := e.q.ListDependentTasks(ctx, prerequisiteTaskID)
+	if err != nil {
+		fmt.Printf("Warning: failed to list dependents of task %d: %v\n", prerequisiteTaskID, err)
+		return
+	}
+	for _, dependent := range dependents {
+		if err := e.ProcessTask(ctx, dependent.ID); err != nil {
+			fmt.Printf("Warning: failed to reconcile dependent task %d: %v\n", dependent.ID, err)
+		}
+	}
+}
+
+// ReconcileQueuedTasks repairs queued work after a process restart. Tasks
+// with an active run are excluded by the query and are handled by run
+// recovery/stale-run recovery separately.
+func (e *NativeEngine) ReconcileQueuedTasks(ctx context.Context) {
+	tasks, err := e.q.ListQueuedTasksForReconciliation(ctx)
+	if err != nil {
+		fmt.Printf("Warning: failed to list queued tasks for reconciliation: %v\n", err)
+		return
+	}
+	for _, task := range tasks {
+		if err := e.ProcessTask(ctx, task.ID); err != nil {
+			fmt.Printf("Warning: failed to reconcile queued task %d: %v\n", task.ID, err)
+		}
+	}
 }
 
 // StopRun cancels the context for the given run, interrupting it at the next
@@ -393,6 +484,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		cancel()
 		e.cancelFuncs.Delete(run.ID)
 	}()
+	if resumeRun == nil {
+		claimed, claimErr := e.q.ClaimTaskRun(ctx, task.ID, run.ID)
+		if claimErr != nil {
+			_ = e.q.UpdateRunLog(context.Background(), run.ID, claimErr.Error(), "failed")
+			return "failed"
+		}
+		if !claimed {
+			// Another reconciler won the task race. Do not start this run or
+			// clear the other run's task lock.
+			_ = e.q.UpdateRunLog(context.Background(), run.ID, "task already claimed by another run", "canceled")
+			return "canceled"
+		}
+	}
 
 	// LockTaskRun is a conditional UPDATE (WHERE run_id IS NULL): for a fresh
 	// run it claims the task; for a resumed run the task is already locked to
@@ -609,6 +713,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
+		}
+		if result.Status == "refinement" {
+			// Compatibility for older providers/prompts; refinement is now a
+			// planning phase, and a clarification outcome is blocked.
+			result.Status = db.TaskStatusBlocked
+		}
+		if result.Status != db.TaskStatusDone && result.Status != db.TaskStatusInReview && result.Status != db.TaskStatusBlocked {
+			return fmt.Errorf("unsupported task status %q", result.Status)
 		}
 		taskFinished = true
 		finishResult = result
@@ -1108,7 +1220,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		_, followErr := aiAgent.Run(runCtx, systemPrompt,
-			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, 'blocked' if stuck, or 'refinement' if you need clarification. Provide a short one-sentence finish_status.")
+			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, or 'blocked' if waiting for human input. Provide a short one-sentence finish_status.")
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 			status = "failed"
@@ -1166,6 +1278,13 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// Notify the parent task that this subtask has completed or failed.
 	e.notifyParentOfSubtaskCompletion(ctx, task, status)
+
+	// A dependent must not start until this run's Git, result, and cleanup work
+	// has finished. Reconcile only an accepted task completion; reopening or
+	// review states are handled by the next explicit transition/start gate.
+	if finishResult.Status == db.TaskStatusDone {
+		e.ReconcileDependents(context.Background(), task.ID)
+	}
 
 	return status
 }
@@ -1376,6 +1495,13 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 		"run_id":   runID,
 		"question": question,
 	})
+	if task, taskErr := e.q.GetTask(ctx, taskID); taskErr == nil && task.Status == db.TaskStatusInProgress {
+		prevStatus := task.Status
+		task.Status = db.TaskStatusBlocked
+		if _, updateErr := e.q.UpdateTask(ctx, task); updateErr == nil {
+			e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
+		}
+	}
 
 	ticker := time.NewTicker(2 * time.Second)
 	defer ticker.Stop()
@@ -1395,6 +1521,13 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 		}
 		for _, c := range comments {
 			if c.AuthorType == "human" && c.ID > questionComment.ID {
+				if task, taskErr := e.q.GetTask(context.Background(), taskID); taskErr == nil && task.Status == db.TaskStatusBlocked {
+					prevStatus := task.Status
+					task.Status = db.TaskStatusInProgress
+					if _, updateErr := e.q.UpdateTask(context.Background(), task); updateErr == nil {
+						e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
+					}
+				}
 				return c.Content, nil
 			}
 		}
@@ -1695,6 +1828,16 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	})
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
+	}
+	for _, prerequisiteID := range p.DependsOnTaskIDs {
+		if _, relationErr := e.q.CreateTaskRelation(ctx, db.TaskRelation{CompanyID: company.ID, SourceTaskID: newTask.ID, TargetTaskID: prerequisiteID, Kind: db.TaskRelationDependsOn}); relationErr != nil {
+			return "", fmt.Errorf("failed to add dependency on task %d: %w", prerequisiteID, relationErr)
+		}
+	}
+	for _, relatedID := range p.RelatedToTaskIDs {
+		if _, relationErr := e.q.CreateTaskRelation(ctx, db.TaskRelation{CompanyID: company.ID, SourceTaskID: newTask.ID, TargetTaskID: relatedID, Kind: db.TaskRelationRelatedTo}); relationErr != nil {
+			return "", fmt.Errorf("failed to relate task %d: %w", relatedID, relationErr)
+		}
 	}
 	e.hub.BroadcastEventForCompany(newTask.CompanyID, "task_created", newTask)
 

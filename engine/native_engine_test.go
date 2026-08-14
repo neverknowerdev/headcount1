@@ -50,6 +50,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.TaskRelation{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},

@@ -47,9 +47,8 @@ func (t *FinishTask) Def() aicli.ToolDef {
 			Name: string(aicli.ToolFinishTask),
 			Description: "MUST be called at the end of every run to record the outcome and update the task status. " +
 				statusGuidance +
-				"Use 'blocked' when you are stuck and need user input — including when you cannot actually verify or complete " +
+				"Use 'blocked' when you are stuck and need human input — including when you cannot actually verify or complete " +
 				"what was asked (never report success you did not verify). " +
-				"Use 'refinement' when you need clarification before you can proceed. " +
 				"finish_status is a short one-sentence summary shown to the user. " +
 				"result_details is the full handoff for whoever consumes your work: key findings, decisions, artifact filenames, " +
 				"file paths touched, caveats and assumptions. It is returned to your task owner when your session completes — make it complete.",
@@ -58,7 +57,7 @@ func (t *FinishTask) Def() aicli.ToolDef {
 				"properties":{
 					"task_status":{
 						"type":"string",
-						"enum":["done","in-review","blocked","refinement"],
+						"enum":["done","in-review","blocked"],
 						"description":"New status for the task"
 					},
 					"finish_status":{

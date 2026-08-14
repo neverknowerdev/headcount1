@@ -3,6 +3,7 @@ package endpoints
 import (
 	"archive/zip"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -12,6 +13,7 @@ import (
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine"
 	"agent-orchestrator/pkg/filesystem"
 
 	"github.com/go-chi/chi/v5"
@@ -260,6 +262,11 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.engine.RerunTask(r.Context(), task.ID); err != nil {
+		var blocked *engine.TaskDependencyBlockedError
+		if errors.As(err, &blocked) {
+			api.respondJSON(w, http.StatusConflict, map[string]interface{}{"error": err.Error(), "task_id": blocked.TaskID, "blocked_by": blocked.Blockers})
+			return
+		}
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}

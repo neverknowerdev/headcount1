@@ -377,6 +377,16 @@ type Skill struct {
 const (
 	TaskTypePlanAndImplement = "plan and implement"
 	TaskTypeImplement        = "implement"
+	TaskStatusBacklog        = "backlog"
+	TaskStatusTodo           = "to-do"
+	TaskStatusInProgress     = "in-progress"
+	TaskStatusBlocked        = "blocked"
+	TaskStatusDependsOnTask  = "depends-on-task"
+	TaskStatusInReview       = "in-review"
+	TaskStatusDone           = "done"
+
+	TaskRelationDependsOn = "depends_on"
+	TaskRelationRelatedTo = "related_to"
 	// DefaultTaskGitBaseBranch is used by new and legacy tasks when no base
 	// branch was explicitly selected.
 	DefaultTaskGitBaseBranch = "main"
@@ -415,10 +425,27 @@ type Task struct {
 	GitHubPRURL        string     `json:"github_pr_url"`
 	// GitHubBranch is canonical on the root task. Subtasks copy the same value
 	// so every run in the task tree operates on one branch.
-	GitHubBranch  string    `json:"github_branch" gorm:"index"`
-	GitBaseBranch string    `json:"git_base_branch" gorm:"not null;default:'main'"`
-	CreatedAt     time.Time `json:"created_at"`
-	UpdatedAt     time.Time `json:"updated_at"`
+	GitHubBranch    string               `json:"github_branch" gorm:"index"`
+	GitBaseBranch   string               `json:"git_base_branch" gorm:"not null;default:'main'"`
+	RelationSummary *TaskRelationSummary `json:"relation_summary,omitempty" gorm:"-"`
+	CreatedAt       time.Time            `json:"created_at"`
+	UpdatedAt       time.Time            `json:"updated_at"`
+}
+
+// TaskRelation stores a canonical edge in the task graph. For a dependency,
+// SourceTaskID depends on TargetTaskID; the inverse "blocks" view is derived
+// from the same row. related_to is normalized by the query layer so the same
+// pair cannot be stored in both directions.
+type TaskRelation struct {
+	ID           int32     `json:"id" gorm:"primaryKey"`
+	CompanyID    int32     `json:"company_id" gorm:"not null;index"`
+	SourceTaskID int32     `json:"source_task_id" gorm:"not null;index;uniqueIndex:idx_task_relations_unique"`
+	TargetTaskID int32     `json:"target_task_id" gorm:"not null;index;uniqueIndex:idx_task_relations_unique"`
+	Kind         string    `json:"kind" gorm:"not null;index;uniqueIndex:idx_task_relations_unique"`
+	CreatedAt    time.Time `json:"created_at"`
+
+	SourceTask Task `json:"-" gorm:"foreignKey:SourceTaskID;constraint:OnDelete:CASCADE"`
+	TargetTask Task `json:"-" gorm:"foreignKey:TargetTaskID;constraint:OnDelete:CASCADE"`
 }
 
 // EffectiveGitBaseBranch returns the branch used to create this task's

@@ -2,8 +2,10 @@ package engine
 
 import (
 	"bytes"
+	"context"
 	"fmt"
 	"log"
+	"strings"
 	"text/template"
 	"time"
 
@@ -34,8 +36,7 @@ const promptTemplate = `You are an agent that works on tasks. Implement the task
 At the end of every run you MUST call finish_task — there are no exceptions. Choose the final status yourself:
 - done: work is complete and needs no human attention (the normal completion status, especially for delegated subtasks — your task owner reviews the result)
 - in-review: work is complete but a human should review or approve it before it counts as finished
-- blocked: you are stuck, cannot verify what was asked, or need user input — never report success you did not verify
-- refinement: you need clarification before you can start
+- blocked: you are waiting for human input or intervention — use ask_human when a concrete question can be answered and never report success you did not verify
 Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — it is returned to your task owner when your session completes.
 
 Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
@@ -53,6 +54,9 @@ Working directory: {{.WorkingDirectory}}
 
 Task name: {{.TaskName}}
 Task status: {{.TaskStatus}}
+{{if .TaskRelations}}Task relations:
+{{.TaskRelations}}
+{{end}}
 {{if .TaskDescription}}Task (user input): {{.TaskDescription}}
 {{end}}{{if .RefinedDescription}}Refined task description:
 {{.RefinedDescription}}
@@ -73,6 +77,7 @@ type PromptData struct {
 	CurrentDate        string
 	TaskName           string
 	TaskStatus         string
+	TaskRelations      string
 	TaskDescription    string
 	RefinedDescription string
 	AcceptanceCriteria string
@@ -109,6 +114,9 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
 		TestCases:          formatSpecItems(task.TestCases),
 		CurrentDate:        time.Now().Format("2006-01-02"),
+	}
+	if summaries, err := b.q.ListTaskRelationSummaries(context.Background(), []int32{task.ID}); err == nil {
+		data.TaskRelations = formatTaskRelations(summaries[task.ID])
 	}
 
 	if task.CompanyID != 0 {
@@ -147,4 +155,25 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 	}
 
 	return buf.String()
+}
+
+func formatTaskRelations(summary db.TaskRelationSummary) string {
+	var b strings.Builder
+	appendTasks := func(label string, tasks []db.TaskRelationTask) {
+		if len(tasks) == 0 {
+			return
+		}
+		fmt.Fprintf(&b, "%s:\n", label)
+		for _, task := range tasks {
+			ref := task.RefKey
+			if ref == "" {
+				ref = fmt.Sprintf("#%d", task.ID)
+			}
+			fmt.Fprintf(&b, "- %s — %s [%s]\n", ref, task.Title, task.Status)
+		}
+	}
+	appendTasks("Depends on", summary.DependsOn)
+	appendTasks("Blocks", summary.Blocks)
+	appendTasks("Related", summary.RelatedTo)
+	return strings.TrimSpace(b.String())
 }

@@ -171,6 +171,7 @@ func main() {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.TaskRelation{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
@@ -213,6 +214,9 @@ func main() {
 	}
 	if err := db.New(database).MigrateDropAgentConfigNames(context.Background()); err != nil {
 		log.Fatalf("agent assignment schema migration failed: %v", err)
+	}
+	if err := db.New(database).MigrateLegacyTaskStatuses(context.Background()); err != nil {
+		log.Fatalf("task status migration failed: %v", err)
 	}
 	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
 		log.Fatalf("GitHub connection index migration failed: %v", err)
@@ -350,6 +354,9 @@ func main() {
 	// auto-update) paused mid-flight — see NativeEngine.BeginDrain. Runs in
 	// the background so a large backlog never delays server startup.
 	go eng.ResumeInterruptedRuns(context.Background())
+	// Reconcile queued tasks after restart so a prerequisite completion or
+	// dependency removal is not stranded in the crash window before launch.
+	go eng.ReconcileQueuedTasks(context.Background())
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
