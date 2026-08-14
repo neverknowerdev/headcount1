@@ -116,8 +116,13 @@ test.describe.serial('Headcount1 App', () => {
         const taskId = task.id;
 
         // Assign agent and move to "To Do" — this triggers the engine
-        await page.click('text=Write E2E Tests');
+        // Navigate directly using the task id returned by the API. The board
+        // card click is intentionally asynchronous and can race the task page
+        // loading before its form controls are available.
+        await page.goto(`/companies/pw-inc/tasks/${taskId}`);
+        await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
         await expect(page.getByText('PW-INC-1')).toBeVisible();
+        await expect(page.getByLabel('Assignee')).toBeVisible();
         await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
         await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');

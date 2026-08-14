@@ -126,7 +126,14 @@ func (api *API) DeleteTaskRelation(w http.ResponseWriter, r *http.Request) {
 }
 
 func (api *API) buildTaskRelationResponse(ctx context.Context, task db.Task, relations []db.TaskRelation) (taskRelationResponse, error) {
-	response := taskRelationResponse{}
+	// Keep collection fields as JSON arrays even when there are no relations.
+	// The frontend renders these collections directly in the empty state.
+	response := taskRelationResponse{
+		DependsOn: make([]db.TaskRelationView, 0),
+		BlockedBy: make([]db.TaskRelationView, 0),
+		Blocks:    make([]db.TaskRelationView, 0),
+		RelatedTo: make([]db.TaskRelationView, 0),
+	}
 	if len(relations) == 0 {
 		return response, nil
 	}

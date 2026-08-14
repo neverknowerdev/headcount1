@@ -53,7 +53,12 @@ export const TaskRelations: React.FC<TaskRelationsProps> = ({ taskId, allTasks }
     const load = async () => {
         try {
             const response = await axios.get(`/api/tasks/${taskId}/relations`);
-            setRelations({ depends_on: [], blocked_by: [], blocks: [], related_to: [], ...response.data });
+            setRelations({
+                depends_on: response.data?.depends_on || [],
+                blocked_by: response.data?.blocked_by || [],
+                blocks: response.data?.blocks || [],
+                related_to: response.data?.related_to || [],
+            });
         } catch (error) {
             console.error(error);
         }
