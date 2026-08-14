@@ -75,16 +75,20 @@ test.describe.serial('task sidecar orchestrator', () => {
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${taskId}/runs`);
             const runs = await response.json();
-            return runs.some((r: any) => r.supervised_run_id);
+            return runs.some((r: any) => r.name?.endsWith('-orchestrator'));
         }, { timeout: 20_000 }).toBeTruthy();
 
         const runsResponse = await request.get(`/api/tasks/${taskId}/runs`);
         const runs = await runsResponse.json();
-        const workers = runs.filter((r: any) => !r.supervised_run_id);
-        const orchestrators = runs.filter((r: any) => r.supervised_run_id);
+        const orchestrator = runs.find((r: any) => r.name?.endsWith('-orchestrator'));
+        expect(orchestrator).toBeTruthy();
+        expect(orchestrator.parent_run_id).toBeNull();
+        const workers = runs.filter((r: any) => r.parent_run_id === orchestrator.id);
         expect(workers.length).toBe(1);
-        expect(orchestrators.length).toBe(1);
-        expect(orchestrators[0].supervised_run_id).toBe(workers[0].id);
+        expect(workers[0].root_run_id).toBe(orchestrator.id);
+        const taskResponse = await request.get(`/api/tasks/${taskId}`);
+        expect(taskResponse.ok()).toBeTruthy();
+        expect((await taskResponse.json()).orchestrator_run_id).toBe(orchestrator.id);
 
         const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');

@@ -182,6 +182,13 @@ func (q *Queries) UnlockTaskRun(ctx context.Context, taskID int32) error {
 	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).Update("run_id", nil).Error
 }
 
+// SetTaskOrchestratorRun records the current task-level orchestrator root.
+// Historical orchestrator runs remain in the runs table; this pointer is the
+// durable owner of the task's active monitoring session.
+func (q *Queries) SetTaskOrchestratorRun(ctx context.Context, taskID, runID int32) error {
+	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).Update("orchestrator_run_id", runID).Error
+}
+
 // GetRootTask walks the parent chain from taskID and returns the top-most
 // ancestor (the task itself when it has no parent). Bounded to 20 hops to
 // guard against cycles.

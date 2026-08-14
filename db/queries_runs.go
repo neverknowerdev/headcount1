@@ -37,7 +37,7 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	} else {
 		updateErr = q.db.WithContext(ctx).Save(&r).Error
 	}
-	if updateErr != nil || r.SupervisedRunID != nil {
+	if updateErr != nil || r.ParentRunID == nil {
 		return updateErr
 	}
 	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
@@ -205,27 +205,41 @@ func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]R
 	return runs, err
 }
 
-func (q *Queries) GetOrchestratorRun(ctx context.Context, supervisedRunID int32) (Run, error) {
-	var run Run
-	err := q.db.WithContext(ctx).Where("supervised_run_id = ?", supervisedRunID).First(&run).Error
-	return run, err
+func (q *Queries) GetOrchestratorRun(ctx context.Context, taskID int32) (Run, error) {
+	var task Task
+	if err := q.db.WithContext(ctx).First(&task, taskID).Error; err != nil {
+		return Run{}, err
+	}
+	if task.OrchestratorRunID == nil {
+		return Run{}, gorm.ErrRecordNotFound
+	}
+	return q.GetRun(ctx, *task.OrchestratorRunID)
 }
 
-func (q *Queries) ListSupervisedRuns(ctx context.Context, workerRootID int32) ([]Run, error) {
+func (q *Queries) ListOrchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("(root_run_id = ? OR id = ?) AND supervised_run_id IS NULL", workerRootID, workerRootID).Order("started_at asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).
+		Preload("Agent").
+		Where("root_run_id = ? AND id <> ?", orchestratorRunID, orchestratorRunID).
+		Order("started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListOrchestratorsByTask(ctx context.Context, taskID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("task_id = ? AND supervised_run_id IS NOT NULL", taskID).Order("started_at asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).
+		Joins("JOIN tasks ON tasks.orchestrator_run_id = runs.id").
+		Where("tasks.id = ?", taskID).
+		Order("runs.started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListWaitingOrchestrators(ctx context.Context) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("supervised_run_id IS NOT NULL AND status IN ?", []string{"running", "waiting"}).Find(&runs).Error
+	err := q.db.WithContext(ctx).
+		Where("parent_run_id IS NULL AND status IN ? AND id IN (?)", []string{"running", "waiting"},
+			q.db.Model(&Task{}).Select("orchestrator_run_id").Where("orchestrator_run_id IS NOT NULL")).
+		Find(&runs).Error
 	return runs, err
 }
 
@@ -419,10 +433,20 @@ func (q *Queries) CountRootRunsThrough(ctx context.Context, taskID, rootRunID in
 // sessions for the same root run and agent. The current run is included, so
 // callers can use the result directly as the suffix.
 func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, runID, agentID int32) (int64, error) {
+	var root Run
+	if err := q.db.WithContext(ctx).Preload("Task").First(&root, rootRunID).Error; err != nil {
+		return 0, err
+	}
+	query := q.db.WithContext(ctx).Model(&Run{}).
+		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID)
+	// In the new hierarchy the first direct child is the worker root, not a
+	// delegated session. Legacy roots have no task orchestrator pointer and
+	// retain the old counting behavior.
+	if root.Task.OrchestratorRunID != nil && *root.Task.OrchestratorRunID == rootRunID {
+		query = query.Where("parent_run_id <> ?", rootRunID)
+	}
 	var count int64
-	err := q.db.WithContext(ctx).Model(&Run{}).
-		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID).
-		Count(&count).Error
+	err := query.Count(&count).Error
 	return count, err
 }
 

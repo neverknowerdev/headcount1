@@ -527,12 +527,23 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if resumeRun != nil {
 		run = *resumeRun
 	} else {
+		var orchestrator db.Run
+		var orchestratorProvider db.LLMProvider
+		var orchestratorModel string
+		orchestratorEnabled := false
+		orchestratorStart := false
+		if parent == nil {
+			orchestrator, orchestratorProvider, orchestratorModel, orchestratorEnabled, orchestratorStart = e.createTaskOrchestrator(ctx, task, agent)
+		}
 		newRun := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: time.Now()}
 		if parent != nil {
 			parentID := parent.parentRunID
 			rootID := parent.rootRunID
 			newRun.ParentRunID = &parentID
 			newRun.RootRunID = &rootID
+		} else if orchestratorEnabled {
+			newRun.ParentRunID = &orchestrator.ID
+			newRun.RootRunID = &orchestrator.ID
 		}
 		created, createErr := e.q.CreateRun(ctx, newRun)
 		if createErr != nil {
@@ -540,16 +551,18 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		run = created
 		if parent == nil {
-			// Root runs point at themselves so the whole tree shares one root id.
-			rootID := run.ID
-			run.RootRunID = &rootID
-			if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
-				fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
+			if orchestratorEnabled {
+				if orchestratorStart {
+					e.startTaskOrchestrator(orchestrator, task, orchestratorProvider, orchestratorModel)
+				}
+			} else {
+				// Legacy runs without an orchestrator point at themselves.
+				rootID := run.ID
+				run.RootRunID = &rootID
+				if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
+					fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
+				}
 			}
-			// Create the monitoring sidecar independently. It never acquires
-			// Task.RunID and is enabled only when its dedicated model setting is
-			// configured for the task owner.
-			e.startOrchestratorForWorker(task, run)
 		}
 	}
 

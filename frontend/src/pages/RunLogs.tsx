@@ -99,15 +99,10 @@ export const RunLogs: React.FC = () => {
     // Grouping is derived once per runs update rather than per-row during
     // render: childrenByParent feeds the "sessions" list and count badge,
     // descendantsByRoot feeds the whole-tree per-agent token breakdown.
-    const { rootRuns, childrenByParent, descendantsByRoot, orchestratorByWorker } = useMemo(() => {
+    const { rootRuns, childrenByParent, descendantsByRoot } = useMemo(() => {
         const childrenByParent = new Map<number, any[]>();
         const descendantsByRoot = new Map<number, any[]>();
-        const orchestratorByWorker = new Map<number, any>();
         runs.forEach((r: any) => {
-            if (r.supervised_run_id) {
-                orchestratorByWorker.set(r.supervised_run_id, r);
-                return;
-            }
             if (r.parent_run_id) {
                 if (!childrenByParent.has(r.parent_run_id)) childrenByParent.set(r.parent_run_id, []);
                 childrenByParent.get(r.parent_run_id)!.push(r);
@@ -116,8 +111,8 @@ export const RunLogs: React.FC = () => {
             if (!descendantsByRoot.has(rootId)) descendantsByRoot.set(rootId, []);
             descendantsByRoot.get(rootId)!.push(r);
         });
-        const rootRuns = runs.filter((r: any) => !r.parent_run_id && !r.supervised_run_id);
-        return { rootRuns, childrenByParent, descendantsByRoot, orchestratorByWorker };
+        const rootRuns = runs.filter((r: any) => !r.parent_run_id);
+        return { rootRuns, childrenByParent, descendantsByRoot };
     }, [runs]);
 
     return (
@@ -135,13 +130,13 @@ export const RunLogs: React.FC = () => {
                             const total = ts.total_tokens || 0;
                             const children = childrenByParent.get(r.id) || [];
                             const descendants = (descendantsByRoot.get(r.id) || []).filter((d: any) => d.id !== r.id);
-                            const orchestrator = orchestratorByWorker.get(r.id);
                             const agentStats = descendants.length > 0 ? buildAgentStats(r, descendants) : undefined;
+                            const isOrchestrator = r.task?.orchestrator_run_id === r.id || (r.parent_run_id == null && String(r.name || '').endsWith('-orchestrator'));
                             return (
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        Run {r.name || `#${r.id}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                         {children.length > 0 && (
                                             <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
                                         )}
@@ -170,13 +165,6 @@ export const RunLogs: React.FC = () => {
                                             <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.current_status}</span>} />
                                         )}
                                     </div>
-
-                                    {orchestrator && (
-                                        <div className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
-                                            <span className="font-semibold">Task Orchestrator:</span> {orchestrator.status}
-                                            {orchestrator.current_status ? ` · ${orchestrator.current_status}` : ''}
-                                        </div>
-                                    )}
 
                                     {r.result_description && (
                                         <div>

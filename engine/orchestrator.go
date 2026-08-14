@@ -21,10 +21,45 @@ import (
 //go:embed prompts/task_orchestrator.md
 var orchestratorPrompt string
 
-// startOrchestratorForWorker is called only after a worker root has acquired
-// Task.RunID. The sidecar has its own Run row and never touches that lock.
-func (e *NativeEngine) startOrchestratorForWorker(task db.Task, worker db.Run) {
-	go e.orchestratorLoop(task, worker)
+// createTaskOrchestrator creates the task-owned root run before its worker
+// starts. Worker and delegated runs then form a normal child tree beneath it.
+func (e *NativeEngine) createTaskOrchestrator(ctx context.Context, task db.Task, agent db.Agent) (db.Run, db.LLMProvider, string, bool, bool) {
+	uid := e.ownerUserIDForCompany(ctx, task.CompanyID)
+	setting, err := e.q.GetDefaultModelSetting(ctx, uid, db.PurposeTaskOrchestrator)
+	if err != nil || (setting.ProviderID == nil && setting.ModelGroupID == nil) {
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	baseProvider, baseModel, err := resolveProvider(ctx, e.q, agent)
+	if err != nil {
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	provider, model := e.resolvePurposeModel(ctx, uid, db.PurposeTaskOrchestrator, baseProvider, baseModel)
+	if provider.ID == 0 || strings.TrimSpace(model) == "" {
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	if existing, err := e.q.GetOrchestratorRun(ctx, task.ID); err == nil && existing.ID != 0 && (existing.Status == "running" || existing.Status == "waiting") {
+		return existing, provider, model, true, false
+	}
+	orchestrator := db.Run{
+		TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: time.Now(),
+		Name: fmt.Sprintf("%s-orchestrator", task.RefKey),
+	}
+	created, err := e.q.CreateRun(ctx, orchestrator)
+	if err != nil {
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	if err := e.q.SetRunRootID(ctx, created.ID, created.ID); err != nil {
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	if err := e.q.SetTaskOrchestratorRun(ctx, task.ID, created.ID); err != nil {
+		_ = e.q.UpdateRunLog(ctx, created.ID, err.Error(), "failed")
+		return db.Run{}, db.LLMProvider{}, "", false, false
+	}
+	return created, provider, model, true, true
+}
+
+func (e *NativeEngine) startTaskOrchestrator(orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
+	go e.runOrchestrator(orchestrator, task, provider, model)
 }
 
 // ResumeWaitingOrchestrators reattaches sidecars after a process restart. A
@@ -36,18 +71,14 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 		return
 	}
 	for _, orch := range runs {
-		if orch.SupervisedRunID == nil {
-			continue
-		}
-		worker, err := e.q.GetRun(ctx, *orch.SupervisedRunID)
+		task, err := e.q.GetTask(ctx, orch.TaskID)
 		if err != nil {
 			continue
 		}
-		task, err := e.q.GetTask(ctx, worker.TaskID)
-		if err != nil {
+		if task.AgentID == nil {
 			continue
 		}
-		agent, err := e.q.GetAgent(ctx, worker.AgentID)
+		agent, err := e.q.GetAgent(ctx, *task.AgentID)
 		if err != nil {
 			continue
 		}
@@ -59,51 +90,11 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 		if provider.ID == 0 || model == "" {
 			continue
 		}
-		go e.runOrchestrator(orch, task, worker, provider, model)
+		go e.runOrchestrator(orch, task, provider, model)
 	}
 }
 
-func (e *NativeEngine) orchestratorLoop(task db.Task, worker db.Run) {
-	ctx := context.Background()
-	// A configured orchestrator setting is opt-in until every existing tenant
-	// has selected a provider. This preserves existing tasks while making the
-	// missing configuration visible in settings instead of silently falling
-	// back to a worker model.
-	uid := e.ownerUserIDForCompany(ctx, task.CompanyID)
-	setting, err := e.q.GetDefaultModelSetting(ctx, uid, db.PurposeTaskOrchestrator)
-	if err != nil || (setting.ProviderID == nil && setting.ModelGroupID == nil) {
-		return
-	}
-	if existing, err := e.q.GetOrchestratorRun(ctx, worker.ID); err == nil && existing.ID != 0 {
-		return
-	}
-
-	workerAgent, err := e.q.GetAgent(ctx, worker.AgentID)
-	if err != nil {
-		return
-	}
-	workerProvider, workerModel, err := resolveProvider(ctx, e.q, workerAgent)
-	if err != nil {
-		return
-	}
-	provider, model := e.resolvePurposeModel(ctx, uid, db.PurposeTaskOrchestrator, workerProvider, workerModel)
-	if strings.TrimSpace(model) == "" || provider.ID == 0 {
-		return
-	}
-
-	orch := db.Run{
-		TaskID: task.ID, AgentID: worker.AgentID, Status: "running",
-		SupervisedRunID: &worker.ID, StartedAt: time.Now(),
-		Name: fmt.Sprintf("%s-ORCH-%d", task.RefKey, worker.ID),
-	}
-	created, err := e.q.CreateRun(ctx, orch)
-	if err != nil {
-		return
-	}
-	e.runOrchestrator(created, task, worker, provider, model)
-}
-
-func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, worker db.Run, provider db.LLMProvider, model string) {
+func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
 	ctx := context.Background()
 	logger, err := logging.NewSessionLoggerWithHub(loadSettings().BasePath, task.Company.ShortName, task.ID, orchestrator.ID, orchestrator.ID, e.hub.ForCompany(task.CompanyID), e.q)
 	if err != nil {
@@ -117,22 +108,22 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, worker
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	callbacks := tools.OrchestratorCallbacks{
 		GetSessions: func(c context.Context) ([]tools.OrchestratorSession, error) {
-			return e.orchestratorSessions(c, worker.ID)
+			return e.orchestratorSessions(c, orchestrator.ID)
 		},
 		GetSessionStatus: func(c context.Context, id int32) (tools.OrchestratorSession, error) {
-			return e.orchestratorSessionStatus(c, worker.ID, id)
+			return e.orchestratorSessionStatus(c, orchestrator.ID, id)
 		},
 		AskTaskOwner: func(c context.Context, id int32, question string) (string, error) {
-			return e.orchestratorAskOwner(c, task, orchestrator.ID, worker.ID, id, question)
+			return e.orchestratorAskOwner(c, task, orchestrator.ID, id, question)
 		},
 		RunNewSession: func(c context.Context, source *int32, reason string) (string, error) {
-			return e.orchestratorRunNew(c, task, worker.ID, source, reason)
+			return e.orchestratorRunNew(c, task, orchestrator.ID, source, reason)
 		},
 		StopSession: func(c context.Context, id int32, reason string) (string, error) {
-			return e.orchestratorStop(c, worker.ID, id, reason)
+			return e.orchestratorStop(c, orchestrator.ID, id, reason)
 		},
 		ForkSession: func(c context.Context, sessionID int32, messageID int64) (string, error) {
-			return e.orchestratorFork(c, worker.ID, sessionID, messageID)
+			return e.orchestratorFork(c, orchestrator.ID, sessionID, messageID)
 		},
 	}
 	registry := tools.NewOrchestratorRegistry(callbacks)
@@ -147,7 +138,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, worker
 	lastFingerprint := ""
 	first := true
 	for {
-		sessions, listErr := e.orchestratorSessions(ctx, worker.ID)
+		sessions, listErr := e.orchestratorSessions(ctx, orchestrator.ID)
 		if listErr != nil {
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, listErr.Error(), "failed")
 			return
@@ -194,8 +185,8 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, worker
 	}
 }
 
-func (e *NativeEngine) orchestratorSessions(ctx context.Context, workerRootID int32) ([]tools.OrchestratorSession, error) {
-	runs, err := e.q.ListSupervisedRuns(ctx, workerRootID)
+func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]tools.OrchestratorSession, error) {
+	runs, err := e.q.ListOrchestratorSessions(ctx, orchestratorRunID)
 	if err != nil {
 		return nil, err
 	}
@@ -205,21 +196,21 @@ func (e *NativeEngine) orchestratorSessions(ctx context.Context, workerRootID in
 		if r.LastMessageTime != nil {
 			last = r.LastMessageTime.Format(time.RFC3339Nano)
 		}
-		out = append(out, tools.OrchestratorSession{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name, ParentRunID: r.ParentRunID, Status: r.Status, CurrentStatus: r.CurrentStatus, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
+		out = append(out, tools.OrchestratorSession{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name, Status: r.Status, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
 	}
 	return out, nil
 }
 
-func (e *NativeEngine) orchestratorSessionStatus(ctx context.Context, workerRootID, id int32) (tools.OrchestratorSession, error) {
+func (e *NativeEngine) orchestratorSessionStatus(ctx context.Context, orchestratorRunID, id int32) (tools.OrchestratorSession, error) {
 	r, err := e.q.GetRun(ctx, id)
 	if err != nil {
 		return tools.OrchestratorSession{}, err
 	}
-	valid := r.ID == workerRootID || r.RootRunID != nil && *r.RootRunID == workerRootID
-	if r.SupervisedRunID != nil || !valid {
-		return tools.OrchestratorSession{}, fmt.Errorf("session %d is outside the supervised worker tree", id)
+	valid := r.ID != orchestratorRunID && r.RootRunID != nil && *r.RootRunID == orchestratorRunID
+	if !valid {
+		return tools.OrchestratorSession{}, fmt.Errorf("session %d is outside the orchestrator worker tree", id)
 	}
-	list, err := e.orchestratorSessions(ctx, workerRootID)
+	list, err := e.orchestratorSessions(ctx, orchestratorRunID)
 	if err != nil {
 		return tools.OrchestratorSession{}, err
 	}
@@ -228,11 +219,11 @@ func (e *NativeEngine) orchestratorSessionStatus(ctx context.Context, workerRoot
 			return s, nil
 		}
 	}
-	return tools.OrchestratorSession{}, fmt.Errorf("session %d is not supervised", id)
+	return tools.OrchestratorSession{}, fmt.Errorf("session %d is not in the orchestrator worker tree", id)
 }
 
-func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, orchestratorID, workerRootID, sessionID int32, question string) (string, error) {
-	session, err := e.orchestratorSessionStatus(ctx, workerRootID, sessionID)
+func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
+	session, err := e.orchestratorSessionStatus(ctx, orchestratorID, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -242,11 +233,11 @@ func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, o
 		return "", err
 	}
 	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
-	return fmt.Sprintf("Current worker status: %s; current activity: %s. Question recorded for session %d; inspect its next lifecycle event for an answer.", session.Status, session.CurrentStatus, sessionID), nil
+	return fmt.Sprintf("Current worker status: %s. Question recorded for session %d; inspect its next lifecycle event for an answer.", session.Status, sessionID), nil
 }
 
-func (e *NativeEngine) orchestratorStop(ctx context.Context, workerRootID, sessionID int32, reason string) (string, error) {
-	if _, err := e.orchestratorSessionStatus(ctx, workerRootID, sessionID); err != nil {
+func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, sessionID int32, reason string) (string, error) {
+	if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
 	}
 	_ = e.q.SetRunStopCause(ctx, sessionID, "orchestrator")
@@ -254,10 +245,10 @@ func (e *NativeEngine) orchestratorStop(ctx context.Context, workerRootID, sessi
 	return fmt.Sprintf("session %d stop requested: %s", sessionID, reason), nil
 }
 
-func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, workerRootID int32, source *int32, reason string) (string, error) {
-	attemptRunID := workerRootID
+func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, reason string) (string, error) {
+	attemptRunID := orchestratorRunID
 	if source != nil {
-		if _, err := e.orchestratorSessionStatus(ctx, workerRootID, *source); err != nil {
+		if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, *source); err != nil {
 			return "", err
 		}
 		attemptRunID = *source
@@ -293,8 +284,8 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, wor
 // message identifier. The position is only usable when the engine persisted
 // a safe checkpoint; an active or failed run without one is rejected instead
 // of risking duplicated side effects.
-func (e *NativeEngine) orchestratorFork(ctx context.Context, workerRootID, sessionID int32, messageID int64) (string, error) {
-	if _, err := e.orchestratorSessionStatus(ctx, workerRootID, sessionID); err != nil {
+func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, sessionID int32, messageID int64) (string, error) {
+	if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
 	}
 	source, err := e.q.GetRun(ctx, sessionID)

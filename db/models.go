@@ -411,6 +411,7 @@ type Task struct {
 	DueDate            *time.Time `json:"due_date"`
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
+	OrchestratorRunID  *int32     `json:"orchestrator_run_id,omitempty" gorm:"index"`
 	GitHubPRNumber     int        `json:"github_pr_number"`
 	GitHubPRURL        string     `json:"github_pr_url"`
 	// GitHubBranch is canonical on the root task. Subtasks copy the same value
@@ -557,7 +558,7 @@ type Run struct {
 	// "HC1-2-CEO-1" and "HC1-2-CTO-2-1". Set when the run starts.
 	Name string `json:"name" gorm:"index"`
 	// ParentRunID links a delegated session to the run that spawned it.
-	// RootRunID points at the top-level (CEO) run of the whole execution tree;
+	// RootRunID points at the task orchestrator run of the whole execution tree;
 	// it equals ID for root runs so log files can be grouped per main run.
 	ParentRunID *int32 `json:"parent_run_id" gorm:"index"`
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
@@ -565,7 +566,6 @@ type Run struct {
 	// the report_status tool, shown live in the Run Log UI.
 	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
 	Status            string     `json:"status" gorm:"not null"`
-	SupervisedRunID   *int32     `json:"supervised_run_id,omitempty" gorm:"index"`
 	SessionID         string     `json:"session_id"`
 	LogFilePath       string     `json:"log_file_path"`
 	LogContent        string     `json:"log_content"`

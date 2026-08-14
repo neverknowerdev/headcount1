@@ -32,10 +32,10 @@ func TestOrchestratorToolValidation(t *testing.T) {
 		StopSession:      func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:      func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	_, err := r.Execute(context.Background(), string(aicli.ToolAskTaskOwner), json.RawMessage(`{"session_id":0,"question":"x"}`))
+	_, err := r.Execute(context.Background(), string(OrchestratorToolAskTaskOwner), json.RawMessage(`{"session_id":0,"question":"x"}`))
 	require.Error(t, err)
 	require.False(t, called)
-	_, err = r.Execute(context.Background(), string(aicli.ToolAskTaskOwner), json.RawMessage(`{"session_id":3,"question":"status?"}`))
+	_, err = r.Execute(context.Background(), string(OrchestratorToolAskTaskOwner), json.RawMessage(`{"session_id":3,"question":"status?"}`))
 	require.NoError(t, err)
 	require.True(t, called)
 }

@@ -15,9 +15,7 @@ type OrchestratorSession struct {
 	Name              string `json:"name"`
 	TaskID            int32  `json:"task_id"`
 	Agent             string `json:"agent"`
-	ParentRunID       *int32 `json:"parent_run_id,omitempty"`
 	Status            string `json:"status"`
-	CurrentStatus     string `json:"current_status,omitempty"`
 	LastMessageTime   string `json:"last_message_time,omitempty"`
 	WaitReason        string `json:"wait_reason,omitempty"`
 	RecoveryAttempts  int    `json:"recovery_attempts"`
@@ -25,6 +23,19 @@ type OrchestratorSession struct {
 	ResultDescription string `json:"result_description,omitempty"`
 	Error             string `json:"error,omitempty"`
 }
+
+// OrchestratorToolName is intentionally private to this registry. These
+// controls are never part of a worker's configurable tool surface.
+type OrchestratorToolName string
+
+const (
+	OrchestratorToolGetSessions      OrchestratorToolName = "get_sessions"
+	OrchestratorToolGetSessionStatus OrchestratorToolName = "get_session_status"
+	OrchestratorToolAskTaskOwner     OrchestratorToolName = "ask_task_owner"
+	OrchestratorToolRunNewSession    OrchestratorToolName = "run_new_session"
+	OrchestratorToolStopSession      OrchestratorToolName = "stop_session"
+	OrchestratorToolForkSession      OrchestratorToolName = "fork_session"
+)
 
 type OrchestratorCallbacks struct {
 	GetSessions      func(context.Context) ([]OrchestratorSession, error)
@@ -36,7 +47,7 @@ type OrchestratorCallbacks struct {
 }
 
 type orchestratorTool struct {
-	name aicli.ToolName
+	name OrchestratorToolName
 	def  aicli.ToolDef
 	fn   func(context.Context, json.RawMessage) (string, error)
 }
@@ -46,7 +57,7 @@ func (t *orchestratorTool) Execute(ctx context.Context, args json.RawMessage) (s
 	return t.fn(ctx, args)
 }
 
-func orchestratorDef(name aicli.ToolName, description, schema string) aicli.ToolDef {
+func orchestratorDef(name OrchestratorToolName, description, schema string) aicli.ToolDef {
 	return aicli.ToolDef{Type: "function", Function: aicli.FuncMeta{
 		Name: string(name), Description: description, Parameters: json.RawMessage(schema),
 	}}
@@ -57,8 +68,8 @@ func orchestratorDef(name aicli.ToolName, description, schema string) aicli.Tool
 func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	r := aicli.NewRegistry()
 	r.Register(&orchestratorTool{
-		name: aicli.ToolGetSessions,
-		def:  orchestratorDef(aicli.ToolGetSessions, "List every worker session in this task execution, including nested sessions.", `{"type":"object","properties":{}}`),
+		name: OrchestratorToolGetSessions,
+		def:  orchestratorDef(OrchestratorToolGetSessions, "List every worker session in this task execution, including nested sessions.", `{"type":"object","properties":{}}`),
 		fn: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			v, err := cb.GetSessions(ctx)
 			if err != nil {
@@ -69,8 +80,8 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: aicli.ToolGetSessionStatus,
-		def:  orchestratorDef(aicli.ToolGetSessionStatus, "Inspect one worker session's authoritative status, heartbeat, wait reason, error, and recovery state.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
+		name: OrchestratorToolGetSessionStatus,
+		def:  orchestratorDef(OrchestratorToolGetSessionStatus, "Inspect one worker session's authoritative status, heartbeat, wait reason, error, and recovery state.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32 `json:"session_id"`
@@ -90,8 +101,8 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: aicli.ToolAskTaskOwner,
-		def:  orchestratorDef(aicli.ToolAskTaskOwner, "Ask the owning worker agent for a status, blocker, or decision. The answer arrives asynchronously.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
+		name: OrchestratorToolAskTaskOwner,
+		def:  orchestratorDef(OrchestratorToolAskTaskOwner, "Ask the owning worker agent for a status, blocker, or decision. The answer arrives asynchronously.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32  `json:"session_id"`
@@ -107,8 +118,8 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: aicli.ToolRunNewSession,
-		def:  orchestratorDef(aicli.ToolRunNewSession, "Start a bounded replacement for a failed worker session, preserving replacement lineage.", `{"type":"object","properties":{"source_session_id":{"type":"integer"},"reason":{"type":"string"}},"required":["reason"]}`),
+		name: OrchestratorToolRunNewSession,
+		def:  orchestratorDef(OrchestratorToolRunNewSession, "Start a bounded replacement for a failed worker session, preserving replacement lineage.", `{"type":"object","properties":{"source_session_id":{"type":"integer"},"reason":{"type":"string"}},"required":["reason"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SourceSessionID *int32 `json:"source_session_id"`
@@ -124,8 +135,8 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: aicli.ToolStopSession,
-		def:  orchestratorDef(aicli.ToolStopSession, "Stop one unhealthy worker session. Never use this for intentional human or owner waits.", `{"type":"object","properties":{"session_id":{"type":"integer"},"reason":{"type":"string"}},"required":["session_id","reason"]}`),
+		name: OrchestratorToolStopSession,
+		def:  orchestratorDef(OrchestratorToolStopSession, "Stop one unhealthy worker session. Never use this for intentional human or owner waits.", `{"type":"object","properties":{"session_id":{"type":"integer"},"reason":{"type":"string"}},"required":["session_id","reason"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32  `json:"session_id"`
@@ -141,8 +152,8 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: aicli.ToolForkSession,
-		def:  orchestratorDef(aicli.ToolForkSession, "Fork a worker from a persisted safe message boundary. This does not roll back side effects.", `{"type":"object","properties":{"session_id":{"type":"integer"},"fork_message_id":{"type":"integer"}},"required":["session_id","fork_message_id"]}`),
+		name: OrchestratorToolForkSession,
+		def:  orchestratorDef(OrchestratorToolForkSession, "Fork a worker from a persisted safe message boundary. This does not roll back side effects.", `{"type":"object","properties":{"session_id":{"type":"integer"},"fork_message_id":{"type":"integer"}},"required":["session_id","fork_message_id"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID     int32 `json:"session_id"`
