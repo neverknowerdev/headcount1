@@ -104,7 +104,7 @@ export const RunLogs: React.FC = () => {
         const descendantsByRoot = new Map<number, any[]>();
         const orchestratorByWorker = new Map<number, any>();
         runs.forEach((r: any) => {
-            if (r.kind === 'orchestrator' && r.supervised_run_id) {
+            if (r.supervised_run_id) {
                 orchestratorByWorker.set(r.supervised_run_id, r);
                 return;
             }
@@ -116,7 +116,7 @@ export const RunLogs: React.FC = () => {
             if (!descendantsByRoot.has(rootId)) descendantsByRoot.set(rootId, []);
             descendantsByRoot.get(rootId)!.push(r);
         });
-        const rootRuns = runs.filter((r: any) => !r.parent_run_id && r.kind !== 'orchestrator');
+        const rootRuns = runs.filter((r: any) => !r.parent_run_id && !r.supervised_run_id);
         return { rootRuns, childrenByParent, descendantsByRoot, orchestratorByWorker };
     }, [runs]);
 
@@ -174,7 +174,6 @@ export const RunLogs: React.FC = () => {
                                     {orchestrator && (
                                         <div className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
                                             <span className="font-semibold">Task Orchestrator:</span> {orchestrator.status}
-                                            {orchestrator.orchestrator_model ? ` · ${orchestrator.orchestrator_model}` : ''}
                                             {orchestrator.current_status ? ` · ${orchestrator.current_status}` : ''}
                                         </div>
                                     )}

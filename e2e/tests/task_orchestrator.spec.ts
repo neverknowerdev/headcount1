@@ -64,21 +64,27 @@ test.describe.serial('task sidecar orchestrator', () => {
         });
         taskId = task.id;
 
+        // Creating a task leaves it in the backlog. Assigning it to To Do is
+        // the explicit execution trigger used by the task lifecycle API.
+        const kick = await request.put(`/api/tasks/${taskId}`, {
+            data: { status: 'to-do' },
+        });
+        expect(kick.ok(), await kick.text()).toBeTruthy();
+
         await waitForTaskStatus(request, taskId, 'done');
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${taskId}/runs`);
             const runs = await response.json();
-            return runs.some((r: any) => r.kind === 'orchestrator');
+            return runs.some((r: any) => r.supervised_run_id);
         }, { timeout: 20_000 }).toBeTruthy();
 
         const runsResponse = await request.get(`/api/tasks/${taskId}/runs`);
         const runs = await runsResponse.json();
-        const workers = runs.filter((r: any) => r.kind !== 'orchestrator');
-        const orchestrators = runs.filter((r: any) => r.kind === 'orchestrator');
+        const workers = runs.filter((r: any) => !r.supervised_run_id);
+        const orchestrators = runs.filter((r: any) => r.supervised_run_id);
         expect(workers.length).toBe(1);
         expect(orchestrators.length).toBe(1);
         expect(orchestrators[0].supervised_run_id).toBe(workers[0].id);
-        expect(orchestrators[0].orchestrator_model).toBe('e2e-orchestrator-model');
 
         const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
