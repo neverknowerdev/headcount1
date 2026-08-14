@@ -480,7 +480,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 
 	run := waitForRunStatus(t, q, runID, db.RunStatusPaused, 10*time.Second)
-	assert.NotZero(t, run.CheckpointSequence, "paused run must persist a JSONL checkpoint cursor")
+	assert.NotZero(t, run.Recovery.CheckpointSequence, "paused run must persist a JSONL checkpoint cursor")
 	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
 	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")
 
@@ -504,7 +504,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 
 	finalRun := waitForRunDone(t, q, runID, 15*time.Second)
 	assert.Equal(t, "completed", finalRun.Status)
-	assert.Zero(t, finalRun.CheckpointSequence, "resumed checkpoint should be cleared once consumed")
+	assert.Zero(t, finalRun.Recovery.CheckpointSequence, "resumed checkpoint should be cleared once consumed")
 	assert.Equal(t, int32(2), callCount.Load(), "resume must replay the pending tool call locally, then make exactly one more LLM call")
 	assert.Equal(t, resumeMarker, finalRun.CurrentStatus, "the tool call pending at pause time must run on resume")
 
@@ -1550,7 +1550,7 @@ func TestNativeEngineResumesFailedRunWithoutPreparedCheckpoint(t *testing.T) {
 	require.NoError(t, eng.ResumeSession(context.Background(), run.ID, engine.ResumeOptions{Cause: engine.ResumeAfterFailure, Reason: "retry after provider error"}))
 	finalRun := waitForRunDone(t, q, run.ID, 20*time.Second)
 	assert.Equal(t, "completed", finalRun.Status)
-	assert.GreaterOrEqual(t, finalRun.ResumeAttempts, 1)
+	assert.GreaterOrEqual(t, finalRun.Recovery.ResumeAttempts, 1)
 	entries := readJSONLEntries(t, logger.FilePath())
 	var messages []string
 	for _, entry := range entries {

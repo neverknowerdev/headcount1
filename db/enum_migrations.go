@@ -2,10 +2,10 @@ package db
 
 import "gorm.io/gorm"
 
-// EnsurePostgresEnumTypes creates enum types used by models before GORM runs
-// AutoMigrate. PostgreSQL requires the type to exist before it can create the
-// Run table's checkpoint_phase column; other dialects keep using their native
-// string-like type.
+// EnsurePostgresEnumTypes keeps the legacy checkpoint_phase type available for
+// upgrades from the pre-JSON recovery schema. New Run rows store checkpoint
+// phase inside the JSONB recovery document, so this is intentionally a no-op
+// for the current schema beyond preserving compatibility with old databases.
 func EnsurePostgresEnumTypes(database *gorm.DB) error {
 	if database == nil || database.Dialector.Name() != "postgres" {
 		return nil

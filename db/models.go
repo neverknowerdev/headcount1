@@ -576,20 +576,27 @@ type Run struct {
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
 
-	// Recovery fields are internal control-plane state. Conversation history
-	// remains exclusively in the append-only JSONL log; these fields store only
-	// a cursor, planned-pause metadata, and the short-lived resume lease.
-	CheckpointSequence   int64           `json:"-" gorm:"default:0"`
-	CheckpointVersion    int             `json:"-" gorm:"default:0"`
-	CheckpointPhase      CheckpointPhase `json:"-" gorm:"type:checkpoint_phase;default:'before_tools'"`
-	RecoveryReason       string          `json:"-" gorm:"default:''"`
-	RecoveryInitiator    string          `json:"-" gorm:"default:''"`
-	RecoveryTarget       string          `json:"-" gorm:"default:''"`
-	ResumeLeaseOwner     string          `json:"-" gorm:"default:''"`
-	ResumeLeaseUntil     *time.Time      `json:"-"`
-	ResumePreviousStatus string          `json:"-" gorm:"default:''"`
-	ResumeAttempts       int             `json:"-" gorm:"default:0"`
-	LastResumeError      string          `json:"-" gorm:"type:text"`
+	// Recovery is internal control-plane state. Conversation history remains
+	// exclusively in the append-only JSONL log; this JSONB document stores only
+	// the cursor, planned-pause metadata, and short-lived resume lease.
+	Recovery RunRecovery `json:"-" gorm:"serializer:json;type:jsonb"`
+}
+
+// RunRecovery groups transient recovery metadata so the execution model does
+// not expose a column for every recovery concern. Query helpers update this
+// value atomically when claiming or releasing a resume lease.
+type RunRecovery struct {
+	CheckpointSequence   int64           `json:"checkpoint_sequence,omitempty"`
+	CheckpointVersion    int             `json:"checkpoint_version,omitempty"`
+	CheckpointPhase      CheckpointPhase `json:"checkpoint_phase,omitempty"`
+	RecoveryReason       string          `json:"recovery_reason,omitempty"`
+	RecoveryInitiator    string          `json:"recovery_initiator,omitempty"`
+	RecoveryTarget       string          `json:"recovery_target,omitempty"`
+	ResumeLeaseOwner     string          `json:"resume_lease_owner,omitempty"`
+	ResumeLeaseUntil     *time.Time      `json:"resume_lease_until,omitempty"`
+	ResumePreviousStatus string          `json:"resume_previous_status,omitempty"`
+	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
+	LastResumeError      string          `json:"last_resume_error,omitempty"`
 }
 
 // CheckpointPhase identifies the safe point represented by a checkpoint. It is

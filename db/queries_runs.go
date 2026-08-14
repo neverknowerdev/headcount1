@@ -42,13 +42,28 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 // conditional update makes the minute monitor safe to run concurrently with
 // normal completion or an explicit resume claim.
 func (q *Queries) MarkRunStale(ctx context.Context, runID int32, reason string) (bool, error) {
-	result := q.db.WithContext(ctx).Model(&Run{}).
-		Where("id = ? AND status = ?", runID, "running").Updates(map[string]interface{}{
-		"status":          RunStatusStale,
-		"ended_at":        gorm.Expr("CURRENT_TIMESTAMP"),
-		"recovery_reason": reason,
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return false, err
+	}
+	if run.Status != "running" {
+		return false, nil
+	}
+	run.Recovery.RecoveryReason = reason
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, "running").Updates(map[string]interface{}{
+		"status": RunStatusStale, "ended_at": ptrTime(time.Now()), "recovery": recoveryJSON(run.Recovery),
 	})
 	return result.RowsAffected == 1, result.Error
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// recoveryJSON mirrors GORM's serializer:json conversion for targeted
+// Updates calls. Map updates bypass the model field serializer, so encode the
+// compact recovery document explicitly while avoiding a full Run rewrite.
+func recoveryJSON(recovery RunRecovery) string {
+	payload, _ := json.Marshal(recovery)
+	return string(payload)
 }
 
 // SetRunRootID sets root_run_id after creation. Root runs point at themselves
@@ -336,21 +351,21 @@ func (q *Queries) PauseRun(ctx context.Context, runID int32, sequence int64) err
 }
 
 // PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
-// boundary directly on the Run row. The JSONL file remains the history source
-// of truth; these columns are only a cursor and recovery coordination state.
+// boundary on the Run row. The JSONL file remains the history source of truth;
+// Recovery is only a cursor and recovery-coordination state.
 func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, sequence int64, reason, initiator, target, phase string) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	recovery := RunRecovery{
+		CheckpointSequence: sequence, CheckpointVersion: CheckpointVersion,
+		CheckpointPhase: CheckpointPhase(phase), RecoveryReason: reason,
+		RecoveryInitiator: initiator, RecoveryTarget: target,
+		ResumeAttempts: run.Recovery.ResumeAttempts,
+	}
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"status":                 RunStatusPaused,
-		"checkpoint_sequence":    sequence,
-		"checkpoint_version":     CheckpointVersion,
-		"checkpoint_phase":       CheckpointPhase(phase),
-		"recovery_reason":        reason,
-		"recovery_initiator":     initiator,
-		"recovery_target":        target,
-		"last_resume_error":      "",
-		"resume_lease_owner":     "",
-		"resume_lease_until":     nil,
-		"resume_previous_status": "",
+		"status": RunStatusPaused, "recovery": recoveryJSON(recovery),
 	}).Error
 }
 
@@ -382,60 +397,63 @@ func (q *Queries) ClaimRunForResume(ctx context.Context, runID int32, owner stri
 	if owner == "" || len(allowedStates) == 0 {
 		return false, fmt.Errorf("resume claim requires owner and allowed states")
 	}
-	claimed := false
-	err := q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&Run{}).
-			Where("runs.id = ? AND runs.status IN ? AND (runs.resume_lease_until IS NULL OR runs.resume_lease_until < ?)", runID, allowedStates, time.Now()).
-			Updates(map[string]interface{}{
-				"status":                 RunStatusResuming,
-				"checkpoint_sequence":    sequence,
-				"checkpoint_version":     CheckpointVersion,
-				"resume_lease_owner":     owner,
-				"resume_lease_until":     lease,
-				"resume_previous_status": previousStatus,
-				"resume_attempts":        gorm.Expr("resume_attempts + 1"),
-				"last_resume_error":      "",
-				"recovery_reason":        cause,
-			})
-		if result.Error != nil {
-			return result.Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return false, err
+	}
+	allowed := false
+	for _, state := range allowedStates {
+		if run.Status == state {
+			allowed = true
+			break
 		}
-		if result.RowsAffected != 1 {
-			return nil
-		}
-		claimed = true
-		return nil
+	}
+	if !allowed || (run.Recovery.ResumeLeaseUntil != nil && run.Recovery.ResumeLeaseUntil.After(time.Now())) {
+		return false, nil
+	}
+	if previousStatus == "" {
+		previousStatus = run.Status
+	}
+	run.Recovery.CheckpointSequence = sequence
+	run.Recovery.CheckpointVersion = CheckpointVersion
+	run.Recovery.ResumeLeaseOwner = owner
+	run.Recovery.ResumeLeaseUntil = ptrTime(lease)
+	run.Recovery.ResumePreviousStatus = previousStatus
+	run.Recovery.ResumeAttempts++
+	run.Recovery.LastResumeError = ""
+	run.Recovery.RecoveryReason = cause
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status IN ?", runID, allowedStates).Updates(map[string]interface{}{
+		"status": RunStatusResuming, "recovery": recoveryJSON(run.Recovery),
 	})
-	return claimed, err
+	return result.RowsAffected == 1, result.Error
 }
 
 // ReclaimExpiredResumeLeases returns interrupted resume attempts to the state
 // they had before claiming, preserving failed/stale policy instead of turning
 // every startup crash into an automatically paused run.
 func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time) error {
-	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		var expired []Run
-		if err := tx.Where("status = ? AND resume_lease_until IS NOT NULL AND resume_lease_until < ?", RunStatusResuming, now).Find(&expired).Error; err != nil {
+	var runs []Run
+	if err := q.db.WithContext(ctx).Where("status = ?", RunStatusResuming).Find(&runs).Error; err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.Recovery.ResumeLeaseUntil == nil || !run.Recovery.ResumeLeaseUntil.Before(now) {
+			continue
+		}
+		status := run.Recovery.ResumePreviousStatus
+		if status == "" {
+			status = RunStatusPaused
+		}
+		run.Recovery.ResumeLeaseOwner = ""
+		run.Recovery.ResumeLeaseUntil = nil
+		run.Recovery.ResumePreviousStatus = ""
+		if err := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", run.ID, RunStatusResuming).Updates(map[string]interface{}{
+			"status": status, "recovery": recoveryJSON(run.Recovery),
+		}).Error; err != nil {
 			return err
 		}
-		for _, run := range expired {
-			status := run.ResumePreviousStatus
-			if status == "" {
-				status = RunStatusPaused
-			}
-			if err := tx.Model(&Run{}).Where("id = ? AND status = ?", run.ID, RunStatusResuming).Update("status", status).Error; err != nil {
-				return err
-			}
-			if err := tx.Model(&Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
-				"resume_lease_owner":     "",
-				"resume_lease_until":     nil,
-				"resume_previous_status": "",
-			}).Error; err != nil {
-				return err
-			}
-		}
-		return nil
-	})
+	}
+	return nil
 }
 
 // MarkRunResumeStarted transitions a claimed run to running without deleting
@@ -443,26 +461,39 @@ func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time)
 // state, so a crash during handoff remains recoverable.
 func (q *Queries) MarkRunResumeStarted(ctx context.Context, runID int32, owner string) error {
 	now := time.Now()
-	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		result := tx.Model(&Run{}).Where("id = ? AND status = ? AND resume_lease_owner = ?", runID, RunStatusResuming, owner).Updates(map[string]interface{}{"status": "running", "last_message_time": now, "ended_at": nil, "resume_lease_owner": "", "resume_lease_until": nil})
-		if result.Error != nil {
-			return result.Error
-		}
-		if result.RowsAffected != 1 {
-			return fmt.Errorf("run %d resume claim is no longer active", runID)
-		}
-		return nil
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	if run.Status != RunStatusResuming || run.Recovery.ResumeLeaseOwner != owner {
+		return fmt.Errorf("run %d resume claim is no longer active", runID)
+	}
+	run.Recovery.ResumeLeaseOwner = ""
+	run.Recovery.ResumeLeaseUntil = nil
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, RunStatusResuming).Updates(map[string]interface{}{
+		"status": "running", "last_message_time": &now, "ended_at": nil,
+		"recovery": recoveryJSON(run.Recovery),
 	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("run %d resume claim is no longer active", runID)
+	}
+	return nil
 }
 
 // UpdateRunRecoveryMetadata records operator/context details without changing
 // the checkpoint or its lifecycle state.
 func (q *Queries) UpdateRunRecoveryMetadata(ctx context.Context, runID int32, reason, initiator, target string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"recovery_reason":    reason,
-		"recovery_initiator": initiator,
-		"recovery_target":    target,
-	}).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.RecoveryReason = reason
+	run.Recovery.RecoveryInitiator = initiator
+	run.Recovery.RecoveryTarget = target
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
 }
 
 // RecordResumeError leaves a claimed run recoverable and makes a failed
@@ -471,22 +502,30 @@ func (q *Queries) RecordResumeError(ctx context.Context, runID int32, resumeErr,
 	if recoverableStatus == "" {
 		recoverableStatus = RunStatusPaused
 	}
-	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"last_resume_error": resumeErr, "resume_lease_owner": "", "resume_lease_until": nil}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&Run{}).Where("id = ?", runID).Update("status", recoverableStatus).Error
-	})
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.LastResumeError = resumeErr
+	run.Recovery.ResumeLeaseOwner = ""
+	run.Recovery.ResumeLeaseUntil = nil
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": recoverableStatus, "recovery": recoveryJSON(run.Recovery),
+	}).Error
 }
 
 // ClearRunCheckpoint removes the transient recovery cursor after a resumed
 // run has reached a durable terminal state.
 func (q *Queries) ClearRunCheckpoint(ctx context.Context, runID int32) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"checkpoint_sequence": 0, "checkpoint_version": 0, "checkpoint_phase": CheckpointPhaseBeforeTools,
-		"recovery_reason": "", "recovery_initiator": "", "recovery_target": "",
-		"resume_lease_owner": "", "resume_lease_until": nil, "resume_previous_status": "", "last_resume_error": "",
-	}).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	// Keep the attempt counter as durable audit metadata while clearing the
+	// cursor, lease, and last transient error consumed by a successful resume.
+	attempts := run.Recovery.ResumeAttempts
+	run.Recovery = RunRecovery{ResumeAttempts: attempts}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
 }
 
 // MarkRunRecoverable records a failed or stale run with a valid checkpoint for
@@ -496,9 +535,16 @@ func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status st
 	if status != RunStatusRecoverableFailed && status != RunStatusStale {
 		return fmt.Errorf("unsupported recoverable run status %q", status)
 	}
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.CheckpointSequence = sequence
+	run.Recovery.CheckpointVersion = CheckpointVersion
+	run.Recovery.CheckpointPhase = CheckpointPhaseAfterTools
+	run.Recovery.RecoveryReason = reason
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"status": status, "checkpoint_sequence": sequence, "checkpoint_version": CheckpointVersion,
-		"checkpoint_phase": CheckpointPhaseAfterTools, "recovery_reason": reason,
+		"status": status, "recovery": recoveryJSON(run.Recovery),
 	}).Error
 }
 
@@ -506,10 +552,12 @@ func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status st
 // callers. New code should claim first and call MarkRunResumeStarted.
 func (q *Queries) ResumeRun(ctx context.Context, runID int32) error {
 	now := time.Now()
-	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": "running", "last_message_time": now}).Error; err != nil {
-			return err
-		}
-		return tx.Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"checkpoint_sequence": 0, "checkpoint_version": 0, "resume_lease_owner": "", "resume_lease_until": nil}).Error
-	})
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": "running", "last_message_time": &now,
+		"recovery": recoveryJSON(RunRecovery{ResumeAttempts: run.Recovery.ResumeAttempts}),
+	}).Error
 }
