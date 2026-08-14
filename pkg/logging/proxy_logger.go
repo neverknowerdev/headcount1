@@ -713,7 +713,7 @@ func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toMode
 //     follow-up nudge), no_finish (ended without ever calling it), max_turns,
 //     error, canceled
 //   - taskStatus: the agent's own verdict passed to finish_task
-//     (done / in-review / blocked / refinement), empty if it never called it
+//     (done / in-review / blocked), empty if it never called it
 //   - summary: the agent's finish_status one-liner, or the error message
 //
 // run_id/task_id/agent_name are embedded so each log file is self-describing.

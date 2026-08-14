@@ -74,7 +74,6 @@ func TestFinishAllowsGitOnlyForSuccessfulVerdicts(t *testing.T) {
 	require.True(t, finishAllowsGit(tools.FinishTaskResult{Status: "done"}))
 	require.True(t, finishAllowsGit(tools.FinishTaskResult{Status: "in-review"}))
 	require.False(t, finishAllowsGit(tools.FinishTaskResult{Status: "blocked"}))
-	require.False(t, finishAllowsGit(tools.FinishTaskResult{Status: "refinement"}))
 	require.False(t, finishAllowsGit(tools.FinishTaskResult{}))
 }
 

@@ -51,6 +51,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.TaskRelation{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
@@ -1419,7 +1420,7 @@ func fixtureHandler(ft *aicli.FixtureTransport) http.Handler {
 }
 
 // TestNativeEngineProcessTaskIgnoresTerminalStatuses verifies that a plain
-// status change (e.g. dragging a card to done/blocked/in-review/refinement)
+// status change (e.g. dragging a card to done/blocked/in-review)
 // does NOT restart the agent — only an explicit re-run may do that.
 func TestNativeEngineProcessTaskIgnoresTerminalStatuses(t *testing.T) {
 	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
@@ -1430,7 +1431,7 @@ func TestNativeEngineProcessTaskIgnoresTerminalStatuses(t *testing.T) {
 	eng := engine.NewNativeEngine(database, hub)
 	q := db.New(database)
 
-	for _, status := range []string{"in-review", "blocked", "done", "refinement"} {
+	for _, status := range []string{db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone} {
 		task.Status = status
 		_, err := q.UpdateTask(context.Background(), task)
 		require.NoError(t, err)

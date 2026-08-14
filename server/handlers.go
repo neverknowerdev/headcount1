@@ -241,6 +241,9 @@ func (s *Server) Mount(r chi.Router) {
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadTask)
 			r.Get("/", api.GetTask)
+			r.Get("/relations", api.ListTaskRelations)
+			r.Post("/relations", api.CreateTaskRelation)
+			r.Delete("/relations/{relationID}", api.DeleteTaskRelation)
 			r.Put("/", api.UpdateTask)
 			r.Put("/status", api.UpdateTask)
 			r.Get("/runs", api.ListTaskRuns)

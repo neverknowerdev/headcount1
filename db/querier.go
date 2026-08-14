@@ -33,6 +33,18 @@ type TaskQuerier interface {
 	GetTask(ctx context.Context, id int32) (Task, error)
 }
 
+type TaskRelationQuerier interface {
+	CreateTaskRelation(ctx context.Context, relation TaskRelation) (TaskRelation, error)
+	DeleteTaskRelation(ctx context.Context, relationID int32) error
+	GetTaskRelation(ctx context.Context, relationID int32) (TaskRelation, error)
+	ListTaskRelations(ctx context.Context, taskID int32) ([]TaskRelation, error)
+	ListBlockingDependencies(ctx context.Context, taskID int32) ([]Task, error)
+	ListDependentTasks(ctx context.Context, prerequisiteTaskID int32) ([]Task, error)
+	ListQueuedTasksForReconciliation(ctx context.Context) ([]Task, error)
+	ListTaskRelationSummaries(ctx context.Context, taskIDs []int32) (map[int32]TaskRelationSummary, error)
+	CanStartTask(ctx context.Context, taskID int32) (bool, []Task, error)
+}
+
 type SubtaskQuerier interface {
 	ListSubtasksByParent(ctx context.Context, parentID int32) ([]Task, error)
 	CountRunningSubtasks(ctx context.Context, parentID int32) (int64, error)
@@ -94,6 +106,7 @@ type Querier interface {
 	ProjectQuerier
 	AgentQuerier
 	TaskQuerier
+	TaskRelationQuerier
 	SubtaskQuerier
 	CommentQuerier
 	AttachmentQuerier
