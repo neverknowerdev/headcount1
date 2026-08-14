@@ -105,7 +105,7 @@ test.describe.serial('Headcount1 App', () => {
         // Add Task
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
-        await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
+        await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
         // Get the newly created task ID for later waits
@@ -118,8 +118,8 @@ test.describe.serial('Headcount1 App', () => {
         // Assign agent and move to "To Do" — this triggers the engine
         await page.click('text=Write E2E Tests');
         await expect(page.getByText('PW-INC-1')).toBeVisible();
-        await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
-        await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
+        await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
+        await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
         // The native engine + mock provider will now run and the mock provider

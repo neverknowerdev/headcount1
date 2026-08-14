@@ -831,8 +831,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         <div className="flex-1 p-6 space-y-4 overflow-y-auto">
                         {taskId && (
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                                <select value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm font-semibold text-indigo-600">
+                                <label htmlFor="task-status" className="block text-sm font-medium text-gray-700 mb-1">Status</label>
+                                <select id="task-status" value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm font-semibold text-indigo-600">
                                     <option value="backlog">Backlog</option>
                                     <option value="to-do">To Do</option>
                                     <option value="in-progress">In Progress</option>
@@ -885,15 +885,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 							</div>
 						)}
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Sprint</label>
-                            <select required value={formData.sprint_id} onChange={e => setFormData({...formData, sprint_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">
+                            <label htmlFor="task-sprint" className="block text-sm font-medium text-gray-700 mb-1">Sprint</label>
+                            <select id="task-sprint" required value={formData.sprint_id} onChange={e => setFormData({...formData, sprint_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">
                                 <option value="" disabled>-- Select Sprint --</option>
                                 {sprints.map(s => <option key={s.id} value={s.id}>{s.name}</option>)}
                             </select>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Assignee</label>
-                            <select value={formData.agent_id} onChange={e => setFormData({...formData, agent_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">
+                            <label htmlFor="task-assignee" className="block text-sm font-medium text-gray-700 mb-1">Assignee</label>
+                            <select id="task-assignee" value={formData.agent_id} onChange={e => setFormData({...formData, agent_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">
                                 <option value="">Unassigned</option>
                                 {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
                             </select>
