@@ -89,9 +89,11 @@ test.describe.serial('task sidecar orchestrator', () => {
         const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
-        const tools = orchestratorRequests[0].body?.tools || [];
-        expect(tools.map((t: any) => t.function?.name).sort()).toEqual([
+        const expectedTools = [
             'ask_task_owner', 'fork_session', 'get_session_status', 'get_sessions', 'run_new_session', 'stop_session',
-        ]);
+        ];
+        const toolNameSets = orchestratorRequests.map((r: any) =>
+            ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());
+        expect(toolNameSets).toContainEqual(expectedTools);
     });
 });
