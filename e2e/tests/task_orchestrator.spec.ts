@@ -48,12 +48,16 @@ test.describe.serial('task sidecar orchestrator', () => {
 
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-mock-model', entries: [{ tool_call: { id: 'worker-finish', name: 'finish_task', arguments: { task_status: 'done', finish_status: 'worker complete', result_details: 'worker complete' } } }] }),
+            body: JSON.stringify({ model: 'e2e-mock-model', entries: [
+                { tool_call: { id: 'worker-status', name: 'report_status', arguments: { status: 'Implementing the smoke task' } } },
+                { tool_call: { id: 'worker-finish', name: 'finish_task', arguments: { task_status: 'done', finish_status: 'worker complete', result_details: 'worker complete' } } },
+            ] }),
         });
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
                 { tool_call: { id: 'orch-list', name: 'get_sessions', arguments: {} } },
+                { tool_call: { id: 'orch-status', name: 'get_session_last_run_status', arguments: { session_id: 2 } } },
                 { text: 'Observed worker; no intervention required.' },
                 { text: 'Execution is terminal.' },
             ] }),
@@ -94,10 +98,16 @@ test.describe.serial('task sidecar orchestrator', () => {
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
         const expectedTools = [
-            'ask_task_owner', 'fork_session', 'get_session_status', 'get_sessions', 'run_new_session', 'stop_session',
+            'ask_task_owner', 'fork_session', 'get_session_last_run_status', 'get_sessions', 'run_new_session', 'stop_session',
         ];
         const toolNameSets = orchestratorRequests.map((r: any) =>
             ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());
         expect(toolNameSets).toContainEqual(expectedTools);
+
+        const statusRequests = orchestratorRequests.filter((r: any) =>
+            JSON.stringify(r.body?.messages || []).includes('last_reported_status'));
+        expect(statusRequests.length).toBeGreaterThanOrEqual(1);
+        expect(JSON.stringify(statusRequests)).toContain('Implementing the smoke task');
+        expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
     });
 });

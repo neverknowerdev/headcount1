@@ -175,6 +175,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunStatusReport{},
 		&db.RunEvent{},
 		&db.Artifact{},
 		&db.ActivityLog{},

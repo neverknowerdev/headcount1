@@ -187,3 +187,27 @@ func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, pending)
 }
+
+func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Run{}, &RunStatusReport{}))
+	run := Run{TaskID: 7, AgentID: 9, Status: "running"}
+	require.NoError(t, database.Create(&run).Error)
+	q := New(database)
+	ctx := context.Background()
+	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "planning"))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "implementing"))
+
+	var reports []RunStatusReport
+	require.NoError(t, database.Where("run_id = ?", run.ID).Order("reported_at asc").Find(&reports).Error)
+	require.Len(t, reports, 2)
+	latest, err := q.GetLatestRunStatusReport(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "implementing", latest.Status)
+	assert.True(t, latest.ReportedAt.After(reports[0].ReportedAt) || latest.ID > reports[0].ID)
+	loaded, err := q.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "implementing", loaded.CurrentStatus)
+}

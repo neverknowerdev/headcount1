@@ -16,7 +16,10 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/secrets"
+	"gorm.io/gorm"
 )
+
+const statusReportFreshness = 10 * time.Minute
 
 //go:embed prompts/task_orchestrator.md
 var orchestratorPrompt string
@@ -110,8 +113,8 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		GetSessions: func(c context.Context) ([]tools.OrchestratorSession, error) {
 			return e.orchestratorSessions(c, orchestrator.ID)
 		},
-		GetSessionStatus: func(c context.Context, id int32) (tools.OrchestratorSession, error) {
-			return e.orchestratorSessionStatus(c, orchestrator.ID, id)
+		GetSessionLastRunStatus: func(c context.Context, id int32) (tools.OrchestratorSessionLastRunStatus, error) {
+			return e.orchestratorSessionLastRunStatus(c, task, orchestrator.ID, id)
 		},
 		AskTaskOwner: func(c context.Context, id int32, question string) (string, error) {
 			return e.orchestratorAskOwner(c, task, orchestrator.ID, id, question)
@@ -201,29 +204,52 @@ func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRun
 	return out, nil
 }
 
-func (e *NativeEngine) orchestratorSessionStatus(ctx context.Context, orchestratorRunID, id int32) (tools.OrchestratorSession, error) {
+func (e *NativeEngine) orchestratorSessionRun(ctx context.Context, orchestratorRunID, id int32) (db.Run, error) {
 	r, err := e.q.GetRun(ctx, id)
 	if err != nil {
-		return tools.OrchestratorSession{}, err
+		return db.Run{}, err
 	}
 	valid := r.ID != orchestratorRunID && r.RootRunID != nil && *r.RootRunID == orchestratorRunID
 	if !valid {
-		return tools.OrchestratorSession{}, fmt.Errorf("session %d is outside the orchestrator worker tree", id)
+		return db.Run{}, fmt.Errorf("session %d is outside the orchestrator worker tree", id)
 	}
-	list, err := e.orchestratorSessions(ctx, orchestratorRunID)
+	return r, nil
+}
+
+func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.OrchestratorSessionLastRunStatus, error) {
+	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
 	if err != nil {
-		return tools.OrchestratorSession{}, err
+		return tools.OrchestratorSessionLastRunStatus{}, err
 	}
-	for _, s := range list {
-		if s.ID == id {
-			return s, nil
+	report, reportErr := e.q.GetLatestRunStatusReport(ctx, id)
+	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
+		return tools.OrchestratorSessionLastRunStatus{}, reportErr
+	}
+	result := tools.OrchestratorSessionLastRunStatus{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name}
+	if reportErr == nil {
+		result.LastReportedStatus = report.Status
+		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
+	}
+	stale := isStatusReportStale(report, reportErr == nil, time.Now())
+	result.StatusReportStale = stale
+	if stale && !isTerminalRunStatus(r.Status) {
+		requested := r.StatusRefreshRequestedAt != nil && time.Since(*r.StatusRefreshRequestedAt) < statusReportFreshness
+		if !requested {
+			question := "Please report your current status now using report_status. Include the stage you are working on and any blocker."
+			if _, askErr := e.orchestratorAskOwner(ctx, task, orchestratorRunID, id, question); askErr == nil {
+				now := time.Now()
+				if setErr := e.q.SetRunStatusRefreshRequestedAt(ctx, id, &now); setErr == nil {
+					requested = true
+				}
+			}
 		}
+		result.StatusRefreshRequested = requested
 	}
-	return tools.OrchestratorSession{}, fmt.Errorf("session %d is not in the orchestrator worker tree", id)
+	return result, nil
 }
 
 func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
-	session, err := e.orchestratorSessionStatus(ctx, orchestratorID, sessionID)
+	session, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
 	if err != nil {
 		return "", err
 	}
@@ -233,11 +259,11 @@ func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, o
 		return "", err
 	}
 	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
-	return fmt.Sprintf("Current worker status: %s. Question recorded for session %d; inspect its next lifecycle event for an answer.", session.Status, sessionID), nil
+	return fmt.Sprintf("Current worker lifecycle status: %s. Question recorded for session %d; inspect its next lifecycle event for an answer.", session.Status, sessionID), nil
 }
 
 func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, sessionID int32, reason string) (string, error) {
-	if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, sessionID); err != nil {
+	if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
 	}
 	_ = e.q.SetRunStopCause(ctx, sessionID, "orchestrator")
@@ -248,7 +274,7 @@ func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, 
 func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, reason string) (string, error) {
 	attemptRunID := orchestratorRunID
 	if source != nil {
-		if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, *source); err != nil {
+		if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, *source); err != nil {
 			return "", err
 		}
 		attemptRunID = *source
@@ -285,7 +311,7 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 // a safe checkpoint; an active or failed run without one is rejected instead
 // of risking duplicated side effects.
 func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, sessionID int32, messageID int64) (string, error) {
-	if _, err := e.orchestratorSessionStatus(ctx, orchestratorRunID, sessionID); err != nil {
+	if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
 	}
 	source, err := e.q.GetRun(ctx, sessionID)
@@ -320,4 +346,17 @@ func allWorkerSessionsTerminal(s []tools.OrchestratorSession) bool {
 		}
 	}
 	return true
+}
+
+func isTerminalRunStatus(status string) bool {
+	switch status {
+	case "completed", "failed", "canceled", db.RunStatusRecoverableFailed, db.RunStatusStale, "interrupted":
+		return true
+	default:
+		return false
+	}
+}
+
+func isStatusReportStale(report db.RunStatusReport, hasReport bool, now time.Time) bool {
+	return !hasReport || now.Sub(report.ReportedAt) > statusReportFreshness
 }

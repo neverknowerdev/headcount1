@@ -59,6 +59,7 @@ func allModels() []any {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunStatusReport{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},

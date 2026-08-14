@@ -103,9 +103,32 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 	return runs, err
 }
 
-// UpdateRunCurrentStatus stores the agent's self-reported progress line.
+// UpdateRunCurrentStatus appends the agent's self-reported progress line and
+// updates the latest-value cache used by the UI. A fresh report also clears a
+// previously requested status refresh.
 func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+	now := time.Now()
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		if err := tx.Create(&RunStatusReport{RunID: id, Status: status, ReportedAt: now}).Error; err != nil {
+			return err
+		}
+		return tx.Model(&Run{}).Where("id = ?", id).Updates(map[string]interface{}{
+			"current_status": status, "status_refresh_requested_at": nil,
+		}).Error
+	})
+}
+
+// GetLatestRunStatusReport returns the newest report_status entry for a run.
+func (q *Queries) GetLatestRunStatusReport(ctx context.Context, runID int32) (RunStatusReport, error) {
+	var report RunStatusReport
+	err := q.db.WithContext(ctx).Where("run_id = ?", runID).Order("reported_at DESC, id DESC").First(&report).Error
+	return report, err
+}
+
+// SetRunStatusRefreshRequestedAt records when the orchestrator last asked a
+// worker to publish a fresh report_status line.
+func (q *Queries) SetRunStatusRefreshRequestedAt(ctx context.Context, runID int32, at *time.Time) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("status_refresh_requested_at", at).Error
 }
 
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {

@@ -8,8 +8,9 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// OrchestratorSession is deliberately a small wire model. The orchestrator
-// receives authoritative state, not worker transcripts or filesystem access.
+// OrchestratorSession is deliberately a small wire model. The status field is
+// the engine lifecycle state used by get_sessions; worker progress reports are
+// returned by get_session_last_run_status instead.
 type OrchestratorSession struct {
 	ID                int32  `json:"id"`
 	Name              string `json:"name"`
@@ -24,26 +25,40 @@ type OrchestratorSession struct {
 	Error             string `json:"error,omitempty"`
 }
 
+// OrchestratorSessionLastRunStatus is the latest progress line emitted by the
+// worker's report_status tool. It deliberately does not expose Run.Status,
+// which is the engine lifecycle state rather than the worker's own report.
+type OrchestratorSessionLastRunStatus struct {
+	ID                     int32  `json:"id"`
+	Name                   string `json:"name"`
+	TaskID                 int32  `json:"task_id"`
+	Agent                  string `json:"agent"`
+	LastReportedStatus     string `json:"last_reported_status,omitempty"`
+	LastReportedAt         string `json:"last_reported_at,omitempty"`
+	StatusReportStale      bool   `json:"status_report_stale"`
+	StatusRefreshRequested bool   `json:"status_refresh_requested"`
+}
+
 // OrchestratorToolName is intentionally private to this registry. These
 // controls are never part of a worker's configurable tool surface.
 type OrchestratorToolName string
 
 const (
-	OrchestratorToolGetSessions      OrchestratorToolName = "get_sessions"
-	OrchestratorToolGetSessionStatus OrchestratorToolName = "get_session_status"
-	OrchestratorToolAskTaskOwner     OrchestratorToolName = "ask_task_owner"
-	OrchestratorToolRunNewSession    OrchestratorToolName = "run_new_session"
-	OrchestratorToolStopSession      OrchestratorToolName = "stop_session"
-	OrchestratorToolForkSession      OrchestratorToolName = "fork_session"
+	OrchestratorToolGetSessions             OrchestratorToolName = "get_sessions"
+	OrchestratorToolGetSessionLastRunStatus OrchestratorToolName = "get_session_last_run_status"
+	OrchestratorToolAskTaskOwner            OrchestratorToolName = "ask_task_owner"
+	OrchestratorToolRunNewSession           OrchestratorToolName = "run_new_session"
+	OrchestratorToolStopSession             OrchestratorToolName = "stop_session"
+	OrchestratorToolForkSession             OrchestratorToolName = "fork_session"
 )
 
 type OrchestratorCallbacks struct {
-	GetSessions      func(context.Context) ([]OrchestratorSession, error)
-	GetSessionStatus func(context.Context, int32) (OrchestratorSession, error)
-	AskTaskOwner     func(context.Context, int32, string) (string, error)
-	RunNewSession    func(context.Context, *int32, string) (string, error)
-	StopSession      func(context.Context, int32, string) (string, error)
-	ForkSession      func(context.Context, int32, int64) (string, error)
+	GetSessions             func(context.Context) ([]OrchestratorSession, error)
+	GetSessionLastRunStatus func(context.Context, int32) (OrchestratorSessionLastRunStatus, error)
+	AskTaskOwner            func(context.Context, int32, string) (string, error)
+	RunNewSession           func(context.Context, *int32, string) (string, error)
+	StopSession             func(context.Context, int32, string) (string, error)
+	ForkSession             func(context.Context, int32, int64) (string, error)
 }
 
 type orchestratorTool struct {
@@ -80,19 +95,19 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorTool{
-		name: OrchestratorToolGetSessionStatus,
-		def:  orchestratorDef(OrchestratorToolGetSessionStatus, "Inspect one worker session's authoritative status, heartbeat, wait reason, error, and recovery state.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
+		name: OrchestratorToolGetSessionLastRunStatus,
+		def:  orchestratorDef(OrchestratorToolGetSessionLastRunStatus, "Return the latest status line reported by a worker through report_status and when it was reported. If it is stale, request a fresh report.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32 `json:"session_id"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
-				return "", fmt.Errorf("get_session_status: %w", err)
+				return "", fmt.Errorf("get_session_last_run_status: %w", err)
 			}
 			if p.SessionID <= 0 {
 				return "", fmt.Errorf("session_id must be positive")
 			}
-			v, err := cb.GetSessionStatus(ctx, p.SessionID)
+			v, err := cb.GetSessionLastRunStatus(ctx, p.SessionID)
 			if err != nil {
 				return "", err
 			}

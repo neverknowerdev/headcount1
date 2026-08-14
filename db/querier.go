@@ -2,6 +2,7 @@ package db
 
 import (
 	"context"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -69,6 +70,8 @@ type RunQuerier interface {
 	GetRunBySessionID(ctx context.Context, sessionID string) (Run, error)
 	ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error)
 	UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error
+	GetLatestRunStatusReport(ctx context.Context, runID int32) (RunStatusReport, error)
+	SetRunStatusRefreshRequestedAt(ctx context.Context, runID int32, at *time.Time) error
 }
 
 type LLMProviderQuerier interface {
