@@ -39,7 +39,12 @@ func TestRunRecoveryIsOneSerializedDocument(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, database.AutoMigrate(&Run{}))
 	require.True(t, database.Migrator().HasColumn(&Run{}, "recovery"))
-	for _, legacyColumn := range legacyRunRecoveryColumns {
+	for _, legacyColumn := range []string{
+		"checkpoint_sequence", "checkpoint_version", "checkpoint_phase",
+		"recovery_reason", "recovery_initiator", "recovery_target",
+		"resume_lease_owner", "resume_lease_until", "resume_previous_status",
+		"resume_attempts", "last_resume_error",
+	} {
 		assert.False(t, database.Migrator().HasColumn(&Run{}, legacyColumn), "legacy recovery column %s must not be part of the current schema", legacyColumn)
 	}
 	run := Run{
@@ -164,54 +169,4 @@ func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
 	assert.Equal(t, RunStatusStale, loaded.Status)
 	assert.NotNil(t, loaded.EndedAt)
 	assert.Equal(t, "heartbeat timeout", loaded.Recovery.RecoveryReason)
-}
-
-func TestMigrateRunRecoveryToRunsDropsLegacyTable(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&Run{}))
-	run := Run{TaskID: 1, AgentID: 1, Status: RunStatusPaused}
-	require.NoError(t, database.Create(&run).Error)
-	require.NoError(t, database.Exec(`CREATE TABLE run_snapshots (
-		run_id integer primary key, checkpoint_sequence integer, checkpoint_version integer,
-		checkpoint_phase text, recovery_reason text, recovery_initiator text, recovery_target text,
-		resume_lease_owner text, resume_lease_until datetime, resume_previous_status text,
-		resume_attempts integer, last_resume_error text
-	)`).Error)
-	require.NoError(t, database.Exec(`INSERT INTO run_snapshots (run_id, checkpoint_sequence, checkpoint_version, checkpoint_phase, recovery_reason, resume_attempts) VALUES (?, ?, ?, ?, ?, ?)`, run.ID, 7, 1, "before_tools", "legacy", 2).Error)
-	require.NoError(t, MigrateRunRecoveryToRuns(database))
-	loaded, err := New(database).GetRun(context.Background(), run.ID)
-	require.NoError(t, err)
-	assert.Equal(t, int64(7), loaded.Recovery.CheckpointSequence)
-	assert.Equal(t, CheckpointVersion, loaded.Recovery.CheckpointVersion)
-	assert.Equal(t, "legacy", loaded.Recovery.RecoveryReason)
-	assert.Equal(t, 2, loaded.Recovery.ResumeAttempts)
-	assert.False(t, database.Migrator().HasTable("run_snapshots"))
-}
-
-func TestMigrateRunRecoveryColumnsIntoJSONDocument(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&Run{}))
-	run := Run{TaskID: 1, AgentID: 1, Status: RunStatusPaused}
-	require.NoError(t, database.Create(&run).Error)
-	for _, column := range []string{
-		"checkpoint_sequence integer", "checkpoint_version integer", "checkpoint_phase text",
-		"recovery_reason text", "recovery_initiator text", "recovery_target text",
-		"resume_lease_owner text", "resume_lease_until datetime", "resume_previous_status text",
-		"resume_attempts integer", "last_resume_error text",
-	} {
-		require.NoError(t, database.Exec("ALTER TABLE runs ADD COLUMN "+column).Error)
-	}
-	require.NoError(t, database.Exec("UPDATE runs SET checkpoint_sequence = 11, checkpoint_version = 1, checkpoint_phase = 'after_tools', recovery_reason = 'legacy columns', resume_attempts = 3 WHERE id = ?", run.ID).Error)
-	require.NoError(t, MigrateRunRecoveryToRuns(database))
-	var loaded Run
-	require.NoError(t, database.First(&loaded, run.ID).Error)
-	assert.Equal(t, int64(11), loaded.Recovery.CheckpointSequence)
-	assert.Equal(t, CheckpointPhaseAfterTools, loaded.Recovery.CheckpointPhase)
-	assert.Equal(t, "legacy columns", loaded.Recovery.RecoveryReason)
-	assert.Equal(t, 3, loaded.Recovery.ResumeAttempts)
-	for _, column := range legacyRunRecoveryColumns {
-		assert.False(t, tableHasColumn(database, "runs", column), "legacy recovery column %s should be removed", column)
-	}
 }

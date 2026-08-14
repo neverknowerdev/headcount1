@@ -35,9 +35,6 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 	if err := database.Exec("CREATE SCHEMA public").Error; err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	if err := db.EnsurePostgresEnumTypes(database); err != nil {
-		t.Fatalf("create postgres enum types: %v", err)
-	}
 	if err := database.AutoMigrate(
 		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
 		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},

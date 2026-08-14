@@ -93,7 +93,6 @@ func dropEverything(t *testing.T, database *gorm.DB) {
 func TestPostgresAutoMigrate(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
-	require.NoError(t, db.EnsurePostgresEnumTypes(database))
 	require.NoError(t, database.AutoMigrate(allModels()...), "AutoMigrate against Postgres")
 
 	// AutoMigrate must be idempotent — a second run (upgrade path) must not error.
@@ -106,7 +105,6 @@ func TestPostgresAutoMigrate(t *testing.T) {
 func TestPostgresQuerySurface(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
-	require.NoError(t, db.EnsurePostgresEnumTypes(database))
 	require.NoError(t, database.AutoMigrate(allModels()...))
 	q := db.New(database)
 	ctx := context.Background()
