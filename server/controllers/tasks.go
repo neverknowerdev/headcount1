@@ -76,6 +76,7 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
 
 	api.respondJSON(w, http.StatusOK, tasks)
 }
@@ -131,7 +132,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-
 	var dueDate *time.Time
 	if req.DueDate != nil {
 		t, _ := time.Parse(time.RFC3339, *req.DueDate)
@@ -175,7 +175,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		ProjectID:     req.ProjectID,
 		Title:         req.Title,
 		TaskType:      taskType,
-		Status:        "backlog",
+		Status:        db.TaskStatusBacklog,
 		AgentID:       req.AgentID,
 		SprintID:      req.SprintID,
 		ParentID:      req.ParentID,
@@ -204,11 +204,59 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
+	tasks := []db.Task{task}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
+	task = tasks[0]
 	api.respondJSON(w, http.StatusCreated, task)
 }
 
+func isTaskStatus(status string) bool {
+	switch status {
+	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInProgress,
+		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone:
+		return true
+	default:
+		return false
+	}
+}
+
 func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
-	api.respondJSON(w, http.StatusOK, api.taskFromCtx(r)) // loaded + authorized by LoadTask
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	tasks := []db.Task{task}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
+	task = tasks[0]
+	api.respondJSON(w, http.StatusOK, task)
+}
+
+func (api *API) attachTaskRelationSummaries(ctx context.Context, tasks []db.Task) {
+	ids := make([]int32, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	summaries, err := api.q.ListTaskRelationSummaries(ctx, ids)
+	if err != nil {
+		return
+	}
+	for i := range tasks {
+		if summary, ok := summaries[tasks[i].ID]; ok {
+			tasks[i].RelationSummary = &summary
+		}
+	}
+}
+
+func (api *API) reconcileDependents(ctx context.Context, prerequisiteTaskID int32) {
+	dependents, err := api.q.ListDependentTasks(ctx, prerequisiteTaskID)
+	if err != nil {
+		return
+	}
+	for _, dependent := range dependents {
+		id := dependent.ID
+		go func() {
+			if err := api.engine.ProcessTask(context.Background(), id); err != nil {
+				fmt.Printf("Warning: failed to reconcile dependent task %d: %v\n", id, err)
+			}
+		}()
+	}
 }
 
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
@@ -228,6 +276,14 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if req.Status != "" && !isTaskStatus(req.Status) {
+		api.respondError(w, http.StatusBadRequest, "invalid task status")
+		return
+	}
+	if req.Status == db.TaskStatusDependsOnTask {
+		api.respondError(w, http.StatusConflict, "depends-on-task is managed by task dependencies")
 		return
 	}
 
@@ -309,6 +365,9 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			Content:     string(content),
 		}); err == nil {
 			api.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", sc)
+		}
+		if task.Status == db.TaskStatusDone {
+			api.reconcileDependents(r.Context(), task.ID)
 		}
 	}
 

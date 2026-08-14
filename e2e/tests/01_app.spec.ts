@@ -105,7 +105,7 @@ test.describe.serial('Headcount1 App', () => {
         // Add Task
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
-        await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
+        await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
         // Get the newly created task ID for later waits
@@ -116,10 +116,15 @@ test.describe.serial('Headcount1 App', () => {
         const taskId = task.id;
 
         // Assign agent and move to "To Do" — this triggers the engine
-        await page.click('text=Write E2E Tests');
+        // Navigate directly using the task id returned by the API. The board
+        // card click is intentionally asynchronous and can race the task page
+        // loading before its form controls are available.
+        await page.goto(`/companies/pw-inc/tasks/${taskId}`);
+        await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
         await expect(page.getByText('PW-INC-1')).toBeVisible();
-        await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
-        await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
+        await expect(page.getByLabel('Assignee')).toBeVisible();
+        await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
+        await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
         // The native engine + mock provider will now run and the mock provider

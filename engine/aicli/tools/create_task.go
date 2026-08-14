@@ -19,7 +19,9 @@ type CreateTaskParams struct {
 	ProjectID   int32  `json:"project_id"`
 	DueDate     string `json:"due_date"`
 	// AgentName is the database Agent role key or display name to assign.
-	AgentName string `json:"agent_name"`
+	AgentName        string  `json:"agent_name"`
+	DependsOnTaskIDs []int32 `json:"depends_on_task_ids"`
+	RelatedToTaskIDs []int32 `json:"related_to_task_ids"`
 }
 
 // CreateTask creates a new TOP-LEVEL task on the board, alongside the tasks
@@ -85,6 +87,14 @@ func (t *CreateTask) Def() aicli.ToolDef {
 					"agent_name":{
 						"type":"string",
 						"description":"Optional database agent role key or name to assign (for example \"CTO\")"
+					},
+					"depends_on_task_ids":{
+						"type":"array","items":{"type":"integer"},
+						"description":"Existing tasks that must be done before this task can start"
+					},
+					"related_to_task_ids":{
+						"type":"array","items":{"type":"integer"},
+						"description":"Existing tasks that are informationally related"
 					}
 				},
 				"required":["title","description"]

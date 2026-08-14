@@ -171,6 +171,7 @@ func main() {
 		&db.Agent{},
 		&db.Skill{},
 		&db.Task{},
+		&db.TaskRelation{},
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
@@ -351,6 +352,9 @@ func main() {
 	// intentionally limited to update-paused sessions; explicit failed/stale
 	// recovery uses the same engine ResumeSession primitive later.
 	go eng.ResumeEligibleSessions(context.Background())
+	// Reconcile queued tasks after restart so a prerequisite completion or
+	// dependency removal is not stranded in the crash window before launch.
+	go eng.ReconcileQueuedTasks(context.Background())
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
