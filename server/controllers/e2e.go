@@ -33,6 +33,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"model_group_members",
 		"model_groups",
 		"default_model_settings",
+		"run_events",
 		"run_status_reports",
 		"runs",
 		"comments",

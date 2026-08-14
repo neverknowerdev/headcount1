@@ -109,6 +109,9 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(statusRequests.length).toBeGreaterThanOrEqual(1);
         expect(JSON.stringify(statusRequests)).toContain('Implementing the smoke task');
         expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
+        const reportEventRequests = orchestratorRequests.filter((r: any) =>
+            JSON.stringify(r.body?.messages || []).includes('"event_type":"status_report"'));
+        expect(reportEventRequests.length).toBeGreaterThanOrEqual(1);
         const statusPayloads = statusRequests.flatMap((r: any) => (r.body?.messages || [])
             .filter((m: any) => m.role === 'tool' && typeof m.content === 'string')
             .map((m: any) => {

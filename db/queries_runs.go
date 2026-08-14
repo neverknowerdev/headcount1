@@ -103,18 +103,29 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 	return runs, err
 }
 
-// UpdateRunCurrentStatus appends the agent's self-reported progress line and
-// updates the latest-value cache used by the UI. A fresh report also clears a
-// previously requested status refresh.
-func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string, messageID int64) error {
+// RecordRunStatusReport appends the agent's self-reported progress line and
+// updates the latest-value cache used by the UI. The append-only report row is
+// the source of truth for orchestrator reads; the cache is for fast UI reads.
+func (q *Queries) RecordRunStatusReport(ctx context.Context, id int32, status string, messageID int64) error {
 	now := time.Now()
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&RunStatusReport{RunID: id, Status: status, MessageID: messageID, ReportedAt: now}).Error; err != nil {
+		var run Run
+		if err := tx.First(&run, id).Error; err != nil {
 			return err
 		}
-		return tx.Model(&Run{}).Where("id = ?", id).Updates(map[string]interface{}{
-			"current_status": status, "status_refresh_requested_at": nil,
-		}).Error
+		report := RunStatusReport{RunID: id, Status: status, MessageID: messageID, ReportedAt: now}
+		if err := tx.Create(&report).Error; err != nil {
+			return err
+		}
+		if run.ParentRunID != nil {
+			payload, _ := json.Marshal(map[string]interface{}{
+				"status": status, "message_id": messageID, "reported_at": now.Format(time.RFC3339Nano),
+			})
+			if err := tx.Create(&RunEvent{TaskID: run.TaskID, RunID: id, EventType: "status_report", Payload: string(payload), DedupeKey: fmt.Sprintf("run:%d:status-report:%d", id, report.ID)}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
 	})
 }
 
@@ -125,10 +136,15 @@ func (q *Queries) GetLatestRunStatusReport(ctx context.Context, runID int32) (Ru
 	return report, err
 }
 
-// SetRunStatusRefreshRequestedAt records when the orchestrator last asked a
-// worker to publish a fresh report_status line.
-func (q *Queries) SetRunStatusRefreshRequestedAt(ctx context.Context, runID int32, at *time.Time) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("status_refresh_requested_at", at).Error
+// HasRecentRunEvent reports whether a targeted control event was created in
+// the freshness window. This keeps refresh throttling in the durable event
+// inbox instead of adding control-only columns to Run.
+func (q *Queries) HasRecentRunEvent(ctx context.Context, runID int32, eventType string, since time.Time) (bool, error) {
+	var count int64
+	err := q.db.WithContext(ctx).Model(&RunEvent{}).
+		Where("run_id = ? AND event_type = ? AND created_at >= ?", runID, eventType, since).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
@@ -306,7 +322,20 @@ func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
 
 func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
 	var events []RunEvent
-	err := q.db.WithContext(ctx).Where("task_id = ? AND consumed_at IS NULL", taskID).Order("created_at asc").Find(&events).Error
+	err := q.db.WithContext(ctx).
+		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []string{"run_status", "status_report"}).
+		Order("created_at asc").Find(&events).Error
+	return events, err
+}
+
+// ListPendingRunEventsForRun returns control messages targeted at one active
+// worker session. These are deliberately separate from the orchestrator's
+// lifecycle inbox so the orchestrator cannot consume worker instructions.
+func (q *Queries) ListPendingRunEventsForRun(ctx context.Context, runID int32, eventType string) ([]RunEvent, error) {
+	var events []RunEvent
+	err := q.db.WithContext(ctx).
+		Where("run_id = ? AND event_type = ? AND consumed_at IS NULL", runID, eventType).
+		Order("created_at asc").Find(&events).Error
 	return events, err
 }
 

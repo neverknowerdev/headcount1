@@ -1124,7 +1124,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string, messageID int64) error {
-		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status, messageID); err != nil {
+		if err := e.q.RecordRunStatusReport(sCtx, run.ID, status, messageID); err != nil {
 			return err
 		}
 		e.hub.BroadcastEventForCompany(task.CompanyID, "run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
@@ -1362,7 +1362,40 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		RunID:                       run.ID,
 		Logger:                      proxyLogger,
 		InitialConversationSequence: run.Recovery.CheckpointSequence,
-		HistoryAlreadyLogged:        resumeRun != nil,
+		BeforeTurn: func(controlCtx context.Context) ([]aicli.Message, error) {
+			refreshEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, "status_report_request")
+			if eventErr != nil {
+				return nil, eventErr
+			}
+			questionEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, "worker_question")
+			if eventErr != nil {
+				return nil, eventErr
+			}
+			events := append(refreshEvents, questionEvents...)
+			if len(events) == 0 {
+				return nil, nil
+			}
+			ids := make([]int64, 0, len(events))
+			messages := make([]aicli.Message, 0, len(events))
+			for _, event := range events {
+				ids = append(ids, event.ID)
+				if event.EventType == "status_report_request" {
+					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator requested a fresh progress update. Call report_status with your current stage and any blocker, then continue the task."})
+					continue
+				}
+				var payload struct {
+					Question string `json:"question"`
+				}
+				if json.Unmarshal([]byte(event.Payload), &payload) == nil && payload.Question != "" {
+					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator asked: " + payload.Question + " Respond with your current status or answer, then continue the task."})
+				}
+			}
+			if consumeErr := e.q.ConsumeRunEvents(controlCtx, ids); consumeErr != nil {
+				return nil, consumeErr
+			}
+			return messages, nil
+		},
+		HistoryAlreadyLogged: resumeRun != nil,
 	}
 	if resumeRun != nil {
 		initiator := run.Recovery.RecoveryInitiator

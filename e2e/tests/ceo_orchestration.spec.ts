@@ -254,7 +254,7 @@ test.describe.serial('CEO orchestration flow', () => {
         expect(rootRun.root_run_id).toBe(rootRun.id);
         expect(rootRun.agent_id).toBe(agent.id);
         expect(rootRun.status).toBe('completed');
-        expect(rootRun.current_status).toBe(STATUS_LINE);
+        expect(rootRun.latest_reported_status).toBe(STATUS_LINE);
         expect(rootRun.result_description).toBe('Greeting feature delegated, implemented and verified.');
 
         // Direct children of the root: exactly one CTO session.

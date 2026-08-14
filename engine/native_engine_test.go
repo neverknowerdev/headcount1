@@ -56,6 +56,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 		&db.Attachment{},
 		&db.Run{},
 		&db.RunStatusReport{},
+		&db.RunEvent{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -446,7 +447,7 @@ func waitForRunStatus(t *testing.T, q *db.Queries, runID int32, status string, t
 //
 // The pending tool call is report_status: it's available to every agent
 // (including the CEO orchestrator this task routes through) and its side
-// effect — writing run.current_status — is observable in the DB, so we can
+// effect — writing run.latest_reported_status — is observable in the DB, so we can
 // assert it ran on resume and not before.
 func TestNativeEnginePauseAndResume(t *testing.T) {
 	tmpHome := t.TempDir()
@@ -484,7 +485,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	run := waitForRunStatus(t, q, runID, db.RunStatusPaused, 10*time.Second)
 	assert.NotZero(t, run.Recovery.CheckpointSequence, "paused run must persist a JSONL checkpoint cursor")
 	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
-	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")
+	assert.NotEqual(t, resumeMarker, run.LatestReportedStatus, "the pending tool call must not run before resume")
 
 	// The task must stay locked to the interrupted run so no other run can
 	// start on it while it's waiting to resume.
@@ -508,7 +509,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	assert.Equal(t, "completed", finalRun.Status)
 	assert.Zero(t, finalRun.Recovery.CheckpointSequence, "resumed checkpoint should be cleared once consumed")
 	assert.Equal(t, int32(2), callCount.Load(), "resume must replay the pending tool call locally, then make exactly one more LLM call")
-	assert.Equal(t, resumeMarker, finalRun.CurrentStatus, "the tool call pending at pause time must run on resume")
+	assert.Equal(t, resumeMarker, finalRun.LatestReportedStatus, "the tool call pending at pause time must run on resume")
 
 	finishedTask, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)

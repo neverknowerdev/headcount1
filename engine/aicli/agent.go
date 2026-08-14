@@ -164,6 +164,7 @@ type Agent struct {
 	runID                int32
 	logger               RunLogger
 	conversationSequence int64
+	beforeTurn           func(context.Context) ([]Message, error)
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -187,6 +188,9 @@ type Config struct {
 	RunID                       int32
 	Logger                      RunLogger
 	InitialConversationSequence int64
+	// BeforeTurn supplies durable control messages immediately before the next
+	// provider request. It never interrupts an in-flight tool or LLM call.
+	BeforeTurn func(context.Context) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
@@ -215,6 +219,7 @@ func New(cfg Config) *Agent {
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
 		conversationSequence:  cfg.InitialConversationSequence,
+		beforeTurn:            cfg.BeforeTurn,
 	}
 }
 
@@ -342,6 +347,16 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()
+		}
+		if a.beforeTurn != nil {
+			messages, hookErr := a.beforeTurn(ctx)
+			if hookErr != nil {
+				return "", history, fmt.Errorf("before-turn control message failed: %w", hookErr)
+			}
+			for _, message := range messages {
+				history = append(history, message)
+				a.logConversationMessage(message)
+			}
 		}
 
 		req := ChatRequest{

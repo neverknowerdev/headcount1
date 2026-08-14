@@ -60,6 +60,7 @@ func allModels() []any {
 		&db.Attachment{},
 		&db.Run{},
 		&db.RunStatusReport{},
+		&db.RunEvent{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -180,7 +181,7 @@ func TestPostgresQuerySurface(t *testing.T) {
 	require.NoError(t, q.MigrateAddProjectFKToMCPServers(ctx), "MigrateAddProjectFKToMCPServers")
 
 	// ── Run key uniqueness query (LIKE with a suffix wildcard) ────────────
-	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "working", 1))
+	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "working", 1))
 
 	_ = user
 }

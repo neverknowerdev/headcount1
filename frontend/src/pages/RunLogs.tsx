@@ -87,7 +87,7 @@ export const RunLogs: React.FC = () => {
                 fetchRuns();
                 return;
             }
-            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, current_status: status } : r));
+            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, latest_reported_status: status } : r));
         }
     }, {
         enabled: !!selectedCompanyId,
@@ -161,8 +161,8 @@ export const RunLogs: React.FC = () => {
                                         <InfoItem label="Agent" value={r.agent?.name || '—'} />
                                         <InfoItem label="Started" value={formatDateTime(r.started_at)} />
                                         <InfoItem label="Duration" value={formatDuration(r.started_at, r.ended_at)} />
-                                        {r.current_status && (
-                                            <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.current_status}</span>} />
+                                        {r.latest_reported_status && (
+                                            <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.latest_reported_status}</span>} />
                                         )}
                                     </div>
 

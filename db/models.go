@@ -589,22 +589,21 @@ type Run struct {
 	// it equals ID for root runs so log files can be grouped per main run.
 	ParentRunID *int32 `json:"parent_run_id" gorm:"index"`
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
-	// CurrentStatus is a short free-text progress line set by the agent via
+	// LatestReportedStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI. The full history is
 	// stored in RunStatusReport rows.
-	CurrentStatus            string     `json:"current_status" gorm:"default:''"`
-	StatusRefreshRequestedAt *time.Time `json:"-"`
-	Status                   string     `json:"status" gorm:"not null"`
-	SessionID                string     `json:"session_id"`
-	LogFilePath              string     `json:"log_file_path"`
-	LogContent               string     `json:"log_content"`
-	LogEntries               string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
-	TokenStats               string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
-	ResultDescription        string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
-	ResultExplanation        string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
-	StartedAt                time.Time  `json:"started_at"`
-	EndedAt                  *time.Time `json:"ended_at"`
-	LastMessageTime          *time.Time `json:"last_message_time"`
+	LatestReportedStatus string     `json:"latest_reported_status" gorm:"column:current_status;default:''"`
+	Status               string     `json:"status" gorm:"not null"`
+	SessionID            string     `json:"session_id"`
+	LogFilePath          string     `json:"log_file_path"`
+	LogContent           string     `json:"log_content"`
+	LogEntries           string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
+	TokenStats           string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
+	ResultDescription    string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
+	ResultExplanation    string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
+	StartedAt            time.Time  `json:"started_at"`
+	EndedAt              *time.Time `json:"ended_at"`
+	LastMessageTime      *time.Time `json:"last_message_time"`
 
 	// Recovery is internal control-plane state. Conversation history remains
 	// exclusively in the append-only JSONL log; this JSONB document stores only
@@ -613,7 +612,7 @@ type Run struct {
 }
 
 // RunStatusReport is an append-only progress report emitted by report_status.
-// Run.CurrentStatus is only the latest-value cache used by the UI; the
+// Run.LatestReportedStatus is only the latest-value cache used by the UI; the
 // orchestrator reads the newest row and the complete report history remains
 // available for diagnostics.
 type RunStatusReport struct {

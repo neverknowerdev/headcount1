@@ -8,6 +8,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/eventhub"
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -22,7 +23,7 @@ func TestStatusReportFreshnessWindow(t *testing.T) {
 func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Sprint{}, &db.Task{}, &db.Run{}, &db.RunStatusReport{}, &db.Comment{}))
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Sprint{}, &db.Task{}, &db.Run{}, &db.RunStatusReport{}, &db.RunEvent{}, &db.Comment{}))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
@@ -48,9 +49,13 @@ func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	require.NoError(t, err)
 	require.True(t, second.StatusReportStale)
 	require.True(t, second.StatusRefreshRequested)
+	var refreshes []db.RunEvent
+	require.NoError(t, database.Where("run_id = ? AND event_type = ?", worker.ID, "status_report_request").Find(&refreshes).Error)
+	require.Len(t, refreshes, 1)
+	assert.Contains(t, refreshes[0].Payload, "report_status")
 	var comments []db.Comment
 	require.NoError(t, database.Where("task_id = ? AND comment_type = ?", task.ID, "orchestrator_question").Find(&comments).Error)
-	require.Len(t, comments, 1)
+	require.Empty(t, comments)
 }
 
 func ptrInt32(v int32) *int32 { return &v }

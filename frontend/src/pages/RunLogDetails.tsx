@@ -173,7 +173,7 @@ export const RunLogDetails: React.FC = () => {
             fetchAgentStats(run);
         } else if (msg.type === 'run_status' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
-            setRun((prev: any) => prev ? { ...prev, current_status: msg.payload.status } : prev);
+            setRun((prev: any) => prev ? { ...prev, latest_reported_status: msg.payload.status } : prev);
         } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
@@ -263,10 +263,10 @@ export const RunLogDetails: React.FC = () => {
                         <p className="text-sm text-gray-500">Status</p>
                         <p className="font-medium capitalize">{run.status}</p>
                     </div>
-                    {run.current_status && (
+                    {run.latest_reported_status && (
                         <div>
                             <p className="text-sm text-gray-500">Current Activity</p>
-                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.current_status}</p>
+                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.latest_reported_status}</p>
                         </div>
                     )}
                     <div>

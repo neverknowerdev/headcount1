@@ -117,7 +117,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return e.orchestratorSessionLastRunStatus(c, task, orchestrator.ID, id)
 		},
 		AskTaskOwner: func(c context.Context, id int32, question string) (string, error) {
-			return e.orchestratorAskOwner(c, task, orchestrator.ID, id, question)
+			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
 		},
 		RunNewSession: func(c context.Context, source *int32, reason string) (string, error) {
 			return e.orchestratorRunNew(c, task, orchestrator.ID, source, reason)
@@ -234,27 +234,57 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 	stale := isStatusReportStale(report, reportErr == nil, time.Now())
 	result.StatusReportStale = stale
 	if stale && !isTerminalRunStatus(r.Status) {
-		requested := r.StatusRefreshRequestedAt != nil && time.Since(*r.StatusRefreshRequestedAt) < statusReportFreshness
-		if !requested {
-			question := "Please report your current status now using report_status. Include the stage you are working on and any blocker."
-			if _, askErr := e.orchestratorAskOwner(ctx, task, orchestratorRunID, id, question); askErr == nil {
-				now := time.Now()
-				if setErr := e.q.SetRunStatusRefreshRequestedAt(ctx, id, &now); setErr == nil {
-					requested = true
-				}
-			}
+		requested, requestErr := e.requestWorkerStatus(ctx, task, orchestratorRunID, id)
+		if requestErr != nil {
+			return tools.OrchestratorSessionLastRunStatus{}, requestErr
 		}
 		result.StatusRefreshRequested = requested
 	}
 	return result, nil
 }
 
-func (e *NativeEngine) orchestratorAskOwner(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
+func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, orchestratorRunID, sessionID int32) (bool, error) {
+	if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, sessionID); err != nil {
+		return false, err
+	}
+	now := time.Now()
+	recent, err := e.q.HasRecentRunEvent(ctx, sessionID, "status_report_request", now.Add(-statusReportFreshness))
+	if err != nil {
+		return false, err
+	}
+	if recent {
+		return true, nil
+	}
+	window := now.Unix() / int64(statusReportFreshness/time.Second)
+	payload, _ := json.Marshal(map[string]interface{}{
+		"task_id": task.ID,
+		"message": "Report your current stage and any blocker using report_status before continuing.",
+	})
+	err = e.q.EnqueueRunEvent(ctx, db.RunEvent{
+		TaskID: task.ID, RunID: sessionID, EventType: "status_report_request", Payload: string(payload),
+		DedupeKey: fmt.Sprintf("run:%d:status-refresh:%d", sessionID, window),
+	})
+	return true, err
+}
+
+// orchestratorAskSession is the explicit ask_task_owner compatibility tool.
+// Automatic status refreshes use requestWorkerStatus instead, because they
+// must be delivered to the active worker without creating a task comment.
+func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
 	session, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
 	if err != nil {
 		return "", err
 	}
-	rid := orchestratorID
+	payload, _ := json.Marshal(map[string]string{"question": question})
+	if err := e.q.EnqueueRunEvent(ctx, db.RunEvent{
+		TaskID: task.ID, RunID: sessionID, EventType: "worker_question", Payload: string(payload),
+		DedupeKey: fmt.Sprintf("run:%d:question:%d", sessionID, time.Now().UnixNano()),
+	}); err != nil {
+		return "", err
+	}
+	// Keep a visible audit trail, but target the worker session rather than
+	// attributing the question to the orchestrator run.
+	rid := sessionID
 	comment, err := e.q.CreateComment(ctx, db.Comment{TaskID: task.ID, AuthorType: "system", CommentType: "orchestrator_question", Content: question, RunID: &rid})
 	if err != nil {
 		return "", err

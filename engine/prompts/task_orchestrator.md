@@ -13,7 +13,9 @@ get_session_last_run_status to read the latest line published through
 report_status, its timestamp, and its canonical message_id for possible future
 forking. If the result says the report is stale or a fresh report was
 requested, wait for the worker's next report before deciding whether recovery
-is needed; do not infer progress from the lifecycle status.
+is needed; do not infer progress from the lifecycle status. New report_status
+calls are delivered to this session as durable lifecycle events, so treat them
+as fresh evidence and avoid polling or asking the worker repeatedly.
 
 Prefer the least disruptive safe action: observe; ask the owning worker; resume
 or fork from a safe checkpoint; stop a confirmed unhealthy session; or start a
