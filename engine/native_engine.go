@@ -335,11 +335,9 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 		return e.processTask(ctx, task.ID, forceRerun)
 	case db.TaskStatusInProgress:
 		go e.run(context.Background(), task, "implement")
-	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone, db.TaskStatusRefinement:
+	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone:
 		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
-		// a task out of these statuses; a plain status change never does. The
-		// legacy refinement status is treated as an in-progress implementation
-		// task after the status migration window.
+		// a task out of these statuses; a plain status change never does.
 		if !forceRerun {
 			return nil
 		}
@@ -926,11 +924,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		t, err := e.q.GetTask(finCtx, task.ID)
 		if err != nil {
 			return err
-		}
-		if result.Status == db.TaskStatusRefinement {
-			// Compatibility for older providers/prompts; refinement is now a
-			// planning phase, and a clarification outcome is blocked.
-			result.Status = db.TaskStatusBlocked
 		}
 		if result.Status != db.TaskStatusDone && result.Status != db.TaskStatusInReview && result.Status != db.TaskStatusBlocked {
 			return fmt.Errorf("unsupported task status %q", result.Status)
@@ -2411,8 +2404,8 @@ Changes:
 }
 
 // finishAllowsGit limits repository publication to successful agent verdicts.
-// A blocked/refinement result may have touched the worktree while preparing a
-// handoff, but it must not be turned into an automatic commit or PR.
+// A blocked result may have touched the worktree while preparing a handoff,
+// but it must not be turned into an automatic commit or PR.
 func finishAllowsGit(result tools.FinishTaskResult) bool {
 	return result.Status == "done" || result.Status == "in-review"
 }

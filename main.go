@@ -215,9 +215,6 @@ func main() {
 	if err := db.New(database).MigrateDropAgentConfigNames(context.Background()); err != nil {
 		log.Fatalf("agent assignment schema migration failed: %v", err)
 	}
-	if err := db.New(database).MigrateLegacyTaskStatuses(context.Background()); err != nil {
-		log.Fatalf("task status migration failed: %v", err)
-	}
 	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
 		log.Fatalf("GitHub connection index migration failed: %v", err)
 	}

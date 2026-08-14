@@ -41,7 +41,6 @@ type TaskRelationQuerier interface {
 	ListBlockingDependencies(ctx context.Context, taskID int32) ([]Task, error)
 	ListDependentTasks(ctx context.Context, prerequisiteTaskID int32) ([]Task, error)
 	ListQueuedTasksForReconciliation(ctx context.Context) ([]Task, error)
-	MigrateLegacyTaskStatuses(ctx context.Context) error
 	ListTaskRelationSummaries(ctx context.Context, taskIDs []int32) (map[int32]TaskRelationSummary, error)
 	CanStartTask(ctx context.Context, taskID int32) (bool, []Task, error)
 }

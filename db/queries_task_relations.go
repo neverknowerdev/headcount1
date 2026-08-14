@@ -137,26 +137,6 @@ func (q *Queries) ListQueuedTasksForReconciliation(ctx context.Context) ([]Task,
 	return tasks, err
 }
 
-// MigrateLegacyTaskStatuses folds the old planning/refinement status into the
-// unified state machine. An active refinement run is in progress; an idle one
-// needs human attention and becomes blocked.
-func (q *Queries) MigrateLegacyTaskStatuses(ctx context.Context) error {
-	var tasks []Task
-	if err := q.db.WithContext(ctx).Where("status = ?", TaskStatusRefinement).Find(&tasks).Error; err != nil {
-		return err
-	}
-	for _, task := range tasks {
-		status := TaskStatusBlocked
-		if task.RunID != nil {
-			status = TaskStatusInProgress
-		}
-		if err := q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND status = ?", task.ID, TaskStatusRefinement).Update("status", status).Error; err != nil {
-			return err
-		}
-	}
-	return nil
-}
-
 func (q *Queries) CanStartTask(ctx context.Context, taskID int32) (bool, []Task, error) {
 	blockers, err := q.ListBlockingDependencies(ctx, taskID)
 	if err != nil {

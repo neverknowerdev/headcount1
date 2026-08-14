@@ -384,9 +384,6 @@ const (
 	TaskStatusDependsOnTask  = "depends-on-task"
 	TaskStatusInReview       = "in-review"
 	TaskStatusDone           = "done"
-	// TaskStatusRefinement is retained only for migrating legacy rows and
-	// accepting older provider results; new work uses the unified state machine.
-	TaskStatusRefinement = "refinement"
 
 	TaskRelationDependsOn = "depends_on"
 	TaskRelationRelatedTo = "related_to"
