@@ -97,6 +97,9 @@ func TestPostgresAutoMigrate(t *testing.T) {
 
 	// AutoMigrate must be idempotent — a second run (upgrade path) must not error.
 	require.NoError(t, database.AutoMigrate(allModels()...), "second AutoMigrate must be idempotent")
+	var recoveryType string
+	require.NoError(t, database.Raw(`SELECT udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'runs' AND column_name = 'recovery'`).Scan(&recoveryType).Error)
+	require.Equal(t, "jsonb", recoveryType)
 }
 
 func TestPostgresQuerySurface(t *testing.T) {

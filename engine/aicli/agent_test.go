@@ -3,6 +3,8 @@ package aicli_test
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -17,6 +19,41 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+type countingResumeTool struct {
+	name  string
+	calls atomic.Int32
+}
+
+func (t *countingResumeTool) Def() aicli.ToolDef {
+	return aicli.ToolDef{
+		Type: "function",
+		Function: aicli.FuncMeta{
+			Name:        t.name,
+			Description: "test tool",
+			Parameters:  json.RawMessage(`{"type":"object"}`),
+		},
+	}
+}
+
+func (t *countingResumeTool) Execute(context.Context, json.RawMessage) (string, error) {
+	t.calls.Add(1)
+	return fmt.Sprintf("%s executed", t.name), nil
+}
+
+type staticCompletionTransport struct {
+	body  []byte
+	calls atomic.Int32
+}
+
+func (t *staticCompletionTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.calls.Add(1)
+	return &http.Response{
+		StatusCode: 200,
+		Body:       io.NopCloser(strings.NewReader(string(t.body))),
+		Header:     http.Header{"Content-Type": {"application/json"}},
+	}, nil
+}
 
 // liveCredentials returns (baseURL, apiKey, model) from environment variables
 // used for real-provider recording runs. Returns empty strings when not set.
@@ -207,6 +244,100 @@ func TestAgentPauseSkippedWhenRunFinishing(t *testing.T) {
 	result, _, err := agent.RunWithHistory(context.Background(), initial, func() bool { return true })
 	require.NoError(t, err)
 	assert.Equal(t, "4", result)
+}
+
+// TestAgentPauseResumeAtMinimumToolBoundary exercises the exact recovery
+// boundary with every callable runtime tool. A single assistant response
+// contains all tool calls; pausing immediately after that response must run
+// none of them. Resuming the JSON-compatible in-memory history must execute
+// each call exactly once, preserve the full prefix, and stop at finish_task
+// without asking the model for a duplicate follow-up turn.
+func TestAgentPauseResumeAtMinimumToolBoundary(t *testing.T) {
+	toolNames := []aicli.ToolName{
+		aicli.ToolBash,
+		aicli.ToolRead,
+		aicli.ToolWrite,
+		aicli.ToolListDir,
+		aicli.ToolGrep,
+		aicli.ToolWebFetch,
+		aicli.ToolBrowserUse,
+		aicli.ToolFinishTask,
+		aicli.ToolWriteArtifact,
+		aicli.ToolListArtifacts,
+		aicli.ToolReadArtifact,
+		aicli.ToolAskArtifact,
+		aicli.ToolCreateSubtask,
+		aicli.ToolAnswerSubtaskQuestion,
+		aicli.ToolAskTaskOwner,
+		aicli.ToolCreateTask,
+		aicli.ToolAskHuman,
+		aicli.ToolReportStatus,
+		aicli.ToolCallMCP,
+		aicli.ToolDiscoverMCP,
+	}
+
+	reg := aicli.NewRegistry()
+	toolsByName := make(map[string]*countingResumeTool, len(toolNames))
+	calls := make([]aicli.ToolCall, 0, len(toolNames))
+	for i, name := range toolNames {
+		name := string(name)
+		tool := &countingResumeTool{name: name}
+		reg.Register(tool)
+		toolsByName[name] = tool
+		calls = append(calls, aicli.ToolCall{
+			ID:   fmt.Sprintf("resume-tool-%d", i),
+			Type: "function",
+			Function: aicli.FuncCall{
+				Name:      name,
+				Arguments: `{}`,
+			},
+		})
+	}
+
+	response, err := json.Marshal(aicli.ChatResponse{
+		ID:    "pause-boundary",
+		Model: "test-model",
+		Choices: []aicli.Choice{{
+			Index: 0,
+			Message: aicli.Message{
+				Role:      "assistant",
+				ToolCalls: calls,
+			},
+			FinishReason: "tool_calls",
+		}},
+	})
+	require.NoError(t, err)
+	transport := &staticCompletionTransport{body: response}
+	client := aicli.NewClient("http://test.invalid", "", "test-model")
+	client.MaxRetries = 0
+	client.HTTPClient = &http.Client{Transport: transport}
+	agent := aicli.New(aicli.Config{
+		Client:        client,
+		Registry:      reg,
+		ProviderName:  "test-provider",
+		AgentName:     "test-agent",
+		TerminalTools: []string{string(aicli.ToolFinishTask)},
+	})
+
+	initial := aicli.BuildHistory("system prompt", []aicli.Message{{Role: "user", Content: "exercise every tool"}})
+	_, paused, err := agent.RunWithHistory(context.Background(), initial, func() bool { return true })
+	require.ErrorIs(t, err, aicli.ErrPaused)
+	require.NotEmpty(t, paused)
+	assert.Equal(t, "assistant", paused[len(paused)-1].Role)
+	assert.Len(t, paused[len(paused)-1].ToolCalls, len(toolNames))
+	for name, tool := range toolsByName {
+		assert.Zero(t, tool.calls.Load(), "tool %s must not execute before the safe pause point", name)
+	}
+	assert.Equal(t, int32(1), transport.calls.Load(), "pause must not issue a second model request")
+
+	_, resumed, err := agent.RunWithHistory(context.Background(), paused, nil)
+	require.NoError(t, err)
+	assert.Equal(t, paused, resumed[:len(paused)], "resume must preserve the paused history prefix")
+	assert.Len(t, resumed, len(paused)+len(toolNames), "resume should append one result per pending tool call")
+	for name, tool := range toolsByName {
+		assert.Equal(t, int32(1), tool.calls.Load(), "tool %s must execute exactly once after resume", name)
+	}
+	assert.Equal(t, int32(1), transport.calls.Load(), "terminal tool should finish without a duplicate LLM turn")
 }
 
 // TestAgentRetryOn429 verifies that the client retries after a 429 response.

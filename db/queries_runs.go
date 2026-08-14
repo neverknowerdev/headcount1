@@ -9,6 +9,14 @@ import (
 	"gorm.io/gorm"
 )
 
+const (
+	RunStatusPaused            = "paused"
+	RunStatusRecoverableFailed = "recoverable_failed"
+	RunStatusStale             = "stale"
+	RunStatusResuming          = "resuming"
+	CheckpointVersion          = 1
+)
+
 func (q *Queries) CreateRun(ctx context.Context, r Run) (Run, error) {
 	err := q.db.WithContext(ctx).Create(&r).Error
 	return r, err
@@ -23,19 +31,44 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	r.LogContent = content
 	r.Status = status
 	var updateErr error
-	if status == "completed" || status == "failed" {
+	if status == "completed" || status == "failed" || status == "canceled" || status == RunStatusStale || status == RunStatusRecoverableFailed {
 		now := gorm.Expr("CURRENT_TIMESTAMP")
 		updateErr = q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
 	} else {
 		updateErr = q.db.WithContext(ctx).Save(&r).Error
 	}
-	if updateErr != nil {
+	if updateErr != nil || r.Kind == "orchestrator" {
 		return updateErr
 	}
-	if r.Kind != "orchestrator" {
-		_ = q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:%s:%d", r.ID, status, time.Now().UnixNano())})
+	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
+}
+
+// MarkRunStale atomically retires a run that has stopped heartbeating. The
+// conditional update makes the minute monitor safe to run concurrently with
+// normal completion or an explicit resume claim.
+func (q *Queries) MarkRunStale(ctx context.Context, runID int32, reason string) (bool, error) {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return false, err
 	}
-	return nil
+	if run.Status != "running" {
+		return false, nil
+	}
+	run.Recovery.RecoveryReason = reason
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, "running").Updates(map[string]interface{}{
+		"status": RunStatusStale, "ended_at": ptrTime(time.Now()), "recovery": recoveryJSON(run.Recovery),
+	})
+	return result.RowsAffected == 1, result.Error
+}
+
+func ptrTime(t time.Time) *time.Time { return &t }
+
+// recoveryJSON mirrors GORM's serializer:json conversion for targeted
+// Updates calls. Map updates bypass the model field serializer, so encode the
+// compact recovery document explicitly while avoiding a full Run rewrite.
+func recoveryJSON(recovery RunRecovery) string {
+	payload, _ := json.Marshal(recovery)
+	return string(payload)
 }
 
 // SetRunRootID sets root_run_id after creation. Root runs point at themselves
@@ -172,74 +205,50 @@ func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]R
 	return runs, err
 }
 
-// GetOrchestratorRun returns the sidecar for a worker root, if one exists.
-func (q *Queries) GetOrchestratorRun(ctx context.Context, workerRunID int32) (Run, error) {
-	var r Run
-	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
-		Where("kind = ? AND supervised_run_id = ?", "orchestrator", workerRunID).First(&r).Error
-	return r, err
+func (q *Queries) GetOrchestratorRun(ctx context.Context, supervisedRunID int32) (Run, error) {
+	var run Run
+	err := q.db.WithContext(ctx).Where("kind = ? AND supervised_run_id = ?", "orchestrator", supervisedRunID).First(&run).Error
+	return run, err
 }
 
-// ListSupervisedRuns returns the worker tree monitored by an orchestrator.
-// The orchestrator itself is never included.
 func (q *Queries) ListSupervisedRuns(ctx context.Context, workerRootID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
-		Where("(kind = ? OR kind = '') AND (id = ? OR root_run_id = ?)", "worker", workerRootID, workerRootID).
-		Order("started_at asc, id asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("(root_run_id = ? OR id = ?) AND kind <> ?", workerRootID, workerRootID, "orchestrator").Order("started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListOrchestratorsByTask(ctx context.Context, taskID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("task_id = ? AND kind = ?", taskID, "orchestrator").Order("started_at desc").Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("task_id = ? AND kind = ?", taskID, "orchestrator").Order("started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListWaitingOrchestrators(ctx context.Context) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
-		Where("kind = ? AND status = ?", "orchestrator", "waiting").Order("started_at asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("kind = ? AND status IN ?", "orchestrator", []string{"running", "waiting"}).Find(&runs).Error
 	return runs, err
 }
 
-func (q *Queries) SetRunKind(ctx context.Context, runID int32, kind string, supervisedRunID *int32) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"kind": kind, "supervised_run_id": supervisedRunID,
-	}).Error
+func (q *Queries) SetRunKind(ctx context.Context, runID int32, kind string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("kind", kind).Error
 }
 
 func (q *Queries) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"status": "waiting", "wait_reason": reason,
-	}).Error
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": "waiting", "wait_reason": reason}).Error
 }
 
 func (q *Queries) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("stop_cause", cause).Error
 }
 
-func (q *Queries) IncrementRunRecoveryAttempts(ctx context.Context, runID int32) (int, error) {
-	if err := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		UpdateColumn("recovery_attempts", gorm.Expr("recovery_attempts + ?", 1)).Error; err != nil {
-		return 0, err
-	}
-	var run Run
-	if err := q.db.WithContext(ctx).Select("recovery_attempts").First(&run, runID).Error; err != nil {
-		return 0, err
-	}
-	return run.RecoveryAttempts, nil
+func (q *Queries) IncrementRunRecoveryAttempts(ctx context.Context, runID int32) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).UpdateColumn("recovery_attempts", gorm.Expr("recovery_attempts + 1")).Error
 }
 
-// EnqueueRunEvent persists a worker lifecycle event. DedupeKey is optional;
-// callers that retry delivery can use it to avoid duplicate wakeups.
 func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
 	if event.DedupeKey != "" {
-		var count int64
-		if err := q.db.WithContext(ctx).Model(&RunEvent{}).Where("task_id = ? AND dedupe_key = ?", event.TaskID, event.DedupeKey).Count(&count).Error; err != nil {
-			return err
-		}
-		if count > 0 {
+		var existing RunEvent
+		if err := q.db.WithContext(ctx).Where("dedupe_key = ?", event.DedupeKey).First(&existing).Error; err == nil {
 			return nil
 		}
 	}
@@ -248,7 +257,7 @@ func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
 
 func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
 	var events []RunEvent
-	err := q.db.WithContext(ctx).Where("task_id = ? AND consumed_at IS NULL", taskID).Order("id asc").Find(&events).Error
+	err := q.db.WithContext(ctx).Where("task_id = ? AND consumed_at IS NULL", taskID).Order("created_at asc").Find(&events).Error
 	return events, err
 }
 
@@ -258,6 +267,15 @@ func (q *Queries) ConsumeRunEvents(ctx context.Context, ids []int64) error {
 	}
 	now := time.Now()
 	return q.db.WithContext(ctx).Model(&RunEvent{}).Where("id IN ? AND consumed_at IS NULL", ids).Update("consumed_at", now).Error
+}
+
+// GetRunningRuns returns every run currently marked running. It is used by the
+// in-process liveness monitor to detect database rows left behind after a
+// goroutine disappeared before its normal status finalizer ran.
+func (q *Queries) GetRunningRuns(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Where("status = ?", "running").Find(&runs).Error
+	return runs, err
 }
 
 func (q *Queries) GetStaleRunningRuns(ctx context.Context, threshold time.Duration) ([]Run, error) {
@@ -396,33 +414,208 @@ func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, run
 	return count, err
 }
 
-// PauseRun marks a run "interrupted" and stores its serialized conversation
-// history so it can be resumed after a restart (see NativeEngine's
-// BeginDrain/ResumeInterruptedRuns). The task lock (Task.RunID) is
-// deliberately left in place — this does not call UnlockTaskRun — so no new
-// run can start on the same task until this one is either resumed or
-// explicitly failed.
-func (q *Queries) PauseRun(ctx context.Context, runID int32, history string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{"status": "interrupted", "paused_history": history}).Error
+// PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
+// boundary on the Run row. The JSONL file remains the history source of truth;
+// Recovery is only a cursor and recovery-coordination state.
+func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, sequence int64, reason, initiator, target, phase string) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	recovery := RunRecovery{
+		CheckpointSequence: sequence, CheckpointVersion: CheckpointVersion,
+		CheckpointPhase: CheckpointPhase(phase), RecoveryReason: reason,
+		RecoveryInitiator: initiator, RecoveryTarget: target,
+		ResumeAttempts: run.Recovery.ResumeAttempts,
+	}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": RunStatusPaused, "recovery": recoveryJSON(recovery),
+	}).Error
 }
 
-// GetInterruptedRuns returns every run left paused by a graceful shutdown,
-// across all tenants — consumed once at boot to resume them.
-func (q *Queries) GetInterruptedRuns(ctx context.Context) ([]Run, error) {
+// GetRunsByRecoveryStates returns runs in the requested recoverable states.
+// A checkpoint cursor is optional: failed/stale sessions may have crashed
+// before one was persisted, so the engine derives the cursor from JSONL when
+// the run is claimed for resume.
+func (q *Queries) GetRunsByRecoveryStates(ctx context.Context, states []string) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("status = ?", "interrupted").Find(&runs).Error
+	if len(states) == 0 {
+		return runs, nil
+	}
+	err := q.db.WithContext(ctx).
+		Where("runs.status IN ?", states).
+		Order("runs.id asc").Find(&runs).Error
 	return runs, err
 }
 
-// ResumeRun marks a previously-interrupted run "running" again and clears its
-// persisted history now that the caller has loaded it back into memory. It
-// also refreshes last_message_time: without this, IsRunStale would see the
-// pre-pause heartbeat (possibly many minutes old, e.g. across a slow update)
-// and could race a concurrent ProcessTask call into treating the resumed run
-// as stale and failing it out from under the resume goroutine.
+// ClaimRunForResume atomically claims a run for one recovery attempt. The
+// cursor may be zero when the run failed before a planned checkpoint; the
+// caller derives and supplies it from the JSONL trajectory at claim time.
+func (q *Queries) ClaimRunForResume(ctx context.Context, runID int32, owner string, cause, previousStatus string, lease time.Time, allowedStates []string, sequence int64) (bool, error) {
+	if owner == "" || len(allowedStates) == 0 {
+		return false, fmt.Errorf("resume claim requires owner and allowed states")
+	}
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return false, err
+	}
+	allowed := false
+	for _, state := range allowedStates {
+		if run.Status == state {
+			allowed = true
+			break
+		}
+	}
+	if !allowed || (run.Recovery.ResumeLeaseUntil != nil && run.Recovery.ResumeLeaseUntil.After(time.Now())) {
+		return false, nil
+	}
+	if previousStatus == "" {
+		previousStatus = run.Status
+	}
+	run.Recovery.CheckpointSequence = sequence
+	run.Recovery.CheckpointVersion = CheckpointVersion
+	run.Recovery.ResumeLeaseOwner = owner
+	run.Recovery.ResumeLeaseUntil = ptrTime(lease)
+	run.Recovery.ResumePreviousStatus = previousStatus
+	run.Recovery.ResumeAttempts++
+	run.Recovery.LastResumeError = ""
+	run.Recovery.RecoveryReason = cause
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status IN ?", runID, allowedStates).Updates(map[string]interface{}{
+		"status": RunStatusResuming, "recovery": recoveryJSON(run.Recovery),
+	})
+	return result.RowsAffected == 1, result.Error
+}
+
+// ReclaimExpiredResumeLeases returns interrupted resume attempts to the state
+// they had before claiming, preserving failed/stale policy instead of turning
+// every startup crash into an automatically paused run.
+func (q *Queries) ReclaimExpiredResumeLeases(ctx context.Context, now time.Time) error {
+	var runs []Run
+	if err := q.db.WithContext(ctx).Where("status = ?", RunStatusResuming).Find(&runs).Error; err != nil {
+		return err
+	}
+	for _, run := range runs {
+		if run.Recovery.ResumeLeaseUntil == nil || !run.Recovery.ResumeLeaseUntil.Before(now) {
+			continue
+		}
+		status := run.Recovery.ResumePreviousStatus
+		if status == "" {
+			status = RunStatusPaused
+		}
+		run.Recovery.ResumeLeaseOwner = ""
+		run.Recovery.ResumeLeaseUntil = nil
+		run.Recovery.ResumePreviousStatus = ""
+		if err := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", run.ID, RunStatusResuming).Updates(map[string]interface{}{
+			"status": status, "recovery": recoveryJSON(run.Recovery),
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// MarkRunResumeStarted transitions a claimed run to running without deleting
+// the checkpoint. It is cleared only when the resumed run reaches a terminal
+// state, so a crash during handoff remains recoverable.
+func (q *Queries) MarkRunResumeStarted(ctx context.Context, runID int32, owner string) error {
+	now := time.Now()
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	if run.Status != RunStatusResuming || run.Recovery.ResumeLeaseOwner != owner {
+		return fmt.Errorf("run %d resume claim is no longer active", runID)
+	}
+	run.Recovery.ResumeLeaseOwner = ""
+	run.Recovery.ResumeLeaseUntil = nil
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, RunStatusResuming).Updates(map[string]interface{}{
+		"status": "running", "last_message_time": &now, "ended_at": nil,
+		"recovery": recoveryJSON(run.Recovery),
+	})
+	if result.Error != nil {
+		return result.Error
+	}
+	if result.RowsAffected != 1 {
+		return fmt.Errorf("run %d resume claim is no longer active", runID)
+	}
+	return nil
+}
+
+// UpdateRunRecoveryMetadata records operator/context details without changing
+// the checkpoint or its lifecycle state.
+func (q *Queries) UpdateRunRecoveryMetadata(ctx context.Context, runID int32, reason, initiator, target string) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.RecoveryReason = reason
+	run.Recovery.RecoveryInitiator = initiator
+	run.Recovery.RecoveryTarget = target
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
+}
+
+// RecordResumeError leaves a claimed run recoverable and makes a failed
+// reconstruction visible to the next explicit or automatic attempt.
+func (q *Queries) RecordResumeError(ctx context.Context, runID int32, resumeErr, recoverableStatus string) error {
+	if recoverableStatus == "" {
+		recoverableStatus = RunStatusPaused
+	}
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.LastResumeError = resumeErr
+	run.Recovery.ResumeLeaseOwner = ""
+	run.Recovery.ResumeLeaseUntil = nil
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": recoverableStatus, "recovery": recoveryJSON(run.Recovery),
+	}).Error
+}
+
+// ClearRunCheckpoint removes the transient recovery cursor after a resumed
+// run has reached a durable terminal state.
+func (q *Queries) ClearRunCheckpoint(ctx context.Context, runID int32) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	// Keep the attempt counter as durable audit metadata while clearing the
+	// cursor, lease, and last transient error consumed by a successful resume.
+	attempts := run.Recovery.ResumeAttempts
+	run.Recovery = RunRecovery{ResumeAttempts: attempts}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
+}
+
+// MarkRunRecoverable records a failed or stale run with a valid checkpoint for
+// future explicit recovery. Automatic startup policy deliberately excludes
+// these states for now.
+func (q *Queries) MarkRunRecoverable(ctx context.Context, runID int32, status string, sequence int64, reason string) error {
+	if status != RunStatusRecoverableFailed && status != RunStatusStale {
+		return fmt.Errorf("unsupported recoverable run status %q", status)
+	}
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.CheckpointSequence = sequence
+	run.Recovery.CheckpointVersion = CheckpointVersion
+	run.Recovery.CheckpointPhase = CheckpointPhaseAfterTools
+	run.Recovery.RecoveryReason = reason
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": status, "recovery": recoveryJSON(run.Recovery),
+	}).Error
+}
+
+// ResumeRun is the legacy helper retained for compatibility with older
+// callers. New code should claim first and call MarkRunResumeStarted.
 func (q *Queries) ResumeRun(ctx context.Context, runID int32) error {
 	now := time.Now()
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
-		Updates(map[string]interface{}{"status": "running", "paused_history": "", "last_message_time": now}).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": "running", "last_message_time": &now,
+		"recovery": recoveryJSON(RunRecovery{ResumeAttempts: run.Recovery.ResumeAttempts}),
+	}).Error
 }

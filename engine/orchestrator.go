@@ -287,7 +287,7 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, wor
 	if current.RecoveryAttempts >= 3 {
 		return "", fmt.Errorf("session %d reached the automatic recovery limit", attemptRunID)
 	}
-	if _, err := e.q.IncrementRunRecoveryAttempts(ctx, attemptRunID); err != nil {
+	if err := e.q.IncrementRunRecoveryAttempts(ctx, attemptRunID); err != nil {
 		return "", err
 	}
 	if source != nil {
@@ -322,43 +322,10 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, workerRootID, sessi
 	if source.Status == "running" || source.Status == "waiting" {
 		return "", fmt.Errorf("session %d must be stopped at a checkpoint before forking", sessionID)
 	}
-	if strings.TrimSpace(source.PausedHistory) == "" {
-		return "", fmt.Errorf("session %d has no persisted safe message checkpoint", sessionID)
-	}
-	if source.RecoveryAttempts >= 3 {
-		return "", fmt.Errorf("session %d reached the automatic recovery limit", sessionID)
-	}
-	if _, err := e.q.IncrementRunRecoveryAttempts(ctx, source.ID); err != nil {
-		return "", err
-	}
-	var history []aicli.Message
-	if err := json.Unmarshal([]byte(source.PausedHistory), &history); err != nil {
-		return "", fmt.Errorf("invalid checkpoint: %w", err)
-	}
-	if messageID <= 0 || messageID > int64(len(history)) {
-		return "", fmt.Errorf("fork_message_id %d is outside checkpoint history", messageID)
-	}
-	history = history[:messageID]
-	if len(history) == 0 || history[len(history)-1].Role == "tool" || len(history[len(history)-1].ToolCalls) > 0 {
-		return "", fmt.Errorf("fork_message_id %d is not a safe assistant/user boundary", messageID)
-	}
-	encoded, _ := json.Marshal(history)
-	_ = e.q.SetRunStopCause(ctx, source.ID, "orchestrator")
-	e.StopRun(ctx, source.ID)
-	_ = e.q.UnlockTaskRun(ctx, source.TaskID)
-	newRun, err := e.q.CreateRun(ctx, db.Run{TaskID: source.TaskID, AgentID: source.AgentID, Status: "running", Kind: "worker", PausedHistory: string(encoded), StartedAt: time.Now()})
-	if err != nil {
-		return "", err
-	}
-	rootID := newRun.ID
-	newRun.RootRunID = &rootID
-	_ = e.q.SetRunRootID(ctx, newRun.ID, rootID)
-	task, err := e.q.GetTask(ctx, source.TaskID)
-	if err != nil {
-		return "", err
-	}
-	go e.executeSession(context.Background(), task, "fork", nil, &newRun)
-	return fmt.Sprintf("forked session %d as new worker run %d", source.ID, newRun.ID), nil
+	// Checkpoint cursors identify durable replay boundaries, not arbitrary
+	// message IDs. Refuse the operation until a dedicated fork checkpoint API
+	// can persist a truncated JSONL history without risking duplicated tools.
+	return "", fmt.Errorf("fork_session is unavailable for session %d: fork_message_id is not a durable checkpoint message ID", sessionID)
 }
 
 func orchestratorFingerprint(s []tools.OrchestratorSession) string {

@@ -563,17 +563,15 @@ type Run struct {
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
-	CurrentStatus string `json:"current_status" gorm:"default:''"`
-	Status        string `json:"status" gorm:"not null"`
-	// Kind distinguishes task-owning worker sessions from the sidecar
-	// orchestrator. Orchestrator runs never acquire Task.RunID.
+	CurrentStatus        string     `json:"current_status" gorm:"default:''"`
+	Status               string     `json:"status" gorm:"not null"`
 	Kind                 string     `json:"kind" gorm:"not null;default:'worker';index"`
 	SupervisedRunID      *int32     `json:"supervised_run_id,omitempty" gorm:"index"`
 	OrchestratorModel    string     `json:"orchestrator_model,omitempty"`
 	OrchestratorProvider string     `json:"orchestrator_provider,omitempty"`
 	StopCause            string     `json:"stop_cause,omitempty"`
 	WaitReason           string     `json:"wait_reason,omitempty"`
-	RecoveryAttempts     int        `json:"recovery_attempts" gorm:"not null;default:0"`
+	RecoveryAttempts     int        `json:"recovery_attempts"`
 	SessionID            string     `json:"session_id"`
 	LogFilePath          string     `json:"log_file_path"`
 	LogContent           string     `json:"log_content"`
@@ -584,18 +582,42 @@ type Run struct {
 	StartedAt            time.Time  `json:"started_at"`
 	EndedAt              *time.Time `json:"ended_at"`
 	LastMessageTime      *time.Time `json:"last_message_time"`
-	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
-	// captured when a graceful shutdown (e.g. applying an auto-update) paused
-	// this run mid-flight, right after its current turn's LLM response
-	// arrived. Set only while Status == "interrupted"; consumed and cleared
-	// when the run resumes. Internal plumbing, not for display — omitted from
-	// the JSON API.
-	PausedHistory string `json:"-" gorm:"type:text"`
+
+	// Recovery is internal control-plane state. Conversation history remains
+	// exclusively in the append-only JSONL log; this JSONB document stores only
+	// the cursor, planned-pause metadata, and short-lived resume lease.
+	Recovery RunRecovery `json:"-" gorm:"serializer:json;type:jsonb"`
 }
 
-// RunEvent is the durable lifecycle inbox consumed by event-driven sidecars.
-// Eventhub/WebSockets are notification layers only; this table survives
-// restart and lets a waiting orchestrator resume without polling the LLM.
+// RunRecovery groups transient recovery metadata so the execution model does
+// not expose a column for every recovery concern. Query helpers update this
+// value atomically when claiming or releasing a resume lease.
+type RunRecovery struct {
+	CheckpointSequence   int64           `json:"checkpoint_sequence,omitempty"`
+	CheckpointVersion    int             `json:"checkpoint_version,omitempty"`
+	CheckpointPhase      CheckpointPhase `json:"checkpoint_phase,omitempty"`
+	RecoveryReason       string          `json:"recovery_reason,omitempty"`
+	RecoveryInitiator    string          `json:"recovery_initiator,omitempty"`
+	RecoveryTarget       string          `json:"recovery_target,omitempty"`
+	ResumeLeaseOwner     string          `json:"resume_lease_owner,omitempty"`
+	ResumeLeaseUntil     *time.Time      `json:"resume_lease_until,omitempty"`
+	ResumePreviousStatus string          `json:"resume_previous_status,omitempty"`
+	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
+	LastResumeError      string          `json:"last_resume_error,omitempty"`
+}
+
+// CheckpointPhase identifies the safe point represented by a checkpoint. It is
+// intentionally a closed set: recovery must distinguish pending assistant
+// tool calls from a conversation whose tool results are already present.
+type CheckpointPhase string
+
+const (
+	CheckpointPhaseBeforeTools CheckpointPhase = "before_tools"
+	CheckpointPhaseAfterTools  CheckpointPhase = "after_tools"
+)
+
+// RunEvent is a durable inbox entry used to wake passive orchestrators when a
+// supervised run changes state. DedupeKey makes status updates idempotent.
 type RunEvent struct {
 	ID         int64      `json:"id" gorm:"primaryKey"`
 	TaskID     int32      `json:"task_id" gorm:"not null;index"`

@@ -3,8 +3,10 @@ package db
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/glebarez/sqlite"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"gorm.io/gorm"
 )
@@ -32,20 +34,156 @@ func TestGetRunWithTaskPreloadsAgent(t *testing.T) {
 	require.Equal(t, "CEO", loaded.Agent.RoleKey)
 }
 
+func TestRunRecoveryIsOneSerializedDocument(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Run{}))
+	require.True(t, database.Migrator().HasColumn(&Run{}, "recovery"))
+	for _, legacyColumn := range []string{
+		"checkpoint_sequence", "checkpoint_version", "checkpoint_phase",
+		"recovery_reason", "recovery_initiator", "recovery_target",
+		"resume_lease_owner", "resume_lease_until", "resume_previous_status",
+		"resume_attempts", "last_resume_error",
+	} {
+		assert.False(t, database.Migrator().HasColumn(&Run{}, legacyColumn), "legacy recovery column %s must not be part of the current schema", legacyColumn)
+	}
+	run := Run{
+		TaskID: 1, AgentID: 1, Status: RunStatusPaused,
+		Recovery: RunRecovery{
+			CheckpointSequence: 9, CheckpointVersion: CheckpointVersion,
+			CheckpointPhase: CheckpointPhaseBeforeTools, RecoveryReason: "restart",
+			ResumeAttempts: 2,
+		},
+	}
+	require.NoError(t, database.Create(&run).Error)
+	var raw string
+	require.NoError(t, database.Raw("SELECT recovery FROM runs WHERE id = ?", run.ID).Scan(&raw).Error)
+	assert.Contains(t, raw, `"checkpoint_sequence":9`)
+	var loaded Run
+	require.NoError(t, database.First(&loaded, run.ID).Error)
+	assert.Equal(t, run.Recovery, loaded.Recovery)
+}
+
+func TestRunResumeClaimIsAtomicAndPreservesCheckpoint(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Company{}, &User{}, &Agent{}, &Sprint{}, &Task{}, &Run{}))
+
+	company := Company{Name: "Acme", ShortName: "acme"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "work"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "recover me"}
+	require.NoError(t, database.Create(&task).Error)
+	run := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusPaused, Recovery: RunRecovery{CheckpointSequence: 2, CheckpointVersion: CheckpointVersion}}
+	require.NoError(t, database.Create(&run).Error)
+
+	q := New(database)
+	lease := time.Now().Add(time.Minute)
+	claimed, err := q.ClaimRunForResume(context.Background(), run.ID, "worker-1", "binary_update", run.Status, lease, []string{RunStatusPaused}, run.Recovery.CheckpointSequence)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	claimed, err = q.ClaimRunForResume(context.Background(), run.ID, "worker-2", "binary_update", run.Status, lease, []string{RunStatusPaused}, run.Recovery.CheckpointSequence)
+	require.NoError(t, err)
+	require.False(t, claimed, "a second worker must not claim the same checkpoint")
+
+	loaded, err := q.GetRun(context.Background(), run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusResuming, loaded.Status)
+	assert.Equal(t, int64(2), loaded.Recovery.CheckpointSequence)
+	assert.Equal(t, 1, loaded.Recovery.ResumeAttempts)
+
+	require.NoError(t, q.MarkRunResumeStarted(context.Background(), run.ID, "worker-1"))
+	loaded, err = q.GetRun(context.Background(), run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", loaded.Status)
+	assert.Equal(t, int64(2), loaded.Recovery.CheckpointSequence, "checkpoint remains until terminal completion")
+}
+
+func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Company{}, &User{}, &Agent{}, &Sprint{}, &Task{}, &Run{}))
+
+	company := Company{Name: "Acme", ShortName: "acme"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "work"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "recover me"}
+	require.NoError(t, database.Create(&task).Error)
+	failed := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusRecoverableFailed}
+	stale := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusStale}
+	require.NoError(t, database.Create(&failed).Error)
+	require.NoError(t, database.Create(&stale).Error)
+	failed.Recovery = RunRecovery{CheckpointSequence: 2, CheckpointVersion: CheckpointVersion}
+	stale.Recovery = RunRecovery{CheckpointSequence: 3, CheckpointVersion: CheckpointVersion}
+	require.NoError(t, database.Save(&failed).Error)
+	require.NoError(t, database.Save(&stale).Error)
+	q := New(database)
+	auto, err := q.GetRunsByRecoveryStates(context.Background(), []string{RunStatusPaused})
+	require.NoError(t, err)
+	assert.Empty(t, auto, "failed and stale checkpoints are explicit-recovery only")
+
+	claimed, err := q.ClaimRunForResume(context.Background(), failed.ID, "worker-f", "failed_recovery", failed.Status, time.Now().Add(time.Minute), []string{RunStatusRecoverableFailed}, 2)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	claimed, err = q.ClaimRunForResume(context.Background(), stale.ID, "worker-s", "stale_recovery", stale.Status, time.Now().Add(time.Minute), []string{RunStatusStale}, 3)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	// Expiring both leases restores their original recovery policy instead of
+	// converting failed/stale sessions into automatically resumed pauses.
+	var failedLease, staleLease Run
+	require.NoError(t, database.First(&failedLease, failed.ID).Error)
+	require.NoError(t, database.First(&staleLease, stale.ID).Error)
+	failedLease.Recovery.ResumeLeaseUntil = ptrTime(time.Now().Add(-time.Minute))
+	staleLease.Recovery.ResumeLeaseUntil = ptrTime(time.Now().Add(-time.Minute))
+	require.NoError(t, database.Save(&failedLease).Error)
+	require.NoError(t, database.Save(&staleLease).Error)
+	require.NoError(t, q.ReclaimExpiredResumeLeases(context.Background(), time.Now()))
+	gotFailed, err := q.GetRun(context.Background(), failed.ID)
+	require.NoError(t, err)
+	gotStale, err := q.GetRun(context.Background(), stale.ID)
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusRecoverableFailed, gotFailed.Status)
+	assert.Equal(t, RunStatusStale, gotStale.Status)
+	assert.NotZero(t, gotFailed.Recovery.CheckpointSequence)
+	assert.NotZero(t, gotStale.Recovery.CheckpointSequence)
+}
+
+func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Run{}))
+	run := Run{TaskID: 1, AgentID: 1, Status: "running", StartedAt: time.Now().Add(-time.Hour)}
+	require.NoError(t, database.Create(&run).Error)
+	q := New(database)
+	changed, err := q.MarkRunStale(context.Background(), run.ID, "heartbeat timeout")
+	require.NoError(t, err)
+	assert.True(t, changed)
+	changed, err = q.MarkRunStale(context.Background(), run.ID, "duplicate monitor tick")
+	require.NoError(t, err)
+	assert.False(t, changed)
+	loaded, err := q.GetRun(context.Background(), run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, RunStatusStale, loaded.Status)
+	assert.NotNil(t, loaded.EndedAt)
+	assert.Equal(t, "heartbeat timeout", loaded.Recovery.RecoveryReason)
+}
+
 func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, database.AutoMigrate(&RunEvent{}))
 	q := New(database)
-	ctx := context.Background()
-	event := RunEvent{TaskID: 7, RunID: 11, EventType: "run_status", Payload: "failed", DedupeKey: "run:11:failed:1"}
-	require.NoError(t, q.EnqueueRunEvent(ctx, event))
-	require.NoError(t, q.EnqueueRunEvent(ctx, event))
-	pending, err := q.ListPendingRunEvents(ctx, 7)
+	event := RunEvent{TaskID: 7, RunID: 9, EventType: "run_status", Payload: "failed", DedupeKey: "run:9:status:failed"}
+	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
+	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
+	pending, err := q.ListPendingRunEvents(context.Background(), 7)
 	require.NoError(t, err)
 	require.Len(t, pending, 1)
-	require.NoError(t, q.ConsumeRunEvents(ctx, []int64{pending[0].ID}))
-	pending, err = q.ListPendingRunEvents(ctx, 7)
+	require.NoError(t, q.ConsumeRunEvents(context.Background(), []int64{pending[0].ID}))
+	pending, err = q.ListPendingRunEvents(context.Background(), 7)
 	require.NoError(t, err)
 	require.Empty(t, pending)
 }
