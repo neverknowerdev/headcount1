@@ -37,7 +37,7 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	} else {
 		updateErr = q.db.WithContext(ctx).Save(&r).Error
 	}
-	if updateErr != nil || r.Kind == "orchestrator" {
+	if updateErr != nil || r.SupervisedRunID != nil {
 		return updateErr
 	}
 	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
@@ -207,42 +207,54 @@ func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]R
 
 func (q *Queries) GetOrchestratorRun(ctx context.Context, supervisedRunID int32) (Run, error) {
 	var run Run
-	err := q.db.WithContext(ctx).Where("kind = ? AND supervised_run_id = ?", "orchestrator", supervisedRunID).First(&run).Error
+	err := q.db.WithContext(ctx).Where("supervised_run_id = ?", supervisedRunID).First(&run).Error
 	return run, err
 }
 
 func (q *Queries) ListSupervisedRuns(ctx context.Context, workerRootID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("(root_run_id = ? OR id = ?) AND kind <> ?", workerRootID, workerRootID, "orchestrator").Order("started_at asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("(root_run_id = ? OR id = ?) AND supervised_run_id IS NULL", workerRootID, workerRootID).Order("started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListOrchestratorsByTask(ctx context.Context, taskID int32) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("task_id = ? AND kind = ?", taskID, "orchestrator").Order("started_at asc").Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("task_id = ? AND supervised_run_id IS NOT NULL", taskID).Order("started_at asc").Find(&runs).Error
 	return runs, err
 }
 
 func (q *Queries) ListWaitingOrchestrators(ctx context.Context) ([]Run, error) {
 	var runs []Run
-	err := q.db.WithContext(ctx).Where("kind = ? AND status IN ?", "orchestrator", []string{"running", "waiting"}).Find(&runs).Error
+	err := q.db.WithContext(ctx).Where("supervised_run_id IS NOT NULL AND status IN ?", []string{"running", "waiting"}).Find(&runs).Error
 	return runs, err
 }
 
-func (q *Queries) SetRunKind(ctx context.Context, runID int32, kind string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("kind", kind).Error
-}
-
 func (q *Queries) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": "waiting", "wait_reason": reason}).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Status = "waiting"
+	run.Recovery.WaitReason = reason
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": run.Status, "recovery": recoveryJSON(run.Recovery)}).Error
 }
 
 func (q *Queries) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("stop_cause", cause).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.StopCause = cause
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
 }
 
 func (q *Queries) IncrementRunRecoveryAttempts(ctx context.Context, runID int32) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).UpdateColumn("recovery_attempts", gorm.Expr("recovery_attempts + 1")).Error
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.RecoveryAttempts++
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
 }
 
 func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {

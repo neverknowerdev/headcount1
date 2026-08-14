@@ -122,7 +122,7 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 	// Mark is_latest so the frontend can show the Re-run button only on the
 	// most recent run. Delegated child sessions are never re-runnable entry
 	// points — only the main (root) session of a task can be re-run.
-	if run.ParentRunID == nil && run.Kind != "orchestrator" {
+	if run.ParentRunID == nil && run.SupervisedRunID == nil {
 		var maxID int64
 		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
 		resp.IsLatest = int64(run.ID) == maxID

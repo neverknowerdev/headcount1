@@ -3,6 +3,7 @@ package engine
 import (
 	"context"
 	"crypto/sha1"
+	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -17,26 +18,8 @@ import (
 	"agent-orchestrator/pkg/secrets"
 )
 
-const orchestratorPrompt = `You are the task orchestrator for one HeadCount1 task execution.
-
-Your only responsibility is to observe and manage worker sessions. You never
-perform any part of the task yourself. Never write code, edit files, run
-commands, browse, research, create artifacts, or change task acceptance.
-
-Use only the session-management tools. Inspect authoritative status before
-acting. Distinguish healthy activity, intentional waiting, transient failure,
-confirmed staleness, terminal failure, and manual cancellation.
-
-Prefer the least disruptive safe action: observe; ask the owning worker; resume
-or fork from a safe checkpoint; stop a confirmed unhealthy session; or start a
-bounded replacement. Never restart a session stopped by the user. Never repeat
-an unacknowledged side effect. Repair the narrowest failed session and do not
-stop healthy parents or siblings. Respect retry limits. If recovery is unsafe
-or repeatedly fails, leave a clear blocker and stop retrying.
-
-The worker execution owns task results and final task status. End this
-activation after making a justified decision; the engine will return you to
-passive monitoring.`
+//go:embed prompts/task_orchestrator.md
+var orchestratorPrompt string
 
 // startOrchestratorForWorker is called only after a worker root has acquired
 // Task.RunID. The sidecar has its own Run row and never touches that lock.
@@ -109,9 +92,8 @@ func (e *NativeEngine) orchestratorLoop(task db.Task, worker db.Run) {
 	}
 
 	orch := db.Run{
-		TaskID: task.ID, AgentID: worker.AgentID, Status: "running", Kind: "orchestrator",
-		SupervisedRunID: &worker.ID, OrchestratorModel: model,
-		OrchestratorProvider: provider.Name, StartedAt: time.Now(),
+		TaskID: task.ID, AgentID: worker.AgentID, Status: "running",
+		SupervisedRunID: &worker.ID, StartedAt: time.Now(),
 		Name: fmt.Sprintf("%s-ORCH-%d", task.RefKey, worker.ID),
 	}
 	created, err := e.q.CreateRun(ctx, orch)
@@ -223,7 +205,7 @@ func (e *NativeEngine) orchestratorSessions(ctx context.Context, workerRootID in
 		if r.LastMessageTime != nil {
 			last = r.LastMessageTime.Format(time.RFC3339Nano)
 		}
-		out = append(out, tools.OrchestratorSession{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name, ParentRunID: r.ParentRunID, Status: r.Status, CurrentStatus: r.CurrentStatus, LastMessageTime: last, WaitReason: r.WaitReason, RecoveryAttempts: r.RecoveryAttempts, StopCause: r.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
+		out = append(out, tools.OrchestratorSession{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name, ParentRunID: r.ParentRunID, Status: r.Status, CurrentStatus: r.CurrentStatus, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
 	}
 	return out, nil
 }
@@ -234,7 +216,7 @@ func (e *NativeEngine) orchestratorSessionStatus(ctx context.Context, workerRoot
 		return tools.OrchestratorSession{}, err
 	}
 	valid := r.ID == workerRootID || r.RootRunID != nil && *r.RootRunID == workerRootID
-	if r.Kind == "orchestrator" || !valid {
+	if r.SupervisedRunID != nil || !valid {
 		return tools.OrchestratorSession{}, fmt.Errorf("session %d is outside the supervised worker tree", id)
 	}
 	list, err := e.orchestratorSessions(ctx, workerRootID)
@@ -284,7 +266,7 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, wor
 	if err != nil {
 		return "", err
 	}
-	if current.RecoveryAttempts >= 3 {
+	if current.Recovery.RecoveryAttempts >= 3 {
 		return "", fmt.Errorf("session %d reached the automatic recovery limit", attemptRunID)
 	}
 	if err := e.q.IncrementRunRecoveryAttempts(ctx, attemptRunID); err != nil {

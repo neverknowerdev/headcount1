@@ -563,25 +563,19 @@ type Run struct {
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
-	CurrentStatus        string     `json:"current_status" gorm:"default:''"`
-	Status               string     `json:"status" gorm:"not null"`
-	Kind                 string     `json:"kind" gorm:"not null;default:'worker';index"`
-	SupervisedRunID      *int32     `json:"supervised_run_id,omitempty" gorm:"index"`
-	OrchestratorModel    string     `json:"orchestrator_model,omitempty"`
-	OrchestratorProvider string     `json:"orchestrator_provider,omitempty"`
-	StopCause            string     `json:"stop_cause,omitempty"`
-	WaitReason           string     `json:"wait_reason,omitempty"`
-	RecoveryAttempts     int        `json:"recovery_attempts"`
-	SessionID            string     `json:"session_id"`
-	LogFilePath          string     `json:"log_file_path"`
-	LogContent           string     `json:"log_content"`
-	LogEntries           string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
-	TokenStats           string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
-	ResultDescription    string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
-	ResultExplanation    string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
-	StartedAt            time.Time  `json:"started_at"`
-	EndedAt              *time.Time `json:"ended_at"`
-	LastMessageTime      *time.Time `json:"last_message_time"`
+	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
+	Status            string     `json:"status" gorm:"not null"`
+	SupervisedRunID   *int32     `json:"supervised_run_id,omitempty" gorm:"index"`
+	SessionID         string     `json:"session_id"`
+	LogFilePath       string     `json:"log_file_path"`
+	LogContent        string     `json:"log_content"`
+	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
+	TokenStats        string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
+	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
+	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
+	StartedAt         time.Time  `json:"started_at"`
+	EndedAt           *time.Time `json:"ended_at"`
+	LastMessageTime   *time.Time `json:"last_message_time"`
 
 	// Recovery is internal control-plane state. Conversation history remains
 	// exclusively in the append-only JSONL log; this JSONB document stores only
@@ -604,6 +598,9 @@ type RunRecovery struct {
 	ResumePreviousStatus string          `json:"resume_previous_status,omitempty"`
 	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
 	LastResumeError      string          `json:"last_resume_error,omitempty"`
+	WaitReason           string          `json:"wait_reason,omitempty"`
+	StopCause            string          `json:"stop_cause,omitempty"`
+	RecoveryAttempts     int             `json:"recovery_attempts,omitempty"`
 }
 
 // CheckpointPhase identifies the safe point represented by a checkpoint. It is
