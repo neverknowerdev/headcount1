@@ -13,6 +13,21 @@ import (
 	"agent-orchestrator/pkg/tokens"
 )
 
+type toolCallMessageIDContextKey struct{}
+
+// WithToolCallMessageID annotates tool execution with the canonical JSONL
+// message sequence of the assistant message that requested the tool.
+func WithToolCallMessageID(ctx context.Context, messageID int64) context.Context {
+	return context.WithValue(ctx, toolCallMessageIDContextKey{}, messageID)
+}
+
+// ToolCallMessageID returns the canonical message sequence for the current
+// tool call, or zero when the call is executed outside a logged agent turn.
+func ToolCallMessageID(ctx context.Context) int64 {
+	messageID, _ := ctx.Value(toolCallMessageIDContextKey{}).(int64)
+	return messageID
+}
+
 // ErrMaxTurns is returned (wrapped) when the agent loop hits its turn cap
 // without producing a final answer. Callers can errors.Is against it to
 // distinguish a runaway loop from a hard LLM/tool failure.
@@ -167,10 +182,11 @@ type Config struct {
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
 	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
-	TerminalTools []string
-	Queries       *db.Queries
-	RunID         int32
-	Logger        RunLogger
+	TerminalTools               []string
+	Queries                     *db.Queries
+	RunID                       int32
+	Logger                      RunLogger
+	InitialConversationSequence int64
 }
 
 // New creates an Agent from a Config.
@@ -198,6 +214,7 @@ func New(cfg Config) *Agent {
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
+		conversationSequence:  cfg.InitialConversationSequence,
 	}
 }
 
@@ -471,6 +488,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			execCtx, cancel = context.WithTimeout(ctx, toolCallTimeout)
 			defer cancel()
 		}
+		execCtx = WithToolCallMessageID(execCtx, a.conversationSequence)
 		output, execErr := a.Registry.Execute(execCtx, tc.Function.Name, argsRaw)
 		if execErr != nil {
 			output = fmt.Sprintf("error: %v", execErr)

@@ -12,10 +12,10 @@ import (
 // run. The engine stores it on the run record and broadcasts it, so the
 // orchestrator and the UI can see what each session is doing right now.
 type ReportStatus struct {
-	fn func(ctx context.Context, status string) error
+	fn func(ctx context.Context, status string, messageID int64) error
 }
 
-func NewReportStatus(fn func(ctx context.Context, status string) error) *ReportStatus {
+func NewReportStatus(fn func(ctx context.Context, status string, messageID int64) error) *ReportStatus {
 	return &ReportStatus{fn: fn}
 }
 
@@ -50,7 +50,7 @@ func (t *ReportStatus) Execute(ctx context.Context, args json.RawMessage) (strin
 	if p.Status == "" {
 		return "", fmt.Errorf("status is required")
 	}
-	if err := t.fn(ctx, p.Status); err != nil {
+	if err := t.fn(ctx, p.Status, aicli.ToolCallMessageID(ctx)); err != nil {
 		return "", fmt.Errorf("report_status: %w", err)
 	}
 	return "Status recorded.", nil

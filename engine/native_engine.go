@@ -1123,8 +1123,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		registry.Register(tools.NewAskTaskOwner(parent.askOwner))
 	}
 
-	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string) error {
-		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status); err != nil {
+	registry.Register(tools.NewReportStatus(func(sCtx context.Context, status string, messageID int64) error {
+		if err := e.q.UpdateRunCurrentStatus(sCtx, run.ID, status, messageID); err != nil {
 			return err
 		}
 		e.hub.BroadcastEventForCompany(task.CompanyID, "run_status", map[string]interface{}{"run_id": run.ID, "task_id": task.ID, "status": status})
@@ -1349,19 +1349,20 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 	agentCfgObj := aicli.Config{
-		Client:                llmClient,
-		Registry:              registry,
-		Mode:                  agentMode,
-		ProviderName:          provider.Name,
-		AgentName:             agentDisplayName,
-		TerminalTools:         []string{string(aicli.ToolFinishTask)},
-		ReasoningLevel:        reasoningLevel,
-		MCPListingCostPerTurn: listingCostTotal,
-		MCPServerListingCosts: listingCostByServer,
-		Queries:               e.q,
-		RunID:                 run.ID,
-		Logger:                proxyLogger,
-		HistoryAlreadyLogged:  resumeRun != nil,
+		Client:                      llmClient,
+		Registry:                    registry,
+		Mode:                        agentMode,
+		ProviderName:                provider.Name,
+		AgentName:                   agentDisplayName,
+		TerminalTools:               []string{string(aicli.ToolFinishTask)},
+		ReasoningLevel:              reasoningLevel,
+		MCPListingCostPerTurn:       listingCostTotal,
+		MCPServerListingCosts:       listingCostByServer,
+		Queries:                     e.q,
+		RunID:                       run.ID,
+		Logger:                      proxyLogger,
+		InitialConversationSequence: run.Recovery.CheckpointSequence,
+		HistoryAlreadyLogged:        resumeRun != nil,
 	}
 	if resumeRun != nil {
 		initiator := run.Recovery.RecoveryInitiator

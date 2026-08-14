@@ -109,5 +109,13 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(statusRequests.length).toBeGreaterThanOrEqual(1);
         expect(JSON.stringify(statusRequests)).toContain('Implementing the smoke task');
         expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
+        const statusPayloads = statusRequests.flatMap((r: any) => (r.body?.messages || [])
+            .filter((m: any) => m.role === 'tool' && typeof m.content === 'string')
+            .map((m: any) => {
+                try { return JSON.parse(m.content); } catch { return null; }
+            })
+            .filter((p: any) => p?.last_reported_status === 'Implementing the smoke task'));
+        expect(statusPayloads.length).toBeGreaterThanOrEqual(1);
+        expect(statusPayloads[0].last_reported_message_id).toBeGreaterThan(0);
     });
 });

@@ -69,7 +69,7 @@ type RunQuerier interface {
 	GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error)
 	GetRunBySessionID(ctx context.Context, sessionID string) (Run, error)
 	ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error)
-	UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error
+	UpdateRunCurrentStatus(ctx context.Context, id int32, status string, messageID int64) error
 	GetLatestRunStatusReport(ctx context.Context, runID int32) (RunStatusReport, error)
 	SetRunStatusRefreshRequestedAt(ctx context.Context, runID int32, at *time.Time) error
 }

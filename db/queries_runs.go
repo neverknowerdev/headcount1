@@ -106,10 +106,10 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 // UpdateRunCurrentStatus appends the agent's self-reported progress line and
 // updates the latest-value cache used by the UI. A fresh report also clears a
 // previously requested status refresh.
-func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
+func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string, messageID int64) error {
 	now := time.Now()
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Create(&RunStatusReport{RunID: id, Status: status, ReportedAt: now}).Error; err != nil {
+		if err := tx.Create(&RunStatusReport{RunID: id, Status: status, MessageID: messageID, ReportedAt: now}).Error; err != nil {
 			return err
 		}
 		return tx.Model(&Run{}).Where("id = ?", id).Updates(map[string]interface{}{

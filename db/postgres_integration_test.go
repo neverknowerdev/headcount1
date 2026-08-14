@@ -180,7 +180,7 @@ func TestPostgresQuerySurface(t *testing.T) {
 	require.NoError(t, q.MigrateAddProjectFKToMCPServers(ctx), "MigrateAddProjectFKToMCPServers")
 
 	// ── Run key uniqueness query (LIKE with a suffix wildcard) ────────────
-	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "working"))
+	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "working", 1))
 
 	_ = user
 }

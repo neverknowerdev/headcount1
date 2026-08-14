@@ -229,6 +229,7 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 	if reportErr == nil {
 		result.LastReportedStatus = report.Status
 		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
+		result.LastReportedMessageID = report.MessageID
 	}
 	stale := isStatusReportStale(report, reportErr == nil, time.Now())
 	result.StatusReportStale = stale

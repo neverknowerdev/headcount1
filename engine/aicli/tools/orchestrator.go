@@ -35,6 +35,7 @@ type OrchestratorSessionLastRunStatus struct {
 	Agent                  string `json:"agent"`
 	LastReportedStatus     string `json:"last_reported_status,omitempty"`
 	LastReportedAt         string `json:"last_reported_at,omitempty"`
+	LastReportedMessageID  int64  `json:"last_reported_message_id,omitempty"`
 	StatusReportStale      bool   `json:"status_report_stale"`
 	StatusRefreshRequested bool   `json:"status_refresh_requested"`
 }

@@ -196,9 +196,9 @@ func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
 	require.NoError(t, database.Create(&run).Error)
 	q := New(database)
 	ctx := context.Background()
-	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "planning"))
+	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "planning", 11))
 	time.Sleep(time.Millisecond)
-	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "implementing"))
+	require.NoError(t, q.UpdateRunCurrentStatus(ctx, run.ID, "implementing", 12))
 
 	var reports []RunStatusReport
 	require.NoError(t, database.Where("run_id = ?", run.ID).Order("reported_at asc").Find(&reports).Error)
@@ -206,6 +206,7 @@ func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
 	latest, err := q.GetLatestRunStatusReport(ctx, run.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "implementing", latest.Status)
+	assert.Equal(t, int64(12), latest.MessageID)
 	assert.True(t, latest.ReportedAt.After(reports[0].ReportedAt) || latest.ID > reports[0].ID)
 	loaded, err := q.GetRun(ctx, run.ID)
 	require.NoError(t, err)

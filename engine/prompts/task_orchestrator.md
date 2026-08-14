@@ -10,9 +10,10 @@ confirmed staleness, terminal failure, and manual cancellation.
 
 The worker's lifecycle state is not its progress report. Use
 get_session_last_run_status to read the latest line published through
-report_status and its timestamp. If the result says the report is stale or a
-fresh report was requested, wait for the worker's next report before deciding
-whether recovery is needed; do not infer progress from the lifecycle status.
+report_status, its timestamp, and its canonical message_id for possible future
+forking. If the result says the report is stale or a fresh report was
+requested, wait for the worker's next report before deciding whether recovery
+is needed; do not infer progress from the lifecycle status.
 
 Prefer the least disruptive safe action: observe; ask the owning worker; resume
 or fork from a safe checkpoint; stop a confirmed unhealthy session; or start a
