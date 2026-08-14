@@ -575,14 +575,39 @@ type Run struct {
 	StartedAt         time.Time  `json:"started_at"`
 	EndedAt           *time.Time `json:"ended_at"`
 	LastMessageTime   *time.Time `json:"last_message_time"`
-	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
-	// captured when a graceful shutdown (e.g. applying an auto-update) paused
-	// this run mid-flight, right after its current turn's LLM response
-	// arrived. Set only while Status == "interrupted"; consumed and cleared
-	// when the run resumes. Internal plumbing, not for display — omitted from
-	// the JSON API.
-	PausedHistory string `json:"-" gorm:"type:text"`
+
+	// Recovery is internal control-plane state. Conversation history remains
+	// exclusively in the append-only JSONL log; this JSONB document stores only
+	// the cursor, planned-pause metadata, and short-lived resume lease.
+	Recovery RunRecovery `json:"-" gorm:"serializer:json;type:jsonb"`
 }
+
+// RunRecovery groups transient recovery metadata so the execution model does
+// not expose a column for every recovery concern. Query helpers update this
+// value atomically when claiming or releasing a resume lease.
+type RunRecovery struct {
+	CheckpointSequence   int64           `json:"checkpoint_sequence,omitempty"`
+	CheckpointVersion    int             `json:"checkpoint_version,omitempty"`
+	CheckpointPhase      CheckpointPhase `json:"checkpoint_phase,omitempty"`
+	RecoveryReason       string          `json:"recovery_reason,omitempty"`
+	RecoveryInitiator    string          `json:"recovery_initiator,omitempty"`
+	RecoveryTarget       string          `json:"recovery_target,omitempty"`
+	ResumeLeaseOwner     string          `json:"resume_lease_owner,omitempty"`
+	ResumeLeaseUntil     *time.Time      `json:"resume_lease_until,omitempty"`
+	ResumePreviousStatus string          `json:"resume_previous_status,omitempty"`
+	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
+	LastResumeError      string          `json:"last_resume_error,omitempty"`
+}
+
+// CheckpointPhase identifies the safe point represented by a checkpoint. It is
+// intentionally a closed set: recovery must distinguish pending assistant
+// tool calls from a conversation whose tool results are already present.
+type CheckpointPhase string
+
+const (
+	CheckpointPhaseBeforeTools CheckpointPhase = "before_tools"
+	CheckpointPhaseAfterTools  CheckpointPhase = "after_tools"
+)
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to
 // Run.TokenStats as JSON so the Run Logs UI can render an overall

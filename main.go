@@ -346,10 +346,11 @@ func main() {
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
 
-	// Pick back up any run a previous graceful shutdown (e.g. applying an
-	// auto-update) paused mid-flight — see NativeEngine.BeginDrain. Runs in
-	// the background so a large backlog never delays server startup.
-	go eng.ResumeInterruptedRuns(context.Background())
+	// Pick up sessions a previous graceful shutdown (e.g. applying an
+	// auto-update) durably paused mid-flight. The automatic startup policy is
+	// intentionally limited to update-paused sessions; explicit failed/stale
+	// recovery uses the same engine ResumeSession primitive later.
+	go eng.ResumeEligibleSessions(context.Background())
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
@@ -493,6 +494,9 @@ func main() {
 	httpServer := &http.Server{Addr: ":" + port, Handler: r}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
+	// The startup sweep handles runs abandoned before this process started;
+	// the monitor covers stalls that happen while the server remains up.
+	eng.StartLivenessMonitor(ctx, time.Minute, 2*time.Minute)
 
 	go func() {
 		log.Printf("Starting server on port %s", port)
@@ -515,7 +519,7 @@ func main() {
 	// its next safe pause point (right after its current turn's LLM response
 	// arrives) instead of continuing — see NativeEngine.BeginDrain. Paused
 	// runs persist their conversation and resume automatically on the next
-	// boot (ResumeInterruptedRuns, called above). Bounded: a run stuck inside
+	// boot (ResumeEligibleSessions, called above). Bounded: a run stuck inside
 	// a long-running or blocking tool call (shell command, ask_human,
 	// delegation, ...) won't reach a turn boundary in time and is abandoned
 	// here — it's recovered the same way any ungraceful crash is, via the
@@ -657,9 +661,12 @@ func recoverStaleRuns(database *gorm.DB) {
 
 	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
 	for _, run := range staleRuns {
-		log.Printf("Marking run %d (task %d) as failed due to inactivity", run.ID, run.TaskID)
-		_ = q.UpdateRunLog(ctx, run.ID, "Run marked as failed: server restarted while run was in progress", "failed")
-		_ = q.UnlockTaskRun(ctx, run.TaskID)
+		log.Printf("Marking run %d (task %d) stale due to inactivity", run.ID, run.TaskID)
+		if changed, markErr := q.MarkRunStale(ctx, run.ID, "server restarted while run was in progress"); markErr != nil {
+			log.Printf("Warning: failed to mark run %d stale: %v", run.ID, markErr)
+		} else if changed {
+			log.Printf("Run %d is recoverable via ResumeSession", run.ID)
+		}
 	}
 }
 

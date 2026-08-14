@@ -20,6 +20,7 @@ import (
 	"agent-orchestrator/engine"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/eventhub"
+	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/secrets"
 
 	"github.com/glebarez/sqlite"
@@ -166,6 +167,22 @@ func startTestServer(t *testing.T, h http.Handler) *httptest.Server {
 	srv := httptest.NewServer(h)
 	t.Cleanup(srv.Close)
 	return srv
+}
+
+func readJSONLEntries(t *testing.T, path string) []map[string]interface{} {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	require.NoError(t, err)
+	var entries []map[string]interface{}
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if line == "" {
+			continue
+		}
+		var entry map[string]interface{}
+		require.NoError(t, json.Unmarshal([]byte(line), &entry))
+		entries = append(entries, entry)
+	}
+	return entries
 }
 
 // waitForRunDone polls the DB until the given run reaches a terminal status or
@@ -422,7 +439,7 @@ func waitForRunStatus(t *testing.T, q *db.Queries, runID int32, status string, t
 // arrives (its pending tool call is never executed), the paused run's
 // conversation is persisted and the task stays locked to it, and a *fresh*
 // NativeEngine instance backed by the same DB (simulating the restarted
-// process) picks the run back up via ResumeInterruptedRuns and completes it —
+// process) picks the run back up via ResumeEligibleSessions and completes it —
 // including actually running the tool call that was pending at pause time.
 //
 // The pending tool call is report_status: it's available to every agent
@@ -462,8 +479,8 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	require.NoError(t, eng.ProcessTask(context.Background(), task.ID))
 	runID := waitForRunCreated(t, database, task.ID, 10*time.Second)
 
-	run := waitForRunStatus(t, q, runID, "interrupted", 10*time.Second)
-	assert.NotEmpty(t, run.PausedHistory, "paused run must persist its conversation")
+	run := waitForRunStatus(t, q, runID, db.RunStatusPaused, 10*time.Second)
+	assert.NotZero(t, run.Recovery.CheckpointSequence, "paused run must persist a JSONL checkpoint cursor")
 	assert.Equal(t, int32(1), callCount.Load(), "pausing must stop before any follow-up LLM call")
 	assert.NotEqual(t, resumeMarker, run.CurrentStatus, "the pending tool call must not run before resume")
 
@@ -483,11 +500,11 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	// in-memory state (cancelFuncs, the drain flag) starts empty, exactly as
 	// it would after a real process restart — only the DB carries state across.
 	eng2 := engine.NewNativeEngine(database, hub)
-	eng2.ResumeInterruptedRuns(context.Background())
+	eng2.ResumeEligibleSessions(context.Background())
 
 	finalRun := waitForRunDone(t, q, runID, 15*time.Second)
 	assert.Equal(t, "completed", finalRun.Status)
-	assert.Empty(t, finalRun.PausedHistory, "resumed history should be cleared once consumed")
+	assert.Zero(t, finalRun.Recovery.CheckpointSequence, "resumed checkpoint should be cleared once consumed")
 	assert.Equal(t, int32(2), callCount.Load(), "resume must replay the pending tool call locally, then make exactly one more LLM call")
 	assert.Equal(t, resumeMarker, finalRun.CurrentStatus, "the tool call pending at pause time must run on resume")
 
@@ -1460,4 +1477,87 @@ func TestNativeEngineRerunTaskFromTerminalStatus(t *testing.T) {
 	updated, err := q.GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "in-review", updated.Status)
+}
+
+func TestNativeEngineCheckStaleRunsRetiresOnlyRunningSessions(t *testing.T) {
+	database := setupTestDB(t)
+	company, err := db.New(database).CreateCompany(context.Background(), "Liveness Co")
+	require.NoError(t, err)
+	agent := db.Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "work"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "stalled", Status: "in-progress"}
+	require.NoError(t, database.Create(&task).Error)
+	old := time.Now().Add(-10 * time.Minute)
+	running := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: old, LastMessageTime: &old}
+	completed := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed", StartedAt: old, LastMessageTime: &old}
+	require.NoError(t, database.Create(&running).Error)
+	require.NoError(t, database.Create(&completed).Error)
+	eng := engine.NewNativeEngine(database, eventhub.NewHub())
+	stale, err := eng.CheckStaleRuns(context.Background(), time.Minute)
+	require.NoError(t, err)
+	assert.Equal(t, []int32{running.ID}, stale)
+	got, err := db.New(database).GetRun(context.Background(), running.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.RunStatusStale, got.Status)
+	stale, err = eng.CheckStaleRuns(context.Background(), time.Minute)
+	require.NoError(t, err)
+	assert.Empty(t, stale, "monitor ticks must be idempotent")
+	got, err = db.New(database).GetRun(context.Background(), completed.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "completed", got.Status)
+}
+
+func TestNativeEngineLivenessMonitorRunsOnCadence(t *testing.T) {
+	database := setupTestDB(t)
+	company, err := db.New(database).CreateCompany(context.Background(), "Monitor Co")
+	require.NoError(t, err)
+	agent := db.Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "work"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "monitor me", Status: "in-progress"}
+	require.NoError(t, database.Create(&task).Error)
+	old := time.Now().Add(-time.Hour)
+	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: old, LastMessageTime: &old}
+	require.NoError(t, database.Create(&run).Error)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	engine.NewNativeEngine(database, eventhub.NewHub()).StartLivenessMonitor(ctx, 10*time.Millisecond, time.Minute)
+	require.Eventually(t, func() bool {
+		got, getErr := db.New(database).GetRun(context.Background(), run.ID)
+		return getErr == nil && got.Status == db.RunStatusStale
+	}, time.Second, 10*time.Millisecond)
+}
+
+func TestNativeEngineResumesFailedRunWithoutPreparedCheckpoint(t *testing.T) {
+	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
+	database := setupTestDB(t)
+	task := seedTestData(t, database, mockSrv.URL)
+	q := db.New(database)
+	run, err := q.CreateRun(context.Background(), db.Run{TaskID: task.ID, AgentID: *task.AgentID, Status: "failed", StartedAt: time.Now().Add(-time.Minute)})
+	require.NoError(t, err)
+	// Simulate a crash after canonical messages were written but before any
+	// planned pause checkpoint could be stored.
+	logger, err := logging.NewSessionLoggerWithHub(t.TempDir(), "test-co", task.ID, run.ID, run.ID, nil, q)
+	require.NoError(t, err)
+	for _, message := range []aicli.Message{{Role: "system", Content: "resume system"}, {Role: "user", Content: "continue this work"}} {
+		payload, marshalErr := json.Marshal(message)
+		require.NoError(t, marshalErr)
+		logger.LogConversationMessage(payload)
+	}
+	require.NoError(t, logger.Close())
+	require.NoError(t, q.UpdateRunLogFilePath(context.Background(), run.ID, logger.FilePath()))
+
+	eng := engine.NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.ResumeSession(context.Background(), run.ID, engine.ResumeOptions{Cause: engine.ResumeAfterFailure, Reason: "retry after provider error"}))
+	finalRun := waitForRunDone(t, q, run.ID, 20*time.Second)
+	assert.Equal(t, "completed", finalRun.Status)
+	assert.GreaterOrEqual(t, finalRun.Recovery.ResumeAttempts, 1)
+	entries := readJSONLEntries(t, logger.FilePath())
+	var messages []string
+	for _, entry := range entries {
+		if entry["type"] == "message" {
+			messages = append(messages, entry["content"].(string))
+		}
+	}
+	assert.Contains(t, messages, `{"role":"system","content":"resume system"}`)
+	assert.Contains(t, messages, `{"role":"user","content":"continue this work"}`)
 }

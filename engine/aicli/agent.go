@@ -116,6 +116,8 @@ type RunLogger interface {
 	LogRequest(model, agentName, providerName string, body []byte)
 	LogResponse(model, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
 	LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{})
+	LogConversationMessage(messageJSON []byte) int64
+	Sync() error
 	FilePath() string
 }
 
@@ -129,16 +131,24 @@ type Agent struct {
 	ProviderName   string
 	AgentName      string
 	ReasoningLevel string // "low", "medium", "max" → mapped to API values
+	// ResumeNotice is appended after a restored pending tool result and before
+	// the first post-resume LLM request. It is runtime-only metadata.
+	ResumeNotice string
+	// HistoryAlreadyLogged tells the agent that the supplied history was
+	// restored from the canonical JSONL trajectory and must not be emitted a
+	// second time. Fresh sessions log their initial system/user messages once.
+	HistoryAlreadyLogged bool
 	// MCPListingCostPerTurn is the estimated token cost of the MCP CompactListing
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools are tool names that end the run: once such a tool
 	// executes successfully, the loop returns without another LLM call.
-	TerminalTools map[string]bool
-	q             *db.Queries
-	runID         int32
-	logger        RunLogger
+	TerminalTools        map[string]bool
+	q                    *db.Queries
+	runID                int32
+	logger               RunLogger
+	conversationSequence int64
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -151,6 +161,8 @@ type Config struct {
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
 	ReasoningLevel        string
+	ResumeNotice          string
+	HistoryAlreadyLogged  bool
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
@@ -178,6 +190,8 @@ func New(cfg Config) *Agent {
 		ProviderName:          cfg.ProviderName,
 		AgentName:             cfg.AgentName,
 		ReasoningLevel:        cfg.ReasoningLevel,
+		ResumeNotice:          cfg.ResumeNotice,
+		HistoryAlreadyLogged:  cfg.HistoryAlreadyLogged,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
 		TerminalTools:         terminal,
@@ -185,6 +199,21 @@ func New(cfg Config) *Agent {
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
 	}
+}
+
+// ConversationSequence returns the JSONL sequence of the newest canonical
+// message emitted by this agent. It is used as the durable checkpoint cursor.
+func (a *Agent) ConversationSequence() int64 { return a.conversationSequence }
+
+func (a *Agent) logConversationMessage(message Message) {
+	if a.logger == nil {
+		return
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return
+	}
+	a.conversationSequence = a.logger.LogConversationMessage(payload)
 }
 
 // Run executes the agent loop starting with systemPrompt and userMessage.
@@ -261,6 +290,12 @@ func (a *Agent) reasoningEffort() string {
 // were never executed. That step is replayed first, before the main loop
 // begins, so resuming is indistinguishable from having never paused.
 func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reasoningEffort string, pause PauseRequested) (string, []Message, error) {
+	if !a.HistoryAlreadyLogged {
+		for _, message := range history {
+			a.logConversationMessage(message)
+		}
+		a.HistoryAlreadyLogged = true
+	}
 	if n := len(history); n > 0 {
 		last := history[n-1]
 		if last.Role == "assistant" && len(last.ToolCalls) > 0 {
@@ -272,10 +307,19 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				a.logger.LogToolResultsFromRequest(a.Client.Model, a.ProviderName, msgsToMap(toolMessages))
 			}
 			history = append(history, toolMessages...)
+			for _, message := range toolMessages {
+				a.logConversationMessage(message)
+			}
 			if terminalDone {
 				return strings.TrimSpace(last.Content), history, nil
 			}
 		}
+	}
+	if a.ResumeNotice != "" {
+		notice := Message{Role: "system", Content: a.ResumeNotice}
+		history = append(history, notice)
+		a.logConversationMessage(notice)
+		a.ResumeNotice = ""
 	}
 
 	for turn := 0; turn < maxTurns; turn++ {
@@ -357,6 +401,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		// Append the assistant turn to history before processing tool calls
 		// so the next LLM call sees the full context.
 		history = append(history, assistantMsg)
+		a.logConversationMessage(assistantMsg)
 
 		if len(assistantMsg.ToolCalls) == 0 {
 			// No tools to invoke — the assistant's text is the final answer.
@@ -386,6 +431,9 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		}
 
 		history = append(history, toolMessages...)
+		for _, message := range toolMessages {
+			a.logConversationMessage(message)
+		}
 
 		// A terminal tool (e.g. finish_task) completed — the run is over.
 		// Skip the extra wrap-up LLM round; the finish summary already exists.
