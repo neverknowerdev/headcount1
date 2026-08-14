@@ -1355,12 +1355,8 @@ func TestNativeEngineAskHuman(t *testing.T) {
 				}
 			}
 		}
-		if n == 2 {
-			json.NewEncoder(w).Encode(textJSON("ask-002", "Understood, going with Option B."))
-			return
-		}
-		json.NewEncoder(w).Encode(toolCallJSON("ask-003", "finish_task",
-			`{"task_status":"done","finish_status":"Completed after human input"}`))
+		json.NewEncoder(w).Encode(toolCallJSON("finish-002", "finish_task",
+			`{"task_status":"done","finish_status":"Understood, going with Option B."}`))
 	})
 
 	mockSrv := startTestServer(t, handler)

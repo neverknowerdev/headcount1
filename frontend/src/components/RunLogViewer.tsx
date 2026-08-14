@@ -343,7 +343,24 @@ function getAgentMessage(content: string): {
         return { text: textParts.join('\n\n') || null, reasoning: null, toolCalls, tokens: null };
       }
     }
-    if (parsed.reasoning || parsed.content || parsed.tool_calls || parsed.tokens) {
+
+    // Proxy logs retain the original provider response in `raw`. Providers
+    // that return tool calls there (including ask_human) must still be
+    // rendered as tool calls rather than as an opaque JSON block.
+    if (typeof parsed.raw === 'string') {
+      try {
+        const rawParsed = JSON.parse(parsed.raw);
+        if (rawParsed.choices && Array.isArray(rawParsed.choices)) {
+          const textParts = rawParsed.choices.map((c: any) => c.message?.content || c.delta?.content || c.text || '').filter(Boolean);
+          const toolCalls = rawParsed.choices.flatMap((c: any) => c.message?.tool_calls || c.delta?.tool_calls || []);
+          if (textParts.length > 0 || toolCalls.length > 0) {
+            return { text: textParts.join('\n\n') || null, reasoning: parsed.reasoning || null, toolCalls, tokens: parsed.tokens || null };
+          }
+        }
+      } catch {}
+    }
+
+    if (parsed.reasoning || parsed.content || parsed.tool_calls || parsed.tokens || parsed.raw) {
       const tokens: TokenUsage = parsed.tokens || null;
       let text = parsed.content || null;
       if (!text && typeof parsed.raw === 'string') {
@@ -382,6 +399,7 @@ function getToolIcon(toolName: string): { Icon: any; color: string; bg: string }
     case 'grep':
     case 'rg':     return { Icon: Search,      color: 'text-purple-600', bg: 'bg-purple-100' };
     case 'update_task_status': return { Icon: ListChecks, color: 'text-green-700', bg: 'bg-green-100' };
+    case 'ask_human': return { Icon: MessageSquare, color: 'text-violet-600', bg: 'bg-violet-100' };
     case 'todowrite': return { Icon: ListChecks, color: 'text-blue-600', bg: 'bg-blue-100' };
     default:       return { Icon: Wrench,      color: 'text-amber-600',  bg: 'bg-amber-100' };
   }
@@ -394,6 +412,9 @@ function getToolCallPreview(entry: LogEntry): string {
     if (args.command) return String(args.command);
     if (args.pattern) return String(args.pattern);
     if (args.status) return `status: ${args.status}`;
+    if (args.question) return String(args.question);
+    if (args.filename) return String(args.filename);
+    if (args.title) return String(args.title);
   } catch {}
   return entry.tool_name || 'tool call';
 }
@@ -915,7 +936,7 @@ function InfoRow({ msg }: { msg: LogMessage }) {
   return (
     <div className="border-b border-gray-50 px-3 py-1 flex items-center gap-2">
       <span className="text-gray-300 text-xs shrink-0">•</span>
-      <span className="text-xs text-gray-500 truncate">{msg.entry.content}</span>
+      <span className="text-xs text-gray-500 min-w-0 flex-1 whitespace-pre-wrap break-words" title={msg.entry.content}>{msg.entry.content}</span>
       {msg.entry.ts && (
         <span className="text-xs text-gray-300 font-mono shrink-0 ml-auto">{formatTime(msg.entry.ts)}</span>
       )}
@@ -959,6 +980,7 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
   const name = toolCall.name || toolCall.function?.name || 'unknown';
   const { Icon, color, bg } = getToolIcon(name);
   const args = toolCall.arguments || toolCall.function?.arguments || {};
+  const argsObject = typeof args === 'string' ? (() => { try { return JSON.parse(args); } catch { return {}; } })() : args;
   const argsStr = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
 
   return (
@@ -973,7 +995,7 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
         </div>
         <span className={`font-mono font-medium ${color}`}>{name}</span>
         <span className="text-gray-500 truncate flex-1">
-          {(args as any).filePath || (args as any).command || (args as any).pattern || (args as any).status || ''}
+          {(argsObject as any).filePath || (argsObject as any).command || (argsObject as any).pattern || (argsObject as any).status || (argsObject as any).question || (argsObject as any).filename || (argsObject as any).title || ''}
         </span>
       </button>
       {expanded && (
@@ -1345,16 +1367,15 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           )}
           <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
         </div>
-        <div className="flex items-center gap-1 shrink-0">
-          {runId != null && (
+        <div className="flex items-center gap-2 shrink-0">
+          {runId && (
             <a
-              href={`/api/runs/${runId}/log/download`}
+              href={`/api/runs/${runId}/download`}
               className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
-              title="Download run log"
+              title="Download all logs for this run and its nested sessions"
               data-testid="download-run-log"
             >
-              <Download size={12} />
-              Download
+              <Download size={12} /> Download
             </a>
           )}
           <button
