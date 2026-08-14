@@ -57,8 +57,8 @@ test.describe.serial('task sidecar orchestrator', () => {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
                 { tool_call: { id: 'orch-list', name: 'get_sessions', arguments: {} } },
-                { tool_call: { id: 'orch-status', name: 'get_session_last_run_status', arguments: { session_id: 2 } } },
                 { text: 'Observed worker; no intervention required.' },
+                { tool_call: { id: 'orch-status', name: 'get_session_last_run_status', arguments: { session_id: 2 } } },
                 { text: 'Execution is terminal.' },
             ] }),
         });
@@ -94,6 +94,14 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(taskResponse.ok()).toBeTruthy();
         expect((await taskResponse.json()).orchestrator_run_id).toBe(orchestrator.id);
 
+        await expect.poll(async () => {
+            const log = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
+            return (log.requests as any[]).some((r: any) =>
+                r.body?.model === 'e2e-orchestrator-model' &&
+                (r.body?.messages || []).some((m: any) =>
+                    m.role === 'tool' && typeof m.content === 'string' &&
+                    m.content.includes('last_reported_status')));
+        }, { timeout: 20_000 }).toBeTruthy();
         const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
@@ -110,7 +118,8 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(JSON.stringify(statusRequests)).toContain('Implementing the smoke task');
         expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
         const reportEventRequests = orchestratorRequests.filter((r: any) =>
-            JSON.stringify(r.body?.messages || []).includes('"event_type":"status_report"'));
+            (r.body?.messages || []).some((m: any) =>
+                typeof m.content === 'string' && m.content.includes('"event_type":"status_report"')));
         expect(reportEventRequests.length).toBeGreaterThanOrEqual(1);
         const statusPayloads = statusRequests.flatMap((r: any) => (r.body?.messages || [])
             .filter((m: any) => m.role === 'tool' && typeof m.content === 'string')
