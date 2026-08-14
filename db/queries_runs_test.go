@@ -120,7 +120,7 @@ func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
 	require.NoError(t, database.Save(&failed).Error)
 	require.NoError(t, database.Save(&stale).Error)
 	q := New(database)
-	auto, err := q.GetRunsByRecoveryStates(context.Background(), []string{RunStatusPaused, RunStatusLegacyInterrupted})
+	auto, err := q.GetRunsByRecoveryStates(context.Background(), []string{RunStatusPaused})
 	require.NoError(t, err)
 	assert.Empty(t, auto, "failed and stale checkpoints are explicit-recovery only")
 

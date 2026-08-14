@@ -439,7 +439,7 @@ func waitForRunStatus(t *testing.T, q *db.Queries, runID int32, status string, t
 // arrives (its pending tool call is never executed), the paused run's
 // conversation is persisted and the task stays locked to it, and a *fresh*
 // NativeEngine instance backed by the same DB (simulating the restarted
-// process) picks the run back up via ResumeInterruptedRuns and completes it —
+// process) picks the run back up via ResumeEligibleSessions and completes it —
 // including actually running the tool call that was pending at pause time.
 //
 // The pending tool call is report_status: it's available to every agent
@@ -500,7 +500,7 @@ func TestNativeEnginePauseAndResume(t *testing.T) {
 	// in-memory state (cancelFuncs, the drain flag) starts empty, exactly as
 	// it would after a real process restart — only the DB carries state across.
 	eng2 := engine.NewNativeEngine(database, hub)
-	eng2.ResumeInterruptedRuns(context.Background())
+	eng2.ResumeEligibleSessions(context.Background())
 
 	finalRun := waitForRunDone(t, q, runID, 15*time.Second)
 	assert.Equal(t, "completed", finalRun.Status)

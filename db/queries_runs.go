@@ -11,7 +11,6 @@ import (
 
 const (
 	RunStatusPaused            = "paused"
-	RunStatusLegacyInterrupted = "interrupted"
 	RunStatusRecoverableFailed = "recoverable_failed"
 	RunStatusStale             = "stale"
 	RunStatusResuming          = "resuming"
@@ -345,11 +344,6 @@ func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, run
 	return count, err
 }
 
-// PauseRun stores an update checkpoint cursor and keeps the task locked to this run.
-func (q *Queries) PauseRun(ctx context.Context, runID int32, sequence int64) error {
-	return q.PauseRunWithMetadata(ctx, runID, sequence, "binary_update", "", "", string(CheckpointPhaseBeforeTools))
-}
-
 // PauseRunWithMetadata persists a versioned recovery checkpoint at a safe
 // boundary on the Run row. The JSONL file remains the history source of truth;
 // Recovery is only a cursor and recovery-coordination state.
@@ -367,12 +361,6 @@ func (q *Queries) PauseRunWithMetadata(ctx context.Context, runID int32, sequenc
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
 		"status": RunStatusPaused, "recovery": recoveryJSON(recovery),
 	}).Error
-}
-
-// GetInterruptedRuns is retained for callers from the first pause/resume
-// implementation. It now returns both the new paused state and legacy rows.
-func (q *Queries) GetInterruptedRuns(ctx context.Context) ([]Run, error) {
-	return q.GetRunsByRecoveryStates(ctx, []string{RunStatusPaused, RunStatusLegacyInterrupted})
 }
 
 // GetRunsByRecoveryStates returns runs in the requested recoverable states.

@@ -413,7 +413,7 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 			cause = ResumeAfterUpdate
 		}
 	}
-	allowed := []string{db.RunStatusPaused, db.RunStatusLegacyInterrupted}
+	allowed := []string{db.RunStatusPaused}
 	switch cause {
 	case ResumeAfterFailure:
 		allowed = []string{db.RunStatusRecoverableFailed, "failed"}
@@ -479,7 +479,7 @@ func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
 	if err := e.q.ReclaimExpiredResumeLeases(ctx, time.Now()); err != nil {
 		fmt.Printf("Warning: failed to reclaim resume leases: %v\n", err)
 	}
-	runs, err := e.q.GetRunsByRecoveryStates(ctx, []string{db.RunStatusPaused, db.RunStatusLegacyInterrupted})
+	runs, err := e.q.GetRunsByRecoveryStates(ctx, []string{db.RunStatusPaused})
 	if err != nil {
 		fmt.Printf("Warning: failed to list paused runs: %v\n", err)
 		return
@@ -493,12 +493,6 @@ func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
 			fmt.Printf("Warning: failed to resume run %d: %v\n", run.ID, resumeErr)
 		}
 	}
-}
-
-// ResumeInterruptedRuns is the compatibility name used by main and older
-// integrations. It now delegates to the explicit paused-session policy.
-func (e *NativeEngine) ResumeInterruptedRuns(ctx context.Context) {
-	e.ResumeEligibleSessions(ctx)
 }
 
 // executeSession runs one agent session for a task and returns its final run

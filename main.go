@@ -519,7 +519,7 @@ func main() {
 	// its next safe pause point (right after its current turn's LLM response
 	// arrives) instead of continuing — see NativeEngine.BeginDrain. Paused
 	// runs persist their conversation and resume automatically on the next
-	// boot (ResumeInterruptedRuns, called above). Bounded: a run stuck inside
+	// boot (ResumeEligibleSessions, called above). Bounded: a run stuck inside
 	// a long-running or blocking tool call (shell command, ask_human,
 	// delegation, ...) won't reach a turn boundary in time and is abandoned
 	// here — it's recovered the same way any ungraceful crash is, via the
