@@ -366,6 +366,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			if rootErr := e.q.SetRunRootID(ctx, run.ID, rootID); rootErr != nil {
 				fmt.Printf("Warning: failed to set root run id for run %d: %v\n", run.ID, rootErr)
 			}
+			// Create the monitoring sidecar independently. It never acquires
+			// Task.RunID and is enabled only when its dedicated model setting is
+			// configured for the task owner.
+			e.startOrchestratorForWorker(task, run)
 		}
 	}
 

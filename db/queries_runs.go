@@ -3,6 +3,7 @@ package db
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"time"
 
 	"gorm.io/gorm"
@@ -21,11 +22,20 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	}
 	r.LogContent = content
 	r.Status = status
+	var updateErr error
 	if status == "completed" || status == "failed" {
 		now := gorm.Expr("CURRENT_TIMESTAMP")
-		return q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
+		updateErr = q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
+	} else {
+		updateErr = q.db.WithContext(ctx).Save(&r).Error
 	}
-	return q.db.WithContext(ctx).Save(&r).Error
+	if updateErr != nil {
+		return updateErr
+	}
+	if r.Kind != "orchestrator" {
+		_ = q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:%s:%d", r.ID, status, time.Now().UnixNano())})
+	}
+	return nil
 }
 
 // SetRunRootID sets root_run_id after creation. Root runs point at themselves
@@ -160,6 +170,94 @@ func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]R
 	var runs []Run
 	err := q.db.WithContext(ctx).Where("task_id = ? AND status = ?", taskID, "running").Find(&runs).Error
 	return runs, err
+}
+
+// GetOrchestratorRun returns the sidecar for a worker root, if one exists.
+func (q *Queries) GetOrchestratorRun(ctx context.Context, workerRunID int32) (Run, error) {
+	var r Run
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
+		Where("kind = ? AND supervised_run_id = ?", "orchestrator", workerRunID).First(&r).Error
+	return r, err
+}
+
+// ListSupervisedRuns returns the worker tree monitored by an orchestrator.
+// The orchestrator itself is never included.
+func (q *Queries) ListSupervisedRuns(ctx context.Context, workerRootID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
+		Where("(kind = ? OR kind = '') AND (id = ? OR root_run_id = ?)", "worker", workerRootID, workerRootID).
+		Order("started_at asc, id asc").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) ListOrchestratorsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Where("task_id = ? AND kind = ?", taskID, "orchestrator").Order("started_at desc").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) ListWaitingOrchestrators(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Preload("Task").Preload("Agent").
+		Where("kind = ? AND status = ?", "orchestrator", "waiting").Order("started_at asc").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) SetRunKind(ctx context.Context, runID int32, kind string, supervisedRunID *int32) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"kind": kind, "supervised_run_id": supervisedRunID,
+	}).Error
+}
+
+func (q *Queries) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
+		"status": "waiting", "wait_reason": reason,
+	}).Error
+}
+
+func (q *Queries) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("stop_cause", cause).Error
+}
+
+func (q *Queries) IncrementRunRecoveryAttempts(ctx context.Context, runID int32) (int, error) {
+	if err := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
+		UpdateColumn("recovery_attempts", gorm.Expr("recovery_attempts + ?", 1)).Error; err != nil {
+		return 0, err
+	}
+	var run Run
+	if err := q.db.WithContext(ctx).Select("recovery_attempts").First(&run, runID).Error; err != nil {
+		return 0, err
+	}
+	return run.RecoveryAttempts, nil
+}
+
+// EnqueueRunEvent persists a worker lifecycle event. DedupeKey is optional;
+// callers that retry delivery can use it to avoid duplicate wakeups.
+func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
+	if event.DedupeKey != "" {
+		var count int64
+		if err := q.db.WithContext(ctx).Model(&RunEvent{}).Where("task_id = ? AND dedupe_key = ?", event.TaskID, event.DedupeKey).Count(&count).Error; err != nil {
+			return err
+		}
+		if count > 0 {
+			return nil
+		}
+	}
+	return q.db.WithContext(ctx).Create(&event).Error
+}
+
+func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
+	var events []RunEvent
+	err := q.db.WithContext(ctx).Where("task_id = ? AND consumed_at IS NULL", taskID).Order("id asc").Find(&events).Error
+	return events, err
+}
+
+func (q *Queries) ConsumeRunEvents(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	now := time.Now()
+	return q.db.WithContext(ctx).Model(&RunEvent{}).Where("id IN ? AND consumed_at IS NULL", ids).Update("consumed_at", now).Error
 }
 
 func (q *Queries) GetStaleRunningRuns(ctx context.Context, threshold time.Duration) ([]Run, error) {

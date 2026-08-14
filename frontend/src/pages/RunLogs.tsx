@@ -99,10 +99,15 @@ export const RunLogs: React.FC = () => {
     // Grouping is derived once per runs update rather than per-row during
     // render: childrenByParent feeds the "sessions" list and count badge,
     // descendantsByRoot feeds the whole-tree per-agent token breakdown.
-    const { rootRuns, childrenByParent, descendantsByRoot } = useMemo(() => {
+    const { rootRuns, childrenByParent, descendantsByRoot, orchestratorByWorker } = useMemo(() => {
         const childrenByParent = new Map<number, any[]>();
         const descendantsByRoot = new Map<number, any[]>();
+        const orchestratorByWorker = new Map<number, any>();
         runs.forEach((r: any) => {
+            if (r.kind === 'orchestrator' && r.supervised_run_id) {
+                orchestratorByWorker.set(r.supervised_run_id, r);
+                return;
+            }
             if (r.parent_run_id) {
                 if (!childrenByParent.has(r.parent_run_id)) childrenByParent.set(r.parent_run_id, []);
                 childrenByParent.get(r.parent_run_id)!.push(r);
@@ -111,8 +116,8 @@ export const RunLogs: React.FC = () => {
             if (!descendantsByRoot.has(rootId)) descendantsByRoot.set(rootId, []);
             descendantsByRoot.get(rootId)!.push(r);
         });
-        const rootRuns = runs.filter((r: any) => !r.parent_run_id);
-        return { rootRuns, childrenByParent, descendantsByRoot };
+        const rootRuns = runs.filter((r: any) => !r.parent_run_id && r.kind !== 'orchestrator');
+        return { rootRuns, childrenByParent, descendantsByRoot, orchestratorByWorker };
     }, [runs]);
 
     return (
@@ -130,6 +135,7 @@ export const RunLogs: React.FC = () => {
                             const total = ts.total_tokens || 0;
                             const children = childrenByParent.get(r.id) || [];
                             const descendants = (descendantsByRoot.get(r.id) || []).filter((d: any) => d.id !== r.id);
+                            const orchestrator = orchestratorByWorker.get(r.id);
                             const agentStats = descendants.length > 0 ? buildAgentStats(r, descendants) : undefined;
                             return (
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
@@ -164,6 +170,14 @@ export const RunLogs: React.FC = () => {
                                             <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.current_status}</span>} />
                                         )}
                                     </div>
+
+                                    {orchestrator && (
+                                        <div className="rounded border border-violet-200 bg-violet-50 px-3 py-2 text-xs text-violet-900">
+                                            <span className="font-semibold">Task Orchestrator:</span> {orchestrator.status}
+                                            {orchestrator.orchestrator_model ? ` · ${orchestrator.orchestrator_model}` : ''}
+                                            {orchestrator.current_status ? ` · ${orchestrator.current_status}` : ''}
+                                        </div>
+                                    )}
 
                                     {r.result_description && (
                                         <div>

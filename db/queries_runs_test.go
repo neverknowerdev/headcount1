@@ -31,3 +31,21 @@ func TestGetRunWithTaskPreloadsAgent(t *testing.T) {
 	require.Equal(t, agent.ID, loaded.Agent.ID)
 	require.Equal(t, "CEO", loaded.Agent.RoleKey)
 }
+
+func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&RunEvent{}))
+	q := New(database)
+	ctx := context.Background()
+	event := RunEvent{TaskID: 7, RunID: 11, EventType: "run_status", Payload: "failed", DedupeKey: "run:11:failed:1"}
+	require.NoError(t, q.EnqueueRunEvent(ctx, event))
+	require.NoError(t, q.EnqueueRunEvent(ctx, event))
+	pending, err := q.ListPendingRunEvents(ctx, 7)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.NoError(t, q.ConsumeRunEvents(ctx, []int64{pending[0].ID}))
+	pending, err = q.ListPendingRunEvents(ctx, 7)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}

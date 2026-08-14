@@ -174,6 +174,7 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunEvent{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -238,7 +239,7 @@ func main() {
 			}
 		}
 	}
-	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
+	// Seed the known provider presets (OpenCode Go, MiniMax, DeepSeek, ...) users can
 	// pick from a dropdown when adding a provider. These are a global catalog;
 	// they don't become actual LLMProvider rows until a user picks one and
 	// supplies an API key.
@@ -350,6 +351,7 @@ func main() {
 	// auto-update) paused mid-flight — see NativeEngine.BeginDrain. Runs in
 	// the background so a large backlog never delays server startup.
 	go eng.ResumeInterruptedRuns(context.Background())
+	go eng.ResumeWaitingOrchestrators(context.Background())
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies

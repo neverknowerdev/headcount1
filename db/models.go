@@ -563,18 +563,27 @@ type Run struct {
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
 	// CurrentStatus is a short free-text progress line set by the agent via
 	// the report_status tool, shown live in the Run Log UI.
-	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
-	Status            string     `json:"status" gorm:"not null"`
-	SessionID         string     `json:"session_id"`
-	LogFilePath       string     `json:"log_file_path"`
-	LogContent        string     `json:"log_content"`
-	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
-	TokenStats        string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
-	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
-	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
-	StartedAt         time.Time  `json:"started_at"`
-	EndedAt           *time.Time `json:"ended_at"`
-	LastMessageTime   *time.Time `json:"last_message_time"`
+	CurrentStatus string `json:"current_status" gorm:"default:''"`
+	Status        string `json:"status" gorm:"not null"`
+	// Kind distinguishes task-owning worker sessions from the sidecar
+	// orchestrator. Orchestrator runs never acquire Task.RunID.
+	Kind                 string     `json:"kind" gorm:"not null;default:'worker';index"`
+	SupervisedRunID      *int32     `json:"supervised_run_id,omitempty" gorm:"index"`
+	OrchestratorModel    string     `json:"orchestrator_model,omitempty"`
+	OrchestratorProvider string     `json:"orchestrator_provider,omitempty"`
+	StopCause            string     `json:"stop_cause,omitempty"`
+	WaitReason           string     `json:"wait_reason,omitempty"`
+	RecoveryAttempts     int        `json:"recovery_attempts" gorm:"not null;default:0"`
+	SessionID            string     `json:"session_id"`
+	LogFilePath          string     `json:"log_file_path"`
+	LogContent           string     `json:"log_content"`
+	LogEntries           string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
+	TokenStats           string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
+	ResultDescription    string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
+	ResultExplanation    string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
+	StartedAt            time.Time  `json:"started_at"`
+	EndedAt              *time.Time `json:"ended_at"`
+	LastMessageTime      *time.Time `json:"last_message_time"`
 	// PausedHistory is the serialized ([]aicli.Message JSON) conversation
 	// captured when a graceful shutdown (e.g. applying an auto-update) paused
 	// this run mid-flight, right after its current turn's LLM response
@@ -582,6 +591,20 @@ type Run struct {
 	// when the run resumes. Internal plumbing, not for display — omitted from
 	// the JSON API.
 	PausedHistory string `json:"-" gorm:"type:text"`
+}
+
+// RunEvent is the durable lifecycle inbox consumed by event-driven sidecars.
+// Eventhub/WebSockets are notification layers only; this table survives
+// restart and lets a waiting orchestrator resume without polling the LLM.
+type RunEvent struct {
+	ID         int64      `json:"id" gorm:"primaryKey"`
+	TaskID     int32      `json:"task_id" gorm:"not null;index"`
+	RunID      int32      `json:"run_id" gorm:"not null;index"`
+	EventType  string     `json:"event_type" gorm:"not null"`
+	Payload    string     `json:"payload" gorm:"type:text"`
+	DedupeKey  string     `json:"dedupe_key" gorm:"index"`
+	CreatedAt  time.Time  `json:"created_at" gorm:"index"`
+	ConsumedAt *time.Time `json:"consumed_at,omitempty" gorm:"index"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to

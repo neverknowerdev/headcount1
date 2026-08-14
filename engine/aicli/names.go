@@ -24,6 +24,11 @@ const (
 	ToolCreateTask            ToolName = "create_task"
 	ToolAskHuman              ToolName = "ask_human"
 	ToolReportStatus          ToolName = "report_status"
+	ToolGetSessions           ToolName = "get_sessions"
+	ToolGetSessionStatus      ToolName = "get_session_status"
+	ToolRunNewSession         ToolName = "run_new_session"
+	ToolStopSession           ToolName = "stop_session"
+	ToolForkSession           ToolName = "fork_session"
 	ToolCallMCP               ToolName = "call_mcp_tool"
 	ToolDiscoverMCP           ToolName = "discover_mcp_tool"
 	ToolCodegraphWildcard     ToolName = "codegraph_*"
@@ -37,6 +42,14 @@ func Names(names ...ToolName) []string {
 		result[i] = string(name)
 	}
 	return result
+}
+
+// OrchestratorToolNames is the complete allowlist for a sidecar task
+// orchestrator. Keep this separate from ConfigurableToolNames: these tools
+// are runtime-managed and must never be granted to a worker accidentally.
+func OrchestratorToolNames() []string {
+	return Names(ToolGetSessions, ToolGetSessionStatus, ToolAskTaskOwner,
+		ToolRunNewSession, ToolStopSession, ToolForkSession)
 }
 
 // ConfigurableToolNames returns the native tools that can be enabled or
