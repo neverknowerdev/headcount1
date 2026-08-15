@@ -66,7 +66,12 @@ test.describe.serial('Headcount1 App', () => {
         // looked up dynamically — builtin providers (OpenRouter, OpenCode
         // Zen) are seeded first, so "Main Provider" isn't necessarily ID 1.
         const providers = await (await request.get('/api/providers')).json();
-        const mainProvider = providers.find((p: any) => p.name === 'Main Provider');
+        // The onboarding UI has used both "Main Provider" and "Custom
+        // Provider" labels over time. Identify the provider by the mock
+        // endpoint first, falling back to the historical name for older
+        // server responses.
+        const mainProvider = providers.find((p: any) => p.base_url === env.E2E_MOCK_PROVIDER_URL)
+            ?? providers.find((p: any) => p.name === 'Main Provider');
         expect(mainProvider).toBeDefined();
 
         await page.goto('/companies/pw-inc/agents/1');
@@ -108,11 +113,16 @@ test.describe.serial('Headcount1 App', () => {
         await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
-        // Get the newly created task ID for later waits
-        const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
-        const tasks = await listRes.json();
-        const task = tasks.find((t: any) => t.title === 'Write E2E Tests');
-        expect(task).toBeTruthy();
+        // The UI navigation can render before the task POST is visible to a
+        // subsequent list query. Poll the API for the task created above.
+        let task: any;
+        await expect.poll(async () => {
+            const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
+            if (!listRes.ok()) return undefined;
+            const tasks = await listRes.json();
+            task = (tasks as any[]).find((t: any) => t.title === 'Write E2E Tests');
+            return Boolean(task);
+        }, { timeout: 15_000, message: 'created task should appear in the task list' }).toBe(true);
         const taskId = task.id;
 
         // Assign agent and move to "To Do" — this triggers the engine

@@ -129,11 +129,14 @@ test.describe('Delete Company', () => {
         // Should redirect to another company (not necessarily fc)
         await page.waitForURL(/\/companies\/[^/]+/, { timeout: 10000 });
 
-        // Verify second company is deleted
-        const listRes = await request.get('/api/companies');
-        const companies = await listRes.json();
-        const deletedCompany = companies.find((c: any) => c.short_name === 'sc');
-        expect(deletedCompany).toBeUndefined();
+        // Verify second company is deleted. The redirect can complete before
+        // the deletion transaction is visible on the next REST read.
+        await expect.poll(async () => {
+            const listRes = await request.get('/api/companies');
+            if (!listRes.ok()) return true;
+            const companies = await listRes.json();
+            return (companies as any[]).some(c => c.short_name === 'sc');
+        }, { timeout: 10_000, message: 'deleted company should disappear from the API' }).toBe(false);
     });
 
     test('skips archiving for empty company folder', async ({ page, request }) => {
@@ -166,8 +169,12 @@ test.describe('Delete Company', () => {
         // Wait for navigation
         await page.waitForURL(/\/(companies\/[^/]+|add-company)/, { timeout: 10000 });
 
-        // Verify company directory is deleted from filesystem
-        expect(fs.existsSync(companyPath)).toBe(false);
+        // Filesystem cleanup is performed after the DB transaction; poll until
+        // the asynchronous cleanup has completed.
+        await expect.poll(() => fs.existsSync(companyPath), {
+            timeout: 10_000,
+            message: 'empty company directory should be removed',
+        }).toBe(false);
 
         // Verify no new archive was created for empty company
         const archivesAfter = fs.existsSync(archiveDir) ? fs.readdirSync(archiveDir).filter(a => a.startsWith('ec_')) : [];

@@ -227,9 +227,11 @@ test.describe.serial('CEO orchestration flow', () => {
             return (comments as any[]).some(c => c.comment_type === 'ask_user' && c.content === QUESTION);
         }, { timeout: 60_000, message: 'ask_user comment should appear' }).toBeTruthy();
 
-        // Waiting for human input is an explicit blocked task state.
-        const midTask = await (await request.get(`/api/tasks/${taskId}`)).json();
-        expect(midTask.status).toBe('blocked');
+        // Waiting for human input is an explicit blocked task state. The
+        // comment is committed before the run's status transition becomes
+        // visible through the REST read path, so wait for the authoritative
+        // state instead of racing a single GET.
+        await waitForTaskStatus(request, taskId, 'blocked', 30_000);
 
         // Reply as the human — this unblocks ask_human inside the same run.
         await postJSON(request, '/api/comments', {
