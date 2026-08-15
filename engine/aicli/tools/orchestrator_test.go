@@ -54,8 +54,12 @@ func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 			gotID = id
 			return ManagedSessionDetails{
 				ManagedSessionSummary: ManagedSessionSummary{ID: id, Name: "worker-4", LifecycleStatus: "running"},
-				LastRunStatus:         &ManagedSessionStatusReport{ID: id, LastReportedStatus: "implementing", LastReportedMessageID: 22},
-				RunStatusHistory:      []ManagedSessionRunStatus{{Status: "planning", MessageID: 11}, {Status: "implementing", MessageID: 22}},
+				LastRunStatus: &ManagedSessionStatusReport{
+					ID: id, OwnReportedStatus: "waiting for Coder", LastReportedStatus: "waiting for Coder. Coder status: implementing",
+					LastReportedMessageID: 22,
+					ChildStatuses:         []ManagedSessionChildStatus{{ID: 5, AgentName: "Coder", Status: "implementing", LastReportedMessageID: 33}},
+				},
+				RunStatusHistory: []ManagedSessionRunStatus{{Status: "planning", MessageID: 11}, {Status: "implementing", MessageID: 22}},
 			}, nil
 		},
 	})
@@ -68,6 +72,8 @@ func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 	require.Contains(t, detail, `"last_run_status"`)
 	require.Contains(t, detail, `"run_status_history"`)
 	require.Contains(t, detail, `"message_id":22`)
+	require.Contains(t, detail, `"child_statuses"`)
+	require.Contains(t, detail, `Coder status: implementing`)
 }
 
 func TestRunNewSessionPassesPromptAndAgentName(t *testing.T) {

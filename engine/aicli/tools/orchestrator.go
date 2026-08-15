@@ -26,19 +26,43 @@ type ManagedSessionSummary struct {
 	Error             string `json:"error,omitempty"`
 }
 
+// ManagedSessionChildStatus is a recursively aggregated progress snapshot for
+// a session spawned by the selected session. Status is the child's own
+// report, followed by the same representation for its descendants. The
+// orchestrator can therefore see why a parent is waiting without flattening
+// the session tree into unrelated list entries.
+type ManagedSessionChildStatus struct {
+	ID                    int32                       `json:"id"`
+	Name                  string                      `json:"name"`
+	AgentName             string                      `json:"agent_name"`
+	OwnReportedStatus     string                      `json:"own_reported_status,omitempty"`
+	Status                string                      `json:"status,omitempty"`
+	LastReportedAt        string                      `json:"last_reported_at,omitempty"`
+	LastReportedMessageID int64                       `json:"last_reported_message_id,omitempty"`
+	StatusReportStale     bool                        `json:"status_report_stale"`
+	ChildStatuses         []ManagedSessionChildStatus `json:"child_statuses,omitempty"`
+	NestedStatusTruncated bool                        `json:"nested_status_truncated,omitempty"`
+}
+
 // ManagedSessionStatusReport is the latest progress line emitted by a worker's
 // report_status tool. It deliberately does not expose the lifecycle status.
+// LastReportedStatus is the selected session's own report with child status
+// lines appended. OwnReportedStatus preserves the unmodified report for
+// callers that need to distinguish the parent's progress from its children.
 type ManagedSessionStatusReport struct {
-	ID                     int32  `json:"id"`
-	Name                   string `json:"name"`
-	TaskID                 int32  `json:"task_id"`
-	AgentID                int32  `json:"agent_id"`
-	AgentName              string `json:"agent_name"`
-	LastReportedStatus     string `json:"last_reported_status,omitempty"`
-	LastReportedAt         string `json:"last_reported_at,omitempty"`
-	LastReportedMessageID  int64  `json:"last_reported_message_id,omitempty"`
-	StatusReportStale      bool   `json:"status_report_stale"`
-	StatusRefreshRequested bool   `json:"status_refresh_requested"`
+	ID                     int32                       `json:"id"`
+	Name                   string                      `json:"name"`
+	TaskID                 int32                       `json:"task_id"`
+	AgentID                int32                       `json:"agent_id"`
+	AgentName              string                      `json:"agent_name"`
+	LastReportedStatus     string                      `json:"last_reported_status,omitempty"`
+	OwnReportedStatus      string                      `json:"own_reported_status,omitempty"`
+	LastReportedAt         string                      `json:"last_reported_at,omitempty"`
+	LastReportedMessageID  int64                       `json:"last_reported_message_id,omitempty"`
+	StatusReportStale      bool                        `json:"status_report_stale"`
+	StatusRefreshRequested bool                        `json:"status_refresh_requested"`
+	ChildStatuses          []ManagedSessionChildStatus `json:"child_statuses,omitempty"`
+	NestedStatusTruncated  bool                        `json:"nested_status_truncated,omitempty"`
 }
 
 // ManagedSessionRunStatus is one append-only report_status entry. The
@@ -51,7 +75,7 @@ type ManagedSessionRunStatus struct {
 
 // ManagedSessionDetails combines lifecycle information with the worker's
 // progress-report history. LastRunStatus is nil when report_status has never
-// been called for the selected session.
+// been called for the selected session and it has no nested sessions.
 type ManagedSessionDetails struct {
 	ManagedSessionSummary
 	LastRunStatus    *ManagedSessionStatusReport `json:"last_run_status"`
@@ -124,7 +148,7 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolGetSession,
-		def:  orchestratorDef(OrchestratorToolGetSession, "Return one worker session's lifecycle information, the latest report_status result, and the complete chronological run-status history. If the latest report is stale, request a fresh report.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
+		def:  orchestratorDef(OrchestratorToolGetSession, "Return one worker session's lifecycle information, the latest report_status result, recursively aggregated status for nested child sessions (up to five levels), and the complete chronological history for the selected session. If the selected session's latest report is stale, request a fresh report.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32 `json:"session_id"`

@@ -333,6 +333,13 @@ func (e *NativeEngine) orchestratorSessionRun(ctx context.Context, orchestratorR
 	return r, nil
 }
 
+// maxNestedStatusDepth bounds the amount of recursive status data returned by
+// get_session. A run tree can be arbitrarily deep in the database, but a
+// bounded response keeps a pathological delegation chain from exhausting the
+// orchestrator context or provider request size. Depth zero is the selected
+// session, so five nested child levels are included.
+const maxNestedStatusDepth = 5
+
 func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionStatusReport, error) {
 	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
 	if err != nil {
@@ -342,13 +349,21 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
 		return tools.ManagedSessionStatusReport{}, reportErr
 	}
+	now := time.Now()
 	result := tools.ManagedSessionStatusReport{ID: r.ID, Name: r.Name, TaskID: r.TaskID, AgentID: r.AgentID, AgentName: r.Agent.Name}
 	if reportErr == nil {
-		result.LastReportedStatus = report.Status
+		result.OwnReportedStatus = report.Status
 		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
 		result.LastReportedMessageID = report.MessageID
 	}
-	stale := isStatusReportStale(report, reportErr == nil, time.Now())
+	children, truncated, childrenErr := e.nestedSessionStatuses(ctx, r, now, 0)
+	if childrenErr != nil {
+		return tools.ManagedSessionStatusReport{}, childrenErr
+	}
+	result.ChildStatuses = children
+	result.NestedStatusTruncated = truncated
+	result.LastReportedStatus = aggregateSessionStatus(result.OwnReportedStatus, children)
+	stale := isStatusReportStale(report, reportErr == nil, now)
 	result.StatusReportStale = stale
 	if stale && !isTerminalRunStatus(r.Status) {
 		requested, requestErr := e.requestWorkerStatus(ctx, task, orchestratorRunID, id)
@@ -358,6 +373,94 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 		result.StatusRefreshRequested = requested
 	}
 	return result, nil
+}
+
+// nestedSessionStatuses returns direct children and their recursively
+// aggregated report_status values. It intentionally does not request fresh
+// reports from descendants: get_session's refresh contract applies to the
+// selected session, while child values are an informational snapshot.
+func (e *NativeEngine) nestedSessionStatuses(ctx context.Context, run db.Run, now time.Time, depth int) ([]tools.ManagedSessionChildStatus, bool, error) {
+	children, err := e.q.ListChildRuns(ctx, run.ID)
+	if err != nil {
+		return nil, false, err
+	}
+	if depth >= maxNestedStatusDepth {
+		return nil, len(children) > 0, nil
+	}
+	result := make([]tools.ManagedSessionChildStatus, 0, len(children))
+	truncated := false
+	for _, child := range children {
+		node, childTruncated, nodeErr := e.nestedSessionStatus(ctx, child, now, depth+1)
+		if nodeErr != nil {
+			return nil, false, nodeErr
+		}
+		result = append(result, node)
+		truncated = truncated || childTruncated
+	}
+	return result, truncated, nil
+}
+
+func (e *NativeEngine) nestedSessionStatus(ctx context.Context, run db.Run, now time.Time, depth int) (tools.ManagedSessionChildStatus, bool, error) {
+	report, reportErr := e.q.GetLatestRunStatusReport(ctx, run.ID)
+	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
+		return tools.ManagedSessionChildStatus{}, false, reportErr
+	}
+	hasReport := reportErr == nil
+	node := tools.ManagedSessionChildStatus{
+		ID:                run.ID,
+		Name:              run.Name,
+		AgentName:         run.Agent.Name,
+		StatusReportStale: isStatusReportStale(report, hasReport, now),
+	}
+	if node.AgentName == "" {
+		node.AgentName = run.Name
+	}
+	if hasReport {
+		node.OwnReportedStatus = report.Status
+		node.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
+		node.LastReportedMessageID = report.MessageID
+	}
+	// A child without a report still contributes useful information about a
+	// live delegation. Keep that fallback separate from OwnReportedStatus so
+	// callers can tell it was inferred from lifecycle state.
+	node.Status = node.OwnReportedStatus
+	if node.Status == "" && !isTerminalRunStatus(run.Status) {
+		node.Status = run.Status
+	}
+	children, truncated, err := e.nestedSessionStatuses(ctx, run, now, depth)
+	if err != nil {
+		return tools.ManagedSessionChildStatus{}, false, err
+	}
+	node.ChildStatuses = children
+	node.NestedStatusTruncated = truncated
+	node.Status = aggregateSessionStatus(node.Status, children)
+	return node, truncated, nil
+}
+
+func aggregateSessionStatus(own string, children []tools.ManagedSessionChildStatus) string {
+	result := own
+	for _, child := range children {
+		status := child.Status
+		if status == "" {
+			status = "no status reported"
+		}
+		label := child.AgentName
+		if label == "" {
+			label = child.Name
+		}
+		if label == "" {
+			label = fmt.Sprintf("session %d", child.ID)
+		}
+		fragment := fmt.Sprintf("%s status: %s", label, status)
+		if result != "" {
+			if !strings.HasSuffix(result, ".") {
+				result += "."
+			}
+			result += " "
+		}
+		result += fragment
+	}
+	return result
 }
 
 func (e *NativeEngine) orchestratorSessionDetails(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionDetails, error) {
@@ -382,7 +485,7 @@ func (e *NativeEngine) orchestratorSessionDetails(ctx context.Context, task db.T
 		})
 	}
 	var latestPtr *tools.ManagedSessionStatusReport
-	if latest.LastReportedAt != "" {
+	if latest.LastReportedAt != "" || latest.LastReportedStatus != "" || len(latest.ChildStatuses) > 0 {
 		latestPtr = &latest
 	}
 	return tools.ManagedSessionDetails{

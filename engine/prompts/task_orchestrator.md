@@ -22,7 +22,11 @@ for a compact overview, then get_session for a selected worker. get_session
 returns lifecycle information, the latest report_status result, and the full
 chronological run-status history, including each report's timestamp and
 canonical message_id for possible future forking. Use that history when you
-need to understand how the worker progressed or changed direction. If the
+need to understand how the worker progressed or changed direction. For a
+worker that spawned children, last_reported_status also includes readable
+child status lines and child_statuses contains the recursive tree (up to five
+nested levels); use those lines to distinguish "waiting for Coder" from a
+parent that is actively making progress through its child. If the
 latest report is stale or a fresh report was requested, wait for the worker's
 next report before deciding whether recovery is needed; do not infer progress
 from the lifecycle status. New report_status calls are delivered to this

@@ -3,8 +3,10 @@ package engine
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -139,6 +141,77 @@ func TestGetSessionReturnsLatestAndCompleteStatusHistory(t *testing.T) {
 	require.NoError(t, err)
 	assert.Nil(t, emptyDetail.LastRunStatus)
 	assert.Empty(t, emptyDetail.RunStatusHistory)
+}
+
+func TestGetSessionAggregatesNestedSessionStatuses(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:nested-session-status?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Project{}, &db.Sprint{}, &db.Task{}, &db.Run{}, &db.RunStatusReport{}, &db.RunEvent{}, &db.Comment{}))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	cto := db.Agent{CompanyID: company.ID, Name: "CTO", RoleKey: "CTO", ShortName: "CTO"}
+	coder := db.Agent{CompanyID: company.ID, Name: "Coder", RoleKey: "CODER", ShortName: "COD"}
+	require.NoError(t, database.Create(&cto).Error)
+	require.NoError(t, database.Create(&coder).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &cto.ID, Title: "Nested status"}
+	require.NoError(t, database.Create(&task).Error)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: cto.ID, Name: "ACME-orchestrator", Status: "running"}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	rootID := orchestrator.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", rootID).Update("root_run_id", rootID).Error)
+	owner := db.Run{TaskID: task.ID, AgentID: cto.ID, Name: "ACME-CTO-1", Status: "running", ParentRunID: &rootID, RootRunID: &rootID}
+	require.NoError(t, database.Create(&owner).Error)
+	coderRun := db.Run{TaskID: task.ID, AgentID: coder.ID, Name: "ACME-COD-1", Status: "running", ParentRunID: &owner.ID, RootRunID: &rootID}
+	require.NoError(t, database.Create(&coderRun).Error)
+
+	queries := db.New(database)
+	require.NoError(t, queries.RecordRunStatusReport(context.Background(), owner.ID, "waiting for Coder to finish its work", 101))
+	require.NoError(t, queries.RecordRunStatusReport(context.Background(), coderRun.ID, "working on dependencies", 202))
+	engine := NewNativeEngine(database, eventhub.NewHub())
+	detail, err := engine.orchestratorSessionDetails(context.Background(), task, orchestrator.ID, owner.ID)
+	require.NoError(t, err)
+	require.NotNil(t, detail.LastRunStatus)
+	assert.Equal(t, "waiting for Coder to finish its work", detail.LastRunStatus.OwnReportedStatus)
+	assert.Equal(t, "waiting for Coder to finish its work. Coder status: working on dependencies", detail.LastRunStatus.LastReportedStatus)
+	require.Len(t, detail.LastRunStatus.ChildStatuses, 1)
+	assert.Equal(t, "Coder", detail.LastRunStatus.ChildStatuses[0].AgentName)
+	assert.Equal(t, "working on dependencies", detail.LastRunStatus.ChildStatuses[0].Status)
+	assert.Equal(t, int64(202), detail.LastRunStatus.ChildStatuses[0].LastReportedMessageID)
+}
+
+func TestGetSessionNestedStatusDepthIsBounded(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:nested-status-depth?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Task{}, &db.Run{}, &db.RunStatusReport{}, &db.RunEvent{}, &db.Comment{}))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "Deep status"}
+	require.NoError(t, database.Create(&task).Error)
+	root := db.Run{TaskID: task.ID, AgentID: agent.ID, Name: "root", Status: "running"}
+	require.NoError(t, database.Create(&root).Error)
+	rootID := root.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", rootID).Update("root_run_id", rootID).Error)
+	parentID := rootID
+	var runs []db.Run
+	for i := 1; i <= maxNestedStatusDepth+2; i++ {
+		run := db.Run{TaskID: task.ID, AgentID: agent.ID, Name: "level-" + fmt.Sprint(i), Status: "running", ParentRunID: &parentID, RootRunID: &rootID}
+		require.NoError(t, database.Create(&run).Error)
+		runs = append(runs, run)
+		parentID = run.ID
+	}
+	queries := db.New(database)
+	for i, run := range runs {
+		require.NoError(t, queries.RecordRunStatusReport(context.Background(), run.ID, "level-"+fmt.Sprint(i+1)+" working", int64(i+1)))
+	}
+	engine := NewNativeEngine(database, eventhub.NewHub())
+	status, err := engine.orchestratorSessionLastRunStatus(context.Background(), task, root.ID, runs[0].ID)
+	require.NoError(t, err)
+	assert.Contains(t, status.LastReportedStatus, "level-6 working")
+	assert.NotContains(t, status.LastReportedStatus, "level-7 working")
+	assert.True(t, status.NestedStatusTruncated)
+	assert.True(t, strings.Contains(status.ChildStatuses[0].Status, "level-2 working"))
 }
 
 func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
