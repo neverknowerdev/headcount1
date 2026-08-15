@@ -110,17 +110,17 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 	apiKey, _ := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	callbacks := tools.OrchestratorCallbacks{
-		GetSessions: func(c context.Context) ([]tools.OrchestratorSession, error) {
+		GetSessions: func(c context.Context) ([]tools.ManagedSessionSummary, error) {
 			return e.orchestratorSessions(c, orchestrator.ID)
 		},
-		GetSessionLastRunStatus: func(c context.Context, id int32) (tools.OrchestratorSessionLastRunStatus, error) {
+		GetSessionLastRunStatus: func(c context.Context, id int32) (tools.ManagedSessionStatusReport, error) {
 			return e.orchestratorSessionLastRunStatus(c, task, orchestrator.ID, id)
 		},
-		AskTaskOwner: func(c context.Context, id int32, question string) (string, error) {
+		AskSessionAgent: func(c context.Context, id int32, question string) (string, error) {
 			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
 		},
-		RunNewSession: func(c context.Context, source *int32, reason string) (string, error) {
-			return e.orchestratorRunNew(c, task, orchestrator.ID, source, reason)
+		RunNewSession: func(c context.Context, source, agentID *int32, reason string, includeTaskContext bool) (string, error) {
+			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentID, reason, includeTaskContext)
 		},
 		StopSession: func(c context.Context, id int32, reason string) (string, error) {
 			return e.orchestratorStop(c, orchestrator.ID, id, reason)
@@ -161,13 +161,6 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		wasFirst := first
 		first = false
 		lastFingerprint = fingerprint
-		if len(events) > 0 {
-			ids := make([]int64, 0, len(events))
-			for _, event := range events {
-				ids = append(ids, event.ID)
-			}
-			_ = e.q.ConsumeRunEvents(ctx, ids)
-		}
 		_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "", "running")
 
 		state, _ := json.Marshal(sessions)
@@ -184,22 +177,35 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, runErr.Error(), "failed")
 			return
 		}
+		// Consume only after the orchestrator has successfully observed the
+		// snapshot. If the provider fails, the durable status/lifecycle events
+		// remain available for the next activation instead of being lost.
+		if len(events) > 0 {
+			ids := make([]int64, 0, len(events))
+			for _, event := range events {
+				ids = append(ids, event.ID)
+			}
+			if consumeErr := e.q.ConsumeRunEvents(ctx, ids); consumeErr != nil {
+				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, consumeErr.Error(), "failed")
+				return
+			}
+		}
 		_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
 	}
 }
 
-func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]tools.OrchestratorSession, error) {
+func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]tools.ManagedSessionSummary, error) {
 	runs, err := e.q.ListOrchestratorSessions(ctx, orchestratorRunID)
 	if err != nil {
 		return nil, err
 	}
-	out := make([]tools.OrchestratorSession, 0, len(runs))
+	out := make([]tools.ManagedSessionSummary, 0, len(runs))
 	for _, r := range runs {
 		last := ""
 		if r.LastMessageTime != nil {
 			last = r.LastMessageTime.Format(time.RFC3339Nano)
 		}
-		out = append(out, tools.OrchestratorSession{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name, Status: r.Status, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
+		out = append(out, tools.ManagedSessionSummary{ID: r.ID, Name: r.Name, TaskID: r.TaskID, AgentID: r.AgentID, AgentName: r.Agent.Name, LifecycleStatus: r.Status, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
 	}
 	return out, nil
 }
@@ -216,16 +222,16 @@ func (e *NativeEngine) orchestratorSessionRun(ctx context.Context, orchestratorR
 	return r, nil
 }
 
-func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.OrchestratorSessionLastRunStatus, error) {
+func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionStatusReport, error) {
 	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
 	if err != nil {
-		return tools.OrchestratorSessionLastRunStatus{}, err
+		return tools.ManagedSessionStatusReport{}, err
 	}
 	report, reportErr := e.q.GetLatestRunStatusReport(ctx, id)
 	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
-		return tools.OrchestratorSessionLastRunStatus{}, reportErr
+		return tools.ManagedSessionStatusReport{}, reportErr
 	}
-	result := tools.OrchestratorSessionLastRunStatus{ID: r.ID, Name: r.Name, TaskID: r.TaskID, Agent: r.Agent.Name}
+	result := tools.ManagedSessionStatusReport{ID: r.ID, Name: r.Name, TaskID: r.TaskID, AgentID: r.AgentID, AgentName: r.Agent.Name}
 	if reportErr == nil {
 		result.LastReportedStatus = report.Status
 		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
@@ -236,7 +242,7 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 	if stale && !isTerminalRunStatus(r.Status) {
 		requested, requestErr := e.requestWorkerStatus(ctx, task, orchestratorRunID, id)
 		if requestErr != nil {
-			return tools.OrchestratorSessionLastRunStatus{}, requestErr
+			return tools.ManagedSessionStatusReport{}, requestErr
 		}
 		result.StatusRefreshRequested = requested
 	}
@@ -248,7 +254,7 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 		return false, err
 	}
 	now := time.Now()
-	recent, err := e.q.HasRecentRunEvent(ctx, sessionID, "status_report_request", now.Add(-statusReportFreshness))
+	recent, err := e.q.HasRecentRunEvent(ctx, sessionID, db.RunEventTypeStatusRefresh, now.Add(-statusReportFreshness))
 	if err != nil {
 		return false, err
 	}
@@ -261,13 +267,13 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 		"message": "Report your current stage and any blocker using report_status before continuing.",
 	})
 	err = e.q.EnqueueRunEvent(ctx, db.RunEvent{
-		TaskID: task.ID, RunID: sessionID, EventType: "status_report_request", Payload: string(payload),
+		TaskID: task.ID, RunID: sessionID, EventType: db.RunEventTypeStatusRefresh, Payload: string(payload),
 		DedupeKey: fmt.Sprintf("run:%d:status-refresh:%d", sessionID, window),
 	})
 	return true, err
 }
 
-// orchestratorAskSession is the explicit ask_task_owner compatibility tool.
+// orchestratorAskSession sends a question to another managed session.
 // Automatic status refreshes use requestWorkerStatus instead, because they
 // must be delivered to the active worker without creating a task comment.
 func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
@@ -277,7 +283,7 @@ func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task,
 	}
 	payload, _ := json.Marshal(map[string]string{"question": question})
 	if err := e.q.EnqueueRunEvent(ctx, db.RunEvent{
-		TaskID: task.ID, RunID: sessionID, EventType: "worker_question", Payload: string(payload),
+		TaskID: task.ID, RunID: sessionID, EventType: db.RunEventTypeSessionQuestion, Payload: string(payload),
 		DedupeKey: fmt.Sprintf("run:%d:question:%d", sessionID, time.Now().UnixNano()),
 	}); err != nil {
 		return "", err
@@ -302,46 +308,111 @@ func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, 
 	return fmt.Sprintf("session %d stop requested: %s", sessionID, reason), nil
 }
 
-func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, reason string) (string, error) {
-	attemptRunID := orchestratorRunID
+func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source, agentID *int32, instruction string, includeTaskContext bool) (string, error) {
+	var sourceRun db.Run
+	launchTask := task
 	if source != nil {
-		if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, *source); err != nil {
+		var err error
+		sourceRun, err = e.orchestratorSessionRun(ctx, orchestratorRunID, *source)
+		if err != nil {
 			return "", err
 		}
-		attemptRunID = *source
+		launchTask, err = e.q.GetTask(ctx, sourceRun.TaskID)
+		if err != nil {
+			return "", err
+		}
+		if launchTask.RunID != nil && *launchTask.RunID != sourceRun.ID {
+			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", launchTask.ID, *launchTask.RunID, sourceRun.ID)
+		}
+		if sourceRun.Recovery.RecoveryAttempts >= 3 {
+			return "", fmt.Errorf("session %d reached the automatic recovery limit", sourceRun.ID)
+		}
+		if err := e.q.IncrementRunRecoveryAttempts(ctx, sourceRun.ID); err != nil {
+			return "", err
+		}
+		_ = e.q.SetRunStopCause(ctx, sourceRun.ID, "orchestrator")
+		e.StopRun(ctx, sourceRun.ID)
+		if err := e.waitForOrchestratorForkStop(ctx, sourceRun.ID); err != nil {
+			return "", err
+		}
+		var taskErr error
+		launchTask, taskErr = e.q.GetTask(ctx, sourceRun.TaskID)
+		if taskErr != nil {
+			return "", taskErr
+		}
+		if launchTask.RunID != nil && *launchTask.RunID != sourceRun.ID {
+			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", launchTask.ID, *launchTask.RunID, sourceRun.ID)
+		}
+		if launchTask.RunID != nil {
+			if err := e.q.UnlockTaskRun(ctx, launchTask.ID); err != nil {
+				return "", fmt.Errorf("unlock source task: %w", err)
+			}
+		}
 	}
-	current, err := e.q.GetRun(ctx, attemptRunID)
+	selectedAgentID := agentID
+	if selectedAgentID == nil {
+		if source != nil {
+			selectedAgentID = &sourceRun.AgentID
+		} else {
+			selectedAgentID = task.AgentID
+		}
+	}
+	if selectedAgentID == nil || *selectedAgentID <= 0 {
+		return "", fmt.Errorf("no target agent was supplied and task has no assigned worker agent")
+	}
+	selectedAgent, err := e.q.GetAgent(ctx, *selectedAgentID)
+	if err != nil {
+		return "", fmt.Errorf("load target agent %d: %w", *selectedAgentID, err)
+	}
+	if selectedAgent.CompanyID != launchTask.CompanyID {
+		return "", fmt.Errorf("agent %d does not belong to task company", selectedAgent.ID)
+	}
+	currentTask, err := e.q.GetTask(ctx, launchTask.ID)
 	if err != nil {
 		return "", err
 	}
-	if current.Recovery.RecoveryAttempts >= 3 {
-		return "", fmt.Errorf("session %d reached the automatic recovery limit", attemptRunID)
+	if source == nil && currentTask.RunID != nil {
+		// An auxiliary session can observe a task already being executed, but it
+		// must not steal that task's lock or clear it when it finishes.
+		instruction = strings.TrimSpace(instruction)
 	}
-	if err := e.q.IncrementRunRecoveryAttempts(ctx, attemptRunID); err != nil {
-		return "", err
+	sessionTask := launchTask
+	sessionTask.AgentID = &selectedAgent.ID
+	options := sessionOptions{
+		Instruction:        instruction,
+		IncludeTaskContext: includeTaskContext,
+		SkipTaskLock:       source == nil && currentTask.RunID != nil,
 	}
+	go e.executeSession(context.Background(), sessionTask, "implement", nil, nil, options)
 	if source != nil {
-		_ = e.q.SetRunStopCause(ctx, *source, "orchestrator")
-		e.StopRun(ctx, *source)
+		return fmt.Sprintf("replacement session queued for task %d with agent %d: %s", launchTask.ID, selectedAgent.ID, instruction), nil
 	}
-	if task.AgentID == nil {
-		return "", fmt.Errorf("task has no assigned worker agent")
-	}
-	if task.RunID != nil && source != nil && *task.RunID != *source {
-		return "", fmt.Errorf("task is already owned by another worker run")
-	}
-	if task.RunID != nil {
-		_ = e.q.UnlockTaskRun(ctx, task.ID)
-	}
-	go e.run(context.Background(), task, "implement")
-	return fmt.Sprintf("replacement worker queued for task %d: %s", task.ID, reason), nil
+	return fmt.Sprintf("new session queued for task %d with agent %d: %s", launchTask.ID, selectedAgent.ID, instruction), nil
 }
 
-// orchestratorFork currently accepts a paused conversation position as the
-// message identifier. The position is only usable when the engine persisted
-// a safe checkpoint; an active or failed run without one is rejected instead
-// of risking duplicated side effects.
+func (e *NativeEngine) waitForOrchestratorForkStop(ctx context.Context, runID int32) error {
+	waitCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	for {
+		run, err := e.q.GetRun(waitCtx, runID)
+		if err != nil {
+			return err
+		}
+		if isTerminalRunStatus(run.Status) || run.Status == db.RunStatusPaused {
+			return nil
+		}
+		select {
+		case <-waitCtx.Done():
+			return fmt.Errorf("session %d did not stop before fork timeout", runID)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+}
+
 func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, sessionID int32, messageID int64) (string, error) {
+	if messageID <= 0 {
+		return "", fmt.Errorf("fork_message_id must be positive")
+	}
 	if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
 	}
@@ -350,15 +421,51 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		return "", err
 	}
 	if source.Status == "running" || source.Status == "waiting" {
-		return "", fmt.Errorf("session %d must be stopped at a checkpoint before forking", sessionID)
+		_ = e.q.SetRunStopCause(ctx, sessionID, "orchestrator")
+		e.StopRun(ctx, sessionID)
+		if err := e.waitForOrchestratorForkStop(ctx, sessionID); err != nil {
+			return "", err
+		}
+		source, err = e.q.GetRun(ctx, sessionID)
+		if err != nil {
+			return "", err
+		}
 	}
-	// Checkpoint cursors identify durable replay boundaries, not arbitrary
-	// message IDs. Refuse the operation until a dedicated fork checkpoint API
-	// can persist a truncated JSONL history without risking duplicated tools.
-	return "", fmt.Errorf("fork_session is unavailable for session %d: fork_message_id is not a durable checkpoint message ID", sessionID)
+	if !isTerminalRunStatus(source.Status) && source.Status != db.RunStatusPaused {
+		return "", fmt.Errorf("session %d is not at a forkable boundary (status %s)", sessionID, source.Status)
+	}
+	forkTask, err := e.q.GetTask(ctx, source.TaskID)
+	if err != nil {
+		return "", err
+	}
+	if forkTask.RunID != nil {
+		if *forkTask.RunID != source.ID {
+			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", forkTask.ID, *forkTask.RunID, source.ID)
+		}
+		if err := e.q.UnlockTaskRun(ctx, forkTask.ID); err != nil {
+			return "", fmt.Errorf("unlock source task: %w", err)
+		}
+	}
+	history, safeMessageID, err := aicli.LoadSafeMessageHistoryAtOrBefore(source.LogFilePath, messageID)
+	if err != nil {
+		return "", err
+	}
+	parentID, rootID := orchestratorRunID, orchestratorRunID
+	newRun, err := e.q.CreateRun(ctx, db.Run{
+		TaskID: source.TaskID, AgentID: source.AgentID, ParentRunID: &parentID, RootRunID: &rootID,
+		Status: "running", StartedAt: time.Now(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create forked session: %w", err)
+	}
+	forkTask.AgentID = &source.AgentID
+	go e.executeSession(context.Background(), forkTask, "implement", nil, nil, sessionOptions{
+		SeedHistory: history, IncludeTaskContext: true, PrecreatedRun: &newRun,
+	})
+	return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil
 }
 
-func orchestratorFingerprint(s []tools.OrchestratorSession) string {
+func orchestratorFingerprint(s []tools.ManagedSessionSummary) string {
 	b, _ := json.Marshal(s)
 	h := sha1.Sum(b)
 	return hex.EncodeToString(h[:])
@@ -367,12 +474,12 @@ func orchestratorFingerprint(s []tools.OrchestratorSession) string {
 func isTerminalTaskStatus(s string) bool {
 	return s == "done" || s == "in-review" || s == "blocked" || s == "refinement"
 }
-func allWorkerSessionsTerminal(s []tools.OrchestratorSession) bool {
+func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 	if len(s) == 0 {
 		return false
 	}
 	for _, v := range s {
-		if v.Status == "running" || v.Status == "waiting" || v.Status == "interrupted" {
+		if v.LifecycleStatus == "running" || v.LifecycleStatus == "waiting" || v.LifecycleStatus == "interrupted" {
 			return false
 		}
 	}

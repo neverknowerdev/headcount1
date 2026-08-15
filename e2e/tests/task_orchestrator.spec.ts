@@ -106,7 +106,7 @@ test.describe.serial('task sidecar orchestrator', () => {
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
         const expectedTools = [
-            'ask_task_owner', 'fork_session', 'get_session_last_run_status', 'get_sessions', 'run_new_session', 'stop_session',
+            'ask_session_agent', 'fork_session', 'get_session_last_run_status', 'get_sessions', 'run_new_session', 'stop_session',
         ];
         const toolNameSets = orchestratorRequests.map((r: any) =>
             ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());

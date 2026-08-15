@@ -40,7 +40,8 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	if updateErr != nil || r.ParentRunID == nil {
 		return updateErr
 	}
-	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: r.TaskID, RunID: r.ID, EventType: "run_status", Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
+	eventTaskID := q.rootTaskID(ctx, r.TaskID)
+	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: eventTaskID, RunID: r.ID, EventType: RunEventTypeLifecycleStatus, Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
 }
 
 // MarkRunStale atomically retires a run that has stopped heartbeating. The
@@ -108,6 +109,11 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 // the source of truth for orchestrator reads; the cache is for fast UI reads.
 func (q *Queries) RecordRunStatusReport(ctx context.Context, id int32, status string, messageID int64) error {
 	now := time.Now()
+	eventTaskID := int32(0)
+	var currentRun Run
+	if err := q.db.WithContext(ctx).Select("task_id").First(&currentRun, id).Error; err == nil {
+		eventTaskID = q.rootTaskID(ctx, currentRun.TaskID)
+	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var run Run
 		if err := tx.First(&run, id).Error; err != nil {
@@ -118,15 +124,33 @@ func (q *Queries) RecordRunStatusReport(ctx context.Context, id int32, status st
 			return err
 		}
 		if run.ParentRunID != nil {
+			if eventTaskID == 0 {
+				eventTaskID = run.TaskID
+			}
 			payload, _ := json.Marshal(map[string]interface{}{
 				"status": status, "message_id": messageID, "reported_at": now.Format(time.RFC3339Nano),
 			})
-			if err := tx.Create(&RunEvent{TaskID: run.TaskID, RunID: id, EventType: "status_report", Payload: string(payload), DedupeKey: fmt.Sprintf("run:%d:status-report:%d", id, report.ID)}).Error; err != nil {
+			if err := tx.Create(&RunEvent{TaskID: eventTaskID, RunID: id, EventType: RunEventTypeStatusReport, Payload: string(payload), DedupeKey: fmt.Sprintf("run:%d:status-report:%d", id, report.ID)}).Error; err != nil {
 				return err
 			}
 		}
 		return tx.Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
 	})
+}
+
+// rootTaskID returns the task-tree root used as the orchestrator inbox key.
+// A missing/partially migrated task row falls back to the run's own task so
+// status reporting remains available during upgrades and isolated unit tests.
+func (q *Queries) rootTaskID(ctx context.Context, taskID int32) int32 {
+	root := taskID
+	for hops := 0; hops < 20; hops++ {
+		var task Task
+		if err := q.db.WithContext(ctx).Select("id", "parent_id").First(&task, root).Error; err != nil || task.ParentID == nil {
+			return root
+		}
+		root = *task.ParentID
+	}
+	return root
 }
 
 // GetLatestRunStatusReport returns the newest report_status entry for a run.
@@ -139,7 +163,7 @@ func (q *Queries) GetLatestRunStatusReport(ctx context.Context, runID int32) (Ru
 // HasRecentRunEvent reports whether a targeted control event was created in
 // the freshness window. This keeps refresh throttling in the durable event
 // inbox instead of adding control-only columns to Run.
-func (q *Queries) HasRecentRunEvent(ctx context.Context, runID int32, eventType string, since time.Time) (bool, error) {
+func (q *Queries) HasRecentRunEvent(ctx context.Context, runID int32, eventType RunEventType, since time.Time) (bool, error) {
 	var count int64
 	err := q.db.WithContext(ctx).Model(&RunEvent{}).
 		Where("run_id = ? AND event_type = ? AND created_at >= ?", runID, eventType, since).
@@ -323,7 +347,7 @@ func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
 func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
 	var events []RunEvent
 	err := q.db.WithContext(ctx).
-		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []string{"run_status", "status_report"}).
+		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport}).
 		Order("created_at asc").Find(&events).Error
 	return events, err
 }
@@ -331,7 +355,7 @@ func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]Run
 // ListPendingRunEventsForRun returns control messages targeted at one active
 // worker session. These are deliberately separate from the orchestrator's
 // lifecycle inbox so the orchestrator cannot consume worker instructions.
-func (q *Queries) ListPendingRunEventsForRun(ctx context.Context, runID int32, eventType string) ([]RunEvent, error) {
+func (q *Queries) ListPendingRunEventsForRun(ctx context.Context, runID int32, eventType RunEventType) ([]RunEvent, error) {
 	var events []RunEvent
 	err := q.db.WithContext(ctx).
 		Where("run_id = ? AND event_type = ? AND consumed_at IS NULL", runID, eventType).

@@ -17,8 +17,8 @@ is needed; do not infer progress from the lifecycle status. New report_status
 calls are delivered to this session as durable lifecycle events, so treat them
 as fresh evidence and avoid polling or asking the worker repeatedly.
 
-Prefer the least disruptive safe action: observe; ask the owning worker; resume
-or fork from a safe checkpoint; stop a confirmed unhealthy session; or start a
+Prefer the least disruptive safe action: observe; ask the worker in its managed session; fork
+from a safe boundary; stop a confirmed unhealthy session; or start a
 bounded replacement. Never restart a session stopped by the user. Never repeat
 an unacknowledged side effect. Repair the narrowest failed session and do not
 stop healthy parents or siblings. Respect retry limits. If recovery is unsafe

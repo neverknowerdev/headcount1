@@ -176,7 +176,7 @@ func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, database.AutoMigrate(&RunEvent{}))
 	q := New(database)
-	event := RunEvent{TaskID: 7, RunID: 9, EventType: "run_status", Payload: "failed", DedupeKey: "run:9:status:failed"}
+	event := RunEvent{TaskID: 7, RunID: 9, EventType: RunEventTypeLifecycleStatus, Payload: "failed", DedupeKey: "run:9:status:failed"}
 	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
 	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
 	pending, err := q.ListPendingRunEvents(context.Background(), 7)
@@ -229,6 +229,29 @@ func TestRunStatusReportEnqueuesOrchestratorEvent(t *testing.T) {
 	require.NoError(t, err)
 	require.Len(t, events, 1)
 	assert.Equal(t, worker.ID, events[0].RunID)
-	assert.Equal(t, "status_report", events[0].EventType)
+	assert.Equal(t, RunEventTypeStatusReport, events[0].EventType)
 	assert.Contains(t, events[0].Payload, `"message_id":77`)
+}
+
+func TestRunStatusReportRoutesNestedTaskEventToRootInbox(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Company{}, &Agent{}, &Task{}, &Run{}, &RunStatusReport{}, &RunEvent{}))
+	parentTask := Task{CompanyID: 1, Title: "root"}
+	require.NoError(t, database.Create(&parentTask).Error)
+	childTask := Task{CompanyID: 1, ParentID: &parentTask.ID, Title: "child"}
+	require.NoError(t, database.Create(&childTask).Error)
+	agent := Agent{CompanyID: 1, Name: "worker"}
+	require.NoError(t, database.Create(&agent).Error)
+	orchestrator := Run{TaskID: parentTask.ID, AgentID: agent.ID, Status: "running"}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	worker := Run{TaskID: childTask.ID, AgentID: agent.ID, Status: "running", ParentRunID: &orchestrator.ID, RootRunID: &orchestrator.ID}
+	require.NoError(t, database.Create(&worker).Error)
+	q := New(database)
+	require.NoError(t, q.RecordRunStatusReport(context.Background(), worker.ID, "researching", 12))
+	events, err := q.ListPendingRunEvents(context.Background(), parentTask.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, parentTask.ID, events[0].TaskID)
+	assert.Equal(t, worker.ID, events[0].RunID)
 }

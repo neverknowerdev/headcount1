@@ -58,6 +58,78 @@ func TestLoadMessageHistoryRejectsMalformedMessageEvent(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoadSafeMessageHistoryAtOrBeforeChoosesNearestCompleteToolTurn(t *testing.T) {
+	path := writeHistoryLog(t,
+		aicli.Message{Role: "system", Content: "system"},
+		aicli.Message{Role: "assistant", Content: "before"},
+		aicli.Message{Role: "assistant", ToolCalls: []aicli.ToolCall{
+			{ID: "a", Type: "function", Function: aicli.FuncCall{Name: "write"}},
+			{ID: "b", Type: "function", Function: aicli.FuncCall{Name: "run"}},
+		}},
+		aicli.Message{Role: "tool", ToolCallID: "a", Content: "ok"},
+		aicli.Message{Role: "tool", ToolCallID: "b", Content: "ok"},
+		aicli.Message{Role: "user", Content: "after"},
+	)
+	tests := []struct {
+		name string
+		id   int64
+		want int64
+		len  int
+	}{
+		{name: "exact safe message", id: 2, want: 2, len: 2},
+		{name: "inside tool batch", id: 3, want: 2, len: 2},
+		{name: "inside tool batch after first result", id: 4, want: 2, len: 2},
+		{name: "after all tools", id: 5, want: 5, len: 5},
+		{name: "beyond log", id: 99, want: 6, len: 6},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			history, cursor, err := aicli.LoadSafeMessageHistoryAtOrBefore(path, tt.id)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, cursor)
+			assert.Len(t, history, tt.len)
+		})
+	}
+}
+
+func TestLoadSafeMessageHistoryAtOrBeforeRejectsUnsafeOrInvalidBoundaries(t *testing.T) {
+	tests := []struct {
+		name string
+		msgs []aicli.Message
+		id   int64
+	}{
+		{name: "non-positive ID", msgs: []aicli.Message{{Role: "user", Content: "x"}}, id: 0},
+		{name: "before first message", msgs: []aicli.Message{{Role: "user", Content: "x"}}, id: 0},
+		{name: "no completed tool result", msgs: []aicli.Message{{Role: "assistant", ToolCalls: []aicli.ToolCall{{ID: "call"}}}}, id: 1},
+		{name: "unmatched tool result", msgs: []aicli.Message{{Role: "tool", ToolCallID: "missing"}}, id: 1},
+		{name: "missing tool call ID", msgs: []aicli.Message{{Role: "assistant", ToolCalls: []aicli.ToolCall{{}}}}, id: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			path := writeHistoryLog(t, tt.msgs...)
+			_, _, err := aicli.LoadSafeMessageHistoryAtOrBefore(path, tt.id)
+			assert.Error(t, err)
+		})
+	}
+}
+
+func writeHistoryLog(t *testing.T, messages ...aicli.Message) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "run.jsonl")
+	file, err := os.Create(path)
+	require.NoError(t, err)
+	for i, message := range messages {
+		messageJSON, marshalErr := json.Marshal(message)
+		require.NoError(t, marshalErr)
+		line, marshalErr := json.Marshal(map[string]interface{}{"type": "message", "seq": i + 1, "content": string(messageJSON)})
+		require.NoError(t, marshalErr)
+		_, err = file.Write(append(line, '\n'))
+		require.NoError(t, err)
+	}
+	require.NoError(t, file.Close())
+	return path
+}
+
 func assertMessageEqual(t *testing.T, expected, actual aicli.Message) {
 	t.Helper()
 	expectedJSON, err := json.Marshal(expected)

@@ -654,17 +654,29 @@ const (
 	CheckpointPhaseAfterTools  CheckpointPhase = "after_tools"
 )
 
+// RunEventType identifies a durable control-plane message. Keeping the event
+// vocabulary typed prevents unrelated strings from silently entering the
+// orchestrator/worker inboxes.
+type RunEventType string
+
+const (
+	RunEventTypeLifecycleStatus RunEventType = "run_status"
+	RunEventTypeStatusReport    RunEventType = "status_report"
+	RunEventTypeStatusRefresh   RunEventType = "status_report_request"
+	RunEventTypeSessionQuestion RunEventType = "worker_question"
+)
+
 // RunEvent is a durable inbox entry used to wake passive orchestrators when a
 // supervised run changes state. DedupeKey makes status updates idempotent.
 type RunEvent struct {
-	ID         int64      `json:"id" gorm:"primaryKey"`
-	TaskID     int32      `json:"task_id" gorm:"not null;index"`
-	RunID      int32      `json:"run_id" gorm:"not null;index"`
-	EventType  string     `json:"event_type" gorm:"not null"`
-	Payload    string     `json:"payload" gorm:"type:text"`
-	DedupeKey  string     `json:"dedupe_key" gorm:"index"`
-	CreatedAt  time.Time  `json:"created_at" gorm:"index"`
-	ConsumedAt *time.Time `json:"consumed_at,omitempty" gorm:"index"`
+	ID         int64        `json:"id" gorm:"primaryKey"`
+	TaskID     int32        `json:"task_id" gorm:"not null;index"`
+	RunID      int32        `json:"run_id" gorm:"not null;index"`
+	EventType  RunEventType `json:"event_type" gorm:"not null"`
+	Payload    string       `json:"payload" gorm:"type:text"`
+	DedupeKey  string       `json:"dedupe_key" gorm:"index"`
+	CreatedAt  time.Time    `json:"created_at" gorm:"index"`
+	ConsumedAt *time.Time   `json:"consumed_at,omitempty" gorm:"index"`
 }
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to

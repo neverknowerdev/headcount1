@@ -60,6 +60,20 @@ type ResumeOptions struct {
 	TargetBuild string
 }
 
+// sessionOptions controls orchestrator-created auxiliary sessions without
+// adding persistence-only columns to Run. SeedHistory is used by forks; the
+// task-context flag controls whether a fresh session receives the task prompt.
+type sessionOptions struct {
+	SeedHistory        []aicli.Message
+	Instruction        string
+	IncludeTaskContext bool
+	SkipTaskLock       bool
+	// PrecreatedRun is used by fork_session so the caller can return the new
+	// run ID synchronously while executeSession still owns normal setup and
+	// terminal-state cleanup.
+	PrecreatedRun *db.Run
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q           *db.Queries
@@ -467,7 +481,7 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 
 // run is the goroutine body for a single root agent execution.
 func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
-	e.executeSession(ctx, task, mode, nil, nil)
+	e.executeSession(ctx, task, mode, nil, nil, sessionOptions{IncludeTaskContext: true})
 }
 
 // resumeSession re-enters a previously-paused root run using its persisted
@@ -475,7 +489,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 // root runs are ever paused (see BeginDrain/executeSession's pause wiring),
 // so this always passes parent = nil.
 func (e *NativeEngine) resumeSession(ctx context.Context, task db.Task, run db.Run) {
-	e.executeSession(ctx, task, "resume", nil, &run)
+	e.executeSession(ctx, task, "resume", nil, &run, sessionOptions{IncludeTaskContext: true})
 }
 
 // ResumeSession claims and asynchronously resumes one checkpointed run. It is
@@ -595,7 +609,7 @@ func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
 // Run checkpoint cursor, seeds the agent loop in place of a freshly
 // built initial message list, and the existing Run row is reused. Delegated
 // sessions still require durable parent coordination before they can pause.
-func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run) string {
+func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run, options sessionOptions) string {
 	if task.AgentID == nil {
 		return "failed"
 	}
@@ -615,6 +629,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	var run db.Run
 	if resumeRun != nil {
 		run = *resumeRun
+	} else if options.PrecreatedRun != nil {
+		run = *options.PrecreatedRun
 	} else {
 		var orchestrator db.Run
 		var orchestratorProvider db.LLMProvider
@@ -679,7 +695,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		cancel()
 		e.cancelFuncs.Delete(run.ID)
 	}()
-	if resumeRun == nil {
+	if resumeRun == nil && !options.SkipTaskLock {
 		claimed, claimErr := e.q.ClaimTaskRun(ctx, task.ID, run.ID)
 		if claimErr != nil {
 			_ = e.q.UpdateRunLog(context.Background(), run.ID, claimErr.Error(), "failed")
@@ -717,8 +733,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// run it claims the task; for a resumed run the task is already locked to
 	// this same run ID (pausing never unlocks it — see the paused branch
 	// below), so this is a harmless no-op that leaves the existing lock as-is.
-	if lockErr := e.q.LockTaskRun(ctx, task.ID, run.ID); lockErr != nil {
-		fmt.Printf("Warning: failed to lock task %d for run %d: %v\n", task.ID, run.ID, lockErr)
+	if !options.SkipTaskLock {
+		if lockErr := e.q.LockTaskRun(ctx, task.ID, run.ID); lockErr != nil {
+			fmt.Printf("Warning: failed to lock task %d for run %d: %v\n", task.ID, run.ID, lockErr)
+		}
 	}
 	// paused is set just before returning if this session stops via
 	// aicli.ErrPaused. In that case the task must stay locked to this run (no
@@ -727,6 +745,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	paused := false
 	defer func() {
 		if paused {
+			return
+		}
+		if options.SkipTaskLock {
 			return
 		}
 		if clearErr := e.q.UnlockTaskRun(context.Background(), task.ID); clearErr != nil {
@@ -898,12 +919,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Agent.SystemPrompt is the database-owned base prompt. The builder only
 	// contributes dynamic task/company context; no file-backed role prompt is
 	// consulted during execution.
-	taskContext := NewSystemPromptBuilder(e.q).Build(agent, task)
 	systemPrompt := strings.TrimSpace(agent.SystemPrompt)
-	if systemPrompt != "" {
-		systemPrompt += "\n\n"
+	if options.IncludeTaskContext {
+		taskContext := NewSystemPromptBuilder(e.q).Build(agent, task)
+		if systemPrompt != "" {
+			systemPrompt += "\n\n"
+		}
+		systemPrompt += taskContext
 	}
-	systemPrompt += taskContext
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
 	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {
 		systemPrompt += fmt.Sprintf("\nTask Git branch: %s (shared by every run and sub-run in this task)", branch)
@@ -922,7 +945,17 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		systemPrompt += fmt.Sprintf("\n\nArtifacts produced so far (%d, files in %s):\n%s", len(arts), artifactDir, formatArtifactList(arts))
 	}
 
-	initialMessages := e.buildInitialMessages(ctx, task, mode)
+	initialMessages := options.SeedHistory
+	if initialMessages == nil {
+		if options.IncludeTaskContext {
+			initialMessages = e.buildInitialMessages(ctx, task, mode)
+		} else {
+			initialMessages = []aicli.Message{{Role: "user", Content: options.Instruction}}
+		}
+	}
+	if options.Instruction != "" && options.IncludeTaskContext && options.SeedHistory == nil {
+		initialMessages = append(initialMessages, aicli.Message{Role: "user", Content: "Orchestrator instruction for this session: " + options.Instruction})
+	}
 
 	// Build full tool registry: file/shell/web tools + task-management tools.
 	registry := tools.DefaultRegistry(workspacePath, readOnlyDirs...)
@@ -1363,11 +1396,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Logger:                      proxyLogger,
 		InitialConversationSequence: run.Recovery.CheckpointSequence,
 		BeforeTurn: func(controlCtx context.Context) ([]aicli.Message, error) {
-			refreshEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, "status_report_request")
+			refreshEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, db.RunEventTypeStatusRefresh)
 			if eventErr != nil {
 				return nil, eventErr
 			}
-			questionEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, "worker_question")
+			questionEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, db.RunEventTypeSessionQuestion)
 			if eventErr != nil {
 				return nil, eventErr
 			}
@@ -1375,20 +1408,27 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			if len(events) == 0 {
 				return nil, nil
 			}
+			sort.SliceStable(events, func(i, j int) bool {
+				if events[i].CreatedAt.Equal(events[j].CreatedAt) {
+					return events[i].ID < events[j].ID
+				}
+				return events[i].CreatedAt.Before(events[j].CreatedAt)
+			})
 			ids := make([]int64, 0, len(events))
 			messages := make([]aicli.Message, 0, len(events))
 			for _, event := range events {
 				ids = append(ids, event.ID)
-				if event.EventType == "status_report_request" {
+				if event.EventType == db.RunEventTypeStatusRefresh {
 					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator requested a fresh progress update. Call report_status with your current stage and any blocker, then continue the task."})
 					continue
 				}
 				var payload struct {
 					Question string `json:"question"`
 				}
-				if json.Unmarshal([]byte(event.Payload), &payload) == nil && payload.Question != "" {
-					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator asked: " + payload.Question + " Respond with your current status or answer, then continue the task."})
+				if json.Unmarshal([]byte(event.Payload), &payload) != nil || strings.TrimSpace(payload.Question) == "" {
+					return nil, fmt.Errorf("invalid worker question event %d", event.ID)
 				}
+				messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator asked: " + payload.Question + " Respond with your current status or answer, then continue the task."})
 			}
 			if consumeErr := e.q.ConsumeRunEvents(controlCtx, ids); consumeErr != nil {
 				return nil, consumeErr
@@ -1425,6 +1465,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// conversation (captured mid-turn by a prior pause — see below); a fresh
 	// run starts from the system prompt + task-derived initial messages.
 	seedHistory := aicli.BuildHistory(systemPrompt, initialMessages)
+	if options.SeedHistory != nil {
+		// Forks already carry the source conversation's system message. Do not
+		// prepend a second system prompt or alter the replay boundary.
+		seedHistory = append([]aicli.Message(nil), options.SeedHistory...)
+	}
 	if resumeRun != nil {
 		loaded, uErr := aicli.LoadMessageHistory(run.LogFilePath, run.Recovery.CheckpointSequence)
 		if uErr != nil {
@@ -1952,7 +1997,7 @@ func (e *NativeEngine) makeCreateSubtaskFunc(
 		// Run the child session in a goroutine so this call can also react to
 		// ask_task_owner questions while the session is still in flight.
 		go func() {
-			status := e.executeSession(callCtx, subtask, "implement", session, nil)
+			status := e.executeSession(callCtx, subtask, "implement", session, nil, sessionOptions{IncludeTaskContext: true})
 			select {
 			case state.eventCh <- subtaskEvent{status: status, done: true}:
 			case <-callCtx.Done():
