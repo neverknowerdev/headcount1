@@ -118,7 +118,7 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolAskSessionAgent,
-		def:  orchestratorDef(OrchestratorToolAskSessionAgent, "Send a question to the agent running a managed session. Delivery is asynchronous and will be added before that session's next provider request.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
+		def:  orchestratorDef(OrchestratorToolAskSessionAgent, "Ask the agent running a managed session a question. The worker finishes its current provider/tool operation, answers this question in an isolated LLM request, and returns the answer or an explicit timeout/provider error before its normal conversation continues.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32  `json:"session_id"`

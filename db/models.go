@@ -663,7 +663,6 @@ const (
 	RunEventTypeLifecycleStatus RunEventType = "run_status"
 	RunEventTypeStatusReport    RunEventType = "status_report"
 	RunEventTypeStatusRefresh   RunEventType = "status_report_request"
-	RunEventTypeSessionQuestion RunEventType = "worker_question"
 )
 
 // RunEvent is a durable inbox entry used to wake passive orchestrators when a

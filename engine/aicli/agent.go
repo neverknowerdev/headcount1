@@ -165,6 +165,10 @@ type Agent struct {
 	logger               RunLogger
 	conversationSequence int64
 	beforeTurn           func(context.Context) ([]Message, error)
+	// interrupt is checked after a response that would otherwise end the run.
+	// It lets a host temporarily service an out-of-band question and then
+	// continue the original conversation with the question and answer appended.
+	interrupt func(context.Context) ([]Message, error)
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -191,6 +195,11 @@ type Config struct {
 	// BeforeTurn supplies durable control messages immediately before the next
 	// provider request. It never interrupts an in-flight tool or LLM call.
 	BeforeTurn func(context.Context) ([]Message, error)
+	// Interrupt handles a pending host-side question after a provider response
+	// is received but before a no-tool response ends the session. Tool calls are
+	// always completed first; the next BeforeTurn handles interruptions queued
+	// while tools were running.
+	Interrupt func(context.Context) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
@@ -220,6 +229,7 @@ func New(cfg Config) *Agent {
 		logger:                cfg.Logger,
 		conversationSequence:  cfg.InitialConversationSequence,
 		beforeTurn:            cfg.BeforeTurn,
+		interrupt:             cfg.Interrupt,
 	}
 }
 
@@ -436,7 +446,24 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		a.logConversationMessage(assistantMsg)
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			// No tools to invoke — the assistant's text is the final answer.
+			// A host-side question may have arrived while this provider request
+			// was in flight. Service it before ending the run so the main loop can
+			// continue with the isolated answer in its durable history.
+			if a.interrupt != nil {
+				interruptMessages, interruptErr := a.interrupt(ctx)
+				if interruptErr != nil {
+					return "", history, fmt.Errorf("interrupt handling failed: %w", interruptErr)
+				}
+				if len(interruptMessages) > 0 {
+					history = append(history, interruptMessages...)
+					for _, message := range interruptMessages {
+						a.logConversationMessage(message)
+					}
+					continue
+				}
+			}
+			// No tools or pending interruptions — the assistant's text is the
+			// final answer.
 			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 

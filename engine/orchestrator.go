@@ -273,30 +273,51 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 	return true, err
 }
 
-// orchestratorAskSession sends a question to another managed session.
-// Automatic status refreshes use requestWorkerStatus instead, because they
-// must be delivered to the active worker without creating a task comment.
+// orchestratorAskSession synchronously exchanges one isolated question/answer
+// turn with another managed session. The worker's normal conversation is
+// paused at its next safe boundary; provider/tool errors and timeouts are
+// returned so the orchestrator agent receives them as the tool result.
 func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
-	session, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
+	_, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
 	if err != nil {
 		return "", err
 	}
-	payload, _ := json.Marshal(map[string]string{"question": question})
-	if err := e.q.EnqueueRunEvent(ctx, db.RunEvent{
-		TaskID: task.ID, RunID: sessionID, EventType: db.RunEventTypeSessionQuestion, Payload: string(payload),
-		DedupeKey: fmt.Sprintf("run:%d:question:%d", sessionID, time.Now().UnixNano()),
-	}); err != nil {
-		return "", err
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return "", fmt.Errorf("question is required")
 	}
+	channelValue, ok := e.sessionQuestionChans.Load(sessionID)
+	if !ok {
+		return "", fmt.Errorf("session %d is not actively processing an LLM turn", sessionID)
+	}
+	questionBroker, ok := channelValue.(*sessionQuestionBroker)
+	if !ok {
+		return "", fmt.Errorf("session %d question broker is invalid", sessionID)
+	}
+	questionCtx, cancel := context.WithTimeout(ctx, orchestratorQuestionTimeout)
+	defer cancel()
+	request := &sessionQuestionRequest{question: question, ctx: questionCtx, result: make(chan sessionQuestionResult, 1)}
 	// Keep a visible audit trail, but target the worker session rather than
-	// attributing the question to the orchestrator run.
+	// attributing the question to the orchestrator run. Record it before
+	// delivery so an audit failure cannot leave an untracked in-flight request.
 	rid := sessionID
 	comment, err := e.q.CreateComment(ctx, db.Comment{TaskID: task.ID, AuthorType: "system", CommentType: "orchestrator_question", Content: question, RunID: &rid})
 	if err != nil {
 		return "", err
 	}
 	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
-	return fmt.Sprintf("Current worker lifecycle status: %s. Question recorded for session %d; inspect its next lifecycle event for an answer.", session.Status, sessionID), nil
+	if err := questionBroker.submit(questionCtx, request); err != nil {
+		return "", fmt.Errorf("orchestrator question delivery failed for session %d: %w", sessionID, err)
+	}
+	select {
+	case result := <-request.result:
+		if result.err != nil {
+			return "", result.err
+		}
+		return result.answer, nil
+	case <-questionCtx.Done():
+		return "", fmt.Errorf("orchestrator question timed out waiting for session %d response: %w", sessionID, questionCtx.Err())
+	}
 }
 
 func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, sessionID int32, reason string) (string, error) {

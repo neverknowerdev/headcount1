@@ -74,11 +74,94 @@ type sessionOptions struct {
 	PrecreatedRun *db.Run
 }
 
+const orchestratorQuestionTimeout = 2 * time.Minute
+
+type sessionQuestionRequest struct {
+	question string
+	ctx      context.Context
+	result   chan sessionQuestionResult
+}
+
+type sessionQuestionResult struct {
+	answer string
+	err    error
+}
+
+type sessionQuestionBroker struct {
+	ch     chan *sessionQuestionRequest
+	mu     sync.Mutex
+	closed bool
+	err    error
+}
+
+func newSessionQuestionBroker() *sessionQuestionBroker {
+	return &sessionQuestionBroker{ch: make(chan *sessionQuestionRequest, 8)}
+}
+
+func (b *sessionQuestionBroker) submit(ctx context.Context, request *sessionQuestionRequest) error {
+	b.mu.Lock()
+	if b.closed {
+		err := b.err
+		b.mu.Unlock()
+		if err == nil {
+			err = fmt.Errorf("session is no longer active")
+		}
+		return err
+	}
+	select {
+	case b.ch <- request:
+		b.mu.Unlock()
+		return nil
+	case <-ctx.Done():
+		b.mu.Unlock()
+		return ctx.Err()
+	}
+}
+
+func (b *sessionQuestionBroker) receive() (*sessionQuestionRequest, bool) {
+	select {
+	case request, ok := <-b.ch:
+		return request, ok
+	default:
+		return nil, true
+	}
+}
+
+func (b *sessionQuestionBroker) close(err error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.closed = true
+	b.err = err
+	close(b.ch)
+	for {
+		select {
+		case request := <-b.ch:
+			if request != nil {
+				select {
+				case request.result <- sessionQuestionResult{err: err}:
+				default:
+				}
+			}
+		default:
+			b.mu.Unlock()
+			return
+		}
+	}
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q           *db.Queries
 	hub         *eventhub.Hub
 	cancelFuncs sync.Map // runID -> context.CancelFunc
+	// sessionQuestionChans are deliberately in-memory: they represent a
+	// currently executing agent loop. The question itself is persisted in the
+	// worker's JSONL history when the loop accepts it; a session that is no
+	// longer active cannot service a synchronous interruption.
+	sessionQuestionChans sync.Map // runID -> *sessionQuestionBroker
 
 	// draining and activeRoots back BeginDrain/WaitForActiveRuns: the
 	// graceful-shutdown path for an auto-update. draining, once set, stops
@@ -1381,6 +1464,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return "failed"
 		}
 	}
+	questionBroker := newSessionQuestionBroker()
+	e.sessionQuestionChans.Store(run.ID, questionBroker)
+	defer func() {
+		e.sessionQuestionChans.Delete(run.ID)
+		questionBroker.close(fmt.Errorf("session %d ended before answering the orchestrator question", run.ID))
+	}()
+	handleQuestion := func(questionCtx context.Context) ([]aicli.Message, error) {
+		request, open := questionBroker.receive()
+		if !open || request == nil {
+			return nil, nil
+		}
+		return e.answerSessionQuestion(questionCtx, request, llmClient, reasoningLevel)
+	}
 	agentCfgObj := aicli.Config{
 		Client:                      llmClient,
 		Registry:                    registry,
@@ -1396,17 +1492,17 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Logger:                      proxyLogger,
 		InitialConversationSequence: run.Recovery.CheckpointSequence,
 		BeforeTurn: func(controlCtx context.Context) ([]aicli.Message, error) {
+			messages, questionErr := handleQuestion(controlCtx)
+			if questionErr != nil {
+				return nil, questionErr
+			}
 			refreshEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, db.RunEventTypeStatusRefresh)
 			if eventErr != nil {
 				return nil, eventErr
 			}
-			questionEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, db.RunEventTypeSessionQuestion)
-			if eventErr != nil {
-				return nil, eventErr
-			}
-			events := append(refreshEvents, questionEvents...)
+			events := refreshEvents
 			if len(events) == 0 {
-				return nil, nil
+				return messages, nil
 			}
 			sort.SliceStable(events, func(i, j int) bool {
 				if events[i].CreatedAt.Equal(events[j].CreatedAt) {
@@ -1415,25 +1511,21 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 				return events[i].CreatedAt.Before(events[j].CreatedAt)
 			})
 			ids := make([]int64, 0, len(events))
-			messages := make([]aicli.Message, 0, len(events))
 			for _, event := range events {
 				ids = append(ids, event.ID)
 				if event.EventType == db.RunEventTypeStatusRefresh {
 					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator requested a fresh progress update. Call report_status with your current stage and any blocker, then continue the task."})
 					continue
 				}
-				var payload struct {
-					Question string `json:"question"`
-				}
-				if json.Unmarshal([]byte(event.Payload), &payload) != nil || strings.TrimSpace(payload.Question) == "" {
-					return nil, fmt.Errorf("invalid worker question event %d", event.ID)
-				}
-				messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator asked: " + payload.Question + " Respond with your current status or answer, then continue the task."})
+				return nil, fmt.Errorf("unsupported worker control event %d", event.ID)
 			}
 			if consumeErr := e.q.ConsumeRunEvents(controlCtx, ids); consumeErr != nil {
 				return nil, consumeErr
 			}
 			return messages, nil
+		},
+		Interrupt: func(interruptCtx context.Context) ([]aicli.Message, error) {
+			return handleQuestion(interruptCtx)
 		},
 		HistoryAlreadyLogged: resumeRun != nil,
 	}
@@ -1634,6 +1726,82 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	}
 
 	return status
+}
+
+// answerSessionQuestion performs the orchestrator interruption as an isolated
+// completion request. The worker's normal history is intentionally excluded
+// from this request; the returned user/assistant pair is appended to that
+// history by the agent loop after the side-channel result is delivered.
+func (e *NativeEngine) answerSessionQuestion(ctx context.Context, request *sessionQuestionRequest, client *aicli.Client, reasoningLevel string) ([]aicli.Message, error) {
+	if request == nil {
+		return nil, fmt.Errorf("nil session question request")
+	}
+	question := strings.TrimSpace(request.question)
+	if question == "" {
+		return nil, fmt.Errorf("session question is empty")
+	}
+	requestCtx := request.ctx
+	if requestCtx == nil {
+		requestCtx = ctx
+	}
+	callCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+	go func() {
+		select {
+		case <-requestCtx.Done():
+			cancel()
+		case <-callCtx.Done():
+		}
+	}()
+	response, _, err := client.Complete(callCtx, aicli.ChatRequest{
+		Messages:        []aicli.Message{{Role: "user", Content: question}},
+		ReasoningEffort: reasoningLevel,
+	})
+	if err != nil {
+		if requestCtx.Err() != nil {
+			err = requestCtx.Err()
+		} else if ctx.Err() != nil {
+			err = ctx.Err()
+		}
+		failure := fmt.Errorf("orchestrator question failed: %w", err)
+		select {
+		case request.result <- sessionQuestionResult{err: failure}:
+		default:
+		}
+		return []aicli.Message{
+			{Role: "user", Content: question},
+			{Role: "assistant", Content: "[orchestrator question failed: " + failure.Error() + "]"},
+		}, nil
+	}
+	if response == nil || len(response.Choices) == 0 {
+		failure := fmt.Errorf("orchestrator question returned no response")
+		select {
+		case request.result <- sessionQuestionResult{err: failure}:
+		default:
+		}
+		return []aicli.Message{
+			{Role: "user", Content: question},
+			{Role: "assistant", Content: "[orchestrator question failed: " + failure.Error() + "]"},
+		}, nil
+	}
+	answerMessage := response.Choices[0].Message
+	answer := answerMessage.Content
+	if strings.TrimSpace(answer) == "" {
+		encoded, marshalErr := json.Marshal(answerMessage)
+		if marshalErr != nil {
+			answer = "[assistant response contained no text]"
+		} else {
+			answer = string(encoded)
+		}
+	}
+	select {
+	case request.result <- sessionQuestionResult{answer: answer}:
+	default:
+	}
+	return []aicli.Message{
+		{Role: "user", Content: question},
+		{Role: "assistant", Content: answer},
+	}, nil
 }
 
 func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspace string, task db.Task, finish tools.FinishTaskResult) {
