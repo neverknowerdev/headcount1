@@ -131,7 +131,7 @@ func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 		AskAgent: func(context.Context, int32, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
-		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})

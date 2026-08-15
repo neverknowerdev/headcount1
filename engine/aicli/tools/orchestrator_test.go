@@ -16,7 +16,7 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
@@ -32,7 +32,7 @@ func TestOrchestratorToolValidation(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
-		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
@@ -70,39 +70,42 @@ func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 	require.Contains(t, detail, `"message_id":22`)
 }
 
-func TestRunNewSessionPassesOptionalContextAndTargetArguments(t *testing.T) {
-	var gotSource, gotAgent *int32
-	var gotReason string
-	var gotContext bool
+func TestRunNewSessionPassesPromptAndAgentName(t *testing.T) {
+	var gotSource *int32
+	var gotAgent, gotPrompt string
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
 		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
 		AskAgent: func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(_ context.Context, source, agent *int32, reason string, include bool) (string, error) {
-			gotSource, gotAgent, gotReason, gotContext = source, agent, reason, include
+		RunNewSession: func(_ context.Context, source *int32, agent, prompt string) (string, error) {
+			gotSource, gotAgent, gotPrompt = source, agent, prompt
 			return "queued", nil
 		},
 		StopSession: func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"source_session_id":4,"agent_id":9,"reason":"difficult question","include_task_context":false}`))
+	_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"source_session_id":4,"agent_name":"Coder","prompt":"Implement the parser and add tests"}`))
 	require.NoError(t, err)
 	require.Equal(t, int32(4), *gotSource)
-	require.Equal(t, int32(9), *gotAgent)
-	require.Equal(t, "difficult question", gotReason)
-	require.False(t, gotContext)
-	_, err = r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"reason":"small action"}`))
+	require.Equal(t, "Coder", gotAgent)
+	require.Equal(t, "Implement the parser and add tests", gotPrompt)
+	_, err = r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"QA","prompt":"Run the regression suite"}`))
 	require.NoError(t, err)
 	require.Nil(t, gotSource)
-	require.Nil(t, gotAgent)
-	require.True(t, gotContext)
-	_, err = r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"reason":"research"}`))
-	require.NoError(t, err)
-	require.Equal(t, "research", gotReason)
+	require.Equal(t, "QA", gotAgent)
+	require.Equal(t, "Run the regression suite", gotPrompt)
 	require.Error(t, func() error {
-		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_id":0,"reason":"x"}`))
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"","prompt":"x"}`))
+		return err
+	}())
+	require.Error(t, func() error {
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"Coder","prompt":""}`))
+		return err
+	}())
+	require.Error(t, func() error {
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"  ","prompt":"do work"}`))
 		return err
 	}())
 }
@@ -115,7 +118,7 @@ func TestForkSessionValidatesCanonicalMessageID(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(_ context.Context, sessionID int32, messageID int64) (string, error) {
 			called = sessionID == 7 && messageID == 42

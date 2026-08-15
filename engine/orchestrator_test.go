@@ -24,6 +24,41 @@ func TestStatusReportFreshnessWindow(t *testing.T) {
 	require.True(t, isStatusReportStale(db.RunStatusReport{}, false, now))
 }
 
+func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:orchestrator-prompt-context?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Project{}, &db.Sprint{}, &db.Agent{}, &db.Task{}, &db.TaskRelation{}))
+	company := db.Company{Name: "Acme Labs", ShortName: "ACME", Description: "Builds privacy-first analytics for clinics."}
+	require.NoError(t, database.Create(&company).Error)
+	project := db.Project{CompanyID: company.ID, Name: "Care Portal", Description: "Patient-facing reporting portal", RepositoryUrl: "https://example.test/care-portal"}
+	require.NoError(t, database.Create(&project).Error)
+	sprint := db.Sprint{CompanyID: company.ID, Name: "Sprint 42", Goal: "Ship the audit export beta"}
+	require.NoError(t, database.Create(&sprint).Error)
+	worker := db.Agent{CompanyID: company.ID, Name: "Backend Builder", RoleKey: "backend", Description: "Implements APIs and database changes."}
+	qa := db.Agent{CompanyID: company.ID, Name: "QA Analyst", RoleKey: "qa", Description: "Adds regression coverage and validates acceptance."}
+	require.NoError(t, database.Create(&worker).Error)
+	require.NoError(t, database.Create(&qa).Error)
+	task := db.Task{
+		CompanyID: company.ID, ProjectID: &project.ID, SprintID: sprint.ID, RefKey: "ACME-42",
+		Title: "Add audit export", TaskType: "implement", Status: "to-do", Priority: "High",
+		Description: "Export a patient's audit trail as CSV.", RefinedDescription: "Use the existing event ordering.",
+		AcceptanceCriteria: "CSV downloads with stable headers", TestCases: "Empty audit trail; large audit trail",
+		Company: company, Project: &project, Sprint: sprint,
+	}
+	require.NoError(t, database.Create(&task).Error)
+
+	prompt, err := NewNativeEngine(database, eventhub.NewHub()).buildOrchestratorSystemPrompt(context.Background(), task)
+	require.NoError(t, err)
+	for _, expected := range []string{
+		"Acme Labs", "Builds privacy-first analytics for clinics.", "Care Portal", "Patient-facing reporting portal",
+		"Sprint 42", "Ship the audit export beta", "ACME-42", "Export a patient's audit trail as CSV.",
+		"CSV downloads with stable headers", "Backend Builder", "Implements APIs and database changes.",
+		"QA Analyst", "Adds regression coverage and validates acceptance.", "run_new_session",
+	} {
+		assert.Contains(t, prompt, expected)
+	}
+}
+
 func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

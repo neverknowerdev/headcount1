@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 
 	"agent-orchestrator/engine/aicli"
 )
@@ -57,6 +58,15 @@ type ManagedSessionDetails struct {
 	RunStatusHistory []ManagedSessionRunStatus   `json:"run_status_history"`
 }
 
+// AvailableAgent is an agent the task orchestrator can select for a new
+// worker session. Names are the stable input accepted by run_new_session;
+// descriptions help the orchestrator choose without guessing from IDs.
+type AvailableAgent struct {
+	Name        string `json:"name"`
+	RoleKey     string `json:"role_key,omitempty"`
+	Description string `json:"description,omitempty"`
+}
+
 // OrchestratorToolName is intentionally private to this registry. These
 // controls are never part of a worker's configurable tool surface.
 type OrchestratorToolName string
@@ -74,7 +84,7 @@ type OrchestratorCallbacks struct {
 	GetSessionList func(context.Context) ([]ManagedSessionSummary, error)
 	GetSession     func(context.Context, int32) (ManagedSessionDetails, error)
 	AskAgent       func(context.Context, int32, string) (string, error)
-	RunNewSession  func(context.Context, *int32, *int32, string, bool) (string, error)
+	RunNewSession  func(context.Context, *int32, string, string) (string, error)
 	StopSession    func(context.Context, int32, string) (string, error)
 	ForkSession    func(context.Context, int32, int64) (string, error)
 }
@@ -152,31 +162,23 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolRunNewSession,
-		def:  orchestratorDef(OrchestratorToolRunNewSession, "Start a new session for an agent related to this task. Optionally replace a source session; include_task_context controls whether the task prompt is included. The reason is also the session instruction.", `{"type":"object","properties":{"source_session_id":{"type":"integer"},"agent_id":{"type":"integer"},"reason":{"type":"string"},"include_task_context":{"type":"boolean","default":true}},"required":["reason"]}`),
+		def:  orchestratorDef(OrchestratorToolRunNewSession, "Start a child worker session for the selected agent. The worker receives the complete task context plus your prompt. Optionally replace a source session when recovering from a failed or unsafe execution.", `{"type":"object","properties":{"source_session_id":{"type":"integer","description":"Existing managed session to replace; omit for a new worker."},"agent_name":{"type":"string","description":"Name or role key from the available-agents list."},"prompt":{"type":"string","description":"Detailed implementation instruction, constraints, and expected handoff for the worker."}},"required":["agent_name","prompt"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
-				SourceSessionID    *int32 `json:"source_session_id"`
-				AgentID            *int32 `json:"agent_id"`
-				Reason             string `json:"reason"`
-				IncludeTaskContext *bool  `json:"include_task_context"`
+				SourceSessionID *int32 `json:"source_session_id"`
+				AgentName       string `json:"agent_name"`
+				Prompt          string `json:"prompt"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
 				return "", fmt.Errorf("run_new_session: %w", err)
 			}
-			if p.Reason == "" {
-				return "", fmt.Errorf("reason is required")
+			if strings.TrimSpace(p.AgentName) == "" || strings.TrimSpace(p.Prompt) == "" {
+				return "", fmt.Errorf("agent_name and prompt are required")
 			}
 			if p.SourceSessionID != nil && *p.SourceSessionID <= 0 {
 				return "", fmt.Errorf("source_session_id must be positive")
 			}
-			if p.AgentID != nil && *p.AgentID <= 0 {
-				return "", fmt.Errorf("agent_id must be positive")
-			}
-			includeTaskContext := true
-			if p.IncludeTaskContext != nil {
-				includeTaskContext = *p.IncludeTaskContext
-			}
-			return cb.RunNewSession(ctx, p.SourceSessionID, p.AgentID, p.Reason, includeTaskContext)
+			return cb.RunNewSession(ctx, p.SourceSessionID, p.AgentName, p.Prompt)
 		},
 	})
 	r.Register(&orchestratorManagementTool{

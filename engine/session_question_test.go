@@ -143,6 +143,68 @@ func TestSessionQuestionBrokerConcurrentSubmitAndClose(t *testing.T) {
 	}
 }
 
+func TestOrchestratorQuestionBrokerCloseTerminatesAndRejectsNewQuestions(t *testing.T) {
+	broker := newOrchestratorQuestionBroker()
+	assert.EqualError(t, broker.submit(context.Background(), nil), "orchestrator question request is nil")
+	request := &orchestratorQuestionRequest{workerRunID: 7, question: "continue?", result: make(chan sessionQuestionResult, 1)}
+	require.NoError(t, broker.submit(context.Background(), request))
+	broker.close(errors.New("orchestrator ended"))
+	result := <-request.result
+	assert.EqualError(t, result.err, "orchestrator ended")
+	_, open := broker.receive()
+	assert.False(t, open)
+	assert.Error(t, broker.submit(context.Background(), &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+}
+
+func TestOrchestratorQuestionBrokerCloseUnblocksFullQueueAndCancellation(t *testing.T) {
+	broker := newOrchestratorQuestionBroker()
+	for i := 0; i < cap(broker.ch); i++ {
+		require.NoError(t, broker.submit(context.Background(), &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+	}
+	submitResult := make(chan error, 1)
+	go func() {
+		submitResult <- broker.submit(context.Background(), &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)})
+	}()
+	broker.close(errors.New("orchestrator stopped"))
+	select {
+	case err := <-submitResult:
+		assert.EqualError(t, err, "orchestrator stopped")
+	case <-time.After(time.Second):
+		t.Fatal("blocked worker question was not released")
+	}
+	cancelBroker := newOrchestratorQuestionBroker()
+	for i := 0; i < cap(cancelBroker.ch); i++ {
+		require.NoError(t, cancelBroker.submit(context.Background(), &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	assert.ErrorIs(t, cancelBroker.submit(ctx, &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)}), context.Canceled)
+	cancelBroker.close(errors.New("test cleanup"))
+	assert.EqualError(t, broker.submit(ctx, &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)}), "orchestrator stopped")
+}
+
+func TestOrchestratorQuestionBrokerConcurrentSubmitAndClose(t *testing.T) {
+	broker := newOrchestratorQuestionBroker()
+	const submitters = 64
+	results := make(chan error, submitters)
+	var wg sync.WaitGroup
+	for i := 0; i < submitters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- broker.submit(context.Background(), &orchestratorQuestionRequest{result: make(chan sessionQuestionResult, 1)})
+		}()
+	}
+	broker.close(errors.New("concurrent orchestrator shutdown"))
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			assert.EqualError(t, err, "concurrent orchestrator shutdown")
+		}
+	}
+}
+
 func TestAnswerSessionQuestionReturnsProviderErrorToWaitingOrchestrator(t *testing.T) {
 	providerErr := errors.New("provider unavailable")
 	client := questionClient(func(*http.Request) (*http.Response, error) { return nil, providerErr })

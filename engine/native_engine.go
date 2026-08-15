@@ -204,6 +204,107 @@ func (b *sessionQuestionBroker) failRequest(request *sessionQuestionRequest, err
 	}
 }
 
+// orchestratorQuestionBroker carries a worker's ask_task_owner request to the
+// task orchestrator and blocks that worker until the orchestrator's next LLM
+// activation returns a direct answer. It follows the same shutdown rules as
+// sessionQuestionBroker: done is closed, but ch remains open so concurrent
+// submitters cannot panic during teardown.
+type orchestratorQuestionRequest struct {
+	workerRunID int32
+	question    string
+	ctx         context.Context
+	result      chan sessionQuestionResult
+}
+
+type orchestratorQuestionBroker struct {
+	ch     chan *orchestratorQuestionRequest
+	done   chan struct{}
+	mu     sync.Mutex
+	closed bool
+	err    error
+}
+
+func newOrchestratorQuestionBroker() *orchestratorQuestionBroker {
+	return &orchestratorQuestionBroker{ch: make(chan *orchestratorQuestionRequest, 8), done: make(chan struct{})}
+}
+
+func (b *orchestratorQuestionBroker) submit(ctx context.Context, request *orchestratorQuestionRequest) error {
+	if request == nil {
+		return fmt.Errorf("orchestrator question request is nil")
+	}
+	b.mu.Lock()
+	if b.closed {
+		err := b.err
+		b.mu.Unlock()
+		return brokerClosedError(err)
+	}
+	done := b.done
+	b.mu.Unlock()
+	select {
+	case b.ch <- request:
+		b.mu.Lock()
+		closed, err := b.closed, b.err
+		b.mu.Unlock()
+		if closed {
+			select {
+			case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
+			default:
+			}
+			return brokerClosedError(err)
+		}
+		return nil
+	case <-done:
+		return b.closedError()
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+func (b *orchestratorQuestionBroker) receive() (*orchestratorQuestionRequest, bool) {
+	b.mu.Lock()
+	closed := b.closed
+	b.mu.Unlock()
+	if closed {
+		return nil, false
+	}
+	select {
+	case request := <-b.ch:
+		return request, true
+	default:
+		return nil, true
+	}
+}
+
+func (b *orchestratorQuestionBroker) close(err error) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return
+	}
+	b.closed = true
+	b.err = err
+	close(b.done)
+	b.mu.Unlock()
+	for {
+		select {
+		case request := <-b.ch:
+			select {
+			case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
+			default:
+			}
+		default:
+			return
+		}
+	}
+}
+
+func (b *orchestratorQuestionBroker) closedError() error {
+	b.mu.Lock()
+	err := b.err
+	b.mu.Unlock()
+	return brokerClosedError(err)
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q           *db.Queries
@@ -214,6 +315,10 @@ type NativeEngine struct {
 	// worker's JSONL history when the loop accepts it; a session that is no
 	// longer active cannot service a synchronous interruption.
 	sessionQuestionChans sync.Map // runID -> *sessionQuestionBroker
+	// orchestratorQuestionChans are the inverse side-channel: worker
+	// ask_task_owner calls wait here until the orchestrator returns a direct
+	// answer from its next LLM turn.
+	orchestratorQuestionChans sync.Map // runID -> *orchestratorQuestionBroker
 
 	// draining and activeRoots back BeginDrain/WaitForActiveRuns: the
 	// graceful-shutdown path for an auto-update. draining, once set, stops
@@ -616,6 +721,32 @@ func (e *NativeEngine) resolveStaleRun(ctx context.Context, runID int32) {
 
 // run is the goroutine body for a single root agent execution.
 func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
+	// When the task-orchestrator model is configured, the sidecar is the task
+	// owner. It claims the task lock and creates worker children through
+	// run_new_session; the assigned agent is only the product-owner identity
+	// used to resolve the company's default provider when creating the sidecar.
+	if task.AgentID != nil {
+		agent, agentErr := e.q.GetAgent(ctx, *task.AgentID)
+		if agentErr == nil {
+			orchestrator, provider, model, enabled, shouldStart := e.createTaskOrchestrator(ctx, task, agent)
+			if enabled {
+				claimed, claimErr := e.q.ClaimTaskRun(ctx, task.ID, orchestrator.ID)
+				if claimErr != nil {
+					_ = e.q.UpdateRunLog(context.Background(), orchestrator.ID, claimErr.Error(), "failed")
+					return
+				}
+				if !claimed {
+					// Another active run already owns the task. The existing
+					// orchestrator will continue monitoring it.
+					return
+				}
+				if shouldStart {
+					e.startTaskOrchestrator(orchestrator, task, provider, model)
+				}
+				return
+			}
+		}
+	}
 	e.executeSession(ctx, task, mode, nil, nil, sessionOptions{IncludeTaskContext: true})
 }
 
@@ -748,12 +879,20 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if task.AgentID == nil {
 		return "failed"
 	}
+	requestedAgentID := task.AgentID
 
 	// Delegated child tasks arrive fresh from CreateTask without preloaded
 	// associations (Company, Project, Sprint) — reload so the system prompt
 	// and artifact paths see the full task.
 	if full, err := e.q.GetTask(ctx, task.ID); err == nil {
 		task = full
+		// Orchestrator-created worker and fork sessions intentionally run the
+		// same root task under a selected agent. The persisted root task keeps
+		// the CEO/product-owner assignment, so preserve the explicit child
+		// agent across this association reload.
+		if requestedAgentID != nil && (parent != nil || options.PrecreatedRun != nil) {
+			task.AgentID = requestedAgentID
+		}
 	}
 
 	agent, err := e.q.GetAgent(ctx, *task.AgentID)

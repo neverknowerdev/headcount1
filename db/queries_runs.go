@@ -358,7 +358,7 @@ func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
 func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
 	var events []RunEvent
 	err := q.db.WithContext(ctx).
-		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport}).
+		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport, RunEventTypeWorkerQuestion}).
 		Order("created_at asc").Find(&events).Error
 	return events, err
 }

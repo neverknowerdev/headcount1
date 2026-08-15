@@ -224,7 +224,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
     });
 });
 
-const COMPANY_KEYS = ['id', 'name', 'short_name', 'color'];
+const COMPANY_KEYS = ['id', 'name', 'short_name', 'description', 'color'];
 const PROJECT_KEYS = ['id', 'company_id', 'name', 'description'];
 const SPRINT_KEYS = ['id', 'company_id', 'name', 'goal'];
 const AGENT_KEYS = ['id', 'company_id', 'name', 'system_prompt', 'model', 'provider_id'];

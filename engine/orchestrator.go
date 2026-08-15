@@ -65,6 +65,95 @@ func (e *NativeEngine) startTaskOrchestrator(orchestrator db.Run, task db.Task, 
 	go e.runOrchestrator(orchestrator, task, provider, model)
 }
 
+// buildOrchestratorSystemPrompt gives the sidecar the same authoritative
+// context a worker would receive, plus the company roster it is allowed to
+// select from. Keeping this in the system prompt means every activation can
+// reason about the task before it chooses a worker or recovery action.
+func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task db.Task) (string, error) {
+	agents, err := e.q.ListAgentsByCompany(ctx, task.CompanyID)
+	if err != nil {
+		return "", fmt.Errorf("list available agents: %w", err)
+	}
+	var b strings.Builder
+	b.WriteString(orchestratorPrompt)
+	b.WriteString("\n\nAuthoritative task context (use this to plan the worker execution):\n")
+	fmt.Fprintf(&b, "Company: %s (id: %d, short name: %s)\n", task.Company.Name, task.Company.ID, task.Company.ShortName)
+	fmt.Fprintf(&b, "Company description: %s\n", valueOrUnavailable(task.Company.Description))
+	if task.Project != nil {
+		fmt.Fprintf(&b, "Project: %s (id: %d)\nProject description: %s\n", task.Project.Name, task.Project.ID, valueOrUnavailable(task.Project.Description))
+		fmt.Fprintf(&b, "Project repository: %s\n", valueOrUnavailable(task.Project.RepositoryUrl))
+		fmt.Fprintf(&b, "Project workspace: %s\nProject default branch: %s\n", valueOrUnavailable(task.Project.WorkspaceFolder), valueOrUnavailable(task.Project.GitHubDefaultBranch))
+	} else {
+		b.WriteString("Project: none assigned\n")
+	}
+	if task.SprintID != 0 {
+		fmt.Fprintf(&b, "Sprint: %s (id: %d)\nSprint goal: %s\n", task.Sprint.Name, task.Sprint.ID, valueOrUnavailable(task.Sprint.Goal))
+		if task.Sprint.StartDate != nil || task.Sprint.EndDate != nil {
+			fmt.Fprintf(&b, "Sprint dates: %s to %s\n", formatOptionalDate(task.Sprint.StartDate), formatOptionalDate(task.Sprint.EndDate))
+		}
+	} else {
+		b.WriteString("Sprint: none assigned\n")
+	}
+	fmt.Fprintf(&b, "Task: %s (id: %d, ref: %s)\n", task.Title, task.ID, task.RefKey)
+	fmt.Fprintf(&b, "Task type: %s\nTask status: %s\nPriority: %s\n", valueOrUnavailable(task.TaskType), valueOrUnavailable(task.Status), valueOrUnavailable(task.Priority))
+	fmt.Fprintf(&b, "Task description: %s\n", valueOrUnavailable(task.Description))
+	fmt.Fprintf(&b, "Refined description: %s\n", valueOrUnavailable(task.RefinedDescription))
+	fmt.Fprintf(&b, "Acceptance criteria: %s\n", valueOrUnavailable(formatSpecItems(task.AcceptanceCriteria)))
+	fmt.Fprintf(&b, "Test cases: %s\n", valueOrUnavailable(formatSpecItems(task.TestCases)))
+	fmt.Fprintf(&b, "Git branch: %s\nBase branch: %s\n", valueOrUnavailable(task.GitHubBranch), valueOrUnavailable(task.GitBaseBranch))
+	fmt.Fprintf(&b, "Due date: %s\nArchived: %t\nGitHub PR: #%d %s\n", formatOptionalDate(task.DueDate), task.IsArchived, task.GitHubPRNumber, valueOrUnavailable(task.GitHubPRURL))
+	if task.ParentID != nil {
+		fmt.Fprintf(&b, "Parent task id: %d\n", *task.ParentID)
+	}
+	if task.AgentID != nil {
+		if assigned, agentErr := e.q.GetAgent(ctx, *task.AgentID); agentErr == nil {
+			fmt.Fprintf(&b, "Product-owner assignment: %s (%s)\n", assigned.Name, valueOrUnavailable(assigned.Description))
+		}
+	}
+	if summaries, relErr := e.q.ListTaskRelationSummaries(ctx, []int32{task.ID}); relErr == nil {
+		if relations := formatTaskRelations(summaries[task.ID]); relations != "" {
+			b.WriteString("Task relations:\n")
+			b.WriteString(relations)
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("\nAvailable agents for run_new_session (choose by name, not ID):\n")
+	if len(agents) == 0 {
+		b.WriteString("- No agents are currently available; report the blocker instead of guessing.\n")
+	} else {
+		for _, agent := range agents {
+			name := agent.Name
+			if strings.TrimSpace(name) == "" {
+				name = agent.RoleKey
+			}
+			fmt.Fprintf(&b, "- %s", name)
+			if agent.RoleKey != "" && agent.RoleKey != name {
+				fmt.Fprintf(&b, " (role: %s)", agent.RoleKey)
+			}
+			if agent.Description != "" {
+				fmt.Fprintf(&b, ": %s", agent.Description)
+			}
+			b.WriteByte('\n')
+		}
+	}
+	b.WriteString("\nStart execution by selecting the most appropriate available agent and calling run_new_session with a concrete prompt. The orchestrator owns coordination; workers own implementation and finish_task.")
+	return b.String(), nil
+}
+
+func valueOrUnavailable(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "(not provided)"
+	}
+	return value
+}
+
+func formatOptionalDate(value *time.Time) string {
+	if value == nil {
+		return "(not set)"
+	}
+	return value.Format("2006-01-02")
+}
+
 // ResumeWaitingOrchestrators reattaches sidecars after a process restart. A
 // quiet sidecar remains dormant; pending worker events are consumed by its
 // next activation rather than being lost with the old goroutine.
@@ -105,7 +194,22 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		return
 	}
 	defer logger.Close()
+	defer e.q.UnlockTaskRun(context.Background(), task.ID)
 	_ = e.q.UpdateRunLogFilePath(ctx, orchestrator.ID, logger.FilePath())
+	questionBroker := newOrchestratorQuestionBroker()
+	actualBroker, loaded := e.orchestratorQuestionChans.LoadOrStore(orchestrator.ID, questionBroker)
+	if loaded {
+		questionBroker = actualBroker.(*orchestratorQuestionBroker)
+	}
+	defer func() {
+		e.orchestratorQuestionChans.Delete(orchestrator.ID)
+		questionBroker.close(fmt.Errorf("orchestrator session %d ended before answering the worker", orchestrator.ID))
+	}()
+	systemPrompt, promptErr := e.buildOrchestratorSystemPrompt(ctx, task)
+	if promptErr != nil {
+		_ = e.q.UpdateRunLog(ctx, orchestrator.ID, promptErr.Error(), "failed")
+		return
+	}
 
 	apiKey, _ := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
@@ -119,8 +223,8 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		AskAgent: func(c context.Context, id int32, question string) (string, error) {
 			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
 		},
-		RunNewSession: func(c context.Context, source, agentID *int32, reason string, includeTaskContext bool) (string, error) {
-			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentID, reason, includeTaskContext)
+		RunNewSession: func(c context.Context, source *int32, agentName, prompt string) (string, error) {
+			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentName, prompt)
 		},
 		StopSession: func(c context.Context, id int32, reason string) (string, error) {
 			return e.orchestratorStop(c, orchestrator.ID, id, reason)
@@ -147,9 +251,10 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return
 		}
 		events, _ := e.q.ListPendingRunEvents(ctx, task.ID)
+		question, _ := questionBroker.receive()
 		fingerprint := orchestratorFingerprint(sessions)
 		taskNow, _ := e.q.GetTask(ctx, task.ID)
-		if !first && fingerprint == lastFingerprint && len(events) == 0 {
+		if !first && fingerprint == lastFingerprint && len(events) == 0 && question == nil {
 			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
 				return
@@ -172,7 +277,17 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			eventJSON, _ := json.Marshal(events)
 			message += "\nDurable lifecycle events since the last activation:\n" + string(eventJSON)
 		}
-		_, runErr := ai.RunWithMessages(ctx, orchestratorPrompt, []aicli.Message{{Role: "user", Content: message}})
+		if question != nil {
+			message += fmt.Sprintf("\n\nA worker is waiting for your answer. Respond directly to this worker question in your final text; do not leave it unanswered. Worker run %d asks:\n%s", question.workerRunID, question.question)
+		}
+		answer, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
+		if question != nil {
+			result := sessionQuestionResult{answer: strings.TrimSpace(answer), err: runErr}
+			select {
+			case question.result <- result:
+			default:
+			}
+		}
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, runErr.Error(), "failed")
 			return
@@ -369,6 +484,60 @@ func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task,
 	}
 }
 
+// askTaskOrchestrator is the worker-to-owner half of the side-channel. The
+// question is persisted as a comment and durable inbox event, then the worker
+// waits for the orchestrator's next LLM activation to return its answer.
+func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, orchestratorID, workerRunID int32, question string) (string, error) {
+	question = strings.TrimSpace(question)
+	if question == "" {
+		return "", fmt.Errorf("question is required")
+	}
+	value, ok := e.orchestratorQuestionChans.Load(orchestratorID)
+	if !ok {
+		return "", fmt.Errorf("orchestrator session %d is not active", orchestratorID)
+	}
+	broker, ok := value.(*orchestratorQuestionBroker)
+	if !ok {
+		return "", fmt.Errorf("orchestrator session %d question broker is invalid", orchestratorID)
+	}
+	questionCtx, cancel := context.WithTimeout(ctx, orchestratorQuestionTimeout)
+	defer cancel()
+	rid := workerRunID
+	comment, err := e.q.CreateComment(ctx, db.Comment{
+		TaskID: task.ID, AuthorType: "agent", CommentType: "ask_owner", Content: question, RunID: &rid,
+	})
+	if err != nil {
+		return "", fmt.Errorf("record worker question: %w", err)
+	}
+	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
+	payload, _ := json.Marshal(map[string]interface{}{
+		"worker_run_id": workerRunID,
+		"question":      question,
+	})
+	if err := e.q.EnqueueRunEvent(ctx, db.RunEvent{
+		TaskID: task.ID, RunID: workerRunID, EventType: db.RunEventTypeWorkerQuestion,
+		Payload: string(payload), DedupeKey: fmt.Sprintf("worker-question:%d:%d:%d", orchestratorID, workerRunID, time.Now().UnixNano()),
+	}); err != nil {
+		return "", fmt.Errorf("queue worker question: %w", err)
+	}
+	request := &orchestratorQuestionRequest{workerRunID: workerRunID, question: question, ctx: questionCtx, result: make(chan sessionQuestionResult, 1)}
+	if err := broker.submit(questionCtx, request); err != nil {
+		return "", fmt.Errorf("worker question delivery failed: %w", err)
+	}
+	select {
+	case result := <-request.result:
+		if result.err != nil {
+			return "", result.err
+		}
+		if strings.TrimSpace(result.answer) == "" {
+			return "", fmt.Errorf("orchestrator returned an empty answer")
+		}
+		return result.answer, nil
+	case <-questionCtx.Done():
+		return "", fmt.Errorf("timed out waiting for orchestrator %d response: %w", orchestratorID, questionCtx.Err())
+	}
+}
+
 func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, sessionID int32, reason string) (string, error) {
 	if _, err := e.orchestratorSessionRun(ctx, orchestratorRunID, sessionID); err != nil {
 		return "", err
@@ -378,7 +547,7 @@ func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, 
 	return fmt.Sprintf("session %d stop requested: %s", sessionID, reason), nil
 }
 
-func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source, agentID *int32, instruction string, includeTaskContext bool) (string, error) {
+func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, agentName, prompt string) (string, error) {
 	var sourceRun db.Run
 	launchTask := task
 	if source != nil {
@@ -391,8 +560,8 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 		if err != nil {
 			return "", err
 		}
-		if launchTask.RunID != nil && *launchTask.RunID != sourceRun.ID {
-			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", launchTask.ID, *launchTask.RunID, sourceRun.ID)
+		if launchTask.RunID != nil && *launchTask.RunID != orchestratorRunID {
+			return "", fmt.Errorf("task %d is locked by run %d, not orchestrator session %d", launchTask.ID, *launchTask.RunID, orchestratorRunID)
 		}
 		if sourceRun.Recovery.RecoveryAttempts >= 3 {
 			return "", fmt.Errorf("session %d reached the automatic recovery limit", sourceRun.ID)
@@ -410,54 +579,54 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 		if taskErr != nil {
 			return "", taskErr
 		}
-		if launchTask.RunID != nil && *launchTask.RunID != sourceRun.ID {
-			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", launchTask.ID, *launchTask.RunID, sourceRun.ID)
-		}
-		if launchTask.RunID != nil {
-			if err := e.q.UnlockTaskRun(ctx, launchTask.ID); err != nil {
-				return "", fmt.Errorf("unlock source task: %w", err)
-			}
+		if launchTask.RunID != nil && *launchTask.RunID != orchestratorRunID {
+			return "", fmt.Errorf("task %d is locked by run %d, not orchestrator session %d", launchTask.ID, *launchTask.RunID, orchestratorRunID)
 		}
 	}
-	selectedAgentID := agentID
-	if selectedAgentID == nil {
-		if source != nil {
-			selectedAgentID = &sourceRun.AgentID
-		} else {
-			selectedAgentID = task.AgentID
-		}
+	agentName = strings.TrimSpace(agentName)
+	prompt = strings.TrimSpace(prompt)
+	if agentName == "" || prompt == "" {
+		return "", fmt.Errorf("agent_name and prompt are required")
 	}
-	if selectedAgentID == nil || *selectedAgentID <= 0 {
-		return "", fmt.Errorf("no target agent was supplied and task has no assigned worker agent")
-	}
-	selectedAgent, err := e.q.GetAgent(ctx, *selectedAgentID)
+	selectedAgent, err := e.findAgentForRole(ctx, launchTask.CompanyID, agentName)
 	if err != nil {
-		return "", fmt.Errorf("load target agent %d: %w", *selectedAgentID, err)
+		return "", fmt.Errorf("load target agent %q: %w", agentName, err)
 	}
 	if selectedAgent.CompanyID != launchTask.CompanyID {
 		return "", fmt.Errorf("agent %d does not belong to task company", selectedAgent.ID)
 	}
-	currentTask, err := e.q.GetTask(ctx, launchTask.ID)
-	if err != nil {
-		return "", err
-	}
-	if source == nil && currentTask.RunID != nil {
-		// An auxiliary session can observe a task already being executed, but it
-		// must not steal that task's lock or clear it when it finishes.
-		instruction = strings.TrimSpace(instruction)
-	}
 	sessionTask := launchTask
 	sessionTask.AgentID = &selectedAgent.ID
-	options := sessionOptions{
-		Instruction:        instruction,
-		IncludeTaskContext: includeTaskContext,
-		SkipTaskLock:       source == nil && currentTask.RunID != nil,
+	parentID, rootID := orchestratorRunID, orchestratorRunID
+	precreated, err := e.q.CreateRun(context.Background(), db.Run{
+		TaskID: sessionTask.ID, AgentID: selectedAgent.ID, Status: "running", StartedAt: time.Now(),
+		ParentRunID: &parentID, RootRunID: &rootID,
+	})
+	if err != nil {
+		return "", fmt.Errorf("create worker session: %w", err)
 	}
-	go e.executeSession(context.Background(), sessionTask, "implement", nil, nil, options)
+	// A worker is a child owned by the sidecar, so it never claims or unlocks
+	// the root task lock. Its ask_task_owner callback is wired to the
+	// orchestrator's durable question inbox.
+	workerParent := &parentSession{
+		parentRunID: orchestratorRunID,
+		rootRunID:   orchestratorRunID,
+		rootTaskID:  task.ID,
+		depth:       1,
+		askOwner: func(questionCtx context.Context, question string) (string, error) {
+			return e.askTaskOrchestrator(questionCtx, task, orchestratorRunID, precreated.ID, question)
+		},
+	}
+	go e.executeSession(context.Background(), sessionTask, "implement", workerParent, nil, sessionOptions{
+		Instruction:        prompt,
+		IncludeTaskContext: true,
+		SkipTaskLock:       true,
+		PrecreatedRun:      &precreated,
+	})
 	if source != nil {
-		return fmt.Sprintf("replacement session queued for task %d with agent %d: %s", launchTask.ID, selectedAgent.ID, instruction), nil
+		return fmt.Sprintf("replacement child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
 	}
-	return fmt.Sprintf("new session queued for task %d with agent %d: %s", launchTask.ID, selectedAgent.ID, instruction), nil
+	return fmt.Sprintf("new child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
 }
 
 func (e *NativeEngine) waitForOrchestratorForkStop(ctx context.Context, runID int32) error {
