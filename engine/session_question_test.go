@@ -253,8 +253,8 @@ func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 
 	engine := NewNativeEngine(database, eventhub.NewHub())
 	questionBroker := newSessionQuestionBroker()
-	engine.sessionQuestionChans.Store(worker.ID, questionBroker)
-	defer engine.sessionQuestionChans.Delete(worker.ID)
+	engine.runs.sessionQuestionBrokers.Store(worker.ID, questionBroker)
+	defer engine.runs.sessionQuestionBrokers.Delete(worker.ID)
 	go func() {
 		request := <-questionBroker.ch
 		request.result <- sessionQuestionResult{answer: "exact answer"}
@@ -285,8 +285,8 @@ func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
 	require.NoError(t, database.Create(&worker).Error)
 
 	engine := NewNativeEngine(database, eventhub.NewHub())
-	engine.sessionQuestionChans.Store(worker.ID, newSessionQuestionBroker())
-	defer engine.sessionQuestionChans.Delete(worker.ID)
+	engine.runs.sessionQuestionBrokers.Store(worker.ID, newSessionQuestionBroker())
+	defer engine.runs.sessionQuestionBrokers.Delete(worker.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err = engine.orchestratorAskSession(ctx, task, orchestrator.ID, worker.ID, "Will this time out?")
