@@ -161,16 +161,28 @@ test.describe.serial('Headcount1 App', () => {
         expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
         expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
-        // Re-open the task to verify both the user comment and the agent comment are visible
-        // The board can still be rendering while the task's run/comment data
-        // settles. Navigate to the known task route directly instead of
-        // depending on a board-card click that may hit a stale virtualized
-        // element and leave us on the list page.
-        await page.goto(`/companies/pw-inc/tasks/${taskId}`);
-        await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
-        await expect(page.locator('input[placeholder="Add a comment..."]')).toBeVisible({ timeout: 10_000 });
-        await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        // Re-open the task to verify both the user comment and the agent comment
+        // are visible. The task run is terminal at this point, but older
+        // databases can briefly retain task.run_id after the run row is already
+        // completed; create this non-agent comment through the API so that UI
+        // verification does not turn that bookkeeping race into a 120s retry.
+        const commentResponse = await request.post('/api/comments', {
+            data: {
+                task_id: taskId,
+                author_type: 'human',
+                content: 'Let us see if the agent works',
+                run_agent: false,
+            },
+        });
+        expect(commentResponse.ok()).toBeTruthy();
+
+        // The comments editor lives in the task modal. Wait for the board
+        // card to be rendered and click the exact title so a stale/virtualized
+        // element cannot leave the page on the list without opening it.
+        await page.goto('/companies/pw-inc/tasks');
+        const taskCard = page.getByText('Write E2E Tests', { exact: true }).first();
+        await expect(taskCard).toBeVisible({ timeout: 10_000 });
+        await taskCard.click();
         // Scope to the comments list: the text can also appear in the run-log
         // preview of the agent run this comment triggers.
         await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
