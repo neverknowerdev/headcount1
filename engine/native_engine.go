@@ -88,17 +88,23 @@ type sessionQuestionResult struct {
 }
 
 type sessionQuestionBroker struct {
-	ch     chan *sessionQuestionRequest
+	ch chan *sessionQuestionRequest
+	// done is closed on shutdown. The request channel stays open so a
+	// concurrent submitter can never panic with "send on closed channel".
+	done   chan struct{}
 	mu     sync.Mutex
 	closed bool
 	err    error
 }
 
 func newSessionQuestionBroker() *sessionQuestionBroker {
-	return &sessionQuestionBroker{ch: make(chan *sessionQuestionRequest, 8)}
+	return &sessionQuestionBroker{ch: make(chan *sessionQuestionRequest, 8), done: make(chan struct{})}
 }
 
 func (b *sessionQuestionBroker) submit(ctx context.Context, request *sessionQuestionRequest) error {
+	if request == nil {
+		return fmt.Errorf("session question request is nil")
+	}
 	b.mu.Lock()
 	if b.closed {
 		err := b.err
@@ -108,20 +114,43 @@ func (b *sessionQuestionBroker) submit(ctx context.Context, request *sessionQues
 		}
 		return err
 	}
+	done := b.done
+	b.mu.Unlock()
+
 	select {
 	case b.ch <- request:
+		b.mu.Lock()
+		closed, err := b.closed, b.err
 		b.mu.Unlock()
+		if closed {
+			b.failRequest(request, err)
+			return brokerClosedError(err)
+		}
 		return nil
+	case <-done:
+		return b.closedError()
 	case <-ctx.Done():
-		b.mu.Unlock()
 		return ctx.Err()
 	}
 }
 
 func (b *sessionQuestionBroker) receive() (*sessionQuestionRequest, bool) {
+	b.mu.Lock()
+	if b.closed {
+		b.mu.Unlock()
+		return nil, false
+	}
+	b.mu.Unlock()
 	select {
-	case request, ok := <-b.ch:
-		return request, ok
+	case request := <-b.ch:
+		b.mu.Lock()
+		closed, err := b.closed, b.err
+		b.mu.Unlock()
+		if closed {
+			b.failRequest(request, err)
+			return nil, false
+		}
+		return request, true
 	default:
 		return nil, true
 	}
@@ -135,24 +164,43 @@ func (b *sessionQuestionBroker) close(err error) {
 	}
 	b.closed = true
 	b.err = err
-	close(b.ch)
+	close(b.done)
+	b.mu.Unlock()
+	b.drain()
+}
+
+func (b *sessionQuestionBroker) drain() {
 	for {
 		select {
-		case request, ok := <-b.ch:
-			if !ok {
-				b.mu.Unlock()
-				return
-			}
-			if request != nil {
-				select {
-				case request.result <- sessionQuestionResult{err: err}:
-				default:
-				}
-			}
+		case request := <-b.ch:
+			b.failRequest(request, b.closedError())
 		default:
-			b.mu.Unlock()
 			return
 		}
+	}
+}
+
+func (b *sessionQuestionBroker) closedError() error {
+	b.mu.Lock()
+	err := b.err
+	b.mu.Unlock()
+	return brokerClosedError(err)
+}
+
+func brokerClosedError(err error) error {
+	if err == nil {
+		return fmt.Errorf("session is no longer active")
+	}
+	return err
+}
+
+func (b *sessionQuestionBroker) failRequest(request *sessionQuestionRequest, err error) {
+	if request == nil {
+		return
+	}
+	select {
+	case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
+	default:
 	}
 }
 

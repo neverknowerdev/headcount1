@@ -7,6 +7,7 @@ import (
 	"io"
 	"net/http"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -64,6 +65,7 @@ func TestAnswerSessionQuestionReturnsAnswerAndPreservesPair(t *testing.T) {
 
 func TestSessionQuestionBrokerCloseTerminatesAndRejectsNewQuestions(t *testing.T) {
 	broker := newSessionQuestionBroker()
+	assert.EqualError(t, broker.submit(context.Background(), nil), "session question request is nil")
 	request := &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}
 	require.NoError(t, broker.submit(context.Background(), request))
 
@@ -83,6 +85,62 @@ func TestSessionQuestionBrokerCloseTerminatesAndRejectsNewQuestions(t *testing.T
 	_, open := broker.receive()
 	assert.False(t, open)
 	assert.Error(t, broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+}
+
+func TestSessionQuestionBrokerCloseUnblocksFullQueueSubmit(t *testing.T) {
+	broker := newSessionQuestionBroker()
+	for i := 0; i < cap(broker.ch); i++ {
+		require.NoError(t, broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+	}
+
+	submitResult := make(chan error, 1)
+	go func() {
+		submitResult <- broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)})
+	}()
+
+	started := time.Now()
+	broker.close(errors.New("worker stopped"))
+	assert.Less(t, time.Since(started), time.Second)
+	select {
+	case err := <-submitResult:
+		assert.EqualError(t, err, "worker stopped")
+	case <-time.After(time.Second):
+		t.Fatal("blocked submit was not released by broker close")
+	}
+}
+
+func TestSessionQuestionBrokerSubmitHonorsCancellationWhenQueueIsFull(t *testing.T) {
+	broker := newSessionQuestionBroker()
+	for i := 0; i < cap(broker.ch); i++ {
+		require.NoError(t, broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := broker.submit(ctx, &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)})
+	assert.ErrorIs(t, err, context.Canceled)
+	broker.close(errors.New("test cleanup"))
+}
+
+func TestSessionQuestionBrokerConcurrentSubmitAndClose(t *testing.T) {
+	broker := newSessionQuestionBroker()
+	const submitters = 64
+	results := make(chan error, submitters)
+	var wg sync.WaitGroup
+	for i := 0; i < submitters; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			results <- broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)})
+		}()
+	}
+	broker.close(errors.New("concurrent shutdown"))
+	wg.Wait()
+	close(results)
+	for err := range results {
+		if err != nil {
+			assert.EqualError(t, err, "concurrent shutdown")
+		}
+	}
 }
 
 func TestAnswerSessionQuestionReturnsProviderErrorToWaitingOrchestrator(t *testing.T) {
