@@ -116,7 +116,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		GetSessionLastRunStatus: func(c context.Context, id int32) (tools.ManagedSessionStatusReport, error) {
 			return e.orchestratorSessionLastRunStatus(c, task, orchestrator.ID, id)
 		},
-		AskSessionAgent: func(c context.Context, id int32, question string) (string, error) {
+		AskAgent: func(c context.Context, id int32, question string) (string, error) {
 			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
 		},
 		RunNewSession: func(c context.Context, source, agentID *int32, reason string, includeTaskContext bool) (string, error) {

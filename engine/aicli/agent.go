@@ -164,11 +164,13 @@ type Agent struct {
 	runID                int32
 	logger               RunLogger
 	conversationSequence int64
-	beforeTurn           func(context.Context) ([]Message, error)
+	beforeTurn           func(context.Context, []Message) ([]Message, error)
 	// interrupt is checked after a response that would otherwise end the run.
 	// It lets a host temporarily service an out-of-band question and then
 	// continue the original conversation with the question and answer appended.
-	interrupt func(context.Context) ([]Message, error)
+	// The complete current conversation is supplied so the side-channel answer
+	// can be grounded in the worker's existing context.
+	interrupt func(context.Context, []Message) ([]Message, error)
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -193,13 +195,15 @@ type Config struct {
 	Logger                      RunLogger
 	InitialConversationSequence int64
 	// BeforeTurn supplies durable control messages immediately before the next
-	// provider request. It never interrupts an in-flight tool or LLM call.
-	BeforeTurn func(context.Context) ([]Message, error)
+	// provider request. It receives the complete conversation accumulated so
+	// far and never interrupts an in-flight tool or LLM call.
+	BeforeTurn func(context.Context, []Message) ([]Message, error)
 	// Interrupt handles a pending host-side question after a provider response
 	// is received but before a no-tool response ends the session. Tool calls are
 	// always completed first; the next BeforeTurn handles interruptions queued
-	// while tools were running.
-	Interrupt func(context.Context) ([]Message, error)
+	// while tools were running. It receives the complete current conversation
+	// so the isolated answer can use the worker's prior context.
+	Interrupt func(context.Context, []Message) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
@@ -359,7 +363,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 			return "", history, ctx.Err()
 		}
 		if a.beforeTurn != nil {
-			messages, hookErr := a.beforeTurn(ctx)
+			messages, hookErr := a.beforeTurn(ctx, history)
 			if hookErr != nil {
 				return "", history, fmt.Errorf("before-turn control message failed: %w", hookErr)
 			}
@@ -450,7 +454,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 			// was in flight. Service it before ending the run so the main loop can
 			// continue with the isolated answer in its durable history.
 			if a.interrupt != nil {
-				interruptMessages, interruptErr := a.interrupt(ctx)
+				interruptMessages, interruptErr := a.interrupt(ctx, history)
 				if interruptErr != nil {
 					return "", history, fmt.Errorf("interrupt handling failed: %w", interruptErr)
 				}

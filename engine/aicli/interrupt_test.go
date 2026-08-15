@@ -50,12 +50,14 @@ func TestAgentInterruptAppendsIsolatedQuestionAndAnswerThenContinues(t *testing.
 	client.MaxRetries = 0
 	client.HTTPClient = &http.Client{Transport: transport}
 	var interrupted atomic.Bool
+	var interruptHistory []aicli.Message
 	agent := aicli.New(aicli.Config{
 		Client: client, Registry: aicli.NewRegistry(),
-		Interrupt: func(context.Context) ([]aicli.Message, error) {
+		Interrupt: func(_ context.Context, history []aicli.Message) ([]aicli.Message, error) {
 			if interrupted.Swap(true) {
 				return nil, nil
 			}
+			interruptHistory = append([]aicli.Message(nil), history...)
 			return []aicli.Message{
 				{Role: "user", Content: "Orchestrator question"},
 				{Role: "assistant", Content: "isolated answer"},
@@ -67,6 +69,9 @@ func TestAgentInterruptAppendsIsolatedQuestionAndAnswerThenContinues(t *testing.
 	require.NoError(t, err)
 	assert.Equal(t, "continued main response", result)
 	assert.Equal(t, int32(2), transport.index.Load())
+	require.Len(t, interruptHistory, 2)
+	assert.Equal(t, "main task", interruptHistory[0].Content)
+	assert.Equal(t, "main response before interruption", interruptHistory[1].Content)
 	assert.Equal(t, []aicli.Message{
 		{Role: "user", Content: "main task"},
 		{Role: "assistant", Content: "main response before interruption"},
@@ -87,12 +92,14 @@ func TestAgentBeforeTurnInterruptionRunsAfterToolResults(t *testing.T) {
 	reg := aicli.NewRegistry()
 	reg.Register(testInterruptTool{})
 	var beforeTurnCalls atomic.Int32
+	var beforeTurnHistory []aicli.Message
 	agent := aicli.New(aicli.Config{
 		Client: client, Registry: reg,
-		BeforeTurn: func(context.Context) ([]aicli.Message, error) {
+		BeforeTurn: func(_ context.Context, history []aicli.Message) ([]aicli.Message, error) {
 			if beforeTurnCalls.Add(1) != 2 {
 				return nil, nil
 			}
+			beforeTurnHistory = append([]aicli.Message(nil), history...)
 			return []aicli.Message{{Role: "user", Content: "question after tool"}, {Role: "assistant", Content: "answer after tool"}}, nil
 		},
 	})
@@ -103,11 +110,14 @@ func TestAgentBeforeTurnInterruptionRunsAfterToolResults(t *testing.T) {
 	// assistant tool-call message and its required tool response.
 	assert.Equal(t, "tool", history[2].Role)
 	assert.Equal(t, "question after tool", history[3].Content)
+	require.Len(t, beforeTurnHistory, 3)
+	assert.Equal(t, "tool", beforeTurnHistory[2].Role)
+	assert.Equal(t, "tool result", beforeTurnHistory[2].Content)
 }
 
 func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 	transport := &queuedCompletionTransport{responses: [][]byte{
-		toolCallWithArgumentsBody(t, "ask-1", "ask_session_agent", `{"session_id":7,"question":"status?"}`),
+		toolCallWithArgumentsBody(t, "ask-1", "ask_agent", `{"session_id":7,"question":"status?"}`),
 		completionBody(t, "I saw the question error and can continue."),
 	}}
 	client := aicli.NewClient("http://unused", "", "test-model")
@@ -118,7 +128,7 @@ func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 		GetSessionLastRunStatus: func(context.Context, int32) (orchestratorTools.ManagedSessionStatusReport, error) {
 			return orchestratorTools.ManagedSessionStatusReport{}, nil
 		},
-		AskSessionAgent: func(context.Context, int32, string) (string, error) {
+		AskAgent: func(context.Context, int32, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
 		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },

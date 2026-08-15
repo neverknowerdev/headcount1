@@ -47,7 +47,7 @@ type OrchestratorToolName string
 const (
 	OrchestratorToolGetSessions             OrchestratorToolName = "get_sessions"
 	OrchestratorToolGetSessionLastRunStatus OrchestratorToolName = "get_session_last_run_status"
-	OrchestratorToolAskSessionAgent         OrchestratorToolName = "ask_session_agent"
+	OrchestratorToolAskAgent                OrchestratorToolName = "ask_agent"
 	OrchestratorToolRunNewSession           OrchestratorToolName = "run_new_session"
 	OrchestratorToolStopSession             OrchestratorToolName = "stop_session"
 	OrchestratorToolForkSession             OrchestratorToolName = "fork_session"
@@ -56,7 +56,7 @@ const (
 type OrchestratorCallbacks struct {
 	GetSessions             func(context.Context) ([]ManagedSessionSummary, error)
 	GetSessionLastRunStatus func(context.Context, int32) (ManagedSessionStatusReport, error)
-	AskSessionAgent         func(context.Context, int32, string) (string, error)
+	AskAgent                func(context.Context, int32, string) (string, error)
 	RunNewSession           func(context.Context, *int32, *int32, string, bool) (string, error)
 	StopSession             func(context.Context, int32, string) (string, error)
 	ForkSession             func(context.Context, int32, int64) (string, error)
@@ -117,20 +117,20 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorManagementTool{
-		name: OrchestratorToolAskSessionAgent,
-		def:  orchestratorDef(OrchestratorToolAskSessionAgent, "Ask the agent running a managed session a question. The worker finishes its current provider/tool operation, answers this question in an isolated LLM request, and returns the answer or an explicit timeout/provider error before its normal conversation continues.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
+		name: OrchestratorToolAskAgent,
+		def:  orchestratorDef(OrchestratorToolAskAgent, "Ask the agent running a managed session a question. The worker finishes its current provider/tool operation, answers using its existing conversation history, and returns the answer or an explicit timeout/provider error before its normal conversation continues.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32  `json:"session_id"`
 				Question  string `json:"question"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
-				return "", fmt.Errorf("ask_session_agent: %w", err)
+				return "", fmt.Errorf("ask_agent: %w", err)
 			}
 			if p.SessionID <= 0 || p.Question == "" {
 				return "", fmt.Errorf("session_id and question are required")
 			}
-			return cb.AskSessionAgent(ctx, p.SessionID, p.Question)
+			return cb.AskAgent(ctx, p.SessionID, p.Question)
 		},
 	})
 	r.Register(&orchestratorManagementTool{

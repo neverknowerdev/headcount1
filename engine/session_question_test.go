@@ -39,14 +39,19 @@ func TestAnswerSessionQuestionReturnsAnswerAndPreservesPair(t *testing.T) {
 			Tools    []aicli.ToolDef `json:"tools"`
 		}
 		require.NoError(t, json.Unmarshal(body, &payload))
-		require.Len(t, payload.Messages, 1)
-		assert.Equal(t, "What happened?", payload.Messages[0].Content)
+		require.Len(t, payload.Messages, 3)
+		assert.Equal(t, "Earlier worker context", payload.Messages[0].Content)
+		assert.Equal(t, "Previous worker answer", payload.Messages[1].Content)
+		assert.Equal(t, "What happened?", payload.Messages[2].Content)
 		assert.Empty(t, payload.Tools)
 		return &http.Response{StatusCode: 200, Body: io.NopCloser(strings.NewReader(`{"choices":[{"message":{"role":"assistant","content":"the answer"}}]}`)), Header: http.Header{"Content-Type": {"application/json"}}}, nil
 	})
 	request := &sessionQuestionRequest{question: "What happened?", result: make(chan sessionQuestionResult, 1)}
 	engine := &NativeEngine{}
-	messages, err := engine.answerSessionQuestion(context.Background(), request, client, "")
+	messages, err := engine.answerSessionQuestion(context.Background(), request, client, "", []aicli.Message{
+		{Role: "user", Content: "Earlier worker context"},
+		{Role: "assistant", Content: "Previous worker answer"},
+	})
 	require.NoError(t, err)
 	require.Len(t, messages, 2)
 	assert.Equal(t, "user", messages[0].Role)
@@ -62,7 +67,7 @@ func TestAnswerSessionQuestionReturnsProviderErrorToWaitingOrchestrator(t *testi
 	client := questionClient(func(*http.Request) (*http.Response, error) { return nil, providerErr })
 	request := &sessionQuestionRequest{question: "Can you continue?", result: make(chan sessionQuestionResult, 1)}
 	engine := &NativeEngine{}
-	messages, err := engine.answerSessionQuestion(context.Background(), request, client, "")
+	messages, err := engine.answerSessionQuestion(context.Background(), request, client, "", nil)
 	require.NoError(t, err)
 	assert.Contains(t, messages[1].Content, "orchestrator question failed")
 	result := <-request.result
@@ -79,7 +84,7 @@ func TestAnswerSessionQuestionPropagatesTimeoutError(t *testing.T) {
 	defer cancel()
 	request := &sessionQuestionRequest{question: "Are you blocked?", ctx: requestCtx, result: make(chan sessionQuestionResult, 1)}
 	engine := &NativeEngine{}
-	_, err := engine.answerSessionQuestion(context.Background(), request, client, "")
+	_, err := engine.answerSessionQuestion(context.Background(), request, client, "", nil)
 	require.NoError(t, err)
 	result := <-request.result
 	require.Error(t, result.err)

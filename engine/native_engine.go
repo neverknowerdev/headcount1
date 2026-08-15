@@ -1470,12 +1470,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.sessionQuestionChans.Delete(run.ID)
 		questionBroker.close(fmt.Errorf("session %d ended before answering the orchestrator question", run.ID))
 	}()
-	handleQuestion := func(questionCtx context.Context) ([]aicli.Message, error) {
+	handleQuestion := func(questionCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
 		request, open := questionBroker.receive()
 		if !open || request == nil {
 			return nil, nil
 		}
-		return e.answerSessionQuestion(questionCtx, request, llmClient, reasoningLevel)
+		return e.answerSessionQuestion(questionCtx, request, llmClient, reasoningLevel, history)
 	}
 	agentCfgObj := aicli.Config{
 		Client:                      llmClient,
@@ -1491,8 +1491,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		RunID:                       run.ID,
 		Logger:                      proxyLogger,
 		InitialConversationSequence: run.Recovery.CheckpointSequence,
-		BeforeTurn: func(controlCtx context.Context) ([]aicli.Message, error) {
-			messages, questionErr := handleQuestion(controlCtx)
+		BeforeTurn: func(controlCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
+			messages, questionErr := handleQuestion(controlCtx, history)
 			if questionErr != nil {
 				return nil, questionErr
 			}
@@ -1524,8 +1524,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			}
 			return messages, nil
 		},
-		Interrupt: func(interruptCtx context.Context) ([]aicli.Message, error) {
-			return handleQuestion(interruptCtx)
+		Interrupt: func(interruptCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
+			return handleQuestion(interruptCtx, history)
 		},
 		HistoryAlreadyLogged: resumeRun != nil,
 	}
@@ -1729,10 +1729,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 }
 
 // answerSessionQuestion performs the orchestrator interruption as an isolated
-// completion request. The worker's normal history is intentionally excluded
-// from this request; the returned user/assistant pair is appended to that
-// history by the agent loop after the side-channel result is delivered.
-func (e *NativeEngine) answerSessionQuestion(ctx context.Context, request *sessionQuestionRequest, client *aicli.Client, reasoningLevel string) ([]aicli.Message, error) {
+// completion request. It reuses the worker's complete current conversation
+// and appends the orchestrator question as the newest user message. Tools stay
+// disabled so this side-channel turn produces an answer rather than starting
+// an unrelated side effect. The returned user/assistant pair is appended to
+// the worker history by the agent loop after the side-channel result is sent.
+func (e *NativeEngine) answerSessionQuestion(ctx context.Context, request *sessionQuestionRequest, client *aicli.Client, reasoningLevel string, history []aicli.Message) ([]aicli.Message, error) {
 	if request == nil {
 		return nil, fmt.Errorf("nil session question request")
 	}
@@ -1753,8 +1755,11 @@ func (e *NativeEngine) answerSessionQuestion(ctx context.Context, request *sessi
 		case <-callCtx.Done():
 		}
 	}()
+	questionHistory := make([]aicli.Message, 0, len(history)+1)
+	questionHistory = append(questionHistory, history...)
+	questionHistory = append(questionHistory, aicli.Message{Role: "user", Content: question})
 	response, _, err := client.Complete(callCtx, aicli.ChatRequest{
-		Messages:        []aicli.Message{{Role: "user", Content: question}},
+		Messages:        questionHistory,
 		ReasoningEffort: reasoningLevel,
 	})
 	if err != nil {

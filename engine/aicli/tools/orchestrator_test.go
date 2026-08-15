@@ -15,12 +15,12 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
 			return ManagedSessionStatusReport{}, nil
 		},
-		AskSessionAgent: func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession:   func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
-		StopSession:     func(context.Context, int32, string) (string, error) { return "", nil },
-		ForkSession:     func(context.Context, int32, int64) (string, error) { return "", nil },
+		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
+		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	require.Equal(t, []string{"ask_session_agent", "fork_session", "get_session_last_run_status", "get_sessions", "run_new_session", "stop_session"}, r.Names())
+	require.Equal(t, []string{"ask_agent", "fork_session", "get_session_last_run_status", "get_sessions", "run_new_session", "stop_session"}, r.Names())
 	require.Error(t, func() error { _, err := r.Execute(context.Background(), string(aicli.ToolWrite), nil); return err }())
 }
 
@@ -31,15 +31,15 @@ func TestOrchestratorToolValidation(t *testing.T) {
 		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
 			return ManagedSessionStatusReport{}, nil
 		},
-		AskSessionAgent: func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
-		RunNewSession:   func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
-		StopSession:     func(context.Context, int32, string) (string, error) { return "", nil },
-		ForkSession:     func(context.Context, int32, int64) (string, error) { return "", nil },
+		AskAgent:      func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
+		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
+		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	_, err := r.Execute(context.Background(), string(OrchestratorToolAskSessionAgent), json.RawMessage(`{"session_id":0,"question":"x"}`))
+	_, err := r.Execute(context.Background(), string(OrchestratorToolAskAgent), json.RawMessage(`{"session_id":0,"question":"x"}`))
 	require.Error(t, err)
 	require.False(t, called)
-	_, err = r.Execute(context.Background(), string(OrchestratorToolAskSessionAgent), json.RawMessage(`{"session_id":3,"question":"status?"}`))
+	_, err = r.Execute(context.Background(), string(OrchestratorToolAskAgent), json.RawMessage(`{"session_id":3,"question":"status?"}`))
 	require.NoError(t, err)
 	require.True(t, called)
 }
@@ -53,7 +53,7 @@ func TestRunNewSessionPassesOptionalContextAndTargetArguments(t *testing.T) {
 		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
 			return ManagedSessionStatusReport{}, nil
 		},
-		AskSessionAgent: func(context.Context, int32, string) (string, error) { return "", nil },
+		AskAgent: func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(_ context.Context, source, agent *int32, reason string, include bool) (string, error) {
 			gotSource, gotAgent, gotReason, gotContext = source, agent, reason, include
 			return "queued", nil
@@ -88,9 +88,9 @@ func TestForkSessionValidatesCanonicalMessageID(t *testing.T) {
 		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
 			return ManagedSessionStatusReport{}, nil
 		},
-		AskSessionAgent: func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession:   func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
-		StopSession:     func(context.Context, int32, string) (string, error) { return "", nil },
+		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
+		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(_ context.Context, sessionID int32, messageID int64) (string, error) {
 			called = sessionID == 7 && messageID == 42
 			return "forked", nil
