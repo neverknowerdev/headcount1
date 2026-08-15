@@ -62,6 +62,29 @@ func TestAnswerSessionQuestionReturnsAnswerAndPreservesPair(t *testing.T) {
 	assert.Equal(t, "the answer", result.answer)
 }
 
+func TestSessionQuestionBrokerCloseTerminatesAndRejectsNewQuestions(t *testing.T) {
+	broker := newSessionQuestionBroker()
+	request := &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}
+	require.NoError(t, broker.submit(context.Background(), request))
+
+	closed := make(chan struct{})
+	go func() {
+		broker.close(errors.New("session ended"))
+		close(closed)
+	}()
+	select {
+	case <-closed:
+	case <-time.After(time.Second):
+		t.Fatal("broker close did not return")
+	}
+
+	result := <-request.result
+	assert.EqualError(t, result.err, "session ended")
+	_, open := broker.receive()
+	assert.False(t, open)
+	assert.Error(t, broker.submit(context.Background(), &sessionQuestionRequest{result: make(chan sessionQuestionResult, 1)}))
+}
+
 func TestAnswerSessionQuestionReturnsProviderErrorToWaitingOrchestrator(t *testing.T) {
 	providerErr := errors.New("provider unavailable")
 	client := questionClient(func(*http.Request) (*http.Response, error) { return nil, providerErr })

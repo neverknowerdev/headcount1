@@ -138,7 +138,11 @@ func (b *sessionQuestionBroker) close(err error) {
 	close(b.ch)
 	for {
 		select {
-		case request := <-b.ch:
+		case request, ok := <-b.ch:
+			if !ok {
+				b.mu.Unlock()
+				return
+			}
 			if request != nil {
 				select {
 				case request.result <- sessionQuestionResult{err: err}:
