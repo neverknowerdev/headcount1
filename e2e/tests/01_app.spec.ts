@@ -162,8 +162,13 @@ test.describe.serial('Headcount1 App', () => {
         expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
         // Re-open the task to verify both the user comment and the agent comment are visible
-        await page.goto('/companies/pw-inc/tasks');
-        await page.click('text=Write E2E Tests');
+        // The board can still be rendering while the task's run/comment data
+        // settles. Navigate to the known task route directly instead of
+        // depending on a board-card click that may hit a stale virtualized
+        // element and leave us on the list page.
+        await page.goto(`/companies/pw-inc/tasks/${taskId}`);
+        await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
+        await expect(page.locator('input[placeholder="Add a comment..."]')).toBeVisible({ timeout: 10_000 });
         await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
         await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
         // Scope to the comments list: the text can also appear in the run-log
