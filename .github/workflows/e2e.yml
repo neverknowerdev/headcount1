@@ -45,6 +45,7 @@ jobs:
       with:
         dir: file://db/migrations/postgres?format=golang-migrate
         url: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
+        revisions-schema: public
 
     # Fetches Go module dependencies as early as possible (independent of the
     # frontend build below), so the "Build Go server" step further down is

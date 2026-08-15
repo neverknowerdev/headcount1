@@ -20,7 +20,11 @@ import (
 
 const (
 	revisionTable = "atlas_schema_revisions"
-	lastMigration = "20260816000043"
+	// Legacy installations were created by AutoMigrate and already contain
+	// the initial 43 tables. Baseline there, then execute the follow-up enum
+	// migrations so existing databases receive the same validation as fresh
+	// databases.
+	baselineMigration = "20260816000043"
 )
 
 // Apply applies all pending embedded migrations for the database dialect.
@@ -49,10 +53,7 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 	// therefore sees a non-empty schema even on a brand-new database; the
 	// application-table check below decides whether that means baseline or a
 	// genuinely clean database.
-	options := []migrate.ExecutorOption{
-		migrate.WithOperatorVersion(operatorVersion),
-		migrate.WithAllowDirty(true),
-	}
+	options := []migrate.ExecutorOption{migrate.WithOperatorVersion(operatorVersion)}
 	revisions, err := store.ReadRevisions(ctx)
 	if err != nil {
 		return fmt.Errorf("read Atlas revisions: %w", err)
@@ -66,8 +67,16 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 			// The first migration captures the schema already created by the
 			// legacy AutoMigrate path. Mark the complete initial set as applied
 			// rather than attempting to recreate existing tables.
-			options = append(options, migrate.WithBaselineVersion(lastMigration))
+			options = append(options, migrate.WithBaselineVersion(baselineMigration))
+		} else {
+			// The revision table is created before Atlas inspects the database,
+			// so a brand-new database is technically non-empty to Atlas.
+			options = append(options, migrate.WithAllowDirty(true))
 		}
+	} else {
+		// The revision table is expected to exist alongside the application
+		// schema on every subsequent run.
+		options = append(options, migrate.WithAllowDirty(true))
 	}
 
 	executor, err := migrate.NewExecutor(drv, dir, store, options...)
