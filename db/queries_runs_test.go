@@ -170,3 +170,93 @@ func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
 	assert.NotNil(t, loaded.EndedAt)
 	assert.Equal(t, "heartbeat timeout", loaded.Recovery.RecoveryReason)
 }
+
+func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&RunEvent{}))
+	q := New(database)
+	event := RunEvent{TaskID: 7, RunID: 9, EventType: RunEventTypeLifecycleStatus, Payload: "failed", DedupeKey: "run:9:status:failed"}
+	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
+	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
+	pending, err := q.ListPendingRunEvents(context.Background(), 7)
+	require.NoError(t, err)
+	require.Len(t, pending, 1)
+	require.NoError(t, q.ConsumeRunEvents(context.Background(), []int64{pending[0].ID}))
+	pending, err = q.ListPendingRunEvents(context.Background(), 7)
+	require.NoError(t, err)
+	require.Empty(t, pending)
+}
+
+func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Run{}, &RunStatusReport{}, &RunEvent{}))
+	run := Run{TaskID: 7, AgentID: 9, Status: "running"}
+	require.NoError(t, database.Create(&run).Error)
+	q := New(database)
+	ctx := context.Background()
+	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "planning", 11))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "implementing", 12))
+
+	var reports []RunStatusReport
+	require.NoError(t, database.Where("run_id = ?", run.ID).Order("reported_at asc").Find(&reports).Error)
+	require.Len(t, reports, 2)
+	latest, err := q.GetLatestRunStatusReport(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "implementing", latest.Status)
+	assert.Equal(t, int64(12), latest.MessageID)
+	assert.True(t, latest.ReportedAt.After(reports[0].ReportedAt) || latest.ID > reports[0].ID)
+	listed, err := q.ListRunStatusReports(ctx, run.ID)
+	require.NoError(t, err)
+	require.Len(t, listed, 2)
+	assert.Equal(t, "planning", listed[0].Status)
+	assert.Equal(t, "implementing", listed[1].Status)
+	loaded, err := q.GetRun(ctx, run.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "implementing", loaded.LatestReportedStatus)
+}
+
+func TestRunStatusReportEnqueuesOrchestratorEvent(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Run{}, &RunStatusReport{}, &RunEvent{}))
+	parent := Run{TaskID: 7, AgentID: 9, Status: "running"}
+	require.NoError(t, database.Create(&parent).Error)
+	worker := Run{TaskID: parent.TaskID, AgentID: parent.AgentID, Status: "running", ParentRunID: &parent.ID, RootRunID: &parent.ID}
+	require.NoError(t, database.Create(&worker).Error)
+
+	q := New(database)
+	require.NoError(t, q.RecordRunStatusReport(context.Background(), worker.ID, "implementing", 77))
+
+	events, err := q.ListPendingRunEvents(context.Background(), parent.TaskID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, worker.ID, events[0].RunID)
+	assert.Equal(t, RunEventTypeStatusReport, events[0].EventType)
+	assert.Contains(t, events[0].Payload, `"message_id":77`)
+}
+
+func TestRunStatusReportRoutesNestedTaskEventToRootInbox(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&Company{}, &Agent{}, &Task{}, &Run{}, &RunStatusReport{}, &RunEvent{}))
+	parentTask := Task{CompanyID: 1, Title: "root"}
+	require.NoError(t, database.Create(&parentTask).Error)
+	childTask := Task{CompanyID: 1, ParentID: &parentTask.ID, Title: "child"}
+	require.NoError(t, database.Create(&childTask).Error)
+	agent := Agent{CompanyID: 1, Name: "worker"}
+	require.NoError(t, database.Create(&agent).Error)
+	orchestrator := Run{TaskID: parentTask.ID, AgentID: agent.ID, Status: "running"}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	worker := Run{TaskID: childTask.ID, AgentID: agent.ID, Status: "running", ParentRunID: &orchestrator.ID, RootRunID: &orchestrator.ID}
+	require.NoError(t, database.Create(&worker).Error)
+	q := New(database)
+	require.NoError(t, q.RecordRunStatusReport(context.Background(), worker.ID, "researching", 12))
+	events, err := q.ListPendingRunEvents(context.Background(), parentTask.ID)
+	require.NoError(t, err)
+	require.Len(t, events, 1)
+	assert.Equal(t, parentTask.ID, events[0].TaskID)
+	assert.Equal(t, worker.ID, events[0].RunID)
+}

@@ -13,6 +13,21 @@ import (
 	"agent-orchestrator/pkg/tokens"
 )
 
+type toolCallMessageIDContextKey struct{}
+
+// WithToolCallMessageID annotates tool execution with the canonical JSONL
+// message sequence of the assistant message that requested the tool.
+func WithToolCallMessageID(ctx context.Context, messageID int64) context.Context {
+	return context.WithValue(ctx, toolCallMessageIDContextKey{}, messageID)
+}
+
+// ToolCallMessageID returns the canonical message sequence for the current
+// tool call, or zero when the call is executed outside a logged agent turn.
+func ToolCallMessageID(ctx context.Context) int64 {
+	messageID, _ := ctx.Value(toolCallMessageIDContextKey{}).(int64)
+	return messageID
+}
+
 // ErrMaxTurns is returned (wrapped) when the agent loop hits its turn cap
 // without producing a final answer. Callers can errors.Is against it to
 // distinguish a runaway loop from a hard LLM/tool failure.
@@ -149,6 +164,13 @@ type Agent struct {
 	runID                int32
 	logger               RunLogger
 	conversationSequence int64
+	beforeTurn           func(context.Context, []Message) ([]Message, error)
+	// interrupt is checked after a response that would otherwise end the run.
+	// It lets a host temporarily service an out-of-band question and then
+	// continue the original conversation with the question and answer appended.
+	// The complete current conversation is supplied so the side-channel answer
+	// can be grounded in the worker's existing context.
+	interrupt func(context.Context, []Message) ([]Message, error)
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -167,10 +189,21 @@ type Config struct {
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
 	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
-	TerminalTools []string
-	Queries       *db.Queries
-	RunID         int32
-	Logger        RunLogger
+	TerminalTools               []string
+	Queries                     *db.Queries
+	RunID                       int32
+	Logger                      RunLogger
+	InitialConversationSequence int64
+	// BeforeTurn supplies durable control messages immediately before the next
+	// provider request. It receives the complete conversation accumulated so
+	// far and never interrupts an in-flight tool or LLM call.
+	BeforeTurn func(context.Context, []Message) ([]Message, error)
+	// Interrupt handles a pending host-side question after a provider response
+	// is received but before a no-tool response ends the session. Tool calls are
+	// always completed first; the next BeforeTurn handles interruptions queued
+	// while tools were running. It receives the complete current conversation
+	// so the isolated answer can use the worker's prior context.
+	Interrupt func(context.Context, []Message) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
@@ -198,6 +231,9 @@ func New(cfg Config) *Agent {
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
+		conversationSequence:  cfg.InitialConversationSequence,
+		beforeTurn:            cfg.BeforeTurn,
+		interrupt:             cfg.Interrupt,
 	}
 }
 
@@ -326,6 +362,16 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()
 		}
+		if a.beforeTurn != nil {
+			messages, hookErr := a.beforeTurn(ctx, history)
+			if hookErr != nil {
+				return "", history, fmt.Errorf("before-turn control message failed: %w", hookErr)
+			}
+			for _, message := range messages {
+				history = append(history, message)
+				a.logConversationMessage(message)
+			}
+		}
 
 		req := ChatRequest{
 			Messages:        pruneHistory(history),
@@ -404,7 +450,24 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		a.logConversationMessage(assistantMsg)
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			// No tools to invoke — the assistant's text is the final answer.
+			// A host-side question may have arrived while this provider request
+			// was in flight. Service it before ending the run so the main loop can
+			// continue with the isolated answer in its durable history.
+			if a.interrupt != nil {
+				interruptMessages, interruptErr := a.interrupt(ctx, history)
+				if interruptErr != nil {
+					return "", history, fmt.Errorf("interrupt handling failed: %w", interruptErr)
+				}
+				if len(interruptMessages) > 0 {
+					history = append(history, interruptMessages...)
+					for _, message := range interruptMessages {
+						a.logConversationMessage(message)
+					}
+					continue
+				}
+			}
+			// No tools or pending interruptions — the assistant's text is the
+			// final answer.
 			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 
@@ -471,6 +534,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			execCtx, cancel = context.WithTimeout(ctx, toolCallTimeout)
 			defer cancel()
 		}
+		execCtx = WithToolCallMessageID(execCtx, a.conversationSequence)
 		output, execErr := a.Registry.Execute(execCtx, tc.Function.Name, argsRaw)
 		if execErr != nil {
 			output = fmt.Sprintf("error: %v", execErr)

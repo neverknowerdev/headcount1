@@ -343,7 +343,7 @@ test.describe.serial('Deploy webhook', () => {
         // The tool call pending at pause time ran on resume, and the task
         // reached the status the agent set after the restart.
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
-        expect(finalRun.current_status).toBe(statusMarker);
+        expect(finalRun.latest_reported_status).toBe(statusMarker);
         const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
         expect(finalTask.status).toBe('in-review');
     });

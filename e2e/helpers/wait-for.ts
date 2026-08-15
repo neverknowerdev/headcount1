@@ -22,12 +22,21 @@ export async function waitForTaskStatus(
 ): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let last: any = null;
+    let lastRequestError = '';
     while (Date.now() < deadline) {
-        const res = await request.get(`/api/tasks/${taskId}`);
-        if (res.ok()) {
-            const task = await res.json();
-            last = task;
-            if (task.status === status) return;
+        try {
+            const res = await request.get(`/api/tasks/${taskId}`);
+            if (res.ok()) {
+                const task = await res.json();
+                last = task;
+                if (task.status === status) return;
+            }
+        } catch (err) {
+            // A server restart, connection pool hiccup, or transient socket
+            // reset must not fail the whole Playwright test immediately. Keep
+            // polling until the deadline, then include the last error in the
+            // diagnostic below so retries remain useful.
+            lastRequestError = (err as Error).message;
         }
         await sleep(250);
     }
@@ -77,7 +86,7 @@ export async function waitForTaskStatus(
 
     throw new Error(
         `waitForTaskStatus: task ${taskId} did not reach status "${status}" within ${timeoutMs}ms. ` +
-        `Last seen: ${JSON.stringify(last)}${runLogHint}`,
+        `Last seen: ${JSON.stringify(last)}${lastRequestError ? `\nLast request error: ${lastRequestError}` : ''}${runLogHint}`,
     );
 }
 

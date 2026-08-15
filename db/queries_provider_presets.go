@@ -8,6 +8,7 @@ import "context"
 const (
 	ProviderPresetOpenCodeGo = "opencode-go"
 	ProviderPresetMiniMax    = "minimax"
+	ProviderPresetDeepSeek   = "deepseek"
 )
 
 func (q *Queries) ListProviderPresets(ctx context.Context) ([]ProviderPreset, error) {
@@ -38,6 +39,12 @@ func (q *Queries) EnsureProviderPresets(ctx context.Context) error {
 			Key:          ProviderPresetMiniMax,
 			Name:         "MiniMax",
 			BaseUrl:      "https://api.minimax.io/v1",
+			ProviderType: "openai",
+		},
+		{
+			Key:          ProviderPresetDeepSeek,
+			Name:         "DeepSeek",
+			BaseUrl:      "https://api.deepseek.com/v1",
 			ProviderType: "openai",
 		},
 	}

@@ -234,9 +234,9 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect(finalTask.status).toBe('in-review');
 
         // The report_status tool call that was pending at pause time must have
-        // run on resume — its side effect is the run's current_status.
+        // run on resume — its side effect is the run's latest_reported_status.
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
-        expect(finalRun.current_status).toBe(resumeMarker);
+        expect(finalRun.latest_reported_status).toBe(resumeMarker);
 
         // Exactly two LLM calls total across both processes: turn 1 (before
         // pause) and turn 2 (finish_task, after resume). The resumed
@@ -353,8 +353,8 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         // order. Assert that both side effects survived, without coupling a
         // marker to whichever run happened to win the race for entry one.
         const statuses = await Promise.all([
-            fetch(`${base}/api/runs/${runAId}`).then((r) => r.json()).then((run) => run.current_status),
-            fetch(`${base}/api/runs/${runBId}`).then((r) => r.json()).then((run) => run.current_status),
+            fetch(`${base}/api/runs/${runAId}`).then((r) => r.json()).then((run) => run.latest_reported_status),
+            fetch(`${base}/api/runs/${runBId}`).then((r) => r.json()).then((run) => run.latest_reported_status),
         ]);
         expect(new Set(statuses)).toEqual(new Set([markerA, markerB]));
 
@@ -461,7 +461,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
             .toBe('completed');
 
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
-        expect(finalRun.current_status).toBe(marker);
+        expect(finalRun.latest_reported_status).toBe(marker);
         expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-review');
 
         const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();

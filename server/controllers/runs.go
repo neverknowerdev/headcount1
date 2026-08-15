@@ -100,7 +100,7 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 	var runs []db.Run
 	err := api.db.
 		Omit("log_content", "log_entries").
-		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
+		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title", "orchestrator_run_id") }).
 		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
@@ -124,7 +124,8 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 	// Mark is_latest so the frontend can show the Re-run button only on the
 	// most recent run. Delegated child sessions are never re-runnable entry
 	// points — only the main (root) session of a task can be re-run.
-	if run.ParentRunID == nil {
+	isOrchestrator := run.Task.OrchestratorRunID != nil && *run.Task.OrchestratorRunID == run.ID
+	if run.ParentRunID == nil && !isOrchestrator {
 		var maxID int64
 		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
 		resp.IsLatest = int64(run.ID) == maxID

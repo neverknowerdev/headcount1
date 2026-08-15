@@ -224,7 +224,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
     });
 });
 
-const COMPANY_KEYS = ['id', 'name', 'short_name', 'color'];
+const COMPANY_KEYS = ['id', 'name', 'short_name', 'description', 'color'];
 const PROJECT_KEYS = ['id', 'company_id', 'name', 'description'];
 const SPRINT_KEYS = ['id', 'company_id', 'name', 'goal'];
 const AGENT_KEYS = ['id', 'company_id', 'name', 'system_prompt', 'model', 'provider_id'];
@@ -232,7 +232,7 @@ const SKILL_KEYS = ['id', 'company_id', 'name', 'description'];
 const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status', 'task_type'];
 const MCP_KEYS = ['id', 'name', 'transport', 'url', 'display_name', 'auth_type'];
 const MCP_ACCOUNT_KEYS = ['id', 'mcp_server_id', 'name', 'has_token'];
-const RUN_KEYS = ['id', 'task_id', 'agent_id', 'status', 'current_status', 'result_description'];
+const RUN_KEYS = ['id', 'task_id', 'agent_id', 'status', 'latest_reported_status', 'result_description'];
 
 function pick(obj: any, keys: string[]): Record<string, unknown> {
     return Object.fromEntries(keys.map((k) => [k, obj?.[k]]));

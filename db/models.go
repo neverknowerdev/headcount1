@@ -172,10 +172,11 @@ type TeamInvite struct {
 }
 
 type Company struct {
-	ID        int32  `json:"id" gorm:"primaryKey"`
-	Name      string `json:"name" gorm:"not null"`
-	ShortName string `json:"short_name" gorm:"not null"`
-	Color     string `json:"color"`
+	ID          int32  `json:"id" gorm:"primaryKey"`
+	Name        string `json:"name" gorm:"not null"`
+	ShortName   string `json:"short_name" gorm:"not null"`
+	Description string `json:"description"`
+	Color       string `json:"color"`
 	// TeamID is the owning team: everything scoped to a company — projects,
 	// agents, tasks, runs — is visible to every member of that team. UserID
 	// records the member who created the company (and whose per-user Default
@@ -421,6 +422,7 @@ type Task struct {
 	DueDate            *time.Time `json:"due_date"`
 	IsArchived         bool       `json:"is_archived" gorm:"not null;default:false"`
 	RunID              *int32     `json:"run_id"`
+	OrchestratorRunID  *int32     `json:"orchestrator_run_id,omitempty" gorm:"index"`
 	GitHubPRNumber     int        `json:"github_pr_number"`
 	GitHubPRURL        string     `json:"github_pr_url"`
 	// GitHubBranch is canonical on the root task. Subtasks copy the same value
@@ -584,29 +586,43 @@ type Run struct {
 	// "HC1-2-CEO-1" and "HC1-2-CTO-2-1". Set when the run starts.
 	Name string `json:"name" gorm:"index"`
 	// ParentRunID links a delegated session to the run that spawned it.
-	// RootRunID points at the top-level (CEO) run of the whole execution tree;
+	// RootRunID points at the task orchestrator run of the whole execution tree;
 	// it equals ID for root runs so log files can be grouped per main run.
 	ParentRunID *int32 `json:"parent_run_id" gorm:"index"`
 	RootRunID   *int32 `json:"root_run_id" gorm:"index"`
-	// CurrentStatus is a short free-text progress line set by the agent via
-	// the report_status tool, shown live in the Run Log UI.
-	CurrentStatus     string     `json:"current_status" gorm:"default:''"`
-	Status            string     `json:"status" gorm:"not null"`
-	SessionID         string     `json:"session_id"`
-	LogFilePath       string     `json:"log_file_path"`
-	LogContent        string     `json:"log_content"`
-	LogEntries        string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
-	TokenStats        string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
-	ResultDescription string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
-	ResultExplanation string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
-	StartedAt         time.Time  `json:"started_at"`
-	EndedAt           *time.Time `json:"ended_at"`
-	LastMessageTime   *time.Time `json:"last_message_time"`
+	// LatestReportedStatus is a short free-text progress line set by the agent via
+	// the report_status tool, shown live in the Run Log UI. The full history is
+	// stored in RunStatusReport rows.
+	LatestReportedStatus string     `json:"latest_reported_status" gorm:"column:current_status;default:''"`
+	Status               string     `json:"status" gorm:"not null"`
+	SessionID            string     `json:"session_id"`
+	LogFilePath          string     `json:"log_file_path"`
+	LogContent           string     `json:"log_content"`
+	LogEntries           string     `json:"log_entries" gorm:"type:text"`        // JSON array of structured log entries
+	TokenStats           string     `json:"token_stats" gorm:"type:text"`        // JSON object with aggregated token counts
+	ResultDescription    string     `json:"result_description" gorm:"type:text"` // short summary set by finish_task_execution
+	ResultExplanation    string     `json:"result_explanation" gorm:"type:text"` // detailed explanation set by finish_task_execution
+	StartedAt            time.Time  `json:"started_at"`
+	EndedAt              *time.Time `json:"ended_at"`
+	LastMessageTime      *time.Time `json:"last_message_time"`
 
 	// Recovery is internal control-plane state. Conversation history remains
 	// exclusively in the append-only JSONL log; this JSONB document stores only
 	// the cursor, planned-pause metadata, and short-lived resume lease.
 	Recovery RunRecovery `json:"-" gorm:"serializer:json;type:jsonb"`
+}
+
+// RunStatusReport is an append-only progress report emitted by report_status.
+// Run.LatestReportedStatus is only the latest-value cache used by the UI; the
+// orchestrator reads the newest row and the complete report history remains
+// available for diagnostics.
+type RunStatusReport struct {
+	ID         int64     `json:"id" gorm:"primaryKey"`
+	RunID      int32     `json:"run_id" gorm:"not null;index"`
+	Run        Run       `json:"-" gorm:"foreignKey:RunID;constraint:OnDelete:CASCADE;"`
+	Status     string    `json:"status" gorm:"not null"`
+	MessageID  int64     `json:"message_id" gorm:"index"`
+	ReportedAt time.Time `json:"reported_at" gorm:"index"`
 }
 
 // RunRecovery groups transient recovery metadata so the execution model does
@@ -624,6 +640,9 @@ type RunRecovery struct {
 	ResumePreviousStatus string          `json:"resume_previous_status,omitempty"`
 	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
 	LastResumeError      string          `json:"last_resume_error,omitempty"`
+	WaitReason           string          `json:"wait_reason,omitempty"`
+	StopCause            string          `json:"stop_cause,omitempty"`
+	RecoveryAttempts     int             `json:"recovery_attempts,omitempty"`
 }
 
 // CheckpointPhase identifies the safe point represented by a checkpoint. It is
@@ -635,6 +654,31 @@ const (
 	CheckpointPhaseBeforeTools CheckpointPhase = "before_tools"
 	CheckpointPhaseAfterTools  CheckpointPhase = "after_tools"
 )
+
+// RunEventType identifies a durable control-plane message. Keeping the event
+// vocabulary typed prevents unrelated strings from silently entering the
+// orchestrator/worker inboxes.
+type RunEventType string
+
+const (
+	RunEventTypeLifecycleStatus RunEventType = "run_status"
+	RunEventTypeStatusReport    RunEventType = "status_report"
+	RunEventTypeStatusRefresh   RunEventType = "status_report_request"
+	RunEventTypeWorkerQuestion  RunEventType = "worker_question"
+)
+
+// RunEvent is a durable inbox entry used to wake passive orchestrators when a
+// supervised run changes state. DedupeKey makes status updates idempotent.
+type RunEvent struct {
+	ID         int64        `json:"id" gorm:"primaryKey"`
+	TaskID     int32        `json:"task_id" gorm:"not null;index"`
+	RunID      int32        `json:"run_id" gorm:"not null;index"`
+	EventType  RunEventType `json:"event_type" gorm:"not null"`
+	Payload    string       `json:"payload" gorm:"type:text"`
+	DedupeKey  string       `json:"dedupe_key" gorm:"index"`
+	CreatedAt  time.Time    `json:"created_at" gorm:"index"`
+	ConsumedAt *time.Time   `json:"consumed_at,omitempty" gorm:"index"`
+}
 
 // RunTokenStats holds aggregated token counts for a run. Persisted to
 // Run.TokenStats as JSON so the Run Logs UI can render an overall

@@ -175,6 +175,8 @@ func main() {
 		&db.Comment{},
 		&db.Attachment{},
 		&db.Run{},
+		&db.RunStatusReport{},
+		&db.RunEvent{},
 		&db.Artifact{},
 		&db.ActivityLog{},
 		&db.ProxyRequestLog{},
@@ -352,6 +354,7 @@ func main() {
 	// intentionally limited to update-paused sessions; explicit failed/stale
 	// recovery uses the same engine ResumeSession primitive later.
 	go eng.ResumeEligibleSessions(context.Background())
+	go eng.ResumeWaitingOrchestrators(context.Background())
 	// Reconcile queued tasks after restart so a prerequisite completion or
 	// dependency removal is not stranded in the crash window before launch.
 	go eng.ReconcileQueuedTasks(context.Background())

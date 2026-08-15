@@ -92,6 +92,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         received: [] as ReceivedRequest[],
         requestCount: 0,
         scenario: null as ScenarioState | null,
+        scenarios: new Map<string, ScenarioState>(),
         // Hold support (used by the auto-update drain/resume test): while active,
         // every /chat/completions request blocks after being logged and before
         // responding, until POST /__test/release resolves it. This lets a test
@@ -157,6 +158,7 @@ interface MockState {
     received: ReceivedRequest[];
     requestCount: number;
     scenario: ScenarioState | null;
+    scenarios: Map<string, ScenarioState>;
     holdActive: boolean;
     holdWaiters: Array<() => void>;
     completionsReceived: number;
@@ -198,6 +200,7 @@ function handleTestRoutes(
         state.requestCount = 0;
         state.completionsReceived = 0;
         state.scenario = null;
+        state.scenarios.clear();
         state.holdActive = false;
         const waiters = state.holdWaiters.splice(0);
         for (const resolve of waiters) resolve();
@@ -206,10 +209,12 @@ function handleTestRoutes(
         return true;
     }
     if (req.url === '/__test/set-scenario' && req.method === 'POST') {
-        const data = body as { entries: ScenarioEntry[] };
-        state.scenario = { entries: data.entries ?? [], index: 0 };
+        const data = body as { entries: ScenarioEntry[]; model?: string };
+        const next = { entries: data.entries ?? [], index: 0 };
+        if (data.model) state.scenarios.set(data.model, next);
+        else state.scenario = next;
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ status: 'ok', count: state.scenario.entries.length }));
+        res.end(JSON.stringify({ status: 'ok', count: next.entries.length, model: data.model || null }));
         return true;
     }
     if (req.url === '/__test/health' && req.method === 'GET') {
@@ -225,7 +230,10 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({
             object: 'list',
-            data: [{ id: MOCK_MODEL_ID, object: 'model', owned_by: 'e2e' }],
+            data: [
+                { id: MOCK_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-orchestrator-model', object: 'model', owned_by: 'e2e' },
+            ],
         }));
         return true;
     }
@@ -246,8 +254,10 @@ function handleChatCompletionsRoute(
     const wantsStream = request.stream === true;
 
     // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
-    if (state.scenario) {
-        const sc = state.scenario;
+    const modelScenario = state.scenarios.get(String(request.model || ''));
+    const scenario = modelScenario || state.scenario;
+    if (scenario) {
+        const sc = scenario;
         const entry = sc.index < sc.entries.length ? sc.entries[sc.index++] : null;
 
         if (wantsStream) {

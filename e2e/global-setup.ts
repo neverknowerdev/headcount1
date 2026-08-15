@@ -87,6 +87,12 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
 
     // 6. Wait for the Go server, then wipe the DB
     await waitForServer(baseURL);
+    // The HTTP listener intentionally starts before the dependency setup
+    // finishes, but the frontend remains behind SetupGate until setup reaches
+    // a terminal state. Waiting here avoids every browser test racing that
+    // gate (and makes a real setup failure visible in global setup instead of
+    // surfacing as a misleading missing-UI-element timeout).
+    await waitForSetup(baseURL);
     const wipeRes = await fetch(`${baseURL}/api/e2e/wipe-db`, { method: 'POST' });
     if (!wipeRes.ok) {
         const text = await wipeRes.text();
@@ -113,4 +119,42 @@ async function waitForServer(url: string, timeoutMs = 120_000): Promise<void> {
         await new Promise((r) => setTimeout(r, 500));
     }
     throw new Error(`globalSetup: server at ${url} did not become reachable within ${timeoutMs}ms`);
+}
+
+async function waitForSetup(url: string, timeoutMs = 180_000): Promise<void> {
+    const deadline = Date.now() + timeoutMs;
+    let lastStatus = 'pending';
+    while (Date.now() < deadline) {
+        try {
+            const res = await fetch(`${url}/api/setup-status`);
+            if (res.ok) {
+                const data = await res.json() as {
+                    pending?: boolean;
+                    ok?: boolean;
+                    error?: string;
+                    failures?: Array<{ name?: string; reason?: string }>;
+                };
+                if (data.pending) {
+                    lastStatus = data.error || 'pending';
+                } else if (data.ok) {
+                    return;
+                } else {
+                    const failures = (data.failures || [])
+                        .map((failure) => [failure.name, failure.reason].filter(Boolean).join(': '))
+                        .filter(Boolean)
+                        .join('; ');
+                    throw new Error(
+                        `globalSetup: dependency setup failed${failures ? ` (${failures})` : ''}${data.error ? `: ${data.error}` : ''}`,
+                    );
+                }
+            }
+        } catch (err) {
+            if (err instanceof Error && err.message.startsWith('globalSetup: dependency setup failed')) {
+                throw err;
+            }
+            lastStatus = 'setup-status unavailable';
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+    throw new Error(`globalSetup: dependency setup did not finish within ${timeoutMs}ms (last status: ${lastStatus})`);
 }

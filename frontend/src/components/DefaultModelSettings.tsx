@@ -15,6 +15,10 @@ const PURPOSE_LABELS: Record<string, { title: string; description: string }> = {
         title: 'Artifact Q&A (ask_artifact)',
         description: 'Answers an agent\'s question about one artifact via a separate one-shot reader call, so the artifact never enters the asking session\'s context.',
     },
+    task_orchestrator: {
+        title: 'Task Orchestrator',
+        description: 'Owns task execution by selecting, starting, monitoring, and recovering worker sessions. It never performs implementation work. Select DeepSeek V4 Flash (or the exact model ID exposed by your provider).',
+    },
 };
 
 const toFormValue = (s: any): ProviderOrGroupValue => ({

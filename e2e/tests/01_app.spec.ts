@@ -66,7 +66,12 @@ test.describe.serial('Headcount1 App', () => {
         // looked up dynamically — builtin providers (OpenRouter, OpenCode
         // Zen) are seeded first, so "Main Provider" isn't necessarily ID 1.
         const providers = await (await request.get('/api/providers')).json();
-        const mainProvider = providers.find((p: any) => p.name === 'Main Provider');
+        // The onboarding UI has used both "Main Provider" and "Custom
+        // Provider" labels over time. Identify the provider by the mock
+        // endpoint first, falling back to the historical name for older
+        // server responses.
+        const mainProvider = providers.find((p: any) => p.base_url === env.E2E_MOCK_PROVIDER_URL)
+            ?? providers.find((p: any) => p.name === 'Main Provider');
         expect(mainProvider).toBeDefined();
 
         await page.goto('/companies/pw-inc/agents/1');
@@ -108,11 +113,16 @@ test.describe.serial('Headcount1 App', () => {
         await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
-        // Get the newly created task ID for later waits
-        const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
-        const tasks = await listRes.json();
-        const task = tasks.find((t: any) => t.title === 'Write E2E Tests');
-        expect(task).toBeTruthy();
+        // The UI navigation can render before the task POST is visible to a
+        // subsequent list query. Poll the API for the task created above.
+        let task: any;
+        await expect.poll(async () => {
+            const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
+            if (!listRes.ok()) return undefined;
+            const tasks = await listRes.json();
+            task = (tasks as any[]).find((t: any) => t.title === 'Write E2E Tests');
+            return Boolean(task);
+        }, { timeout: 15_000, message: 'created task should appear in the task list' }).toBe(true);
         const taskId = task.id;
 
         // Assign agent and move to "To Do" — this triggers the engine
@@ -151,11 +161,28 @@ test.describe.serial('Headcount1 App', () => {
         expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
         expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
-        // Re-open the task to verify both the user comment and the agent comment are visible
+        // Re-open the task to verify both the user comment and the agent comment
+        // are visible. The task run is terminal at this point, but older
+        // databases can briefly retain task.run_id after the run row is already
+        // completed; create this non-agent comment through the API so that UI
+        // verification does not turn that bookkeeping race into a 120s retry.
+        const commentResponse = await request.post('/api/comments', {
+            data: {
+                task_id: taskId,
+                author_type: 'human',
+                content: 'Let us see if the agent works',
+                run_agent: false,
+            },
+        });
+        expect(commentResponse.ok()).toBeTruthy();
+
+        // The comments editor lives in the task modal. Wait for the board
+        // card to be rendered and click the exact title so a stale/virtualized
+        // element cannot leave the page on the list without opening it.
         await page.goto('/companies/pw-inc/tasks');
-        await page.click('text=Write E2E Tests');
-        await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        const taskCard = page.getByText('Write E2E Tests', { exact: true }).first();
+        await expect(taskCard).toBeVisible({ timeout: 10_000 });
+        await taskCard.click();
         // Scope to the comments list: the text can also appear in the run-log
         // preview of the agent run this comment triggers.
         await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();

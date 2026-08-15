@@ -10,11 +10,12 @@ import (
 // a sensible zero-value default in EnsureDefaultModelSettings) whenever a
 // new internal one-shot LLM use case is added.
 const (
-	PurposeCommitMessages = "commit_messages"
-	PurposeAskArtifact    = "ask_artifact"
+	PurposeCommitMessages   = "commit_messages"
+	PurposeAskArtifact      = "ask_artifact"
+	PurposeTaskOrchestrator = "task_orchestrator"
 )
 
-var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeAskArtifact}
+var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeAskArtifact, PurposeTaskOrchestrator}
 
 func (q *Queries) GetDefaultModelSetting(ctx context.Context, userID int32, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting

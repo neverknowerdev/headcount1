@@ -30,11 +30,18 @@ func (q *Queries) UpdateRunLog(ctx context.Context, id int32, content string, st
 	}
 	r.LogContent = content
 	r.Status = status
+	var updateErr error
 	if status == "completed" || status == "failed" || status == "canceled" || status == RunStatusStale || status == RunStatusRecoverableFailed {
 		now := gorm.Expr("CURRENT_TIMESTAMP")
-		return q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
+		updateErr = q.db.WithContext(ctx).Model(&r).Updates(map[string]interface{}{"log_content": content, "status": status, "ended_at": now}).Error
+	} else {
+		updateErr = q.db.WithContext(ctx).Save(&r).Error
 	}
-	return q.db.WithContext(ctx).Save(&r).Error
+	if updateErr != nil || r.ParentRunID == nil {
+		return updateErr
+	}
+	eventTaskID := q.rootTaskID(ctx, r.TaskID)
+	return q.EnqueueRunEvent(ctx, RunEvent{TaskID: eventTaskID, RunID: r.ID, EventType: RunEventTypeLifecycleStatus, Payload: status, DedupeKey: fmt.Sprintf("run:%d:status:%s", r.ID, status)})
 }
 
 // MarkRunStale atomically retires a run that has stopped heartbeating. The
@@ -97,9 +104,82 @@ func (q *Queries) ListDescendantRuns(ctx context.Context, rootRunID int32) ([]Ru
 	return runs, err
 }
 
-// UpdateRunCurrentStatus stores the agent's self-reported progress line.
-func (q *Queries) UpdateRunCurrentStatus(ctx context.Context, id int32, status string) error {
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+// RecordRunStatusReport appends the agent's self-reported progress line and
+// updates the latest-value cache used by the UI. The append-only report row is
+// the source of truth for orchestrator reads; the cache is for fast UI reads.
+func (q *Queries) RecordRunStatusReport(ctx context.Context, id int32, status string, messageID int64) error {
+	now := time.Now()
+	eventTaskID := int32(0)
+	var currentRun Run
+	if err := q.db.WithContext(ctx).Select("task_id").First(&currentRun, id).Error; err == nil {
+		eventTaskID = q.rootTaskID(ctx, currentRun.TaskID)
+	}
+	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+		var run Run
+		if err := tx.First(&run, id).Error; err != nil {
+			return err
+		}
+		report := RunStatusReport{RunID: id, Status: status, MessageID: messageID, ReportedAt: now}
+		if err := tx.Create(&report).Error; err != nil {
+			return err
+		}
+		if run.ParentRunID != nil {
+			if eventTaskID == 0 {
+				eventTaskID = run.TaskID
+			}
+			payload, _ := json.Marshal(map[string]interface{}{
+				"status": status, "message_id": messageID, "reported_at": now.Format(time.RFC3339Nano),
+			})
+			if err := tx.Create(&RunEvent{TaskID: eventTaskID, RunID: id, EventType: RunEventTypeStatusReport, Payload: string(payload), DedupeKey: fmt.Sprintf("run:%d:status-report:%d", id, report.ID)}).Error; err != nil {
+				return err
+			}
+		}
+		return tx.Model(&Run{}).Where("id = ?", id).Update("current_status", status).Error
+	})
+}
+
+// rootTaskID returns the task-tree root used as the orchestrator inbox key.
+// A missing/partially migrated task row falls back to the run's own task so
+// status reporting remains available during upgrades and isolated unit tests.
+func (q *Queries) rootTaskID(ctx context.Context, taskID int32) int32 {
+	root := taskID
+	for hops := 0; hops < 20; hops++ {
+		var task Task
+		if err := q.db.WithContext(ctx).Select("id", "parent_id").First(&task, root).Error; err != nil || task.ParentID == nil {
+			return root
+		}
+		root = *task.ParentID
+	}
+	return root
+}
+
+// GetLatestRunStatusReport returns the newest report_status entry for a run.
+func (q *Queries) GetLatestRunStatusReport(ctx context.Context, runID int32) (RunStatusReport, error) {
+	var report RunStatusReport
+	err := q.db.WithContext(ctx).Where("run_id = ?", runID).Order("reported_at DESC, id DESC").First(&report).Error
+	return report, err
+}
+
+// ListRunStatusReports returns the complete append-only report history for a
+// run in chronological order. The latest report is therefore the final item.
+func (q *Queries) ListRunStatusReports(ctx context.Context, runID int32) ([]RunStatusReport, error) {
+	var reports []RunStatusReport
+	err := q.db.WithContext(ctx).
+		Where("run_id = ?", runID).
+		Order("reported_at ASC, id ASC").
+		Find(&reports).Error
+	return reports, err
+}
+
+// HasRecentRunEvent reports whether a targeted control event was created in
+// the freshness window. This keeps refresh throttling in the durable event
+// inbox instead of adding control-only columns to Run.
+func (q *Queries) HasRecentRunEvent(ctx context.Context, runID int32, eventType RunEventType, since time.Time) (bool, error) {
+	var count int64
+	err := q.db.WithContext(ctx).Model(&RunEvent{}).
+		Where("run_id = ? AND event_type = ? AND created_at >= ?", runID, eventType, since).
+		Count(&count).Error
+	return count > 0, err
 }
 
 func (q *Queries) UpdateRunSession(ctx context.Context, id int32, sessionID string) error {
@@ -197,6 +277,109 @@ func (q *Queries) GetRunningRunsByTaskID(ctx context.Context, taskID int32) ([]R
 	var runs []Run
 	err := q.db.WithContext(ctx).Where("task_id = ? AND status = ?", taskID, "running").Find(&runs).Error
 	return runs, err
+}
+
+func (q *Queries) GetOrchestratorRun(ctx context.Context, taskID int32) (Run, error) {
+	var task Task
+	if err := q.db.WithContext(ctx).First(&task, taskID).Error; err != nil {
+		return Run{}, err
+	}
+	if task.OrchestratorRunID == nil {
+		return Run{}, gorm.ErrRecordNotFound
+	}
+	return q.GetRun(ctx, *task.OrchestratorRunID)
+}
+
+func (q *Queries) ListOrchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Preload("Agent").
+		Where("root_run_id = ? AND id <> ?", orchestratorRunID, orchestratorRunID).
+		Order("started_at asc").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) ListOrchestratorsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Joins("JOIN tasks ON tasks.orchestrator_run_id = runs.id").
+		Where("tasks.id = ?", taskID).
+		Order("runs.started_at asc").Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) ListWaitingOrchestrators(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("parent_run_id IS NULL AND status IN ? AND id IN (?)", []string{"running", "waiting"},
+			q.db.Model(&Task{}).Select("orchestrator_run_id").Where("orchestrator_run_id IS NOT NULL")).
+		Find(&runs).Error
+	return runs, err
+}
+
+func (q *Queries) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Status = "waiting"
+	run.Recovery.WaitReason = reason
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": run.Status, "recovery": recoveryJSON(run.Recovery)}).Error
+}
+
+func (q *Queries) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.StopCause = cause
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
+}
+
+func (q *Queries) IncrementRunRecoveryAttempts(ctx context.Context, runID int32) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	run.Recovery.RecoveryAttempts++
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Update("recovery", recoveryJSON(run.Recovery)).Error
+}
+
+func (q *Queries) EnqueueRunEvent(ctx context.Context, event RunEvent) error {
+	if event.DedupeKey != "" {
+		var existing RunEvent
+		if err := q.db.WithContext(ctx).Where("dedupe_key = ?", event.DedupeKey).First(&existing).Error; err == nil {
+			return nil
+		}
+	}
+	return q.db.WithContext(ctx).Create(&event).Error
+}
+
+func (q *Queries) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
+	var events []RunEvent
+	err := q.db.WithContext(ctx).
+		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport, RunEventTypeWorkerQuestion}).
+		Order("created_at asc").Find(&events).Error
+	return events, err
+}
+
+// ListPendingRunEventsForRun returns control messages targeted at one active
+// worker session. These are deliberately separate from the orchestrator's
+// lifecycle inbox so the orchestrator cannot consume worker instructions.
+func (q *Queries) ListPendingRunEventsForRun(ctx context.Context, runID int32, eventType RunEventType) ([]RunEvent, error) {
+	var events []RunEvent
+	err := q.db.WithContext(ctx).
+		Where("run_id = ? AND event_type = ? AND consumed_at IS NULL", runID, eventType).
+		Order("created_at asc").Find(&events).Error
+	return events, err
+}
+
+func (q *Queries) ConsumeRunEvents(ctx context.Context, ids []int64) error {
+	if len(ids) == 0 {
+		return nil
+	}
+	now := time.Now()
+	return q.db.WithContext(ctx).Model(&RunEvent{}).Where("id IN ? AND consumed_at IS NULL", ids).Update("consumed_at", now).Error
 }
 
 // GetRunningRuns returns every run currently marked running. It is used by the
@@ -337,10 +520,20 @@ func (q *Queries) CountRootRunsThrough(ctx context.Context, taskID, rootRunID in
 // sessions for the same root run and agent. The current run is included, so
 // callers can use the result directly as the suffix.
 func (q *Queries) CountSubsessionRunsThrough(ctx context.Context, rootRunID, runID, agentID int32) (int64, error) {
+	var root Run
+	if err := q.db.WithContext(ctx).Preload("Task").First(&root, rootRunID).Error; err != nil {
+		return 0, err
+	}
+	query := q.db.WithContext(ctx).Model(&Run{}).
+		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID)
+	// In the new hierarchy the first direct child is the worker root, not a
+	// delegated session. Legacy roots have no task orchestrator pointer and
+	// retain the old counting behavior.
+	if root.Task.OrchestratorRunID != nil && *root.Task.OrchestratorRunID == rootRunID {
+		query = query.Where("parent_run_id <> ?", rootRunID)
+	}
 	var count int64
-	err := q.db.WithContext(ctx).Model(&Run{}).
-		Where("root_run_id = ? AND parent_run_id IS NOT NULL AND id <= ? AND agent_id = ?", rootRunID, runID, agentID).
-		Count(&count).Error
+	err := query.Count(&count).Error
 	return count, err
 }
 
