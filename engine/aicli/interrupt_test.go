@@ -124,9 +124,9 @@ func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 	client.MaxRetries = 0
 	client.HTTPClient = &http.Client{Transport: transport}
 	registry := orchestratorTools.NewOrchestratorRegistry(orchestratorTools.OrchestratorCallbacks{
-		GetSessions: func(context.Context) ([]orchestratorTools.ManagedSessionSummary, error) { return nil, nil },
-		GetSessionLastRunStatus: func(context.Context, int32) (orchestratorTools.ManagedSessionStatusReport, error) {
-			return orchestratorTools.ManagedSessionStatusReport{}, nil
+		GetSessionList: func(context.Context) ([]orchestratorTools.ManagedSessionSummary, error) { return nil, nil },
+		GetSession: func(context.Context, int32) (orchestratorTools.ManagedSessionDetails, error) {
+			return orchestratorTools.ManagedSessionDetails{}, nil
 		},
 		AskAgent: func(context.Context, int32, string) (string, error) {
 			return "", context.DeadlineExceeded

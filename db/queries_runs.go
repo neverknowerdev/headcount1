@@ -160,6 +160,17 @@ func (q *Queries) GetLatestRunStatusReport(ctx context.Context, runID int32) (Ru
 	return report, err
 }
 
+// ListRunStatusReports returns the complete append-only report history for a
+// run in chronological order. The latest report is therefore the final item.
+func (q *Queries) ListRunStatusReports(ctx context.Context, runID int32) ([]RunStatusReport, error) {
+	var reports []RunStatusReport
+	err := q.db.WithContext(ctx).
+		Where("run_id = ?", runID).
+		Order("reported_at ASC, id ASC").
+		Find(&reports).Error
+	return reports, err
+}
+
 // HasRecentRunEvent reports whether a targeted control event was created in
 // the freshness window. This keeps refresh throttling in the durable event
 // inbox instead of adding control-only columns to Run.

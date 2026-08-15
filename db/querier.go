@@ -70,6 +70,7 @@ type RunQuerier interface {
 	ListChildRuns(ctx context.Context, parentRunID int32) ([]Run, error)
 	RecordRunStatusReport(ctx context.Context, id int32, status string, messageID int64) error
 	GetLatestRunStatusReport(ctx context.Context, runID int32) (RunStatusReport, error)
+	ListRunStatusReports(ctx context.Context, runID int32) ([]RunStatusReport, error)
 }
 
 type LLMProviderQuerier interface {

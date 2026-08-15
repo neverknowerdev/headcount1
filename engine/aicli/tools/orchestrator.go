@@ -8,8 +8,8 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// ManagedSessionSummary is the lifecycle snapshot returned by get_sessions.
-// Worker progress reports are returned by get_session_last_run_status instead.
+// ManagedSessionSummary is the compact lifecycle snapshot returned by
+// get_session_list.
 type ManagedSessionSummary struct {
 	ID                int32  `json:"id"`
 	Name              string `json:"name"`
@@ -40,26 +40,43 @@ type ManagedSessionStatusReport struct {
 	StatusRefreshRequested bool   `json:"status_refresh_requested"`
 }
 
+// ManagedSessionRunStatus is one append-only report_status entry. The
+// orchestrator receives the full ordered history through get_session.
+type ManagedSessionRunStatus struct {
+	Status     string `json:"status"`
+	ReportedAt string `json:"reported_at"`
+	MessageID  int64  `json:"message_id"`
+}
+
+// ManagedSessionDetails combines lifecycle information with the worker's
+// progress-report history. LastRunStatus is nil when report_status has never
+// been called for the selected session.
+type ManagedSessionDetails struct {
+	ManagedSessionSummary
+	LastRunStatus    *ManagedSessionStatusReport `json:"last_run_status"`
+	RunStatusHistory []ManagedSessionRunStatus   `json:"run_status_history"`
+}
+
 // OrchestratorToolName is intentionally private to this registry. These
 // controls are never part of a worker's configurable tool surface.
 type OrchestratorToolName string
 
 const (
-	OrchestratorToolGetSessions             OrchestratorToolName = "get_sessions"
-	OrchestratorToolGetSessionLastRunStatus OrchestratorToolName = "get_session_last_run_status"
-	OrchestratorToolAskAgent                OrchestratorToolName = "ask_agent"
-	OrchestratorToolRunNewSession           OrchestratorToolName = "run_new_session"
-	OrchestratorToolStopSession             OrchestratorToolName = "stop_session"
-	OrchestratorToolForkSession             OrchestratorToolName = "fork_session"
+	OrchestratorToolGetSessionList OrchestratorToolName = "get_session_list"
+	OrchestratorToolGetSession     OrchestratorToolName = "get_session"
+	OrchestratorToolAskAgent       OrchestratorToolName = "ask_agent"
+	OrchestratorToolRunNewSession  OrchestratorToolName = "run_new_session"
+	OrchestratorToolStopSession    OrchestratorToolName = "stop_session"
+	OrchestratorToolForkSession    OrchestratorToolName = "fork_session"
 )
 
 type OrchestratorCallbacks struct {
-	GetSessions             func(context.Context) ([]ManagedSessionSummary, error)
-	GetSessionLastRunStatus func(context.Context, int32) (ManagedSessionStatusReport, error)
-	AskAgent                func(context.Context, int32, string) (string, error)
-	RunNewSession           func(context.Context, *int32, *int32, string, bool) (string, error)
-	StopSession             func(context.Context, int32, string) (string, error)
-	ForkSession             func(context.Context, int32, int64) (string, error)
+	GetSessionList func(context.Context) ([]ManagedSessionSummary, error)
+	GetSession     func(context.Context, int32) (ManagedSessionDetails, error)
+	AskAgent       func(context.Context, int32, string) (string, error)
+	RunNewSession  func(context.Context, *int32, *int32, string, bool) (string, error)
+	StopSession    func(context.Context, int32, string) (string, error)
+	ForkSession    func(context.Context, int32, int64) (string, error)
 }
 
 type orchestratorManagementTool struct {
@@ -84,10 +101,10 @@ func orchestratorDef(name OrchestratorToolName, description, schema string) aicl
 func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	r := aicli.NewRegistry()
 	r.Register(&orchestratorManagementTool{
-		name: OrchestratorToolGetSessions,
-		def:  orchestratorDef(OrchestratorToolGetSessions, "List every worker session in this task execution, including nested sessions.", `{"type":"object","properties":{}}`),
+		name: OrchestratorToolGetSessionList,
+		def:  orchestratorDef(OrchestratorToolGetSessionList, "List every worker session in this task execution, including nested sessions. Use get_session for detailed lifecycle and status-report history.", `{"type":"object","properties":{}}`),
 		fn: func(ctx context.Context, _ json.RawMessage) (string, error) {
-			v, err := cb.GetSessions(ctx)
+			v, err := cb.GetSessionList(ctx)
 			if err != nil {
 				return "", err
 			}
@@ -96,19 +113,19 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorManagementTool{
-		name: OrchestratorToolGetSessionLastRunStatus,
-		def:  orchestratorDef(OrchestratorToolGetSessionLastRunStatus, "Return the latest status line reported by a worker through report_status and when it was reported. If it is stale, request a fresh report.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
+		name: OrchestratorToolGetSession,
+		def:  orchestratorDef(OrchestratorToolGetSession, "Return one worker session's lifecycle information, the latest report_status result, and the complete chronological run-status history. If the latest report is stale, request a fresh report.", `{"type":"object","properties":{"session_id":{"type":"integer"}},"required":["session_id"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SessionID int32 `json:"session_id"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
-				return "", fmt.Errorf("get_session_last_run_status: %w", err)
+				return "", fmt.Errorf("get_session: %w", err)
 			}
 			if p.SessionID <= 0 {
 				return "", fmt.Errorf("session_id must be positive")
 			}
-			v, err := cb.GetSessionLastRunStatus(ctx, p.SessionID)
+			v, err := cb.GetSession(ctx, p.SessionID)
 			if err != nil {
 				return "", err
 			}

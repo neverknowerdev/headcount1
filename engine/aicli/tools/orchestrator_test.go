@@ -11,25 +11,25 @@ import (
 
 func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
-		GetSessions: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
-		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
-			return ManagedSessionStatusReport{}, nil
+		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
+		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
+			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	require.Equal(t, []string{"ask_agent", "fork_session", "get_session_last_run_status", "get_sessions", "run_new_session", "stop_session"}, r.Names())
+	require.Equal(t, []string{"ask_agent", "fork_session", "get_session", "get_session_list", "run_new_session", "stop_session"}, r.Names())
 	require.Error(t, func() error { _, err := r.Execute(context.Background(), string(aicli.ToolWrite), nil); return err }())
 }
 
 func TestOrchestratorToolValidation(t *testing.T) {
 	called := false
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
-		GetSessions: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
-		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
-			return ManagedSessionStatusReport{}, nil
+		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
+		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
+			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
 		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },
@@ -44,14 +44,40 @@ func TestOrchestratorToolValidation(t *testing.T) {
 	require.True(t, called)
 }
 
+func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
+	gotID := int32(0)
+	r := NewOrchestratorRegistry(OrchestratorCallbacks{
+		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) {
+			return []ManagedSessionSummary{{ID: 4, Name: "worker-4", LifecycleStatus: "running"}}, nil
+		},
+		GetSession: func(_ context.Context, id int32) (ManagedSessionDetails, error) {
+			gotID = id
+			return ManagedSessionDetails{
+				ManagedSessionSummary: ManagedSessionSummary{ID: id, Name: "worker-4", LifecycleStatus: "running"},
+				LastRunStatus:         &ManagedSessionStatusReport{ID: id, LastReportedStatus: "implementing", LastReportedMessageID: 22},
+				RunStatusHistory:      []ManagedSessionRunStatus{{Status: "planning", MessageID: 11}, {Status: "implementing", MessageID: 22}},
+			}, nil
+		},
+	})
+	list, err := r.Execute(context.Background(), string(OrchestratorToolGetSessionList), json.RawMessage(`{}`))
+	require.NoError(t, err)
+	require.Contains(t, list, `"worker-4"`)
+	detail, err := r.Execute(context.Background(), string(OrchestratorToolGetSession), json.RawMessage(`{"session_id":4}`))
+	require.NoError(t, err)
+	require.Equal(t, int32(4), gotID)
+	require.Contains(t, detail, `"last_run_status"`)
+	require.Contains(t, detail, `"run_status_history"`)
+	require.Contains(t, detail, `"message_id":22`)
+}
+
 func TestRunNewSessionPassesOptionalContextAndTargetArguments(t *testing.T) {
 	var gotSource, gotAgent *int32
 	var gotReason string
 	var gotContext bool
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
-		GetSessions: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
-		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
-			return ManagedSessionStatusReport{}, nil
+		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
+		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
+			return ManagedSessionDetails{}, nil
 		},
 		AskAgent: func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(_ context.Context, source, agent *int32, reason string, include bool) (string, error) {
@@ -84,9 +110,9 @@ func TestRunNewSessionPassesOptionalContextAndTargetArguments(t *testing.T) {
 func TestForkSessionValidatesCanonicalMessageID(t *testing.T) {
 	called := false
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
-		GetSessions: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
-		GetSessionLastRunStatus: func(context.Context, int32) (ManagedSessionStatusReport, error) {
-			return ManagedSessionStatusReport{}, nil
+		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
+		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
+			return ManagedSessionDetails{}, nil
 		},
 		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(context.Context, *int32, *int32, string, bool) (string, error) { return "", nil },

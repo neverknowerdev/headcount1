@@ -62,6 +62,50 @@ func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	require.Empty(t, comments)
 }
 
+func TestGetSessionReturnsLatestAndCompleteStatusHistory(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:session-details?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Sprint{}, &db.Project{}, &db.Task{}, &db.Run{}, &db.RunStatusReport{}, &db.RunEvent{}, &db.Comment{}))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "Status history"}
+	require.NoError(t, database.Create(&task).Error)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running"}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	rootID := orchestrator.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", orchestrator.ID).Update("root_run_id", rootID).Error)
+	worker := db.Run{TaskID: task.ID, AgentID: agent.ID, Name: "ACME-WRK-1", Status: "running", ParentRunID: &rootID, RootRunID: &rootID}
+	require.NoError(t, database.Create(&worker).Error)
+
+	queries := db.New(database)
+	require.NoError(t, queries.RecordRunStatusReport(context.Background(), worker.ID, "planning", 101))
+	time.Sleep(time.Millisecond)
+	require.NoError(t, queries.RecordRunStatusReport(context.Background(), worker.ID, "implementing", 202))
+
+	engine := NewNativeEngine(database, eventhub.NewHub())
+	detail, err := engine.orchestratorSessionDetails(context.Background(), task, orchestrator.ID, worker.ID)
+	require.NoError(t, err)
+	assert.Equal(t, worker.ID, detail.ID)
+	assert.Equal(t, "running", detail.LifecycleStatus)
+	require.NotNil(t, detail.LastRunStatus)
+	assert.Equal(t, "implementing", detail.LastRunStatus.LastReportedStatus)
+	assert.Equal(t, int64(202), detail.LastRunStatus.LastReportedMessageID)
+	require.Len(t, detail.RunStatusHistory, 2)
+	assert.Equal(t, "planning", detail.RunStatusHistory[0].Status)
+	assert.Equal(t, int64(101), detail.RunStatusHistory[0].MessageID)
+	assert.Equal(t, "implementing", detail.RunStatusHistory[1].Status)
+	assert.Equal(t, int64(202), detail.RunStatusHistory[1].MessageID)
+
+	emptyWorker := db.Run{TaskID: task.ID, AgentID: agent.ID, Name: "ACME-WRK-2", Status: "running", ParentRunID: &rootID, RootRunID: &rootID}
+	require.NoError(t, database.Create(&emptyWorker).Error)
+	emptyDetail, err := engine.orchestratorSessionDetails(context.Background(), task, orchestrator.ID, emptyWorker.ID)
+	require.NoError(t, err)
+	assert.Nil(t, emptyDetail.LastRunStatus)
+	assert.Empty(t, emptyDetail.RunStatusHistory)
+}
+
 func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

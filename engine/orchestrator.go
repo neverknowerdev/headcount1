@@ -110,11 +110,11 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 	apiKey, _ := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
 	callbacks := tools.OrchestratorCallbacks{
-		GetSessions: func(c context.Context) ([]tools.ManagedSessionSummary, error) {
+		GetSessionList: func(c context.Context) ([]tools.ManagedSessionSummary, error) {
 			return e.orchestratorSessions(c, orchestrator.ID)
 		},
-		GetSessionLastRunStatus: func(c context.Context, id int32) (tools.ManagedSessionStatusReport, error) {
-			return e.orchestratorSessionLastRunStatus(c, task, orchestrator.ID, id)
+		GetSession: func(c context.Context, id int32) (tools.ManagedSessionDetails, error) {
+			return e.orchestratorSessionDetails(c, task, orchestrator.ID, id)
 		},
 		AskAgent: func(c context.Context, id int32, question string) (string, error) {
 			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
@@ -201,11 +201,7 @@ func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRun
 	}
 	out := make([]tools.ManagedSessionSummary, 0, len(runs))
 	for _, r := range runs {
-		last := ""
-		if r.LastMessageTime != nil {
-			last = r.LastMessageTime.Format(time.RFC3339Nano)
-		}
-		out = append(out, tools.ManagedSessionSummary{ID: r.ID, Name: r.Name, TaskID: r.TaskID, AgentID: r.AgentID, AgentName: r.Agent.Name, LifecycleStatus: r.Status, LastMessageTime: last, WaitReason: r.Recovery.WaitReason, RecoveryAttempts: r.Recovery.RecoveryAttempts, StopCause: r.Recovery.StopCause, ResultDescription: r.ResultDescription, Error: r.LogContent})
+		out = append(out, managedSessionSummary(r))
 	}
 	return out, nil
 }
@@ -247,6 +243,59 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 		result.StatusRefreshRequested = requested
 	}
 	return result, nil
+}
+
+func (e *NativeEngine) orchestratorSessionDetails(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionDetails, error) {
+	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
+	if err != nil {
+		return tools.ManagedSessionDetails{}, err
+	}
+	latest, err := e.orchestratorSessionLastRunStatus(ctx, task, orchestratorRunID, id)
+	if err != nil {
+		return tools.ManagedSessionDetails{}, err
+	}
+	reports, err := e.q.ListRunStatusReports(ctx, id)
+	if err != nil {
+		return tools.ManagedSessionDetails{}, err
+	}
+	history := make([]tools.ManagedSessionRunStatus, 0, len(reports))
+	for _, report := range reports {
+		history = append(history, tools.ManagedSessionRunStatus{
+			Status:     report.Status,
+			ReportedAt: report.ReportedAt.Format(time.RFC3339Nano),
+			MessageID:  report.MessageID,
+		})
+	}
+	var latestPtr *tools.ManagedSessionStatusReport
+	if latest.LastReportedAt != "" {
+		latestPtr = &latest
+	}
+	return tools.ManagedSessionDetails{
+		ManagedSessionSummary: managedSessionSummary(r),
+		LastRunStatus:         latestPtr,
+		RunStatusHistory:      history,
+	}, nil
+}
+
+func managedSessionSummary(r db.Run) tools.ManagedSessionSummary {
+	last := ""
+	if r.LastMessageTime != nil {
+		last = r.LastMessageTime.Format(time.RFC3339Nano)
+	}
+	return tools.ManagedSessionSummary{
+		ID:                r.ID,
+		Name:              r.Name,
+		TaskID:            r.TaskID,
+		AgentID:           r.AgentID,
+		AgentName:         r.Agent.Name,
+		LifecycleStatus:   r.Status,
+		LastMessageTime:   last,
+		WaitReason:        r.Recovery.WaitReason,
+		RecoveryAttempts:  r.Recovery.RecoveryAttempts,
+		StopCause:         r.Recovery.StopCause,
+		ResultDescription: r.ResultDescription,
+		Error:             r.LogContent,
+	}
 }
 
 func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, orchestratorRunID, sessionID int32) (bool, error) {

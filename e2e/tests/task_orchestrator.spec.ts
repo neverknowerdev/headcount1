@@ -56,9 +56,9 @@ test.describe.serial('task sidecar orchestrator', () => {
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'orch-list', name: 'get_sessions', arguments: {} } },
+                { tool_call: { id: 'orch-list', name: 'get_session_list', arguments: {} } },
                 { text: 'Observed worker; no intervention required.' },
-                { tool_call: { id: 'orch-status', name: 'get_session_last_run_status', arguments: { session_id: 2 } } },
+                { tool_call: { id: 'orch-status', name: 'get_session', arguments: { session_id: 2 } } },
                 { text: 'Execution is terminal.' },
             ] }),
         });
@@ -106,7 +106,7 @@ test.describe.serial('task sidecar orchestrator', () => {
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
         const expectedTools = [
-            'ask_agent', 'fork_session', 'get_session_last_run_status', 'get_sessions', 'run_new_session', 'stop_session',
+            'ask_agent', 'fork_session', 'get_session', 'get_session_list', 'run_new_session', 'stop_session',
         ];
         const toolNameSets = orchestratorRequests.map((r: any) =>
             ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());
@@ -117,6 +117,7 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(statusRequests.length).toBeGreaterThanOrEqual(1);
         expect(JSON.stringify(statusRequests)).toContain('Implementing the smoke task');
         expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
+        expect(JSON.stringify(statusRequests)).toContain('run_status_history');
         const reportEventRequests = orchestratorRequests.filter((r: any) =>
             (r.body?.messages || []).some((m: any) =>
                 typeof m.content === 'string' && m.content.includes('"event_type":"status_report"')));
@@ -126,8 +127,8 @@ test.describe.serial('task sidecar orchestrator', () => {
             .map((m: any) => {
                 try { return JSON.parse(m.content); } catch { return null; }
             })
-            .filter((p: any) => p?.last_reported_status === 'Implementing the smoke task'));
+            .filter((p: any) => p?.last_run_status?.last_reported_status === 'Implementing the smoke task'));
         expect(statusPayloads.length).toBeGreaterThanOrEqual(1);
-        expect(statusPayloads[0].last_reported_message_id).toBeGreaterThan(0);
+        expect(statusPayloads[0].last_run_status.last_reported_message_id).toBeGreaterThan(0);
     });
 });
