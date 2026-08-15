@@ -35,7 +35,16 @@ jobs:
     - name: Set up Go
       uses: actions/setup-go@v5
       with:
-        go-version: '1.24.3'
+        go-version: '1.26.4'
+
+    - name: Set up Atlas
+      uses: ariga/setup-atlas@v0
+
+    - name: Apply PostgreSQL migrations
+      uses: ariga/atlas-action/migrate/apply@v1
+      with:
+        dir: file://db/migrations/postgres?format=golang-migrate
+        url: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
     # Fetches Go module dependencies as early as possible (independent of the
     # frontend build below), so the "Build Go server" step further down is
@@ -49,7 +58,7 @@ jobs:
         node-version: 20
 
     # Fast dialect-specific signal before the browser suite: the Go integration
-    # tests (AutoMigrate, raw-SQL query surface, backup/restore sequence
+    # tests (migration compatibility, raw-SQL query surface, backup/restore sequence
     # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
     # two packages: they share one Postgres database and each DROP SCHEMAs +
     # AutoMigrates it, so running them concurrently races on type creation.
