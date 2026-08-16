@@ -1,8 +1,11 @@
 import { test, expect } from '@playwright/test';
-import { spawn, ChildProcess } from 'child_process';
+import { spawn, spawnSync, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
+import { resetE2E } from '../helpers/reset';
+import { terminateProcess } from '../helpers/process';
+import { fetchWithTimeout } from '../helpers/http';
 
 const env = loadE2EEnv();
 
@@ -22,15 +25,12 @@ test.describe.serial('Shared database across processes', () => {
     let secondServer: ChildProcess | null = null;
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request);
     });
 
     test.afterAll(async () => {
-        // `go run` wraps the compiled binary in a child process; kill the
-        // whole process group so the actual server dies too.
-        if (secondServer?.pid) {
-            try { process.kill(-secondServer.pid, 'SIGKILL'); } catch { /* already gone */ }
-        }
+        // Kill the whole process group so any child work is reaped too.
+        if (secondServer) await terminateProcess(secondServer, { group: true, timeoutMs: 4_000 });
     });
 
     test('a second server process sees data written by the first, and vice versa', async ({ request }) => {
@@ -45,9 +45,14 @@ test.describe.serial('Shared database across processes', () => {
 
         // Boot a second server process against the SAME headcount1 home.
         const projectRoot = path.resolve(__dirname, '..', '..');
-        secondServer = spawn('go', ['run', '.'], {
+        const binary = path.join(env.E2E_HEADCOUNT1_HOME, 'shared-db-server');
+        if (!fs.existsSync(binary)) {
+            const build = spawnSync('go', ['build', '-o', binary, '.'], { cwd: projectRoot, encoding: 'utf8', timeout: 120_000 });
+            expect(build.status, `go build failed: ${build.stderr}`).toBe(0);
+        }
+        secondServer = spawn(binary, [], {
             cwd: projectRoot,
-            detached: true, // own process group, so afterAll can kill go run's child too
+            detached: true, // own process group, so teardown can reap children too
             env: {
                 ...process.env,
                 E2E_MODE: 'true',
@@ -62,7 +67,7 @@ test.describe.serial('Shared database across processes', () => {
         await expect
             .poll(async () => {
                 try {
-                    const res = await fetch(`${secondBase}/api/ping`);
+                    const res = await fetchWithTimeout(`${secondBase}/api/ping`, {}, 2_000);
                     return res.ok;
                 } catch {
                     return false;
@@ -72,18 +77,18 @@ test.describe.serial('Shared database across processes', () => {
 
         // First direction: the second process reads the company created by
         // the first process.
-        const listRes = await fetch(`${secondBase}/api/companies`);
+        const listRes = await fetchWithTimeout(`${secondBase}/api/companies`, {}, 5_000);
         expect(listRes.ok).toBeTruthy();
         const companies = await listRes.json();
         expect((companies as any[]).some(c => c.short_name === 'shared-db')).toBe(true);
 
         // Second direction: create a sprint via the second process, read it
         // via the first.
-        const sprintRes = await fetch(`${secondBase}/api/sprints`, {
+        const sprintRes = await fetchWithTimeout(`${secondBase}/api/sprints`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ company_id: company.id, name: 'Cross-process sprint', goal: 'shared db' }),
-        });
+        }, 5_000);
         expect(sprintRes.ok).toBeTruthy();
 
         const sprintsRes = await request.get(`/api/sprints?company_id=${company.id}`);

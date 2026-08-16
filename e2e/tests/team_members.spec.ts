@@ -1,4 +1,5 @@
 import { test, expect } from '@playwright/test';
+import { resetE2E } from '../helpers/reset';
 
 // Teams & members: the e2e fixture user (e2e@local) is auto-logged-in by the
 // E2E auth bypass and owns its own team. This suite covers the Team page UI
@@ -6,7 +7,7 @@ import { test, expect } from '@playwright/test';
 // invite-token registration flow joining a second user to the same team.
 test.describe.serial('Team & members', () => {
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request);
     });
 
     test('owner sees their team with themselves as the only member', async ({ page }) => {

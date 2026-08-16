@@ -101,7 +101,10 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         holdActive: false,
         holdWaiters: [] as Array<() => void>,
         completionsReceived: 0,
+        shutdown: null as (() => Promise<void>) | null,
     };
+
+    const sockets = new Set<net.Socket>();
 
     const server = http.createServer(async (req, res) => {
         const body = await parseRequestBody(req);
@@ -129,20 +132,39 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         res.end(JSON.stringify({ error: 'not_found', method: req.method, path: req.url }));
     });
 
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    server.on('connection', (socket) => {
+        sockets.add(socket);
+        socket.once('close', () => sockets.delete(socket));
+    });
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve());
+    });
     const addr = server.address() as AddressInfo;
     const baseUrl = `http://127.0.0.1:${addr.port}`;
 
     // Print the ready line so global-setup can read it
     process.stdout.write(`MOCK_PROVIDER_READY ${addr.port} ${baseUrl}\n`);
 
-    const stop = () => new Promise<void>((resolve) => server.close(() => resolve()));
+    const stop = async (): Promise<void> => {
+        // Release requests held by the drain/resume scenario before closing.
+        state.holdActive = false;
+        for (const resolve of state.holdWaiters.splice(0)) resolve();
+        if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
+        for (const socket of sockets) socket.destroy();
+        if (!server.listening) return;
+        await new Promise<void>((resolve) => {
+            const timer = setTimeout(resolve, 2_000);
+            server.close(() => { clearTimeout(timer); resolve(); });
+        });
+    };
+    state.shutdown = stop;
 
     return { baseUrl, port: addr.port, stop };
 }
 
 async function parseRequestBody(req: http.IncomingMessage): Promise<unknown> {
+    req.setTimeout(5_000, () => req.destroy(new Error('request body timeout')));
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const rawBody = Buffer.concat(chunks).toString('utf8');
@@ -162,6 +184,7 @@ interface MockState {
     holdActive: boolean;
     holdWaiters: Array<() => void>;
     completionsReceived: number;
+    shutdown: (() => Promise<void>) | null;
 }
 
 function handleTestRoutes(
@@ -206,6 +229,12 @@ function handleTestRoutes(
         for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok' }));
+        return true;
+    }
+    if (req.url === '/__test/shutdown' && req.method === 'POST') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'stopping' }));
+        setImmediate(() => { void state.shutdown?.(); });
         return true;
     }
     if (req.url === '/__test/set-scenario' && req.method === 'POST') {
@@ -384,19 +413,6 @@ function buildChatCompletionResponse(withToolCall: boolean): object {
         }],
         usage: { prompt_tokens: 10, completion_tokens: 20, total_tokens: 30 },
     };
-}
-
-function getFreePort(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const srv = net.createServer();
-        srv.unref();
-        srv.on('error', reject);
-        srv.listen(0, '127.0.0.1', () => {
-            const addr = srv.address() as AddressInfo;
-            const port = addr.port;
-            srv.close(() => resolve(port));
-        });
-    });
 }
 
 function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean): void {

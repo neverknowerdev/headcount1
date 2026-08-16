@@ -1,6 +1,7 @@
 import { test, expect } from '@playwright/test';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
 
 const env = loadE2EEnv();
 
@@ -15,13 +16,11 @@ test.describe.serial('task sidecar orchestrator', () => {
     let taskId = 0;
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test.afterAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test('CEO-owned task is executed by an orchestrator that starts, answers, and monitors a worker', async ({ request }) => {

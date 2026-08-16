@@ -12,16 +12,22 @@ const executablePath = fs.existsSync(PREINSTALLED_CHROMIUM)
     : fs.existsSync(SYSTEM_CHROME) ? SYSTEM_CHROME : undefined;
 
 export default defineConfig({
-    timeout: 120_000,
+    timeout: 150_000,
+    globalTimeout: 20 * 60 * 1000,
+    maxFailures: process.env.CI ? 1 : 0,
     testDir: './tests',
     fullyParallel: false,
     forbidOnly: !!process.env.CI,
-    retries: process.env.CI ? 2 : 0,
+    retries: process.env.CI ? 1 : 0,
     workers: 1,
-    reporter: 'html',
+    reporter: process.env.CI
+        ? [['line'], ['html', { outputFolder: process.env.PLAYWRIGHT_REPORT_DIR || 'playwright-report', open: 'never' }]]
+        : [['list'], ['html', { open: 'never' }]],
     use: {
         baseURL: process.env.E2E_BASE_URL || 'http://localhost:8080',
-        trace: 'on-first-retry',
+        trace: 'retain-on-failure',
+        screenshot: 'only-on-failure',
+        video: 'retain-on-failure',
         ...(executablePath ? { launchOptions: { executablePath } } : {}),
     },
     globalSetup: require.resolve('./global-setup.ts'),

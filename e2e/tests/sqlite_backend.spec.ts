@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
 
 /**
  * SQLite-backend edge cases.
@@ -73,7 +74,7 @@ test.describe.serial('SQLite autoincrement reset', () => {
 
     test.beforeAll(async ({ request }) => {
         // A clean wipe resets sqlite_sequence, so the next inserts start at 1.
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request);
     });
 
     test('ids restart at 1 after a wipe and increment sequentially', async ({ request }) => {
@@ -107,13 +108,11 @@ test.describe.serial('SQLite export/import round-trip', () => {
     test.skip(isPostgres, 'SQLite-only: backup/restore fidelity on the on-disk backend');
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test.afterAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test('backup, wipe, restore preserves the full company tree and run logs', async ({ request }) => {
@@ -187,8 +186,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
         const backup = await postJSON(request, '/api/backup', {});
         expect(backup.archive_path).toBeTruthy();
 
-        const wipe = await request.post('/api/e2e/wipe-db');
-        expect(wipe.ok()).toBeTruthy();
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
         const afterWipe = await (await request.get('/api/companies')).json();
         expect((afterWipe as any[]).some((c) => c.short_name === 'backup-co')).toBe(false);
 
