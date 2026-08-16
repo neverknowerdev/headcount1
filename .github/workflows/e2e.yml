@@ -37,16 +37,6 @@ jobs:
       with:
         go-version: '1.26.4'
 
-    - name: Set up Atlas
-      uses: ariga/setup-atlas@v0
-
-    - name: Apply PostgreSQL migrations
-      uses: ariga/atlas-action/migrate/apply@v1
-      with:
-        dir: file://db/migrations/postgres?format=golang-migrate
-        url: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
-        revisions-schema: public
-
     # Fetches Go module dependencies as early as possible (independent of the
     # frontend build below), so the "Build Go server" step further down is
     # mostly just compilation.
@@ -57,31 +47,6 @@ jobs:
       uses: actions/setup-node@v4
       with:
         node-version: 20
-
-    # Fast dialect-specific signal before the browser suite: the Go integration
-    # tests (migration compatibility, raw-SQL query surface, backup/restore sequence
-    # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
-    # two packages: they share one Postgres database and each DROP SCHEMAs +
-    # AutoMigrates it, so running them concurrently races on type creation.
-    - name: Run Go Postgres integration tests
-      run: go test ./db/ ./pkg/backup/ -run TestPostgres -p 1 -v
-      env:
-        TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
-
-    # The Postgres integration tests deliberately drop and recreate the public
-    # schema with AutoMigrate. Restore the authoritative Atlas schema after
-    # those tests so the E2E server never starts against a partial legacy
-    # schema (for example, one missing task_relations).
-    - name: Reapply PostgreSQL migrations after integration tests
-      timeout-minutes: 5
-      run: |
-        PGPASSWORD=postgres psql \
-          --host=localhost --port=5432 --username=postgres --dbname=orchestrator \
-          --command='DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
-        atlas migrate apply \
-          --dir 'file://db/migrations/postgres?format=golang-migrate' \
-          --url 'postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable' \
-          --revisions-schema public
 
     - name: Install Frontend Dependencies
       timeout-minutes: 5
@@ -97,13 +62,64 @@ jobs:
         cd frontend
         npm run build
 
-    # Compiles the server ahead of the Playwright run (after the frontend
-    # build, since main.go embeds frontend/dist) so module download + build —
-    # which can take longer than the e2e harness's 60s server-ready timeout on
-    # a cold module cache — happen here, where a real failure is a clear build
-    # error instead of a "server never became reachable" timeout.
+    # Compiles the same server artifact that the production-style E2E harness
+    # starts below. This also ensures the embedded migration directory is part
+    # of the binary being exercised by the migration probe.
     - name: Build Go server
       run: go build -o agent-orchestrator .
+
+    # Exercise the exact startup path used in production: the built binary
+    # opens PostgreSQL and applies its embedded migrations before it starts
+    # serving HTTP. Keeping this in CI catches migration/embedding/startup
+    # failures before the integration or browser suites, without maintaining a
+    # second Atlas CLI deployment path that production never uses.
+    - name: Exercise embedded migrations through production binary
+      timeout-minutes: 5
+      env:
+        DATABASE_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
+        E2E_MODE: true
+        E2E_HEADCOUNT1_HOME: ${{ runner.temp }}/headcount1-migration-probe
+        PORT: '18080'
+      run: |
+        set -euo pipefail
+        rm -rf "$E2E_HEADCOUNT1_HOME"
+        log_file="$RUNNER_TEMP/headcount1-migration-probe.log"
+        ./agent-orchestrator >"$log_file" 2>&1 &
+        pid=$!
+        cleanup() {
+          kill -TERM "$pid" 2>/dev/null || true
+          wait "$pid" 2>/dev/null || true
+        }
+        trap cleanup EXIT
+
+        ready=0
+        for _ in $(seq 1 120); do
+          if ! kill -0 "$pid" 2>/dev/null; then
+            cat "$log_file"
+            echo "migration probe binary exited before readiness" >&2
+            exit 1
+          fi
+          if curl --fail --silent http://127.0.0.1:18080/api/ping >/dev/null; then
+            ready=1
+            break
+          fi
+          sleep 0.25
+        done
+        if [ "$ready" -ne 1 ]; then
+          cat "$log_file"
+          echo "migration probe binary did not become ready" >&2
+          exit 1
+        fi
+
+    # Fast dialect-specific signal before the browser suite: the Go integration
+    # tests (migration compatibility, raw-SQL query surface, backup/restore sequence
+    # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
+    # two packages: they share one Postgres database and each DROP SCHEMAs +
+    # AutoMigrates it, so running them concurrently races on type creation.
+    - name: Run Go Postgres integration tests
+      run: go test ./db/ ./pkg/backup/ -run TestPostgres -p 1 -v
+      env:
+        TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
     - name: Install E2E Dependencies
       timeout-minutes: 5
@@ -116,6 +132,9 @@ jobs:
         cd e2e
         npx playwright install --with-deps chromium
 
+    # globalSetup starts this same built binary against the now-reset database;
+    # its normal startup migration pass is therefore the schema hand-off into
+    # the browser suite, just as it is during a production restart.
     # Primary: the whole suite against PostgreSQL. SQLite-only specs
     # (sqlite_backend) self-skip here.
     - name: Run Playwright tests (PostgreSQL — primary)
