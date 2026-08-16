@@ -70,9 +70,9 @@ jobs:
 
     # Exercise the exact startup path used in production: the built binary
     # opens PostgreSQL and applies its embedded migrations before it starts
-    # serving HTTP. Keeping this in CI catches migration/embedding/startup
-    # failures before the integration or browser suites, without maintaining a
-    # second Atlas CLI deployment path that production never uses.
+    # serving HTTP. The migration and repository integration suites run in the
+    # separate Go Tests workflow; this probe keeps the browser workflow focused
+    # on the production binary handoff and E2E behavior.
     - name: Exercise embedded migrations through production binary
       timeout-minutes: 5
       env:
@@ -111,16 +111,6 @@ jobs:
           exit 1
         fi
 
-    # Fast dialect-specific signal before the browser suite: the Go integration
-    # tests (migration compatibility, raw-SQL query surface, backup/restore sequence
-    # realignment) run only when TEST_POSTGRES_URL is set. -p 1 serializes the
-    # two packages: they share one Postgres database and each DROP SCHEMAs +
-    # AutoMigrates it, so running them concurrently races on type creation.
-    - name: Run Go Postgres integration tests
-      run: go test ./db/ ./pkg/backup/ -run TestPostgres -p 1 -v
-      env:
-        TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
-
     - name: Install E2E Dependencies
       timeout-minutes: 5
       run: |
@@ -132,9 +122,10 @@ jobs:
         cd e2e
         npx playwright install --with-deps chromium
 
-    # globalSetup starts this same built binary against the now-reset database;
-    # its normal startup migration pass is therefore the schema hand-off into
-    # the browser suite, just as it is during a production restart.
+    # globalSetup starts this same built binary against the database prepared
+    # by the migration probe; its normal startup migration pass is therefore
+    # the schema hand-off into the browser suite, just as it is during a
+    # production restart.
     # Primary: the whole suite against PostgreSQL. SQLite-only specs
     # (sqlite_backend) self-skip here.
     - name: Run Playwright tests (PostgreSQL — primary)

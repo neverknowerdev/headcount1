@@ -1,7 +1,7 @@
 package db_test
 
-// This is a full-surface integration test that runs the real AutoMigrate list
-// (mirroring main.go) and exercises the query layer against a REAL PostgreSQL
+// This is a full-surface integration test that runs the embedded production
+// migrations and exercises the query layer against a REAL PostgreSQL
 // database. It is skipped unless TEST_POSTGRES_URL is set, e.g.:
 //
 //	TEST_POSTGRES_URL="postgres://postgres@127.0.0.1:5433/orchestrator?sslmode=disable" \
@@ -18,60 +18,13 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/migrations"
 	"agent-orchestrator/pkg/secrets"
 
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
 )
-
-// allModels mirrors the AutoMigrate list in main.go exactly.
-func allModels() []any {
-	return []any{
-		&db.User{},
-		&db.WebAuthnCredential{},
-		&db.WebAuthnSession{},
-		&db.Team{},
-		&db.TeamMember{},
-		&db.TeamInvite{},
-		&db.Session{},
-		&db.RefreshToken{},
-		&db.UserGitCredential{},
-		&db.PasswordResetToken{},
-		&db.Company{},
-		&db.Project{},
-		&db.GitHubOAuthState{},
-		&db.GitHubConnection{},
-		&db.GitHubIdentity{},
-		&db.GitHubWebhookDelivery{},
-		&db.GitHubWebhookTarget{},
-		&db.Sprint{},
-		&db.LLMProvider{},
-		&db.ModelGroup{},
-		&db.ModelGroupMember{},
-		&db.ModelRequestStat{},
-		&db.DefaultModelSetting{},
-		&db.ProviderPreset{},
-		&db.Agent{},
-		&db.Skill{},
-		&db.Task{},
-		&db.TaskRelation{},
-		&db.Comment{},
-		&db.Attachment{},
-		&db.Run{},
-		&db.RunStatusReport{},
-		&db.RunEvent{},
-		&db.Artifact{},
-		&db.ActivityLog{},
-		&db.ProxyRequestLog{},
-		&db.MCPServer{},
-		&db.MCPAccount{},
-		&db.AgentMCPServer{},
-		&db.AgentMCPAccount{},
-		&db.MCPToolStat{},
-		&db.AgentMCPToolFilter{},
-	}
-}
 
 func openPostgres(t *testing.T) *gorm.DB {
 	t.Helper()
@@ -84,8 +37,14 @@ func openPostgres(t *testing.T) *gorm.DB {
 	return database
 }
 
-// dropEverything drops all tables so each run starts from a clean schema. It
-// also drops join tables that AutoMigrate creates implicitly (agent_skills).
+func applyPostgresMigrations(t *testing.T, database *gorm.DB) {
+	t.Helper()
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	require.NoError(t, migrations.Apply(context.Background(), sqlDB, "postgres", "integration-test"))
+}
+
+// dropEverything drops the application schema so each run starts clean.
 func dropEverything(t *testing.T, database *gorm.DB) {
 	t.Helper()
 	// DROP SCHEMA is the cleanest full reset for a dedicated test database.
@@ -93,22 +52,10 @@ func dropEverything(t *testing.T, database *gorm.DB) {
 	require.NoError(t, database.Exec("CREATE SCHEMA public").Error)
 }
 
-func TestPostgresAutoMigrate(t *testing.T) {
-	database := openPostgres(t)
-	dropEverything(t, database)
-	require.NoError(t, database.AutoMigrate(allModels()...), "AutoMigrate against Postgres")
-
-	// AutoMigrate must be idempotent — a second run (upgrade path) must not error.
-	require.NoError(t, database.AutoMigrate(allModels()...), "second AutoMigrate must be idempotent")
-	var recoveryType string
-	require.NoError(t, database.Raw(`SELECT udt_name FROM information_schema.columns WHERE table_schema = current_schema() AND table_name = 'runs' AND column_name = 'recovery'`).Scan(&recoveryType).Error)
-	require.Equal(t, "jsonb", recoveryType)
-}
-
 func TestPostgresQuerySurface(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
-	require.NoError(t, database.AutoMigrate(allModels()...))
+	applyPostgresMigrations(t, database)
 	q := db.New(database)
 	ctx := context.Background()
 

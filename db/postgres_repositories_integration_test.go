@@ -41,7 +41,7 @@ func TestPostgresRepositoryQueries(t *testing.T) {
 	database := openPostgres(t)
 	t.Cleanup(func() { dropEverything(t, database) })
 	dropEverything(t, database)
-	require.NoError(t, database.AutoMigrate(allModels()...))
+	applyPostgresMigrations(t, database)
 	database.Logger = logger.Default.LogMode(logger.Silent)
 	fixtures := seedRepositoryFixtures(t, database)
 	resetPostgresSequences(t, database)
@@ -338,6 +338,14 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 		if field := copy.FieldByName("Status"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
 			field.SetString("running")
 		}
+		if copy.Type() == reflect.TypeOf(db.Task{}) {
+			if field := copy.FieldByName("Status"); field.IsValid() && field.CanSet() {
+				field.SetString(db.TaskStatusTodo)
+			}
+			if field := copy.FieldByName("TaskType"); field.IsValid() && field.CanSet() {
+				field.SetString(db.TaskTypeImplement)
+			}
+		}
 		if field := copy.FieldByName("EventType"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
 			field.SetString(string(db.RunEventTypeLifecycleStatus))
 		}
@@ -362,20 +370,24 @@ func prepareRepositoryMethodFixture(t *testing.T, database *gorm.DB, repoName, m
 
 func resetPostgresSequences(t *testing.T, database *gorm.DB) {
 	t.Helper()
-	for _, model := range allModels() {
-		statement := &gorm.Statement{DB: database}
-		require.NoError(t, statement.Parse(model))
-		if statement.Schema.LookUpField("ID") == nil {
-			continue
-		}
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	rows, err := sqlDB.Query(`SELECT table_name FROM information_schema.columns WHERE table_schema = 'public' AND column_name = 'id'`)
+	require.NoError(t, err)
+	defer rows.Close()
+	for rows.Next() {
+		var table string
+		require.NoError(t, rows.Scan(&table))
 		var sequence sql.NullString
-		require.NoError(t, database.Raw("SELECT pg_get_serial_sequence(?, 'id')", statement.Schema.Table).Scan(&sequence).Error)
+		require.NoError(t, sqlDB.QueryRow(`SELECT pg_get_serial_sequence($1, 'id')`, "public."+table).Scan(&sequence))
 		if !sequence.Valid {
 			continue
 		}
-		query := fmt.Sprintf("SELECT setval(?::regclass, COALESCE((SELECT MAX(id) FROM %s), 1), true)", quotePostgresIdentifier(statement.Schema.Table))
-		require.NoError(t, database.Exec(query, sequence.String).Error)
+		query := fmt.Sprintf("SELECT setval($1::regclass, COALESCE((SELECT MAX(id) FROM %s), 1), true)", quotePostgresIdentifier(table))
+		_, err = sqlDB.Exec(query, sequence.String)
+		require.NoError(t, err)
 	}
+	require.NoError(t, rows.Err())
 }
 
 func quotePostgresIdentifier(identifier string) string {
