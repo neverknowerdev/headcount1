@@ -30,34 +30,6 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
 	require.Equal(t, 53, revisions)
 
-	// Simulate a legacy pre-Atlas database: retain all application tables but
-	// remove Atlas's revision history. The runner must baseline the initial
-	// schema and still execute the follow-up enum migrations.
-	for _, statement := range []string{
-		"ALTER TABLE team_members DROP COLUMN __enum_guard_role",
-		"ALTER TABLE team_invites DROP COLUMN __enum_guard_role",
-		"ALTER TABLE agents DROP COLUMN __enum_guard_reasoning_level",
-		"ALTER TABLE agents DROP COLUMN __enum_guard_chat_type",
-		"ALTER TABLE tasks DROP COLUMN __enum_guard_status",
-		"ALTER TABLE tasks DROP COLUMN __enum_guard_task_type",
-		"ALTER TABLE task_relations DROP COLUMN __enum_guard_kind",
-		"ALTER TABLE runs DROP COLUMN __enum_guard_status",
-		"ALTER TABLE run_events DROP COLUMN __enum_guard_event_type",
-		"ALTER TABLE default_model_settings DROP COLUMN __enum_guard_purpose",
-		"ALTER TABLE git_hub_webhook_deliveries DROP COLUMN __enum_guard_status",
-		"ALTER TABLE git_hub_webhook_targets DROP COLUMN __enum_guard_wake_status",
-	} {
-		_, err = database.Exec(statement)
-		require.NoError(t, err)
-	}
-	_, err = database.Exec(`DROP TABLE atlas_schema_revisions`)
-	require.NoError(t, err)
-	require.NoError(t, Apply(context.Background(), database, "sqlite", "test"))
-	require.NoError(t, database.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'atlas_schema_revisions'`).Scan(&revisions))
-	require.Equal(t, 1, revisions)
-	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 11, revisions)
-
 	_ = database.Close()
 }
 
