@@ -1,4 +1,4 @@
-h1:eHg3q022dgVwUh6CrQwBopgWsOUwseR8Kkno8JLGfSA=
+h1:iMgQi/wFIKFfc/FYidZbdwndH2V30aRcNB33IhSD6RQ=
 20260816000001_users.up.sql h1:zWGpDshwpFAWWZj7TWEG5DBCglIIJdICp2sbioyDRSY=
 20260816000002_teams.up.sql h1:gjtNenVxgvh4t4DwxsZYiMeoIzUjsJNFMpFE0gDC01A=
 20260816000003_companies.up.sql h1:SePgHobf9TTKwjWKQGuUO2rbqqzEuDdDy+Fw+xnKXz0=
@@ -53,3 +53,4 @@ h1:eHg3q022dgVwUh6CrQwBopgWsOUwseR8Kkno8JLGfSA=
 20260816000052_github_webhook_delivery_status_enum.up.sql h1:eGmyEVq/IeNGcPpLSvUmwBtyeLo7l5nW5gFn2T027ec=
 20260816000053_github_webhook_target_wake_status_enum.up.sql h1:FTxqiAW0XOPB06UbW7PdetmsEsyftoBEgcG+O6YDWtE=
 20260816000054_task_status_refinement_enum.up.sql h1:nJ1q+IdR1X0kbzzf52fBGH3cdSv8EoYuyJJjPsv11Lg=
+20260816000055_github_connection_account_installation_unique.up.sql h1:uzjIspHY6mkrcuPTRBXuWfgirG/2mBhudFKSj5gel6g=

@@ -42,21 +42,3 @@ func TestCreateTaskAssignsHumanReadableSharedBranch(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, root.GitHubBranch, child.GitHubBranch)
 }
-
-func TestMigrateDropAgentConfigNames(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	require.NoError(t, database.Exec("ALTER TABLE tasks ADD COLUMN agent_config_name TEXT").Error)
-	require.NoError(t, database.Exec("ALTER TABLE runs ADD COLUMN agent_config_name TEXT").Error)
-
-	require.NoError(t, New(database).MigrateDropAgentConfigNames(context.Background()))
-
-	for _, table := range []string{"tasks", "runs"} {
-		var columns []struct{ Name string }
-		require.NoError(t, database.Raw("PRAGMA table_info("+table+")").Scan(&columns).Error)
-		for _, column := range columns {
-			require.NotEqual(t, "agent_config_name", column.Name, table)
-		}
-	}
-}

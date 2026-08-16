@@ -19,18 +19,11 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	revisionTable = "atlas_schema_revisions"
-	// Legacy installations may already contain the initial 43 tables. Baseline
-	// there, then execute the follow-up enum
-	// migrations so existing databases receive the same validation as fresh
-	// databases.
-	baselineMigration = "20260816000043"
-)
+const revisionTable = "atlas_schema_revisions"
 
 // Apply applies all pending embedded migrations for the database dialect.
-// Existing databases are adopted by recording the initial schema as a
-// baseline; new databases execute every table migration from an empty schema.
+// Databases without an Atlas revision history are expected to be new and are
+// initialized by applying the complete migration set from an empty schema.
 func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion string) error {
 	if database == nil {
 		return errors.New("database is nil")
@@ -50,34 +43,11 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 	}
 	defer dir.Close()
 
-	// The revision table is created before Atlas inspects the database. Atlas
-	// therefore sees a non-empty schema even on a brand-new database; the
-	// application-table check below decides whether that means baseline or a
-	// genuinely clean database.
-	options := []migrate.ExecutorOption{migrate.WithOperatorVersion(operatorVersion)}
-	revisions, err := store.ReadRevisions(ctx)
-	if err != nil {
-		return fmt.Errorf("read Atlas revisions: %w", err)
-	}
-	if len(revisions) == 0 {
-		dirty, err := hasApplicationTables(ctx, database, dialect)
-		if err != nil {
-			return fmt.Errorf("inspect database before baseline: %w", err)
-		}
-		if dirty {
-			// The first migration captures the schema already created by the
-			// legacy schema path. Mark the complete initial set as applied
-			// rather than attempting to recreate existing tables.
-			options = append(options, migrate.WithBaselineVersion(baselineMigration))
-		} else {
-			// The revision table is created before Atlas inspects the database,
-			// so a brand-new database is technically non-empty to Atlas.
-			options = append(options, migrate.WithAllowDirty(true))
-		}
-	} else {
-		// The revision table is expected to exist alongside the application
-		// schema on every subsequent run.
-		options = append(options, migrate.WithAllowDirty(true))
+	// The revision table is created before Atlas inspects the database, so a
+	// brand-new database is technically non-empty to Atlas.
+	options := []migrate.ExecutorOption{
+		migrate.WithOperatorVersion(operatorVersion),
+		migrate.WithAllowDirty(true),
 	}
 
 	executor, err := migrate.NewExecutor(drv, dir, store, options...)
@@ -102,26 +72,6 @@ func ApplyGORM(database *gorm.DB, dialect, operatorVersion string) error {
 		return fmt.Errorf("get SQL database: %w", err)
 	}
 	return Apply(context.Background(), sqlDB, dialect, operatorVersion)
-}
-
-func hasApplicationTables(ctx context.Context, database *sql.DB, dialect string) (bool, error) {
-	var present bool
-	switch dialect {
-	case "postgres":
-		err := database.QueryRowContext(ctx, `SELECT EXISTS (
-  SELECT 1 FROM information_schema.tables
-  WHERE table_schema = 'public' AND table_name <> $1
-)`, revisionTable).Scan(&present)
-		return present, err
-	case "sqlite":
-		err := database.QueryRowContext(ctx, `SELECT EXISTS (
-  SELECT 1 FROM sqlite_master
-  WHERE type = 'table' AND name <> ? AND name NOT LIKE 'sqlite_%'
-)`, revisionTable).Scan(&present)
-		return present, err
-	default:
-		return false, fmt.Errorf("unsupported database dialect %q", dialect)
-	}
 }
 
 func openDriver(database *sql.DB, dialect string) (migrate.Driver, error) {

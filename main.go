@@ -154,19 +154,6 @@ func main() {
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
 	}
-	if err := db.New(database).MigrateGitHubOAuth(context.Background()); err != nil {
-		// This migration removes obsolete plaintext GitHub token storage. Starting
-		// with it only partially applied would leave credentials exposed, so fail
-		// closed rather than serving the integration in an unknown state.
-		log.Fatalf("GitHub OAuth security migration failed: %v", err)
-	}
-	if err := db.New(database).MigrateDropAgentConfigNames(context.Background()); err != nil {
-		log.Fatalf("agent assignment schema migration failed: %v", err)
-	}
-	if err := db.New(database).EnsureGitHubConnectionUniqueness(context.Background()); err != nil {
-		log.Fatalf("GitHub connection index migration failed: %v", err)
-	}
-
 	// Builtin free-model providers (OpenRouter, OpenCode Zen) and the
 	// "Default Models" purposes are per-user: seeded at registration and, for
 	// every existing user, here at startup (covers upgrades adding new
@@ -196,22 +183,6 @@ func main() {
 	}
 	go refreshBuiltinLLMProviderModels(database)
 	go llmdiscovery.StartDailyModelRefreshScheduler(context.Background(), db.New(database), &http.Client{Timeout: 20 * time.Second})
-
-	// Repair codegraph servers whose project_id was not set on creation.
-	if err := db.New(database).RepairOrphanedCodegraphServers(context.Background()); err != nil {
-		log.Printf("Warning: codegraph repair failed: %v", err)
-	}
-
-	// Add FK constraint from mcp_servers.project_id → projects.id (SQLite table rebuild).
-	if err := db.New(database).MigrateAddProjectFKToMCPServers(context.Background()); err != nil {
-		log.Printf("Warning: mcp_servers FK migration: %v", err)
-	}
-
-	// Backfill the provider domain slug for rows created before the column
-	// existed, so tenant export/import can dedup providers by slug.
-	if err := db.New(database).BackfillProviderSlugs(context.Background()); err != nil {
-		log.Printf("Warning: provider slug backfill: %v", err)
-	}
 
 	// Secrets (provider API keys, MCP tokens, SSH keys) are sealed per-user under
 	// keys derived from each user's passkey, held only in memory while they're
