@@ -214,7 +214,7 @@ func repositoryStringArgument(repoName, methodName string, index, callIndex int)
 	case "GetModelGroupByKey":
 		return "fixture-group"
 	case "GetDefaultModelSetting", "UpdateDefaultModelSetting":
-		return "primary"
+		return repository.PurposeTaskOrchestrator
 	case "GetArtifactByTaskAndFilename":
 		return "fixture.md"
 	case "GetProviderPresetByKey":
@@ -414,7 +414,7 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&group)
 	groupMember := db.ModelGroupMember{ID: 1, GroupID: 1, ProviderID: 1, Model: "fixture-model"}
 	insert(&groupMember)
-	defaultSetting := db.DefaultModelSetting{ID: 1, Purpose: "primary", UserID: ptrInt32(1), ProviderID: ptrInt32(1), Model: "fixture-model", ModelGroupID: ptrInt32(1)}
+	defaultSetting := db.DefaultModelSetting{ID: 1, Purpose: repository.PurposeTaskOrchestrator, UserID: ptrInt32(1), ProviderID: ptrInt32(1), Model: "fixture-model", ModelGroupID: ptrInt32(1)}
 	insert(&defaultSetting)
 	agent := db.Agent{ID: 1, CompanyID: 1, Name: "fixture-agent", RoleKey: "fixture-agent", SystemPrompt: "integration", ProviderID: ptrInt32(1), ModelGroupID: ptrInt32(1), Model: "fixture-model", Mode: "primary", ChatType: "message_history"}
 	insert(&agent)
@@ -428,7 +428,7 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&thirdTask)
 	run := db.Run{ID: 1, TaskID: 1, AgentID: 1, Name: "fixture-run", Status: "running", SessionID: "fixture-session", StartedAt: now, LastMessageTime: ptrTime(now)}
 	insert(&run)
-	completedRun := db.Run{ID: 2, TaskID: 2, AgentID: 1, Name: "fixture-completed-run", Status: "done", SessionID: "fixture-session-done", StartedAt: now.Add(-time.Hour), EndedAt: ptrTime(now.Add(-time.Minute))}
+	completedRun := db.Run{ID: 2, TaskID: 2, AgentID: 1, Name: "fixture-completed-run", Status: "completed", SessionID: "fixture-session-done", StartedAt: now.Add(-time.Hour), EndedAt: ptrTime(now.Add(-time.Minute))}
 	insert(&completedRun)
 	runEvent := db.RunEvent{ID: 1, TaskID: 1, RunID: 1, EventType: db.RunEventTypeLifecycleStatus, Payload: "{}", DedupeKey: "event-1", CreatedAt: now}
 	insert(&runEvent)
