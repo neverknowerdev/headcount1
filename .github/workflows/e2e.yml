@@ -74,11 +74,14 @@ jobs:
     # schema (for example, one missing task_relations).
     - name: Reapply PostgreSQL migrations after integration tests
       timeout-minutes: 5
-      uses: ariga/atlas-action/migrate/apply@v1
-      with:
-        dir: file://db/migrations/postgres?format=golang-migrate
-        url: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
-        revisions-schema: public
+      run: |
+        PGPASSWORD=postgres psql \
+          --host=localhost --port=5432 --username=postgres --dbname=orchestrator \
+          --command='DROP SCHEMA public CASCADE; CREATE SCHEMA public;'
+        atlas migrate apply \
+          --dir 'file://db/migrations/postgres?format=golang-migrate' \
+          --url 'postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable' \
+          --revisions-schema public
 
     - name: Install Frontend Dependencies
       timeout-minutes: 5
