@@ -67,6 +67,6 @@ type LLMProvider struct {
 // derived from the fields that make one provider "the same" as another
 // (builtin vendor name, preset key, or name+base URL). Unlike the DB id it
 // survives an export/import into a different database, so tenant restore can
-// dedup providers by slug instead of duplicating them. Set by BeforeCreate;
-// deterministic so
+// dedup providers by slug instead of duplicating them. Set by BeforeCreate
+// and backfilled for existing rows (BackfillProviderSlugs); deterministic so
 // two independently-seeded accounts share a slug for the same builtin.

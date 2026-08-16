@@ -19,7 +19,7 @@ make build
 This creates an executable file named `agent-orchestrator`.
 
 ### 2. Running the Server
-You can run the generated binary directly. By default, it will create a local SQLite database at `~/.headcount1/headcount1.db` and set up the current schema on startup!
+You can run the generated binary directly. By default, it will create a local SQLite database at `~/.headcount1/headcount1.db` and perform automatic migrations on startup!
 
 ```sh
 ./agent-orchestrator

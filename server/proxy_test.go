@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"net/http"
 	"net/http/httptest"
@@ -19,7 +20,7 @@ import (
 func TestProxyChatCompletionsStreamUsage(t *testing.T) {
 	// Setup DB
 	database, _ := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	db.EnsureSchema(database)
+	migrations.ApplyGORM(database, "sqlite", "test")
 
 	comp := db.Company{Name: "Test"}
 	database.Create(&comp)

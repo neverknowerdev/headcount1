@@ -1,6 +1,7 @@
 package logging_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"os"
@@ -24,7 +25,7 @@ func setupLoggerTest(t *testing.T) (*logging.ProxyLogger, *db.Queries, int32, st
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
 
 	run, err := q.CreateRun(context.Background(), db.Run{TaskID: 1, AgentID: 1, Status: "running"})

@@ -4,6 +4,7 @@ import (
 	. "agent-orchestrator/db/models"
 	"context"
 	"encoding/json"
+	"fmt"
 	"gorm.io/gorm"
 	"log"
 	"os/exec"
@@ -88,6 +89,25 @@ func (q *MCPServerRepository) ListCodegraphProjectServers(ctx context.Context, c
 		result = append(result, CodegraphProjectServer{Project: proj, Server: s})
 	}
 	return result, nil
+}
+func (q *MCPServerRepository) RepairOrphanedCodegraphServers(ctx context.Context) error {
+	var servers []MCPServer
+	if err := q.db.WithContext(ctx).Where("project_id IS NULL AND name LIKE 'codegraph-%'").Find(&servers).Error; err != nil {
+		return err
+	}
+	for _, s := range servers {
+		var projectID int32
+		if _, err := fmt.Sscanf(s.Name, "codegraph-%d", &projectID); err != nil || projectID == 0 {
+			continue
+		}
+		var proj Project
+		if err := q.db.WithContext(ctx).First(&proj, projectID).Error; err != nil {
+			continue
+		}
+		q.db.WithContext(ctx).Model(&MCPServer{}).Where("id = ?", s.ID).Update("project_id", projectID)
+		log.Printf("codegraph repair: linked server %d (%s) to project %d", s.ID, s.Name, projectID)
+	}
+	return nil
 }
 func (q *MCPServerRepository) ListPendingCodegraphServers(ctx context.Context) ([]CodegraphProjectServer, error) {
 	var servers []MCPServer
@@ -176,4 +196,19 @@ func (q *MCPServerRepository) ListAllMCPNpmDeps(ctx context.Context) ([]string, 
 		}
 	}
 	return result, nil
+}
+func (q *MCPServerRepository) MigrateAddProjectFKToMCPServers(ctx context.Context) error {
+	if q.db.Dialector.Name() != "sqlite" {
+		return nil
+	}
+	var ddl string
+	q.db.WithContext(ctx).Raw(`SELECT COALESCE(sql,'') FROM sqlite_master WHERE type='table' AND name='mcp_servers'`).Scan(&ddl)
+	lower := strings.ToLower(ddl)
+	if strings.Contains(lower, "references") && strings.Contains(lower, "projects") {
+		return nil
+	}
+	if err := q.db.WithContext(ctx).Where("project_id IS NOT NULL AND project_id NOT IN (SELECT id FROM projects)").Delete(&MCPServer{}).Error; err != nil {
+		return fmt.Errorf("purge orphans: %w", err)
+	}
+	return q.db.WithContext(ctx).Migrator().CreateConstraint(&MCPServer{}, "Project")
 }

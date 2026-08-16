@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"agent-orchestrator/db/migrations"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,8 +21,8 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 	}
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	if err := db.EnsureSchema(database); err != nil {
-		t.Fatalf("schema setup: %v", err)
+	if err := migrations.ApplyGORM(database, "sqlite", "test"); err != nil {
+		t.Fatalf("migrate: %v", err)
 	}
 	return database
 }

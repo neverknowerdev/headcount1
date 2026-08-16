@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 
@@ -18,7 +19,7 @@ func TestAssignRunName(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
 	t.Cleanup(func() { _ = sqlDB.Close() })
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)

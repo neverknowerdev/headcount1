@@ -116,8 +116,8 @@ func (q *RunRepository) ListDescendantRuns(ctx context.Context, rootRunID int32)
 }
 
 // rootTaskID returns the task-tree root used as the orchestrator inbox key.
-// An incomplete task row falls back to the run's own task so status reporting
-// remains available in isolated unit tests.
+// A missing/partially migrated task row falls back to the run's own task so
+// status reporting remains available during upgrades and isolated unit tests.
 func (q *RunRepository) rootTaskID(ctx context.Context, taskID int32) int32 {
 	root := taskID
 	for hops := 0; hops < 20; hops++ {

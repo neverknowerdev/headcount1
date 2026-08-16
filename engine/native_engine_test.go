@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -45,7 +46,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	// concurrent session work, and SQLite otherwise turns transient write
 	// contention into lost test observations.
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

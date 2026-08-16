@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"testing"
 
 	"agent-orchestrator/db"
@@ -17,7 +18,7 @@ func setupModelGroupTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

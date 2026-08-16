@@ -3,6 +3,7 @@ package repository
 import (
 	. "agent-orchestrator/db/models"
 	"context"
+	"fmt"
 	"gorm.io/gorm"
 )
 
@@ -33,4 +34,15 @@ func (q *GitHubConnectionRepository) GetGitHubConnectionForAccountInstallation(c
 }
 func (q *GitHubConnectionRepository) UpsertGitHubConnection(ctx context.Context, connection GitHubConnection) error {
 	return q.db.WithContext(ctx).Where("mcp_account_id = ? AND installation_id = ?", connection.MCPAccountID, connection.InstallationID).Assign(connection).FirstOrCreate(&connection).Error
+}
+func (q *GitHubConnectionRepository) EnsureGitHubConnectionUniqueness(ctx context.Context) error {
+	database := q.db.WithContext(ctx)
+	table := database.NamingStrategy.TableName("GitHubConnection")
+	if err := database.Exec("DELETE FROM " + table + " WHERE id NOT IN (SELECT MIN(id) FROM " + table + " GROUP BY mcp_account_id, installation_id)").Error; err != nil {
+		return fmt.Errorf("deduplicate GitHub connections: %w", err)
+	}
+	if err := database.Exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_github_connection_account_installation ON " + table + " (mcp_account_id, installation_id)").Error; err != nil {
+		return fmt.Errorf("create GitHub connection uniqueness index: %w", err)
+	}
+	return nil
 }

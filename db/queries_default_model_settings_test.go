@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 
@@ -16,7 +17,7 @@ import (
 // purpose a user has since configured.
 func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) {
 	database := setupModelGroupTestDB(t)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
 	ctx := context.Background()
 

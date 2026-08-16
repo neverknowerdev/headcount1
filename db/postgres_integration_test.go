@@ -1,7 +1,7 @@
 package db_test
 
-// This is a full-surface integration test that creates the production schema
-// and exercises the query layer against a REAL PostgreSQL
+// This is a full-surface integration test that runs the embedded production
+// migrations and exercises the query layer against a REAL PostgreSQL
 // database. It is skipped unless TEST_POSTGRES_URL is set, e.g.:
 //
 //	TEST_POSTGRES_URL="postgres://postgres@127.0.0.1:5433/orchestrator?sslmode=disable" \
@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/migrations"
 	"agent-orchestrator/pkg/secrets"
 
 	"github.com/stretchr/testify/require"
@@ -36,9 +37,11 @@ func openPostgres(t *testing.T) *gorm.DB {
 	return database
 }
 
-func applyPostgresSchema(t *testing.T, database *gorm.DB) {
+func applyPostgresMigrations(t *testing.T, database *gorm.DB) {
 	t.Helper()
-	require.NoError(t, db.EnsureSchema(database))
+	sqlDB, err := database.DB()
+	require.NoError(t, err)
+	require.NoError(t, migrations.Apply(context.Background(), sqlDB, "postgres", "integration-test"))
 }
 
 // dropEverything drops the application schema so each run starts clean.
@@ -52,7 +55,7 @@ func dropEverything(t *testing.T, database *gorm.DB) {
 func TestPostgresQuerySurface(t *testing.T) {
 	database := openPostgres(t)
 	dropEverything(t, database)
-	applyPostgresSchema(t, database)
+	applyPostgresMigrations(t, database)
 	q := db.New(database)
 	ctx := context.Background()
 
@@ -120,6 +123,9 @@ func TestPostgresQuerySurface(t *testing.T) {
 	filters, err := q.GetAgentMCPToolFilters(ctx, agent.ID)
 	require.NoError(t, err)
 	require.Equal(t, false, filters[srv.ID]["search_code"], "Enabled=false must persist")
+
+	// ── FK-constraint rebuild migration (must no-op on Postgres) ──────────
+	require.NoError(t, q.MigrateAddProjectFKToMCPServers(ctx), "MigrateAddProjectFKToMCPServers")
 
 	// ── Run key uniqueness query (LIKE with a suffix wildcard) ────────────
 	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "working", 1))

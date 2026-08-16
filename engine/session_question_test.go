@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"errors"
@@ -237,7 +238,7 @@ func TestAnswerSessionQuestionPropagatesTimeoutError(t *testing.T) {
 func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", ShortName: "WRK"}
@@ -270,7 +271,7 @@ func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker"}

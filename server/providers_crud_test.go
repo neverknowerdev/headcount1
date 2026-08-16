@@ -1,6 +1,7 @@
 package server
 
 import (
+	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,7 +24,7 @@ func setupProvidersTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, db.EnsureSchema(database))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 
