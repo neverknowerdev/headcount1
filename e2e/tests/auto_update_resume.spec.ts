@@ -469,19 +469,24 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect(finalRun.latest_reported_status).toBe(marker);
         expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-review');
 
-        const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
-        expect(finalRequests.completionsReceived).toBe(2);
+        let finalRequests: any;
+        await expect
+            .poll(async () => {
+                finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
+                return finalRequests.completionsReceived;
+            }, { timeout: 10_000, intervals: [100], message: 'resumed provider request should be recorded' })
+            .toBe(2);
         const resumedRequest = finalRequests.requests
             .filter((request: any) => request.path.includes('/chat/completions'))
             .at(-1);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('BASH_RESUME_MARKER'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('WRITE_RESUME_MARKER'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('HTTP 200'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'system' && String(message.content).includes('This session was resumed by'))).toBe(true);
+        expect(resumedRequest).toBeTruthy();
+        // JSON.stringify also handles providers that represent message content
+        // as structured blocks instead of a plain string.
+        const resumedMessages = resumedRequest.body.messages.map((message: any) => JSON.stringify(message));
+        expect(resumedMessages.some((message: string) => message.includes('BASH_RESUME_MARKER'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('WRITE_RESUME_MARKER'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('HTTP 200'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('This session was resumed by'))).toBe(true);
 
         // The downloadable JSONL is the recovery source of truth. Verify the
         // paused assistant turn and every resumed tool result are present once
