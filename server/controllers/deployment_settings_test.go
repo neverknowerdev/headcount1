@@ -1,7 +1,6 @@
 package endpoints
 
 import (
-	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -26,7 +25,7 @@ func setupDeploymentSettingsTest(t *testing.T) (*gorm.DB, *API, db.User, db.User
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 
 	q := db.New(database)
 	first, err := q.CreateUser(context.Background(), "admin@test.local")

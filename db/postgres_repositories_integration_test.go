@@ -34,14 +34,12 @@ var (
 // TestPostgresRepositoryQueries invokes every exported method on every
 // repository against PostgreSQL.  Each ordinary query runs inside a rollback
 // transaction, so create/update/delete methods can all be exercised against
-// the same fixture without making test order part of correctness.  Migration
-// helpers are run directly because DDL cannot be rolled back reliably across
-// PostgreSQL versions.
+// the same fixture without making test order part of correctness.
 func TestPostgresRepositoryQueries(t *testing.T) {
 	database := openPostgres(t)
 	t.Cleanup(func() { dropEverything(t, database) })
 	dropEverything(t, database)
-	applyPostgresMigrations(t, database)
+	applyPostgresSchema(t, database)
 	database.Logger = logger.Default.LogMode(logger.Silent)
 	fixtures := seedRepositoryFixtures(t, database)
 	resetPostgresSequences(t, database)
@@ -77,14 +75,10 @@ func TestPostgresRepositoryQueries(t *testing.T) {
 				t.Run(methodName, func(t *testing.T) {
 					cleanupFixture := prepareRepositoryMethodFixture(t, database, repo.name, methodName)
 					defer cleanupFixture()
-					migrationHelper := strings.HasPrefix(methodName, "Migrate")
-					callDB := database
-					if !migrationHelper {
-						tx := database.Begin()
-						require.NoError(t, tx.Error)
-						defer tx.Rollback()
-						callDB = tx
-					}
+					tx := database.Begin()
+					require.NoError(t, tx.Error)
+					defer tx.Rollback()
+					callDB := tx
 					queries := db.New(callDB)
 					repoValue := reflect.ValueOf(queries).Elem().Field(repo.field).Interface()
 					method := reflect.ValueOf(repoValue).MethodByName(methodName)

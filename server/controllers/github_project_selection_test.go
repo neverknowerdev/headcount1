@@ -1,7 +1,6 @@
 package endpoints
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -64,7 +63,7 @@ func TestAuthenticatedGitHubEndpointsRejectMissingUserContext(t *testing.T) {
 func TestGitHubCallbackDoesNotConsumeAnotherUsersState(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	state := db.GitHubOAuthState{ID: "state", UserID: 10, MCPServerID: 1, ExpiresAt: time.Now().Add(time.Minute)}
 	require.NoError(t, database.Create(&state).Error)
 	request := httptest.NewRequest(http.MethodGet, "/github/callback?state=state&code=code", nil)
@@ -80,7 +79,7 @@ func TestGitHubCallbackDoesNotConsumeAnotherUsersState(t *testing.T) {
 func TestGitHubCallbackRejectsStateForNonBuiltinGitHubServerBeforeClaim(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	user := db.User{ID: 10}
 	lookalike := db.MCPServer{Name: "github-lookalike", AuthType: db.MCPAuthTypeGitHubApp, Builtin: false}
 	require.NoError(t, database.Create(&lookalike).Error)
@@ -99,7 +98,7 @@ func TestGitHubCallbackRejectsStateForNonBuiltinGitHubServerBeforeClaim(t *testi
 func TestGitHubOAuthAccountUsesAuthenticatedGitHubLoginAsName(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	user := db.User{Email: "user@example.test"}
 	server := db.MCPServer{Name: db.MCPServerNameGitHub, AuthType: db.MCPAuthTypeGitHubApp, Builtin: true}
 	require.NoError(t, database.Create(&user).Error)
@@ -128,7 +127,7 @@ func TestGitHubOAuthAccountUsesAuthenticatedGitHubLoginAsName(t *testing.T) {
 func TestGitHubAccountChooserIsOnlyUsedWhenAddingAnotherAccount(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	api := NewAPI(database, nil, nil)
 
 	selectAccount, err := api.shouldSelectGitHubAccount(t.Context(), 7, 11, 0)

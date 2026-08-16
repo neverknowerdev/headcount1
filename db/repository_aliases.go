@@ -2,7 +2,7 @@ package db
 
 import "agent-orchestrator/db/repository"
 
-// Repository-owned values are re-exported from db during the migration so
+// Repository-owned values are re-exported from db for compatibility so
 // existing callers keep the stable db API while persistence is organized in
 // db/repository.
 type GitHubInstallationRecord = repository.GitHubInstallationRecord

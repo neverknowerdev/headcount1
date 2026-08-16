@@ -1,7 +1,6 @@
 package endpoints
 
 import (
-	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"io"
@@ -51,7 +50,7 @@ func TestGitHubWebhookDeliveryLeaseRejectsConcurrentAndProtectsStaleAttempt(t *t
 	require.Greater(t, githubWebhookLeaseDuration, githubWebhookWakeTimeout)
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	api := NewAPI(database, nil, nil)
 	first, complete, err := api.claimGitHubWebhookDelivery(context.Background(), "lease-1", "issue_comment")
 	require.NoError(t, err)

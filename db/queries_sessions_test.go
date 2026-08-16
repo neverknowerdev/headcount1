@@ -1,7 +1,6 @@
 package db_test
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 	"time"
@@ -18,7 +17,7 @@ func setupSessionTestDB(t *testing.T) (*db.Queries, *gorm.DB) {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	return db.New(database), database
 }
 

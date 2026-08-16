@@ -1,7 +1,6 @@
 package db_test
 
 import (
-	"agent-orchestrator/db/migrations"
 	"testing"
 	"time"
 
@@ -15,7 +14,7 @@ import (
 func TestGitHubQueriesKeepAccountsIsolatedByUserAndBuiltinServer(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 
 	owner := db.User{Email: "owner@example.test"}
@@ -55,7 +54,7 @@ func TestGitHubQueriesKeepAccountsIsolatedByUserAndBuiltinServer(t *testing.T) {
 func TestSaveGitHubOAuthAccountCannotReauthenticateAnotherUsersAccount(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 	ownerID, attackerID := int32(1), int32(2)
 	server := db.MCPServer{Name: db.MCPServerNameGitHub, AuthType: db.MCPAuthTypeGitHubApp, Builtin: true}
@@ -76,7 +75,7 @@ func TestSaveGitHubOAuthAccountCannotReauthenticateAnotherUsersAccount(t *testin
 func TestSaveGitHubOAuthAccountRejectsDuplicateIdentityForSameUser(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 	userID := int32(7)
 	server := db.MCPServer{Name: db.MCPServerNameGitHub, AuthType: db.MCPAuthTypeGitHubApp, Builtin: true}
@@ -97,7 +96,7 @@ func TestSaveGitHubOAuthAccountRejectsDuplicateIdentityForSameUser(t *testing.T)
 func TestGitHubInstallationLookupIsScopedToTheAccountOwner(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 	ownerID, otherID := int32(1), int32(2)
 	account := db.MCPAccount{Name: "owner", UserID: &ownerID}

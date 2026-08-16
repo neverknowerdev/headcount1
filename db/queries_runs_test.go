@@ -1,7 +1,6 @@
 package db
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 	"time"
@@ -15,7 +14,7 @@ import (
 func TestGetRunWithTaskPreloadsAgent(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
@@ -38,7 +37,7 @@ func TestGetRunWithTaskPreloadsAgent(t *testing.T) {
 func TestRunRecoveryIsOneSerializedDocument(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	require.True(t, database.Migrator().HasColumn(&Run{}, "recovery"))
 	for _, legacyColumn := range []string{
 		"checkpoint_sequence", "checkpoint_version", "checkpoint_phase",
@@ -68,7 +67,7 @@ func TestRunRecoveryIsOneSerializedDocument(t *testing.T) {
 func TestRunResumeClaimIsAtomicAndPreservesCheckpoint(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
@@ -104,7 +103,7 @@ func TestRunResumeClaimIsAtomicAndPreservesCheckpoint(t *testing.T) {
 func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
@@ -155,7 +154,7 @@ func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
 func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	run := Run{TaskID: 1, AgentID: 1, Status: "running", StartedAt: time.Now().Add(-time.Hour)}
 	require.NoError(t, database.Create(&run).Error)
 	q := New(database)
@@ -175,7 +174,7 @@ func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
 func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	q := New(database)
 	event := RunEvent{TaskID: 7, RunID: 9, EventType: RunEventTypeLifecycleStatus, Payload: "failed", DedupeKey: "run:9:status:failed"}
 	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
@@ -192,7 +191,7 @@ func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
 func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	run := Run{TaskID: 7, AgentID: 9, Status: "running"}
 	require.NoError(t, database.Create(&run).Error)
 	q := New(database)
@@ -222,7 +221,7 @@ func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
 func TestRunStatusReportEnqueuesOrchestratorEvent(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	parent := Run{TaskID: 7, AgentID: 9, Status: "running"}
 	require.NoError(t, database.Create(&parent).Error)
 	worker := Run{TaskID: parent.TaskID, AgentID: parent.AgentID, Status: "running", ParentRunID: &parent.ID, RootRunID: &parent.ID}
@@ -242,7 +241,7 @@ func TestRunStatusReportEnqueuesOrchestratorEvent(t *testing.T) {
 func TestRunStatusReportRoutesNestedTaskEventToRootInbox(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	parentTask := Task{CompanyID: 1, Title: "root"}
 	require.NoError(t, database.Create(&parentTask).Error)
 	childTask := Task{CompanyID: 1, ParentID: &parentTask.ID, Title: "child"}

@@ -1,7 +1,6 @@
 package filesystem
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"os"
 	"path/filepath"
@@ -21,7 +20,7 @@ func TestResolveSSHKeyPath(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 	ctx := context.Background()
 	base := t.TempDir()

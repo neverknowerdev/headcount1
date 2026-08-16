@@ -1,1 +1,0 @@
-ALTER TABLE `runs` ADD COLUMN `__enum_guard_status` INTEGER NOT NULL DEFAULT 1 CHECK (`status` IN ('running', 'completed', 'failed', 'canceled', 'paused', 'recoverable_failed', 'stale', 'resuming', 'waiting', 'interrupted'));

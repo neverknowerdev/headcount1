@@ -1,7 +1,6 @@
 package db
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 
@@ -14,7 +13,7 @@ func relationFixture(t *testing.T) (*Queries, Company, Task, Task, Task) {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, EnsureSchema(database))
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
 	sprint := Sprint{CompanyID: company.ID, Name: "Sprint"}

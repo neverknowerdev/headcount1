@@ -1,7 +1,6 @@
 package engine
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,7 +29,7 @@ func TestStatusReportFreshnessWindow(t *testing.T) {
 func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:orchestrator-prompt-context?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme Labs", ShortName: "ACME", Description: "Builds privacy-first analytics for clinics."}
 	require.NoError(t, database.Create(&company).Error)
 	project := db.Project{CompanyID: company.ID, Name: "Care Portal", Description: "Patient-facing reporting portal", RepositoryUrl: "https://example.test/care-portal"}
@@ -65,7 +64,7 @@ func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testi
 func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
@@ -103,7 +102,7 @@ func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 func TestGetSessionReturnsLatestAndCompleteStatusHistory(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:session-details?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
@@ -147,7 +146,7 @@ func TestGetSessionReturnsLatestAndCompleteStatusHistory(t *testing.T) {
 func TestGetSessionAggregatesNestedSessionStatuses(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:nested-session-status?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	cto := db.Agent{CompanyID: company.ID, Name: "CTO", RoleKey: "CTO", ShortName: "CTO"}
@@ -183,7 +182,7 @@ func TestGetSessionAggregatesNestedSessionStatuses(t *testing.T) {
 func TestGetSessionNestedStatusDepthIsBounded(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:nested-status-depth?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", RoleKey: "WORKER", ShortName: "WRK"}
@@ -218,7 +217,7 @@ func TestGetSessionNestedStatusDepthIsBounded(t *testing.T) {
 func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", ShortName: "WRK", RoleKey: "WORKER"}
@@ -263,7 +262,7 @@ func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 func TestOrchestratorForkRejectsUnsafeAndOutOfTreeRequests(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker"}

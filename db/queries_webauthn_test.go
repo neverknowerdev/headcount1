@@ -1,7 +1,6 @@
 package db_test
 
 import (
-	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 	"time"
@@ -20,7 +19,7 @@ func setupWebAuthnTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	return database
 }
 
@@ -90,7 +89,7 @@ func TestCryptoShredUserWipesSecretsKeepsAccount(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	require.NoError(t, db.EnsureSchema(database))
 	q := db.New(database)
 	ctx := context.Background()
 

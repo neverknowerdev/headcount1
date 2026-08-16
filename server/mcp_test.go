@@ -1,7 +1,6 @@
 package server
 
 import (
-	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -24,7 +23,7 @@ func setupMCPTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	err = migrations.ApplyGORM(database, "sqlite", "test")
+	err = db.EnsureSchema(database)
 	require.NoError(t, err)
 	return database
 }

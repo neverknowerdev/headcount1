@@ -4,8 +4,8 @@ import "time"
 
 type GitHubConnection struct {
 	ID             int32     `json:"id" gorm:"primaryKey"`
-	InstallationID int64     `json:"installation_id" gorm:"index"`
-	MCPAccountID   int32     `json:"mcp_account_id" gorm:"index"`
+	InstallationID int64     `json:"installation_id" gorm:"index;uniqueIndex:idx_github_connection_account_installation"`
+	MCPAccountID   int32     `json:"mcp_account_id" gorm:"index;uniqueIndex:idx_github_connection_account_installation"`
 	UserID         int32     `json:"user_id" gorm:"index"`
 	AccountLogin   string    `json:"account_login"`
 	ConnectedAt    time.Time `json:"connected_at"`

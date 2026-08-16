@@ -10,12 +10,10 @@ package backup
 // insert collides with a restored row. This test reproduces exactly that path.
 
 import (
-	"context"
 	"os"
 	"testing"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/db/migrations"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -37,12 +35,8 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 	if err := database.Exec("CREATE SCHEMA public").Error; err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	sqlDB, err := database.DB()
-	if err != nil {
-		t.Fatalf("database handle: %v", err)
-	}
-	if err := migrations.Apply(context.Background(), sqlDB, "postgres", "integration-test"); err != nil {
-		t.Fatalf("migrate: %v", err)
+	if err := db.EnsureSchema(database); err != nil {
+		t.Fatalf("schema setup: %v", err)
 	}
 	return database
 }
