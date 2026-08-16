@@ -124,9 +124,6 @@ func TestPostgresQuerySurface(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, false, filters[srv.ID]["search_code"], "Enabled=false must persist")
 
-	// ── FK-constraint rebuild migration (must no-op on Postgres) ──────────
-	require.NoError(t, q.MigrateAddProjectFKToMCPServers(ctx), "MigrateAddProjectFKToMCPServers")
-
 	// ── Run key uniqueness query (LIKE with a suffix wildcard) ────────────
 	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "working", 1))
 

@@ -24,29 +24,6 @@ func TaskGitBranch(refKey string, taskID int32) string {
 	return taskGitBranchPrefix + refKey
 }
 
-// MigrateDropAgentConfigNames removes the retired file-config selectors from
-// existing databases. Runtime task and run assignment is now represented only
-// by AgentID.
-func (q *TaskRepository) MigrateDropAgentConfigNames(ctx context.Context) error {
-	database := q.db.WithContext(ctx)
-	for _, item := range []struct {
-		model any
-		name  string
-	}{
-		{model: &Task{}, name: "Task"},
-		{model: &Run{}, name: "Run"},
-	} {
-		if !database.Migrator().HasColumn(item.model, "agent_config_name") {
-			continue
-		}
-		table := database.NamingStrategy.TableName(item.name)
-		if err := database.Exec("ALTER TABLE " + table + " DROP COLUMN agent_config_name").Error; err != nil {
-			return fmt.Errorf("drop %s.agent_config_name: %w", table, err)
-		}
-	}
-	return nil
-}
-
 func (q *TaskRepository) CreateTask(ctx context.Context, t Task) (Task, error) {
 	err := q.db.WithContext(ctx).Create(&t).Error
 	if err != nil {
@@ -145,28 +122,6 @@ func (q *TaskRepository) computeTaskRefKey(ctx context.Context, t Task) (string,
 		}
 	}
 	return fmt.Sprintf("%s-%d", parentRef, maxIdx+1), nil
-}
-
-func (q *TaskRepository) BackfillTaskRefKeys(ctx context.Context) error {
-	for _, scope := range []string{"parent_id IS NULL", "parent_id IS NOT NULL"} {
-		var tasks []Task
-		if err := q.db.WithContext(ctx).
-			Where("(ref_key = '' OR ref_key IS NULL) AND " + scope).
-			Order("id asc").
-			Find(&tasks).Error; err != nil {
-			return err
-		}
-		for _, t := range tasks {
-			key, err := q.computeTaskRefKey(ctx, t)
-			if err != nil || key == "" {
-				continue
-			}
-			if err := q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", t.ID).Update("ref_key", key).Error; err != nil {
-				return err
-			}
-		}
-	}
-	return nil
 }
 
 func (q *TaskRepository) UpdateTask(ctx context.Context, t Task) (Task, error) {

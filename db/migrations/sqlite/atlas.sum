@@ -1,4 +1,4 @@
-h1:55X6XOwCnika1ktigS1xMklZHkTiBsQcA3HgoFwnqWo=
+h1:rqOhUnZ1rQAtuj4QQJ7SR58td3qduJDCbTs7kFG2LkM=
 20260816000001_users.up.sql h1:jBhcs/9Wd51UU/AKincyLRhGKQQTp6TOW6dG23BR/us=
 20260816000002_teams.up.sql h1:pvBKvsdpLFCUMcbP0vNok9xYBC7d1oylm0+u9DT3lBA=
 20260816000003_companies.up.sql h1:TwBvGoR1K1so/7c+Rnz3rbfFPdSeCbLQHSaq2Fheagc=
@@ -52,3 +52,4 @@ h1:55X6XOwCnika1ktigS1xMklZHkTiBsQcA3HgoFwnqWo=
 20260816000051_default_model_setting_purpose_enum.up.sql h1:WStYOY7TbszAeL3XtgaW8BG/gbGbCMdrPdc9UWOJiYM=
 20260816000052_github_webhook_delivery_status_enum.up.sql h1:A+y1iKM5zFAuqun8xhx1oDbuWIX94htAtXaBYiczs8I=
 20260816000053_github_webhook_target_wake_status_enum.up.sql h1:bqS7A0qPybglbdyEXjz5ZAsSoY72mh1t0GqpzrpYQwI=
+20260816000054_github_connection_account_installation_unique.up.sql h1:tqR5BhYSkyfrLOebgUB18fk+yl05qwQF92ZlapAPr+4=

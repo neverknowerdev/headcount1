@@ -639,17 +639,3 @@ func (q *RunRepository) MarkRunRecoverable(ctx context.Context, runID int32, sta
 		"status": status, "recovery": recoveryJSON(run.Recovery),
 	}).Error
 }
-
-// ResumeRun is the legacy helper retained for compatibility with older
-// callers. New code should claim first and call MarkRunResumeStarted.
-func (q *RunRepository) ResumeRun(ctx context.Context, runID int32) error {
-	now := time.Now()
-	var run Run
-	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
-		return err
-	}
-	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
-		"status": "running", "last_message_time": &now,
-		"recovery": recoveryJSON(RunRecovery{ResumeAttempts: run.Recovery.ResumeAttempts}),
-	}).Error
-}
