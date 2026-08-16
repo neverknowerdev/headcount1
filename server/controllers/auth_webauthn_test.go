@@ -1,6 +1,7 @@
 package endpoints
 
 import (
+	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,13 +24,7 @@ func setupAuthTestDB(t *testing.T) (*gorm.DB, *API) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.WebAuthnCredential{}, &db.WebAuthnSession{},
-		&db.Team{}, &db.TeamMember{}, &db.TeamInvite{},
-		&db.LLMProvider{}, &db.DefaultModelSetting{},
-		&db.PasswordResetToken{}, &db.RefreshToken{}, &db.MCPServer{}, &db.MCPAccount{},
-		&db.UserGitCredential{},
-	))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database, NewAPI(database, nil, nil)
 }
 

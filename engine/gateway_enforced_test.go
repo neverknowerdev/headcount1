@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"net/http"
 	"net/url"
@@ -28,7 +29,7 @@ import (
 func TestNativeEngineGroupModeThroughEnforcedGateway(t *testing.T) {
 	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
 	database := setupTestDB(t)
-	require.NoError(t, database.AutoMigrate(&db.ModelRequestStat{}, &db.User{}, &db.Session{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	task := seedTestData(t, database, mockSrv.URL)
 	q := db.New(database)
 	ctx := context.Background()

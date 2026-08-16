@@ -1,6 +1,7 @@
 package db
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 
@@ -16,7 +17,7 @@ func setupUsersTestDB(t *testing.T) *gorm.DB {
 	sqlDB, err := database.DB()
 	require.NoError(t, err)
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&User{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

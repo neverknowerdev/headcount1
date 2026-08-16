@@ -16,12 +16,13 @@ import (
 	"ariga.io/atlas/sql/postgres"
 	"ariga.io/atlas/sql/schema"
 	"ariga.io/atlas/sql/sqlite"
+	"gorm.io/gorm"
 )
 
 const (
 	revisionTable = "atlas_schema_revisions"
-	// Legacy installations were created by AutoMigrate and already contain
-	// the initial 43 tables. Baseline there, then execute the follow-up enum
+	// Legacy installations may already contain the initial 43 tables. Baseline
+	// there, then execute the follow-up enum
 	// migrations so existing databases receive the same validation as fresh
 	// databases.
 	baselineMigration = "20260816000043"
@@ -65,7 +66,7 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 		}
 		if dirty {
 			// The first migration captures the schema already created by the
-			// legacy AutoMigrate path. Mark the complete initial set as applied
+			// legacy schema path. Mark the complete initial set as applied
 			// rather than attempting to recreate existing tables.
 			options = append(options, migrate.WithBaselineVersion(baselineMigration))
 		} else {
@@ -87,6 +88,20 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 		return fmt.Errorf("apply Atlas migrations: %w", err)
 	}
 	return nil
+}
+
+// ApplyGORM adapts a GORM database handle to the embedded migration runner.
+// It exists for callers that already use GORM for queries; schema creation is
+// still performed exclusively by Atlas migrations.
+func ApplyGORM(database *gorm.DB, dialect, operatorVersion string) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return fmt.Errorf("get SQL database: %w", err)
+	}
+	return Apply(context.Background(), sqlDB, dialect, operatorVersion)
 }
 
 func hasApplicationTables(ctx context.Context, database *sql.DB, dialect string) (bool, error) {

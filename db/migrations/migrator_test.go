@@ -30,7 +30,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
 	require.Equal(t, 53, revisions)
 
-	// Simulate a legacy AutoMigrate database: retain all application tables but
+	// Simulate a legacy pre-Atlas database: retain all application tables but
 	// remove Atlas's revision history. The runner must baseline the initial
 	// schema and still execute the follow-up enum migrations.
 	for _, statement := range []string{
