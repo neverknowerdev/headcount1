@@ -90,7 +90,9 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const child = server;
         if (!child) return;
         await terminateProcess(child, { group: true, timeoutMs: 4_000 });
-        server = null;
+        // Keep the exited child available to callers for exit-code assertions.
+        // The next startServer call replaces this handle, and callers already
+        // use `exitCode !== null` to decide whether a restart is needed.
     }
 
     async function postJSON(url: string, data: unknown): Promise<any> {
