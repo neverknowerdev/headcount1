@@ -42,7 +42,10 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	database, err := gorm.Open(sqlite.Open(dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
-	sqlDB.SetMaxOpenConns(4)
+	// Keep the test database single-writer. NativeEngine deliberately performs
+	// concurrent session work, and SQLite otherwise turns transient write
+	// contention into lost test observations.
+	sqlDB.SetMaxOpenConns(1)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
