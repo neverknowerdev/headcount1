@@ -38,7 +38,15 @@ jobs:
           npm run build
 
       - name: Run unit tests
-        run: go test ./... -count=1
+        run: |
+          git config --global user.name "CI Test"
+          git config --global user.email "ci@example.com"
+          # Landlock tests exercise Linux kernel confinement and have their own
+          # platform-specific harness. Run the rest of this package here and
+          # keep those tests out of the generic unit gate.
+          packages=$(go list ./... | grep -v '/engine/aicli/tools$')
+          go test $packages -count=1
+          go test ./engine/aicli/tools -run '^Test[^L].*$' -count=1
 
   integration:
     name: PostgreSQL integration tests
