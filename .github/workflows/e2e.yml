@@ -68,6 +68,18 @@ jobs:
       env:
         TEST_POSTGRES_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
 
+    # The Postgres integration tests deliberately drop and recreate the public
+    # schema with AutoMigrate. Restore the authoritative Atlas schema after
+    # those tests so the E2E server never starts against a partial legacy
+    # schema (for example, one missing task_relations).
+    - name: Reapply PostgreSQL migrations after integration tests
+      timeout-minutes: 5
+      uses: ariga/atlas-action/migrate/apply@v1
+      with:
+        dir: file://db/migrations/postgres?format=golang-migrate
+        url: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
+        revisions-schema: public
+
     - name: Install Frontend Dependencies
       timeout-minutes: 5
       run: |
