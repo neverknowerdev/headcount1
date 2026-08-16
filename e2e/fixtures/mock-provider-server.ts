@@ -164,7 +164,12 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
 }
 
 async function parseRequestBody(req: http.IncomingMessage): Promise<unknown> {
-    req.setTimeout(5_000, () => req.destroy(new Error('request body timeout')));
+    // Some drain/resume tests deliberately hold a completed request open while
+    // the server drains (longer than the normal body-read budget). Keep the
+    // socket alive for that bounded test window so the provider does not turn
+    // one logical completion into several retries and consume multiple scenario
+    // entries.
+    req.setTimeout(120_000, () => req.destroy(new Error('request body timeout')));
     const chunks: Buffer[] = [];
     for await (const chunk of req) chunks.push(chunk as Buffer);
     const rawBody = Buffer.concat(chunks).toString('utf8');
