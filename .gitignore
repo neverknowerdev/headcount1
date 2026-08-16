@@ -8,9 +8,7 @@ e2e/playwright-report/
 e2e/test-results/
 e2e/.e2e-env.json
 e2e/.e2e-server.pid
-# Commit lockfiles so CI uses a reproducible JavaScript dependency graph.
-!/e2e/package-lock.json
-!/frontend/package-lock.json
+package-lock.json
 agent-orchestrator
 agent-orchestratror.db
 test-results/

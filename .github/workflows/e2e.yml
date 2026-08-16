@@ -72,7 +72,10 @@ jobs:
       timeout-minutes: 5
       run: |
         cd frontend
-        npm ci
+        # npm install is intentional here: npm ci can omit platform-specific
+        # optional Vite/Rolldown bindings when the lockfile was produced on a
+        # different OS (npm/cli#4828), leaving Linux runners unable to build.
+        npm install
 
     - name: Build Frontend
       run: |
@@ -91,7 +94,7 @@ jobs:
       timeout-minutes: 5
       run: |
         cd e2e
-        npm ci
+        npm install
 
     - name: Install Playwright Browsers
       run: |
@@ -117,12 +120,11 @@ jobs:
         path: e2e/playwright-report/
         retention-days: 30
 
-    # Dedicated SQLite coverage: the on-disk layout, WAL journaling, and
-    # autoincrement-reset edge cases that only apply with no DATABASE_URL. Runs
-    # even if the Postgres run failed, so both backends give an independent
-    # signal.
+    # Dedicated SQLite coverage: the on-disk layout, WAL journaling,
+    # autoincrement-reset, lifecycle, and cross-process cases that only apply
+    # with no DATABASE_URL. This runs after the shared dependency/build setup so
+    # a failed prerequisite cannot produce a misleading second failure.
     - name: Run SQLite backend E2E
-      if: always()
       timeout-minutes: 12
       run: |
         cd e2e
