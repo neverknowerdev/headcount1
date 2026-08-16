@@ -45,8 +45,8 @@ jobs:
           # platform-specific harness. Run the rest of this package here and
           # keep those tests out of the generic unit gate.
           packages=$(go list ./... | grep -v '/engine/aicli/tools$')
-          go test $packages -count=1
-          go test ./engine/aicli/tools -run '^Test[^L].*$' -count=1
+          go test -p 1 $packages -count=1
+          go test -p 1 ./engine/aicli/tools -run '^Test[^L].*$' -count=1
 
   integration:
     name: PostgreSQL integration tests
