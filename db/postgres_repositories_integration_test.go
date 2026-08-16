@@ -39,6 +39,7 @@ var (
 // PostgreSQL versions.
 func TestPostgresRepositoryQueries(t *testing.T) {
 	database := openPostgres(t)
+	t.Cleanup(func() { dropEverything(t, database) })
 	dropEverything(t, database)
 	require.NoError(t, database.AutoMigrate(allModels()...))
 	database.Logger = logger.Default.LogMode(logger.Silent)

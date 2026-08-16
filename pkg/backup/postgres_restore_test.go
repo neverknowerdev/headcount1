@@ -53,6 +53,15 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 func TestPostgresRestoreRealignsSequences(t *testing.T) {
 	basePath := t.TempDir()
 	database := openPostgresTestDB(t)
+	t.Cleanup(func() {
+		if err := database.Exec("DROP SCHEMA public CASCADE").Error; err != nil {
+			t.Errorf("cleanup postgres schema: %v", err)
+			return
+		}
+		if err := database.Exec("CREATE SCHEMA public").Error; err != nil {
+			t.Errorf("recreate postgres schema: %v", err)
+		}
+	})
 
 	// Seed a small tree with non-1 ids so the sequence must advance past them.
 	comp := db.Company{Name: "Acme", ShortName: "acme"}
