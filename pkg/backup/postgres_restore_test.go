@@ -10,10 +10,12 @@ package backup
 // insert collides with a restored row. This test reproduces exactly that path.
 
 import (
+	"context"
 	"os"
 	"testing"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/migrations"
 
 	"gorm.io/driver/postgres"
 	"gorm.io/gorm"
@@ -35,16 +37,11 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 	if err := database.Exec("CREATE SCHEMA public").Error; err != nil {
 		t.Fatalf("create schema: %v", err)
 	}
-	if err := database.AutoMigrate(
-		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
-		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},
-		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
-		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
-		&db.Agent{}, &db.Skill{}, &db.Task{}, &db.Comment{}, &db.Attachment{},
-		&db.Run{}, &db.Artifact{}, &db.ActivityLog{}, &db.ProxyRequestLog{},
-		&db.MCPServer{}, &db.MCPAccount{}, &db.AgentMCPServer{},
-		&db.AgentMCPAccount{}, &db.AgentMCPToolFilter{},
-	); err != nil {
+	sqlDB, err := database.DB()
+	if err != nil {
+		t.Fatalf("database handle: %v", err)
+	}
+	if err := migrations.Apply(context.Background(), sqlDB, "postgres", "integration-test"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return database
@@ -53,6 +50,15 @@ func openPostgresTestDB(t *testing.T) *gorm.DB {
 func TestPostgresRestoreRealignsSequences(t *testing.T) {
 	basePath := t.TempDir()
 	database := openPostgresTestDB(t)
+	t.Cleanup(func() {
+		if err := database.Exec("DROP SCHEMA public CASCADE").Error; err != nil {
+			t.Errorf("cleanup postgres schema: %v", err)
+			return
+		}
+		if err := database.Exec("CREATE SCHEMA public").Error; err != nil {
+			t.Errorf("recreate postgres schema: %v", err)
+		}
+	})
 
 	// Seed a small tree with non-1 ids so the sequence must advance past them.
 	comp := db.Company{Name: "Acme", ShortName: "acme"}

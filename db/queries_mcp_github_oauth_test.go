@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 
@@ -14,7 +15,7 @@ import (
 func TestMigrateGitHubOAuthDropsLegacyTokenAndDisablesDuplicateIdentity(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.MCPServer{}, &db.MCPAccount{}, &db.GitHubConnection{}, &db.GitHubIdentity{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	// Simulate the pre-OAuth schema. The plaintext column must not survive a
 	// successful migration, even if legacy rows are present.
 	connectionTable := database.NamingStrategy.TableName("GitHubConnection")

@@ -19,6 +19,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	"agent-orchestrator/db"
+	dbmigrations "agent-orchestrator/db/migrations"
 	"agent-orchestrator/engine"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
@@ -142,64 +143,9 @@ func main() {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 
-	log.Println("Running AutoMigrate...")
-	err = database.AutoMigrate(
-		&db.User{},
-		&db.WebAuthnCredential{},
-		&db.WebAuthnSession{},
-		&db.Team{},
-		&db.TeamMember{},
-		&db.TeamInvite{},
-		&db.Session{},
-		&db.RefreshToken{},
-		&db.UserGitCredential{},
-		&db.PasswordResetToken{},
-		&db.Company{},
-		&db.Project{},
-		&db.GitHubOAuthState{},
-		&db.GitHubConnection{},
-		&db.GitHubIdentity{},
-		&db.GitHubWebhookDelivery{},
-		&db.GitHubWebhookTarget{},
-		&db.Sprint{},
-		&db.LLMProvider{},
-		&db.ModelGroup{},
-		&db.ModelGroupMember{},
-		&db.ModelRequestStat{},
-		&db.DefaultModelSetting{},
-		&db.ProviderPreset{},
-		&db.Agent{},
-		&db.Skill{},
-		&db.Task{},
-		&db.TaskRelation{},
-		&db.Comment{},
-		&db.Attachment{},
-		&db.Run{},
-		&db.RunStatusReport{},
-		&db.RunEvent{},
-		&db.Artifact{},
-		&db.ActivityLog{},
-		&db.ProxyRequestLog{},
-		&db.MCPServer{},
-		&db.MCPAccount{},
-		&db.AgentMCPServer{},
-		&db.AgentMCPAccount{},
-		&db.MCPToolStat{},
-		&db.AgentMCPToolFilter{},
-	)
-	if err != nil {
-		log.Fatalf("AutoMigrate failed: %v", err)
-	}
-	// Earlier GitHub App support allowed only one row per installation. MCP
-	// accounts intentionally allow personal and work identities to connect the
-	// same installation independently, so replace that legacy unique index.
-	if database.Migrator().HasIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id") {
-		if err := database.Migrator().DropIndex(&db.GitHubConnection{}, "idx_git_hub_connections_installation_id"); err != nil {
-			log.Printf("GitHub connection index migration: %v", err)
-		}
-	}
-	if err := database.Migrator().CreateIndex(&db.GitHubConnection{}, "InstallationID"); err != nil {
-		log.Printf("GitHub connection index migration: %v", err)
+	log.Printf("Running embedded Atlas migrations (%s)...", database.Dialector.Name())
+	if err := dbmigrations.Apply(context.Background(), sqlDB, database.Dialector.Name(), Version); err != nil {
+		log.Fatalf("database migration failed: %v", err)
 	}
 
 	recoverStaleRuns(database)

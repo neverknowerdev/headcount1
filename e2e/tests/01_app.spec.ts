@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus, waitForComment } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
 
 const env = loadE2EEnv();
 
@@ -20,7 +21,7 @@ test.describe.serial('Headcount1 App', () => {
                 if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test('can go through onboarding, create project, and test full task flow', async ({ page, request }) => {

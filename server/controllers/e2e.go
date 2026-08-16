@@ -3,8 +3,11 @@ package endpoints
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"sync"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/authctx"
@@ -12,13 +15,29 @@ import (
 	"agent-orchestrator/pkg/utils"
 
 	"github.com/go-chi/chi/v5"
+	"gorm.io/gorm"
 )
+
+var e2eResetMu sync.Mutex
 
 // WipeDB clears all data from the database. Only available when E2E_MODE=true.
 // Route registration is guarded by the env var in main.go.
 func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	if !utils.IsE2E() {
 		http.Error(w, "WipeDB is only available in E2E mode", http.StatusForbidden)
+		return
+	}
+
+	// A reset must never race an agent goroutine that is still writing to the
+	// database. The browser suite deliberately reuses one server process, so a
+	// previous test that timed out can otherwise repopulate rows after this
+	// handler deletes them. Serialize resets and stop active runs first.
+	e2eResetMu.Lock()
+	defer e2eResetMu.Unlock()
+	resetCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := api.stopE2ERuns(resetCtx); err != nil {
+		api.respondError(w, http.StatusConflict, "cannot reset E2E database while runs are active: "+err.Error())
 		return
 	}
 
@@ -64,40 +83,58 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		"teams",
 		"users",
 	}
-	for _, table := range tables {
-		api.db.Exec("DELETE FROM " + table)
-	}
-	// Reset autoincrement so test IDs start at 1. SQLite keeps its counters in
-	// sqlite_sequence; Postgres realigns each table's serial sequence instead.
-	if api.db.Dialector.Name() == "sqlite" {
-		api.db.Exec("DELETE FROM sqlite_sequence")
-	} else {
+	if err := api.db.Transaction(func(tx *gorm.DB) error {
 		for _, table := range tables {
-			// Skip tables without an id column (composite-key join tables) — on
-			// those pg_get_serial_sequence raises rather than returning NULL.
+			if err := tx.Exec("DELETE FROM " + table).Error; err != nil {
+				return fmt.Errorf("delete %s: %w", table, err)
+			}
+		}
+		// Reset autoincrement so test IDs start at 1. SQLite keeps its counters
+		// in sqlite_sequence; Postgres realigns each table's serial sequence.
+		if tx.Dialector.Name() == "sqlite" {
+			if err := tx.Exec("DELETE FROM sqlite_sequence").Error; err != nil {
+				return fmt.Errorf("reset SQLite sequences: %w", err)
+			}
+			return nil
+		}
+		for _, table := range tables {
+			// Skip tables without an id column (composite-key join tables).
 			var hasID bool
-			if err := api.db.Raw(
+			if err := tx.Raw(
 				`SELECT EXISTS (SELECT 1 FROM information_schema.columns
 				 WHERE table_schema = current_schema() AND table_name = ? AND column_name = 'id')`,
 				table,
-			).Scan(&hasID).Error; err != nil || !hasID {
+			).Scan(&hasID).Error; err != nil {
+				return fmt.Errorf("inspect %s id column: %w", table, err)
+			} else if !hasID {
 				continue
 			}
 			var seq *string
-			if err := api.db.Raw(`SELECT pg_get_serial_sequence(?, 'id')`, table).Scan(&seq).Error; err != nil || seq == nil {
+			if err := tx.Raw(`SELECT pg_get_serial_sequence(?, 'id')`, table).Scan(&seq).Error; err != nil {
+				return fmt.Errorf("find %s sequence: %w", table, err)
+			} else if seq == nil {
 				continue
 			}
-			api.db.Exec(`SELECT setval(?, 1, false)`, *seq)
+			if err := tx.Exec(`SELECT setval(?, 1, false)`, *seq).Error; err != nil {
+				return fmt.Errorf("reset %s sequence: %w", table, err)
+			}
 		}
+		return nil
+	}); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to reset E2E database: "+err.Error())
+		return
 	}
 
 	// Re-seed built-in MCP servers so tests that list servers get a consistent baseline.
-	_ = db.New(api.db).EnsureBuiltinMCPServers(context.Background())
+	if err := db.New(api.db).EnsureBuiltinMCPServers(resetCtx); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to recreate builtin MCP servers: "+err.Error())
+		return
+	}
 
 	// Recreate the e2e fixture user (auth is always on; the wipe removed it).
 	// Its onUserCreated hook seeds the per-user builtin providers and default
 	// model settings.
-	if _, err := api.e2eUser(context.Background()); err != nil {
+	if _, err := api.e2eUser(resetCtx); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to recreate e2e user: "+err.Error())
 		return
 	}
@@ -112,11 +149,40 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// provider has a usable default (e.g. the "existing provider" onboarding
 	// step's required Model Name field).
 	q := db.New(api.db)
-	seedPlaceholderModelCatalog(context.Background(), q)
+	seedPlaceholderModelCatalog(resetCtx, q)
 
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(http.StatusOK)
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+}
+
+// stopE2ERuns cancels every process-local running session and waits until the
+// database observes that all of them have reached a terminal state. It is
+// intentionally bounded so a broken engine cannot turn a test reset into a
+// CI-job-sized hang.
+func (api *API) stopE2ERuns(ctx context.Context) error {
+	activeStatuses := []string{"running", "resuming", "waiting"}
+	var runs []db.Run
+	if err := api.db.WithContext(ctx).Where("status IN ?", activeStatuses).Find(&runs).Error; err != nil {
+		return fmt.Errorf("list active runs: %w", err)
+	}
+	for _, run := range runs {
+		api.engine.StopRun(ctx, run.ID)
+	}
+	for {
+		var active int64
+		if err := api.db.WithContext(ctx).Model(&db.Run{}).Where("status IN ?", activeStatuses).Count(&active).Error; err != nil {
+			return fmt.Errorf("check active runs: %w", err)
+		}
+		if active == 0 {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(100 * time.Millisecond):
+		}
+	}
 }
 
 // E2ERegister creates an account without a WebAuthn ceremony, for E2E tests

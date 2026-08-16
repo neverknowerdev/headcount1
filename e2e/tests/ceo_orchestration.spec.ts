@@ -3,6 +3,8 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
+import { requireFetchOK } from '../helpers/http';
 
 const env = loadE2EEnv();
 
@@ -46,8 +48,7 @@ test.describe.serial('CEO orchestration flow', () => {
 
     test.beforeAll(async ({ request }) => {
         cleanFilesystem();
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test.afterAll(async ({ request }) => {
@@ -55,8 +56,7 @@ test.describe.serial('CEO orchestration flow', () => {
         // follow — wipe-db also re-seeds the built-in Utility/Memory
         // Management model groups back to their default state.
         cleanFilesystem();
-        await request.post('/api/e2e/wipe-db');
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test('task is delegated CEO → CTO → Coder/QA with a question round-trip', async ({ page, request }) => {
@@ -475,7 +475,7 @@ test.describe.serial('CEO orchestration flow', () => {
 
     test('re-running a subtask or child session restarts the main session', async ({ page, request }) => {
         // Reset the mock to default mode: first call answers finish_task(in-review).
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' });
+        await requireFetchOK(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' }, 5_000);
 
         const subtasksList = await (await request.get(`/api/tasks?company_id=${companyId}&parent_id=${taskId}`)).json();
         const subtask = (subtasksList as any[])[0];

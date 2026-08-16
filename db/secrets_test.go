@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"strings"
@@ -22,9 +23,7 @@ func setupSecretsTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{},
-	))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 
@@ -121,7 +120,7 @@ func TestUserOwnedSecretsSealedWithUserDEK(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
 	ctx := context.Background()
 
@@ -171,7 +170,7 @@ func TestLockedMetadataEditPreservesSecret(t *testing.T) {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.WebAuthnCredential{}, &db.LLMProvider{}, &db.MCPServer{}, &db.MCPAccount{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
 	ctx := context.Background()
 

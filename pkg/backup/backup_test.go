@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"agent-orchestrator/db/migrations"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,16 +21,7 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 	}
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	if err := database.AutoMigrate(
-		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
-		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},
-		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
-		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
-		&db.Agent{}, &db.Skill{}, &db.Task{}, &db.Comment{}, &db.Attachment{},
-		&db.Run{}, &db.Artifact{}, &db.ActivityLog{}, &db.ProxyRequestLog{},
-		&db.MCPServer{}, &db.MCPAccount{}, &db.AgentMCPServer{},
-		&db.AgentMCPAccount{}, &db.AgentMCPToolFilter{},
-	); err != nil {
+	if err := migrations.ApplyGORM(database, "sqlite", "test"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return database
@@ -54,9 +46,9 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	agent := db.Agent{CompanyID: comp.ID, Name: "dev"}
 	database.Create(&agent)
 	agentID := agent.ID
-	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: "done", TaskType: "plan_and_implement", Priority: "Normal"}
+	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: db.TaskStatusDone, TaskType: db.TaskTypePlanAndImplement, Priority: "Normal"}
 	database.Create(&parentTask)
-	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: "backlog", TaskType: "plan_and_implement", Priority: "Normal"}
+	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: db.TaskStatusBacklog, TaskType: db.TaskTypePlanAndImplement, Priority: "Normal"}
 	database.Create(&childTask)
 	comment := db.Comment{TaskID: parentTask.ID, AuthorType: "human", Content: "hi"}
 	database.Create(&comment)

@@ -1,6 +1,7 @@
 package server_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"io"
@@ -48,11 +49,7 @@ func setupGroupTestDB(t *testing.T) *gorm.DB {
 	// DSN would otherwise get its own empty database.
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	if err := database.AutoMigrate(
-		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
-		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
-		&db.Sprint{}, &db.Task{}, &db.Run{},
-	); err != nil {
+	if err := migrations.ApplyGORM(database, "sqlite", "test"); err != nil {
 		t.Fatal(err)
 	}
 	return database

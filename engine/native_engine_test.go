@@ -1,6 +1,7 @@
 package engine_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"database/sql"
 	"encoding/json"
@@ -41,29 +42,11 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	database, err := gorm.Open(sqlite.Open(dbPath+"?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
-	sqlDB.SetMaxOpenConns(4)
-	require.NoError(t, database.AutoMigrate(
-		&db.User{},
-		&db.Company{},
-		&db.Project{},
-		&db.Sprint{},
-		&db.LLMProvider{},
-		&db.Agent{},
-		&db.Skill{},
-		&db.Task{},
-		&db.TaskRelation{},
-		&db.Comment{},
-		&db.Attachment{},
-		&db.Run{},
-		&db.RunStatusReport{},
-		&db.RunEvent{},
-		&db.Artifact{},
-		&db.ActivityLog{},
-		&db.ProxyRequestLog{},
-		&db.ModelGroup{},
-		&db.ModelGroupMember{},
-		&db.DefaultModelSetting{},
-	))
+	// Keep the test database single-writer. NativeEngine deliberately performs
+	// concurrent session work, and SQLite otherwise turns transient write
+	// contention into lost test observations.
+	sqlDB.SetMaxOpenConns(1)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

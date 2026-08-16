@@ -16,7 +16,6 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/secrets"
-	"gorm.io/gorm"
 )
 
 const statusReportFreshness = 10 * time.Minute
@@ -197,12 +196,12 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 	defer e.q.UnlockTaskRun(context.Background(), task.ID)
 	_ = e.q.UpdateRunLogFilePath(ctx, orchestrator.ID, logger.FilePath())
 	questionBroker := newOrchestratorQuestionBroker()
-	actualBroker, loaded := e.orchestratorQuestionChans.LoadOrStore(orchestrator.ID, questionBroker)
+	actualBroker, loaded := e.runs.orchestratorQuestionBrokers.LoadOrStore(orchestrator.ID, questionBroker)
 	if loaded {
 		questionBroker = actualBroker.(*orchestratorQuestionBroker)
 	}
 	defer func() {
-		e.orchestratorQuestionChans.Delete(orchestrator.ID)
+		e.runs.orchestratorQuestionBrokers.Delete(orchestrator.ID)
 		questionBroker.close(fmt.Errorf("orchestrator session %d ended before answering the worker", orchestrator.ID))
 	}()
 	systemPrompt, promptErr := e.buildOrchestratorSystemPrompt(ctx, task)
@@ -333,136 +332,6 @@ func (e *NativeEngine) orchestratorSessionRun(ctx context.Context, orchestratorR
 	return r, nil
 }
 
-// maxNestedStatusDepth bounds the amount of recursive status data returned by
-// get_session. A run tree can be arbitrarily deep in the database, but a
-// bounded response keeps a pathological delegation chain from exhausting the
-// orchestrator context or provider request size. Depth zero is the selected
-// session, so five nested child levels are included.
-const maxNestedStatusDepth = 5
-
-func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionStatusReport, error) {
-	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
-	if err != nil {
-		return tools.ManagedSessionStatusReport{}, err
-	}
-	report, reportErr := e.q.GetLatestRunStatusReport(ctx, id)
-	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
-		return tools.ManagedSessionStatusReport{}, reportErr
-	}
-	now := time.Now()
-	result := tools.ManagedSessionStatusReport{ID: r.ID, Name: r.Name, TaskID: r.TaskID, AgentID: r.AgentID, AgentName: r.Agent.Name}
-	if reportErr == nil {
-		result.OwnReportedStatus = report.Status
-		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
-		result.LastReportedMessageID = report.MessageID
-	}
-	children, truncated, childrenErr := e.nestedSessionStatuses(ctx, r, now, 0)
-	if childrenErr != nil {
-		return tools.ManagedSessionStatusReport{}, childrenErr
-	}
-	result.ChildStatuses = children
-	result.NestedStatusTruncated = truncated
-	result.LastReportedStatus = aggregateSessionStatus(result.OwnReportedStatus, children)
-	stale := isStatusReportStale(report, reportErr == nil, now)
-	result.StatusReportStale = stale
-	if stale && !isTerminalRunStatus(r.Status) {
-		requested, requestErr := e.requestWorkerStatus(ctx, task, orchestratorRunID, id)
-		if requestErr != nil {
-			return tools.ManagedSessionStatusReport{}, requestErr
-		}
-		result.StatusRefreshRequested = requested
-	}
-	return result, nil
-}
-
-// nestedSessionStatuses returns direct children and their recursively
-// aggregated report_status values. It intentionally does not request fresh
-// reports from descendants: get_session's refresh contract applies to the
-// selected session, while child values are an informational snapshot.
-func (e *NativeEngine) nestedSessionStatuses(ctx context.Context, run db.Run, now time.Time, depth int) ([]tools.ManagedSessionChildStatus, bool, error) {
-	children, err := e.q.ListChildRuns(ctx, run.ID)
-	if err != nil {
-		return nil, false, err
-	}
-	if depth >= maxNestedStatusDepth {
-		return nil, len(children) > 0, nil
-	}
-	result := make([]tools.ManagedSessionChildStatus, 0, len(children))
-	truncated := false
-	for _, child := range children {
-		node, childTruncated, nodeErr := e.nestedSessionStatus(ctx, child, now, depth+1)
-		if nodeErr != nil {
-			return nil, false, nodeErr
-		}
-		result = append(result, node)
-		truncated = truncated || childTruncated
-	}
-	return result, truncated, nil
-}
-
-func (e *NativeEngine) nestedSessionStatus(ctx context.Context, run db.Run, now time.Time, depth int) (tools.ManagedSessionChildStatus, bool, error) {
-	report, reportErr := e.q.GetLatestRunStatusReport(ctx, run.ID)
-	if reportErr != nil && !errors.Is(reportErr, gorm.ErrRecordNotFound) {
-		return tools.ManagedSessionChildStatus{}, false, reportErr
-	}
-	hasReport := reportErr == nil
-	node := tools.ManagedSessionChildStatus{
-		ID:                run.ID,
-		Name:              run.Name,
-		AgentName:         run.Agent.Name,
-		StatusReportStale: isStatusReportStale(report, hasReport, now),
-	}
-	if node.AgentName == "" {
-		node.AgentName = run.Name
-	}
-	if hasReport {
-		node.OwnReportedStatus = report.Status
-		node.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
-		node.LastReportedMessageID = report.MessageID
-	}
-	// A child without a report still contributes useful information about a
-	// live delegation. Keep that fallback separate from OwnReportedStatus so
-	// callers can tell it was inferred from lifecycle state.
-	node.Status = node.OwnReportedStatus
-	if node.Status == "" && !isTerminalRunStatus(run.Status) {
-		node.Status = run.Status
-	}
-	children, truncated, err := e.nestedSessionStatuses(ctx, run, now, depth)
-	if err != nil {
-		return tools.ManagedSessionChildStatus{}, false, err
-	}
-	node.ChildStatuses = children
-	node.NestedStatusTruncated = truncated
-	node.Status = aggregateSessionStatus(node.Status, children)
-	return node, truncated, nil
-}
-
-func aggregateSessionStatus(own string, children []tools.ManagedSessionChildStatus) string {
-	result := own
-	for _, child := range children {
-		status := child.Status
-		if status == "" {
-			status = "no status reported"
-		}
-		label := child.AgentName
-		if label == "" {
-			label = child.Name
-		}
-		if label == "" {
-			label = fmt.Sprintf("session %d", child.ID)
-		}
-		fragment := fmt.Sprintf("%s status: %s", label, status)
-		if result != "" {
-			if !strings.HasSuffix(result, ".") {
-				result += "."
-			}
-			result += " "
-		}
-		result += fragment
-	}
-	return result
-}
-
 func (e *NativeEngine) orchestratorSessionDetails(ctx context.Context, task db.Task, orchestratorRunID, id int32) (tools.ManagedSessionDetails, error) {
 	r, err := e.orchestratorSessionRun(ctx, orchestratorRunID, id)
 	if err != nil {
@@ -553,7 +422,7 @@ func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task,
 	if question == "" {
 		return "", fmt.Errorf("question is required")
 	}
-	channelValue, ok := e.sessionQuestionChans.Load(sessionID)
+	channelValue, ok := e.runs.sessionQuestionBrokers.Load(sessionID)
 	if !ok {
 		return "", fmt.Errorf("session %d is not actively processing an LLM turn", sessionID)
 	}
@@ -595,7 +464,7 @@ func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, or
 	if question == "" {
 		return "", fmt.Errorf("question is required")
 	}
-	value, ok := e.orchestratorQuestionChans.Load(orchestratorID)
+	value, ok := e.runs.orchestratorQuestionBrokers.Load(orchestratorID)
 	if !ok {
 		return "", fmt.Errorf("orchestrator session %d is not active", orchestratorID)
 	}
@@ -814,7 +683,7 @@ func orchestratorFingerprint(s []tools.ManagedSessionSummary) string {
 }
 
 func isTerminalTaskStatus(s string) bool {
-	return s == "done" || s == "in-review" || s == "blocked" || s == "refinement"
+	return s == "done" || s == "in-review" || s == "blocked"
 }
 func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 	if len(s) == 0 {
@@ -826,17 +695,4 @@ func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 		}
 	}
 	return true
-}
-
-func isTerminalRunStatus(status string) bool {
-	switch status {
-	case "completed", "failed", "canceled", db.RunStatusRecoverableFailed, db.RunStatusStale, "interrupted":
-		return true
-	default:
-		return false
-	}
-}
-
-func isStatusReportStale(report db.RunStatusReport, hasReport bool, now time.Time) bool {
-	return !hasReport || now.Sub(report.ReportedAt) > statusReportFreshness
 }

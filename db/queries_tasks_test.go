@@ -1,6 +1,7 @@
 package db
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"strconv"
 	"testing"
@@ -13,7 +14,7 @@ import (
 func TestCreateTaskAssignsHumanReadableSharedBranch(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&Company{}, &Sprint{}, &User{}, &Task{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 
 	creator := User{Email: "owner@example.com"}
 	require.NoError(t, database.Create(&creator).Error)
@@ -45,7 +46,7 @@ func TestCreateTaskAssignsHumanReadableSharedBranch(t *testing.T) {
 func TestMigrateDropAgentConfigNames(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&Company{}, &Sprint{}, &User{}, &Task{}, &Run{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	require.NoError(t, database.Exec("ALTER TABLE tasks ADD COLUMN agent_config_name TEXT").Error)
 	require.NoError(t, database.Exec("ALTER TABLE runs ADD COLUMN agent_config_name TEXT").Error)
 

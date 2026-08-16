@@ -4,6 +4,9 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { startMockProviderServer } from '../fixtures/mock-provider-server';
+import { terminateProcess } from '../helpers/process';
+import { fetchWithTimeout } from '../helpers/http';
+import { resetE2EBase } from '../helpers/reset';
 
 /**
  * Graceful-drain + resume across a restart (the deploy-restart guarantee).
@@ -29,8 +32,8 @@ import { startMockProviderServer } from '../fixtures/mock-provider-server';
  *      run, runs the report_status tool call that was pending at pause time,
  *      makes its next LLM call (finish_task), and completes the task.
  *
- * A `go run .` wrapper would swallow SIGTERM (it reaches the wrapper, not the
- * server), so this spawns the compiled binary directly.
+ * The harness spawns the compiled binary directly so SIGTERM reaches the
+ * server process and teardown can reap its complete process group.
  */
 test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
     const repoRoot = path.resolve(__dirname, '..', '..');
@@ -63,6 +66,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
                 PORT: String(port),
             },
             stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
         });
         child.stdout?.on('data', (d) => { serverLog += d.toString(); });
         child.stderr?.on('data', (d) => { serverLog += d.toString(); });
@@ -71,8 +75,10 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         await expect
             .poll(async () => {
                 try {
-                    return (await fetch(`${base}/api/ping`)).ok;
-                } catch {
+                    if (child.exitCode !== null || child.signalCode !== null) throw new Error(`isolated server exited (code=${child.exitCode}, signal=${child.signalCode})\n${serverLog}`);
+                    return (await fetchWithTimeout(`${base}/api/ping`, {}, 2_000)).ok;
+                } catch (err) {
+                    if (child.exitCode !== null || child.signalCode !== null) throw err;
                     return false;
                 }
             }, { timeout: 60_000, intervals: [500] })
@@ -82,18 +88,19 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
     /** SIGTERM the server and resolve once the process has fully exited. */
     async function stopServer(): Promise<void> {
         const child = server;
-        if (!child || child.exitCode !== null) return;
-        const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-        child.kill('SIGTERM');
-        await exited;
+        if (!child) return;
+        await terminateProcess(child, { group: true, timeoutMs: 4_000 });
+        // Keep the exited child available to callers for exit-code assertions.
+        // The next startServer call replaces this handle, and callers already
+        // use `exitCode !== null` to decide whether a restart is needed.
     }
 
     async function postJSON(url: string, data: unknown): Promise<any> {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(data),
-        });
+        }, 10_000);
         if (!res.ok) {
             let detail = '';
             try { detail = await res.text(); } catch { /* ignore */ }
@@ -107,7 +114,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         home = fs.mkdtempSync(path.join(os.tmpdir(), 'hc1-resume-'));
 
         // Prefer the CI-prebuilt binary; otherwise build one now. Spawning the
-        // binary directly (not `go run .`) is what lets SIGTERM reach it.
+        // Spawning the binary directly is what lets SIGTERM reach it.
         const prebuilt = path.join(repoRoot, 'agent-orchestrator');
         if (fs.existsSync(prebuilt)) {
             binPath = prebuilt;
@@ -256,8 +263,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         // The previous test leaves the isolated process running on its resumed
         // build. Reset both stores so this test proves that the startup scan
         // handles more than one paused session in the same restart.
-        expect((await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' })).ok).toBeTruthy();
-        expect((await fetch(`${mockUrl}/__test/reset`, { method: 'POST' })).ok).toBeTruthy();
+        await resetE2EBase(base, mockUrl);
         await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
@@ -380,8 +386,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
 
         // Keep the isolated process but reset its data and provider transcript.
         if (!server || server.exitCode !== null) await startServer();
-        expect((await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' })).ok).toBeTruthy();
-        expect((await fetch(`${mockUrl}/__test/reset`, { method: 'POST' })).ok).toBeTruthy();
+        await resetE2EBase(base, mockUrl);
         const scenario = {
             entries: [
                 {
@@ -464,19 +469,24 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect(finalRun.latest_reported_status).toBe(marker);
         expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-review');
 
-        const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
-        expect(finalRequests.completionsReceived).toBe(2);
+        let finalRequests: any;
+        await expect
+            .poll(async () => {
+                finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
+                return finalRequests.completionsReceived;
+            }, { timeout: 10_000, intervals: [100], message: 'resumed provider request should be recorded' })
+            .toBe(2);
         const resumedRequest = finalRequests.requests
             .filter((request: any) => request.path.includes('/chat/completions'))
             .at(-1);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('BASH_RESUME_MARKER'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('WRITE_RESUME_MARKER'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'tool' && String(message.content).includes('HTTP 200'))).toBe(true);
-        expect(resumedRequest.body.messages.some((message: any) =>
-            message.role === 'system' && String(message.content).includes('This session was resumed by'))).toBe(true);
+        expect(resumedRequest).toBeTruthy();
+        // JSON.stringify also handles providers that represent message content
+        // as structured blocks instead of a plain string.
+        const resumedMessages = resumedRequest.body.messages.map((message: any) => JSON.stringify(message));
+        expect(resumedMessages.some((message: string) => message.includes('BASH_RESUME_MARKER'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('WRITE_RESUME_MARKER'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('HTTP 200'))).toBe(true);
+        expect(resumedMessages.some((message: string) => message.includes('This session was resumed by'))).toBe(true);
 
         // The downloadable JSONL is the recovery source of truth. Verify the
         // paused assistant turn and every resumed tool result are present once

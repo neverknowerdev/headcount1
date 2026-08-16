@@ -1,6 +1,7 @@
 package server
 
 import (
+	"agent-orchestrator/db/migrations"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -24,12 +25,7 @@ func setupGatewayAuthDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.Session{}, &db.Team{}, &db.TeamMember{},
-		&db.Company{}, &db.LLMProvider{}, &db.Agent{}, &db.ProxyRequestLog{},
-		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.ModelRequestStat{},
-		&db.Task{}, &db.Run{},
-	))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 
@@ -63,15 +59,15 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	// (user-owned) group/provider. Run 77 belongs to another tenant.
 	ownerCompany := db.Company{Name: "Acme", ShortName: "acme", UserID: &owner.ID}
 	require.NoError(t, database.Create(&ownerCompany).Error)
-	ownerTask := db.Task{Title: "t", CompanyID: ownerCompany.ID}
+	ownerTask := db.Task{Title: "t", CompanyID: ownerCompany.ID, Status: db.TaskStatusTodo, TaskType: db.TaskTypeImplement}
 	require.NoError(t, database.Create(&ownerTask).Error)
-	require.NoError(t, database.Create(&db.Run{ID: 42, TaskID: ownerTask.ID}).Error)
+	require.NoError(t, database.Create(&db.Run{ID: 42, TaskID: ownerTask.ID, Status: "running"}).Error)
 
 	otherCompany := db.Company{Name: "Other", ShortName: "oth", UserID: &other.ID}
 	require.NoError(t, database.Create(&otherCompany).Error)
-	otherTask := db.Task{Title: "t2", CompanyID: otherCompany.ID}
+	otherTask := db.Task{Title: "t2", CompanyID: otherCompany.ID, Status: db.TaskStatusTodo, TaskType: db.TaskTypeImplement}
 	require.NoError(t, database.Create(&otherTask).Error)
-	require.NoError(t, database.Create(&db.Run{ID: 77, TaskID: otherTask.ID}).Error)
+	require.NoError(t, database.Create(&db.Run{ID: 77, TaskID: otherTask.ID, Status: "running"}).Error)
 
 	registry := runtokens.NewRegistry()
 	gw := integration.NewLLMGateway(database)

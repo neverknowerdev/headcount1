@@ -1,6 +1,7 @@
 package server
 
 import (
+	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"crypto/hmac"
@@ -51,7 +52,7 @@ func TestGitHubWebhookIsPublicAndDeliveryIsIdempotent(t *testing.T) {
 	t.Setenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET", "relay-secret")
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Project{}, &db.Task{}, &db.Comment{}, &db.GitHubWebhookDelivery{}, &db.GitHubWebhookTarget{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 
 	router := chi.NewRouter()
 	NewServer(database, nil).MountPublic(router)
@@ -77,7 +78,7 @@ func TestGitHubWebhookCommitsEachDeliveryTargetOnce(t *testing.T) {
 	t.Setenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET", "relay-secret")
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Project{}, &db.Task{}, &db.Comment{}, &db.GitHubWebhookDelivery{}, &db.GitHubWebhookTarget{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	project := db.Project{GitHubRepositoryID: 42}
 	require.NoError(t, database.Create(&project).Error)
 	task := db.Task{ProjectID: &project.ID, GitHubPRNumber: 7}
@@ -112,7 +113,7 @@ func TestGitHubWebhookRetriesWakeWithoutDuplicatingComment(t *testing.T) {
 	t.Setenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET", "relay-secret")
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Project{}, &db.Task{}, &db.Comment{}, &db.GitHubWebhookDelivery{}, &db.GitHubWebhookTarget{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	project := db.Project{GitHubRepositoryID: 42}
 	require.NoError(t, database.Create(&project).Error)
 	task := db.Task{ProjectID: &project.ID, GitHubPRNumber: 7}
@@ -153,7 +154,7 @@ func TestGitHubWebhookIgnoresEditedCommentAndReclaimsExpiredLease(t *testing.T) 
 	t.Setenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET", "relay-secret")
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Project{}, &db.Task{}, &db.Comment{}, &db.GitHubWebhookDelivery{}, &db.GitHubWebhookTarget{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	past := time.Now().Add(-time.Minute)
 	require.NoError(t, database.Create(&db.GitHubWebhookDelivery{DeliveryID: "stale-lease-1", Event: "issue_comment", Status: "processing", AttemptToken: "old", LeaseExpiresAt: &past}).Error)
 	router := chi.NewRouter()
@@ -179,7 +180,7 @@ func TestGitHubWebhookRejectsMissingDeliveryBeforeSideEffects(t *testing.T) {
 	t.Setenv("HEADCOUNT1_GITHUB_WEBHOOK_FORWARD_SECRET", "relay-secret")
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Project{}, &db.Task{}, &db.Comment{}, &db.GitHubWebhookDelivery{}, &db.GitHubWebhookTarget{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	project := db.Project{GitHubRepositoryID: 42}
 	require.NoError(t, database.Create(&project).Error)
 	task := db.Task{ProjectID: &project.ID, GitHubPRNumber: 7}

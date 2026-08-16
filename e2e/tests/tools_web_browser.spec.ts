@@ -8,12 +8,13 @@
  */
 
 import * as http from 'http';
-import * as net from 'net';
 import { AddressInfo } from 'net';
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
+import { requireFetchOK } from '../helpers/http';
 import type { ScenarioEntry } from '../fixtures/mock-provider-server';
 
 const env = loadE2EEnv();
@@ -28,8 +29,10 @@ async function startTestServer(html: string): Promise<{ url: string; stop: () =>
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
     });
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve());
+    });
     const addr = server.address() as AddressInfo;
     return {
         url: `http://127.0.0.1:${addr.port}`,
@@ -47,25 +50,15 @@ async function startMultiRouteServer(routes: Record<string, string>): Promise<{
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(body);
     });
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve());
+    });
     const addr = server.address() as AddressInfo;
     return {
         url: `http://127.0.0.1:${addr.port}`,
         stop: () => new Promise<void>((resolve) => server.close(() => resolve())),
     };
-}
-
-function getFreePort(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const srv = net.createServer();
-        srv.unref();
-        srv.on('error', reject);
-        srv.listen(0, '127.0.0.1', () => {
-            const { port } = srv.address() as AddressInfo;
-            srv.close(() => resolve(port));
-        });
-    });
 }
 
 /** Configure the mock LLM provider to run a specific scenario. */
@@ -78,7 +71,7 @@ async function setScenario(request: APIRequestContext, entries: ScenarioEntry[])
 
 /** Reset the mock LLM provider to default mode and clear recorded requests. */
 async function resetMockProvider(request: APIRequestContext): Promise<void> {
-    await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`);
+    await requireFetchOK(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' }, 5_000);
 }
 
 /** Return all requests the mock LLM provider has received. */
@@ -204,7 +197,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
     let sprintId: number;
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
         const ws = await setupWorkspace(request, SHORT);
         companyId = ws.companyId;
         agentId = ws.agentId;
@@ -262,7 +255,9 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
 
     test('web_fetch: handles HTTP errors gracefully', async ({ request }) => {
         // Point fetch at a port where nothing is listening.
-        const deadPort = await getFreePort(); // guaranteed free since we don't bind it
+        // Port 1 is reserved and should be closed in the test environment;
+        // using a fixed closed port avoids a bind-then-close TOCTOU race.
+        const deadPort = 1;
         const deadUrl = `http://127.0.0.1:${deadPort}/no-such-path`;
 
         await setScenario(request, [

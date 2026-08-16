@@ -1,160 +1,155 @@
 import { FullConfig } from '@playwright/test';
-import { spawn, ChildProcessWithoutNullStreams } from 'child_process';
+import { execFileSync, spawn, ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
+import { fetchWithTimeout, requireFetchOK } from './helpers/http';
+import { terminateProcess } from './helpers/process';
 
+const runID = `${process.pid}-${Date.now()}`;
+const runDir = fs.mkdtempSync(path.join(os.tmpdir(), `headcount1-e2e-${runID}-`));
+// Playwright loads test modules before globalSetup, so the default metadata
+// paths must be discoverable without setup having mutated process.env yet.
+// They are overwritten at the start of every run and removed by teardown.
 const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '.e2e-env.json');
 const pidFile = process.env.E2E_PID_FILE || path.join(__dirname, '.e2e-server.pid');
+const logFile = path.join(runDir, 'server.log');
 
-let serverProcess: ChildProcessWithoutNullStreams | null = null;
+let serverProcess: ChildProcess | null = null;
+let mock: Awaited<ReturnType<typeof startMockProviderServer>> | null = null;
+let log = '';
 
-/**
- * Playwright global setup. Runs once before all tests.
- *
- * Responsibilities:
- *  1. Verify the native Go engine is ready (no external CLI dependencies).
- *  2. Create a local bare git repo and expose its file:// URL.
- *  3. Start a mock LLM provider HTTP server and capture its port.
- *  4. Spawn the Go server with the right env vars (E2E_MODE + the URLs above).
- *  5. Wait for the Go server, then wipe the e2e database so every run starts clean.
- */
+/** Playwright global setup with bounded startup and failure cleanup. */
 export default async function globalSetup(config: FullConfig): Promise<void> {
     const baseURL = config.projects[0]?.use?.baseURL || 'http://localhost:8080';
     const port = new URL(baseURL).port || '80';
+    let e2eHome = '';
+    try {
+        e2eHome = createE2EHome();
+        const repoUrl = setupBareRepo();
+        mock = await startMockProviderServer();
 
-    // 1. Create isolated home directory for E2E tests
-    const e2eHome = createE2EHome();
-    console.log(`[globalSetup] E2E home: ${e2eHome}`);
+        const envData = {
+            E2E_MOCK_PROVIDER_URL: mock.baseUrl,
+            E2E_TEST_REPO_URL: repoUrl,
+            E2E_HEADCOUNT1_HOME: e2eHome,
+            E2E_ENV_FILE: envFile,
+            E2E_PID_FILE: pidFile,
+            E2E_SERVER_LOG: logFile,
+            E2E_RUN_DIR: runDir,
+        };
+        fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
+        Object.assign(process.env, envData, { E2E_MODE: 'true' });
 
-    // 3. Local bare git repo
-    const repoUrl = setupBareRepo();
-    console.log(`[globalSetup] bare repo URL: ${repoUrl}`);
+        const projectRoot = path.resolve(__dirname, '..');
+        const prebuiltBinary = path.join(projectRoot, 'agent-orchestrator');
+        let binary = prebuiltBinary;
+        if (!fs.existsSync(binary)) {
+            binary = path.join(runDir, 'agent-orchestrator');
+            console.log(`[globalSetup] building server binary at ${binary}`);
+            execFileSync('go', ['build', '-o', binary, '.'], {
+                cwd: projectRoot,
+                env: process.env,
+                stdio: 'pipe',
+                timeout: 120_000,
+            });
+        }
+        const env: Record<string, string> = { ...(process.env as Record<string, string>), ...envData };
+        env.E2E_MODE = 'true';
+        env.PORT = port;
+        env.E2E_HEADCOUNT1_HOME = e2eHome;
 
-    // 4. Mock LLM provider server
-    const mock = await startMockProviderServer();
-    console.log(`[globalSetup] mock provider: ${mock.baseUrl}`);
+        console.log(`[globalSetup] starting server via ${binary}`);
+        const child = spawn(binary, [], {
+            cwd: projectRoot,
+            env,
+            detached: true,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        child.stdout?.on('data', (data) => appendLog(`[stdout] ${data}`));
+        child.stderr?.on('data', (data) => appendLog(`[stderr] ${data}`));
+        child.on('exit', (code, signal) => appendLog(`[exit] code=${code} signal=${signal}`));
+        child.on('error', (err) => appendLog(`[error] ${err.message}`));
+        serverProcess = child;
+        if (!child.pid) throw new Error('globalSetup: server process did not expose a pid');
+        fs.writeFileSync(pidFile, JSON.stringify({ pid: child.pid, group: true, logFile }));
 
-    // 5. Persist env for tests
-    const envData = {
-        E2E_MOCK_PROVIDER_URL: mock.baseUrl,
-        E2E_TEST_REPO_URL: repoUrl,
-        E2E_HEADCOUNT1_HOME: e2eHome,
-    };
-    fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
-    process.env.E2E_MOCK_PROVIDER_URL = mock.baseUrl;
-    process.env.E2E_TEST_REPO_URL = repoUrl;
-    process.env.E2E_MODE = 'true';
-
-    // 6. Spawn the Go server with the right env (native engine by default).
-    const env: Record<string, string> = { ...process.env as Record<string, string> };
-    Object.assign(env, envData);
-    env.E2E_MODE = 'true';
-    env.E2E_HEADCOUNT1_HOME = e2eHome;
-    env.PORT = port;
-
-    const projectRoot = path.resolve(__dirname, '..');
-    // CI prebuilds the server binary (see .github/workflows/e2e.yml) so module
-    // download + compilation happen in their own step instead of racing the
-    // 60s server-ready timeout below on a cold module cache. Local runs (no
-    // prebuilt binary) fall back to `go run .`.
-    const prebuiltBinary = path.join(projectRoot, 'agent-orchestrator');
-    const usePrebuilt = fs.existsSync(prebuiltBinary);
-    console.log(`[globalSetup] starting server via ${usePrebuilt ? prebuiltBinary : 'go run .'}`);
-    serverProcess = spawn(usePrebuilt ? prebuiltBinary : 'go', usePrebuilt ? [] : ['run', '.'], {
-        cwd: projectRoot,
-        env,
-        stdio: ['ignore', 'pipe', 'pipe'],
-    });
-
-    serverProcess.stdout?.on('data', (data) => {
-        process.stdout.write(`[server] ${data}`);
-    });
-    serverProcess.stderr?.on('data', (data) => {
-        process.stderr.write(`[server] ${data}`);
-    });
-    serverProcess.on('exit', (code) => {
-        console.log(`[globalSetup] Go server exited with code ${code}`);
-    });
-
-    // Persist the PID so teardown can kill it
-    if (serverProcess.pid) {
-        fs.writeFileSync(pidFile, String(serverProcess.pid));
+        await waitForServer(baseURL, child);
+        await waitForSetup(baseURL, child);
+        await requireFetchOK(`${baseURL}/api/e2e/wipe-db`, { method: 'POST' }, 10_000);
+        console.log('[globalSetup] wiped database via /api/e2e/wipe-db');
+    } catch (err) {
+        await cleanupSetup(e2eHome);
+        throw err;
     }
-
-    // 6. Wait for the Go server, then wipe the DB
-    await waitForServer(baseURL);
-    // The HTTP listener intentionally starts before the dependency setup
-    // finishes, but the frontend remains behind SetupGate until setup reaches
-    // a terminal state. Waiting here avoids every browser test racing that
-    // gate (and makes a real setup failure visible in global setup instead of
-    // surfacing as a misleading missing-UI-element timeout).
-    await waitForSetup(baseURL);
-    const wipeRes = await fetch(`${baseURL}/api/e2e/wipe-db`, { method: 'POST' });
-    if (!wipeRes.ok) {
-        const text = await wipeRes.text();
-        throw new Error(
-            `globalSetup: wipe-db failed (${wipeRes.status}): ${text}. ` +
-            `Ensure the Go server is running with E2E_MODE=true.`,
-        );
-    }
-    console.log(`[globalSetup] wiped database via /api/e2e/wipe-db`);
 }
 
-// 120s: generous enough to cover a `go run .` cold-compile fallback (no
-// prebuilt binary) on a slow machine, while the CI-prebuilt-binary path
-// above starts in well under a second.
-async function waitForServer(url: string, timeoutMs = 120_000): Promise<void> {
+function appendLog(message: string): void {
+    log = `${log}${message}`.slice(-50_000);
+    try { fs.appendFileSync(logFile, message); } catch { /* best effort */ }
+    process.stdout.write(`[server] ${message}`);
+}
+
+async function cleanupSetup(e2eHome: string): Promise<void> {
+    if (serverProcess) await terminateProcess(serverProcess, { group: true, timeoutMs: 3_000 });
+    if (mock) await mock.stop();
+    if (e2eHome) {
+        try { fs.rmSync(e2eHome, { recursive: true, force: true }); } catch { /* best effort */ }
+    }
+    try { fs.writeFileSync(logFile, log); } catch { /* best effort */ }
+    try { fs.unlinkSync(pidFile); } catch { /* best effort */ }
+    try { fs.unlinkSync(envFile); } catch { /* best effort */ }
+}
+
+async function waitForServer(
+    url: string,
+    child: ChildProcess,
+    timeoutMs = 120_000,
+): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        try {
-            const res = await fetch(`${url}/api/ping`);
-            if (res.ok) return;
-        } catch {
-            /* keep trying */
+        if (child.exitCode !== null || child.signalCode !== null) {
+            throw new Error(`globalSetup: server exited before readiness (code=${child.exitCode}, signal=${child.signalCode})\n${log}`);
         }
-        await new Promise((r) => setTimeout(r, 500));
+        try {
+            const res = await fetchWithTimeout(`${url}/api/ping`, {}, Math.min(2_000, deadline - Date.now()));
+            if (res.ok) return;
+        } catch { /* retry until deadline or child exit */ }
+        await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`globalSetup: server at ${url} did not become reachable within ${timeoutMs}ms`);
+    throw new Error(`globalSetup: server at ${url} did not become reachable within ${timeoutMs}ms\n${log}`);
 }
 
-async function waitForSetup(url: string, timeoutMs = 180_000): Promise<void> {
+async function waitForSetup(
+    url: string,
+    child: ChildProcess,
+    timeoutMs = 180_000,
+): Promise<void> {
     const deadline = Date.now() + timeoutMs;
     let lastStatus = 'pending';
     while (Date.now() < deadline) {
+        if (child.exitCode !== null || child.signalCode !== null) {
+            throw new Error(`globalSetup: server exited during dependency setup (code=${child.exitCode}, signal=${child.signalCode})\n${log}`);
+        }
         try {
-            const res = await fetch(`${url}/api/setup-status`);
+            const res = await fetchWithTimeout(`${url}/api/setup-status`, {}, Math.min(2_000, deadline - Date.now()));
             if (res.ok) {
-                const data = await res.json() as {
-                    pending?: boolean;
-                    ok?: boolean;
-                    error?: string;
-                    failures?: Array<{ name?: string; reason?: string }>;
-                };
-                if (data.pending) {
-                    lastStatus = data.error || 'pending';
-                } else if (data.ok) {
-                    return;
-                } else {
-                    const failures = (data.failures || [])
-                        .map((failure) => [failure.name, failure.reason].filter(Boolean).join(': '))
-                        .filter(Boolean)
-                        .join('; ');
-                    throw new Error(
-                        `globalSetup: dependency setup failed${failures ? ` (${failures})` : ''}${data.error ? `: ${data.error}` : ''}`,
-                    );
+                const data = await res.json() as { pending?: boolean; ok?: boolean; error?: string; failures?: Array<{ name?: string; reason?: string }> };
+                if (data.pending) lastStatus = data.error || 'pending';
+                else if (data.ok) return;
+                else {
+                    const failures = (data.failures || []).map((f) => [f.name, f.reason].filter(Boolean).join(': ')).filter(Boolean).join('; ');
+                    throw new Error(`globalSetup: dependency setup failed${failures ? ` (${failures})` : ''}${data.error ? `: ${data.error}` : ''}`);
                 }
             }
         } catch (err) {
-            if (err instanceof Error && err.message.startsWith('globalSetup: dependency setup failed')) {
-                throw err;
-            }
+            if (err instanceof Error && err.message.startsWith('globalSetup: dependency setup failed')) throw err;
             lastStatus = 'setup-status unavailable';
         }
-        await new Promise((resolve) => setTimeout(resolve, 500));
+        await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    throw new Error(`globalSetup: dependency setup did not finish within ${timeoutMs}ms (last status: ${lastStatus})`);
+    throw new Error(`globalSetup: dependency setup did not finish within ${timeoutMs}ms (last status: ${lastStatus})\n${log}`);
 }

@@ -1,5 +1,6 @@
-import { APIRequestContext, Page, expect } from '@playwright/test';
+import { APIRequestContext } from '@playwright/test';
 import WebSocket from 'ws';
+import { fetchWithTimeout } from './http';
 
 export interface HubEvent {
     type: string;
@@ -25,13 +26,18 @@ export async function waitForTaskStatus(
     let lastRequestError = '';
     while (Date.now() < deadline) {
         try {
-            const res = await request.get(`/api/tasks/${taskId}`);
+            const remaining = Math.max(1, deadline - Date.now());
+            const res = await request.get(`/api/tasks/${taskId}`, { timeout: Math.min(5_000, remaining) });
             if (res.ok()) {
                 const task = await res.json();
                 last = task;
                 if (task.status === status) return;
+                if (['failed', 'canceled', 'stale', 'recoverable_failed'].includes(task.status) && task.status !== status) {
+                    throw new Error(`task entered terminal status "${task.status}" before expected "${status}"`);
+                }
             }
         } catch (err) {
+            if (err instanceof Error && err.message.startsWith('task entered terminal status')) throw err;
             // A server restart, connection pool hiccup, or transient socket
             // reset must not fail the whole Playwright test immediately. Keep
             // polling until the deadline, then include the last error in the
@@ -45,7 +51,7 @@ export async function waitForTaskStatus(
     try {
         const companyId = last?.company_id ?? last?.CompanyID;
         if (companyId != null) {
-            const runsRes = await request.get(`/api/runs?company_id=${companyId}`);
+            const runsRes = await request.get(`/api/runs?company_id=${companyId}`, { timeout: 3_000 });
             if (runsRes.ok()) {
                 const runs = await runsRes.json();
                 const mine = (runs as any[])
@@ -62,7 +68,7 @@ export async function waitForTaskStatus(
                     // Details page) — re-fetch the single run for diagnostics.
                     let full: any = latest;
                     try {
-                        const runRes = await request.get(`/api/runs/${latest.id}`);
+                        const runRes = await request.get(`/api/runs/${latest.id}`, { timeout: 3_000 });
                         if (runRes.ok()) full = await runRes.json();
                     } catch { /* fall back to list data below */ }
                     const log = full.log_content || full.LogContent || '';
@@ -100,26 +106,34 @@ export async function waitForHubEvent(
     timeoutMs = 30_000,
 ): Promise<HubEvent> {
     return new Promise((resolve, reject) => {
-        const deadline = Date.now() + timeoutMs;
         const ws = new WebSocket(url);
         let timer: NodeJS.Timeout;
+        let settled = false;
 
         const cleanup = () => {
             clearTimeout(timer);
             try { ws.close(); } catch { /* ignore */ }
         };
 
-        timer = setInterval(() => {
-            if (Date.now() > deadline) {
-                cleanup();
-                reject(new Error(`waitForHubEvent: timed out after ${timeoutMs}ms`));
-            }
-        }, 500);
+        const fail = (err: Error) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            reject(err);
+        };
+        const succeed = (evt: HubEvent) => {
+            if (settled) return;
+            settled = true;
+            cleanup();
+            resolve(evt);
+        };
+
+        timer = setTimeout(() => fail(new Error(`waitForHubEvent: timed out after ${timeoutMs}ms`)), timeoutMs);
 
         ws.on('open', () => { /* ready */ });
-        ws.on('error', (err) => {
-            cleanup();
-            reject(new Error(`waitForHubEvent: ws error: ${err.message}`));
+        ws.on('error', (err) => fail(new Error(`waitForHubEvent: ws error: ${err.message}`)));
+        ws.on('close', (code, reason) => {
+            if (!settled) fail(new Error(`waitForHubEvent: ws closed before matching event (${code}${reason ? `: ${reason}` : ''})`));
         });
         ws.on('message', (raw) => {
             try {
@@ -127,8 +141,7 @@ export async function waitForHubEvent(
                 // Hub events are shaped { type, payload } (matches frontend store)
                 const evt: HubEvent = { type: msg.type, data: msg.payload };
                 if (predicate(evt)) {
-                    cleanup();
-                    resolve(evt);
+                    succeed(evt);
                 }
             } catch {
                 /* ignore non-JSON */
@@ -149,17 +162,20 @@ export async function waitForTaskStatusEvent(
     timeoutMs = 30_000,
 ): Promise<void> {
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/api/ws';
+    const deadline = Date.now() + timeoutMs;
     try {
         await waitForHubEvent(wsUrl, (e) => {
             if (e.type !== 'task_updated') return false;
             const d = e.data || {};
             return (d.id === taskId || d.ID === taskId) && d.status === status;
-        }, timeoutMs);
+        }, Math.min(1_000, Math.max(1, timeoutMs)));
         return;
     } catch (err) {
-        // Fall back to polling
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw err;
+        // Fall back to polling within the original total deadline.
         console.log(`[helpers] WS wait failed (${(err as Error).message}); falling back to REST polling`);
-        await waitForTaskStatus(request, taskId, status, timeoutMs);
+        await waitForTaskStatus(request, taskId, status, remaining);
     }
 }
 
@@ -174,39 +190,19 @@ export async function waitForComment(
     timeoutMs = 30_000,
 ): Promise<HubEvent> {
     const wsUrl = baseUrl.replace(/^http/, 'ws') + '/api/ws';
-    return new Promise<HubEvent>(async (resolve, reject) => {
-        let resolved = false;
-        const settle = (fn: () => void) => {
-            if (resolved) return;
-            resolved = true;
-            fn();
-        };
-        const deadline = setTimeout(() => {
-            if (resolved) return;
-            // fall back to REST polling
-            pollForComment(baseUrl, taskId, timeoutMs)
-                .then((evt) => settle(() => resolve(evt)))
-                .catch((err) => settle(() => reject(err)));
-        }, 1000);
-        try {
-            const evt = await waitForHubEvent(wsUrl, (e) => {
-                if (e.type !== 'comment_created') return false;
-                const d = e.data || {};
-                return (d.task_id === taskId || d.TaskID === taskId);
-            }, Math.max(timeoutMs - 1000, 1000));
-            clearTimeout(deadline);
-            settle(() => resolve(evt));
-        } catch (err) {
-            clearTimeout(deadline);
-            if (resolved) return;
-            try {
-                const evt = await pollForComment(baseUrl, taskId, timeoutMs);
-                settle(() => resolve(evt));
-            } catch (e2) {
-                settle(() => reject(e2));
-            }
-        }
-    });
+    const deadline = Date.now() + timeoutMs;
+    try {
+        return await waitForHubEvent(wsUrl, (e) => {
+            if (e.type !== 'comment_created') return false;
+            const d = e.data || {};
+            return (d.task_id === taskId || d.TaskID === taskId);
+        }, Math.min(1_000, Math.max(1, timeoutMs)));
+    } catch (err) {
+        const remaining = deadline - Date.now();
+        if (remaining <= 0) throw err;
+        console.log(`[helpers] WS comment wait failed (${(err as Error).message}); falling back to REST polling`);
+        return pollForComment(baseUrl, taskId, remaining);
+    }
 }
 
 async function pollForComment(
@@ -216,7 +212,11 @@ async function pollForComment(
 ): Promise<HubEvent> {
     const deadline = Date.now() + timeoutMs;
     while (Date.now() < deadline) {
-        const res = await fetch(`${baseUrl}/api/comments?task_id=${taskId}`);
+        const res = await fetchWithTimeout(
+            `${baseUrl}/api/comments?task_id=${taskId}`,
+            {},
+            Math.min(3_000, Math.max(1, deadline - Date.now())),
+        );
         if (res.ok) {
             const comments = await res.json();
             if (Array.isArray(comments) && comments.length > 0) {

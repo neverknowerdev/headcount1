@@ -7,6 +7,9 @@ import * as os from 'os';
 import * as path from 'path';
 import { AddressInfo } from 'net';
 import { startMockProviderServer } from '../fixtures/mock-provider-server';
+import { terminateProcess } from '../helpers/process';
+import { fetchWithTimeout, requireFetchOK } from '../helpers/http';
+import { resetE2EBase } from '../helpers/reset';
 
 /**
  * Server-side deploy webhook, end-to-end.
@@ -72,23 +75,23 @@ test.describe.serial('Deploy webhook', () => {
                 HEADCOUNT1_DEPLOY_ALLOWED_HOSTS: '127.0.0.1',
             },
             stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
         });
         child.stdout?.on('data', (d) => { serverLog += d.toString(); });
         child.stderr?.on('data', (d) => { serverLog += d.toString(); });
         server = child;
         await expect
-            .poll(async () => { try { return (await fetch(`${base}/api/ping`)).ok; } catch { return false; } },
+            .poll(async () => { try {
+                if (child.exitCode !== null || child.signalCode !== null) throw new Error(`isolated server exited (code=${child.exitCode}, signal=${child.signalCode})\n${serverLog}`);
+                return (await fetchWithTimeout(`${base}/api/ping`, {}, 2_000)).ok;
+            } catch (err) { if (child.exitCode !== null || child.signalCode !== null) throw err; return false; } },
                 { timeout: 60_000, intervals: [500] })
             .toBe(true);
     }
 
     async function stopServer(): Promise<void> {
         const child = server;
-        if (child && child.exitCode === null) {
-            const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-            child.kill('SIGTERM');
-            await exited;
-        }
+        if (child) await terminateProcess(child, { group: true, timeoutMs: 4_000 });
         server = null;
         // A deploy execs in place so the PID is unchanged and the kill above is
         // enough. This is a belt-and-braces reap for a run that failed midway;
@@ -98,23 +101,23 @@ test.describe.serial('Deploy webhook', () => {
     }
 
     async function version(): Promise<string> {
-        const res = await fetch(`${base}/api/version`);
+        const res = await fetchWithTimeout(`${base}/api/version`, {}, 5_000);
         if (!res.ok) return '';
         return (await res.json()).commit_hash ?? '';
     }
 
     function deployPost(key: string, payload: unknown): Promise<Response> {
-        return fetch(`${base}/api/deploy/webhook`, {
+        return fetchWithTimeout(`${base}/api/deploy/webhook`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Deploy-Key': key },
             body: JSON.stringify(payload),
-        });
+        }, 10_000);
     }
 
     async function postJSON(url: string, data: unknown): Promise<any> {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-        });
+        }, 10_000);
         if (!res.ok) {
             let detail = '';
             try { detail = await res.text(); } catch { /* ignore */ }
@@ -157,7 +160,7 @@ test.describe.serial('Deploy webhook', () => {
         // Every test starts on binary A, whatever the previous test deployed.
         fs.copyFileSync(pristineBinA, serverBinPath);
         fs.chmodSync(serverBinPath, 0o755);
-        if (mock) await fetch(`${mock.baseUrl}/__test/reset`, { method: 'POST' });
+        if (mock) await requireFetchOK(`${mock.baseUrl}/__test/reset`, { method: 'POST' }, 5_000);
     });
 
     test.afterEach(async () => {
@@ -252,7 +255,7 @@ test.describe.serial('Deploy webhook', () => {
         const statusMarker = 'progress recorded before the deploy';
 
         await startServer();
-        await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' });
+        await resetE2EBase(base, mockUrl);
         expect(await version()).toBe(runningCommit);
 
         // Seed a runnable task on this isolated server.

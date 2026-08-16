@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 	"time"
@@ -17,7 +18,7 @@ func TestGitHubConnectionsAllowMultipleMCPAccountsPerInstallation(t *testing.T) 
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.GitHubConnection{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 
 	// A work identity and a personal identity can both have access to the same
 	// organisation installation. The old installation_id unique constraint made

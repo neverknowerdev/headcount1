@@ -1,6 +1,7 @@
 package engine
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"errors"
@@ -237,7 +238,7 @@ func TestAnswerSessionQuestionPropagatesTimeoutError(t *testing.T) {
 func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Project{}, &db.Sprint{}, &db.Task{}, &db.Run{}, &db.Comment{}, &db.RunEvent{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker", ShortName: "WRK"}
@@ -253,8 +254,8 @@ func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 
 	engine := NewNativeEngine(database, eventhub.NewHub())
 	questionBroker := newSessionQuestionBroker()
-	engine.sessionQuestionChans.Store(worker.ID, questionBroker)
-	defer engine.sessionQuestionChans.Delete(worker.ID)
+	engine.runs.sessionQuestionBrokers.Store(worker.ID, questionBroker)
+	defer engine.runs.sessionQuestionBrokers.Delete(worker.ID)
 	go func() {
 		request := <-questionBroker.ch
 		request.result <- sessionQuestionResult{answer: "exact answer"}
@@ -270,7 +271,7 @@ func TestOrchestratorAskSessionWaitsForExactSideChannelAnswer(t *testing.T) {
 func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.Company{}, &db.Agent{}, &db.Task{}, &db.Run{}, &db.Comment{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	company := db.Company{Name: "Acme", ShortName: "ACME"}
 	require.NoError(t, database.Create(&company).Error)
 	agent := db.Agent{CompanyID: company.ID, Name: "Worker"}
@@ -285,8 +286,8 @@ func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
 	require.NoError(t, database.Create(&worker).Error)
 
 	engine := NewNativeEngine(database, eventhub.NewHub())
-	engine.sessionQuestionChans.Store(worker.ID, newSessionQuestionBroker())
-	defer engine.sessionQuestionChans.Delete(worker.ID)
+	engine.runs.sessionQuestionBrokers.Store(worker.ID, newSessionQuestionBroker())
+	defer engine.runs.sessionQuestionBrokers.Delete(worker.ID)
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
 	_, err = engine.orchestratorAskSession(ctx, task, orchestrator.ID, worker.ID, "Will this time out?")
