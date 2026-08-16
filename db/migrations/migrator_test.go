@@ -28,7 +28,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 53, revisions)
+	require.Equal(t, 54, revisions)
 
 	// Simulate a legacy pre-Atlas database: retain all application tables but
 	// remove Atlas's revision history. The runner must baseline the initial
@@ -56,7 +56,17 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM sqlite_master WHERE type = 'table' AND name = 'atlas_schema_revisions'`).Scan(&revisions))
 	require.Equal(t, 1, revisions)
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 11, revisions)
+	require.Equal(t, 12, revisions)
+
+	// The follow-up status migration must allow legacy refinement rows.
+	for _, statement := range []string{
+		"INSERT INTO companies (id, name, short_name) VALUES (1, 'Migration company', 'migration')",
+		"INSERT INTO sprints (id, company_id, name) VALUES (1, 1, 'Migration sprint')",
+		"INSERT INTO tasks (company_id, sprint_id, title, status) VALUES (1, 1, 'Legacy refinement task', 'refinement')",
+	} {
+		_, err = database.Exec(statement)
+		require.NoError(t, err)
+	}
 
 	_ = database.Close()
 }
@@ -76,7 +86,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 53, revisions)
+	require.Equal(t, 54, revisions)
 
 	_ = database.Close()
 }
