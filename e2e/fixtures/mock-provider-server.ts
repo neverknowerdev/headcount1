@@ -416,7 +416,7 @@ function handleChatCompletionsRoute(
                     text: 'Waiting for the next routed message.',
                 }
             : candidate;
-        if (!waitingForIncoming && candidate) {
+        if (!waitingForIncoming && !waitingForForwardedQuestion && candidate) {
             if (inboundGate) {
                 sc.inboundReadyFor?.delete(inboundGate);
                 sc.inboundReadyFor?.delete(GENERIC_FORWARDING_INBOUND);
