@@ -355,7 +355,9 @@ function handleChatCompletionsRoute(
         if (!modelScenario) {
             const content = (Array.isArray(request.messages) ? request.messages : [])
                 .map((message) => String(message.content ?? '')).join('\n');
-            const entries = content.includes('Fork replay') && template.forkEntries ? template.forkEntries
+            const terminalReplacement = content.includes("Answer the task owner's routed question");
+            const entries = terminalReplacement && template.inboundEntries ? template.inboundEntries
+                : content.includes('Fork replay') && template.forkEntries ? template.forkEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
                     : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
             modelScenario = {
@@ -363,7 +365,7 @@ function handleChatCompletionsRoute(
                 index: 0,
                 inboundEntries: template.inboundEntries,
                 inboundIndex: 0,
-                inboundActive: false,
+                inboundActive: terminalReplacement,
                 inboundReadyFor: new Set<string>(),
             };
             state.scenarios.set(sessionKey, modelScenario);
