@@ -464,8 +464,8 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
     res.end();
 }
 
-function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry): boolean {
-    return (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
+function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry | null): boolean {
+    return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
 }
 
 function requestHasIncoming(request: ChatCompletionRequest): boolean {
