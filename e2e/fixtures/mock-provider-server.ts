@@ -513,8 +513,13 @@ function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry | null): boolean 
 }
 
 function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
+    // Outbound routing is not an answer to the event currently delivered to
+    // this session. Treating send_message_to_session as an inbound handler can
+    // deadlock the deterministic scenario: the orchestrator sends another
+    // message while a worker's ask_task_owner call is still waiting for its
+    // correlated answer. Only answer_message consumes the pending event.
     return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) =>
-        toolCall.name === 'answer_message' || toolCall.name === 'send_message_to_session');
+        toolCall.name === 'answer_message');
 }
 
 function requestHasIncoming(request: ChatCompletionRequest): boolean {
