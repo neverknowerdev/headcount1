@@ -476,7 +476,11 @@ function latestIncomingContent(request: ChatCompletionRequest): string | null {
     const messages = Array.isArray(request.messages) ? request.messages : [];
     for (let index = messages.length - 1; index >= 0; index--) {
         const message = messages[index];
-        if (message.role === 'user' && String(message.content).includes('Incoming')) {
+        // Only the trailing user block can represent the event injected for
+        // this provider turn. Once an answer/tool result is appended, older
+        // Incoming text is conversation history, not a newly pending event.
+        if (message.role !== 'user') break;
+        if (String(message.content).includes('Incoming')) {
             return String(message.content);
         }
     }
