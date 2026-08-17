@@ -321,7 +321,15 @@ function handleChatCompletionsRoute(
     const scenario = modelScenario || state.scenario;
     if (scenario) {
         const sc = scenario;
-        const entry = sc.index < sc.entries.length ? sc.entries[sc.index++] : null;
+        const candidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        // A worker may finish its owner-wait at the same moment the
+        // orchestrator sends the next message. Keep an answer entry queued if
+        // that message has not reached this turn yet; the engine's forced
+        // follow-up will re-enter BeforeTurn and receive it without consuming
+        // the scripted answer prematurely.
+        const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
+        const entry = waitingForIncoming ? { text: 'Waiting for the next routed message.' } : candidate;
+        if (!waitingForIncoming && candidate) sc.index++;
 
         if (wantsStream) {
             writeStreamingScenarioEntry(res, entry, request);
@@ -434,6 +442,14 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
 
     res.write('data: [DONE]\n\n');
     res.end();
+}
+
+function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry): boolean {
+    return (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
+}
+
+function requestHasIncoming(request: ChatCompletionRequest): boolean {
+    return (Array.isArray(request.messages) ? request.messages : []).some((message) => message.role === 'user' && String(message.content).includes('Incoming'));
 }
 
 /** Resolve IDs that are assigned by the database during an E2E run. A zero in
