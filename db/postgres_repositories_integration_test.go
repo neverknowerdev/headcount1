@@ -100,7 +100,11 @@ func TestPostgresRepositoryQueries(t *testing.T) {
 								t.Fatalf("panic invoking repository query: %v", recovered)
 							}
 						}()
-						out = method.Call(args)
+						if method.Type().IsVariadic() {
+							out = method.CallSlice(args)
+						} else {
+							out = method.Call(args)
+						}
 					}()
 					if err := repositoryCallError(out); err != nil && !errors.Is(err, gorm.ErrRecordNotFound) {
 						t.Fatalf("real PostgreSQL query failed: %v", err)
@@ -162,6 +166,9 @@ func repositoryIntegrationArg(t *testing.T, repoName, methodName string, index i
 		case reflect.Int64:
 			return reflect.ValueOf([]int64{1}).Convert(typ)
 		case reflect.String:
+			if typ.Elem() == reflect.TypeOf(db.RunEventType("")) {
+				return reflect.ValueOf([]db.RunEventType{db.RunEventTypeSessionMessage}).Convert(typ)
+			}
 			return reflect.ValueOf([]string{"running", "paused", "done"}).Convert(typ)
 		case reflect.Uint8:
 			if methodName == "GetCredentialByCredentialID" {
@@ -216,6 +223,13 @@ func repositoryStringArgument(repoName, methodName string, index, callIndex int)
 		return "fixture-group"
 	case "GetDefaultModelSetting", "UpdateDefaultModelSetting":
 		return repository.PurposeTaskOrchestrator
+	case "EnqueueRoutedEvent":
+		// The routed-message API accepts a RunEventType directly rather than
+		// a RunEvent struct, so it does not pass through the Create*/Save*
+		// fixture normalization below.
+		if index == 3 {
+			return string(db.RunEventTypeSessionMessage)
+		}
 	case "GetArtifactByTaskAndFilename":
 		return "fixture.md"
 	case "GetProviderPresetByKey":
@@ -343,11 +357,18 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 				field.SetString(db.TaskStatusTodo)
 			}
 		}
+		if copy.Type() == reflect.TypeOf(db.Run{}) {
+			if field := copy.FieldByName("Kind"); field.IsValid() && field.CanSet() {
+				field.SetString(db.RunKindAgentSession)
+			}
+		}
 		if field := copy.FieldByName("EventType"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
 			field.SetString(string(db.RunEventTypeLifecycleStatus))
 		}
-		if field := copy.FieldByName("Kind"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
-			field.SetString(db.TaskRelationRelatedTo)
+		if copy.Type() == reflect.TypeOf(db.TaskRelation{}) {
+			if field := copy.FieldByName("Kind"); field.IsValid() && field.CanSet() {
+				field.SetString(db.TaskRelationRelatedTo)
+			}
 		}
 	}
 	return copy.Interface()
@@ -355,6 +376,12 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 
 func prepareRepositoryMethodFixture(t *testing.T, database *gorm.DB, repoName, methodName string) func() {
 	t.Helper()
+	if repoName == "RunEventRepository" && methodName == "AnswerPendingMessage" {
+		require.NoError(t, database.Exec("UPDATE run_events SET source_run_id = 1, target_run_id = 1, event_type = 'session_message', consumed_at = NULL WHERE id = 1").Error)
+		return func() {
+			_ = database.Exec("UPDATE run_events SET source_run_id = NULL, target_run_id = NULL, event_type = 'run_status', consumed_at = NULL WHERE id = 1").Error
+		}
+	}
 	if repoName == "RunRepository" && methodName == "MarkRunResumeStarted" {
 		lease := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 		require.NoError(t, database.Exec("UPDATE runs SET status = 'resuming', recovery = jsonb_build_object('resume_lease_owner', 'integration-owner', 'resume_lease_until', ?::timestamptz) WHERE id = 1", lease).Error)

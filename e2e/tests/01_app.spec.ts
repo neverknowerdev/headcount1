@@ -249,6 +249,12 @@ test.describe.serial('Headcount1 App', () => {
         await page.fill('input[type="text"]', 'Second CEO');
         await page.click('button:has-text("Finish & Launch")');
 
+        // AddCompany performs a full-page redirect after creating the CEO.
+        // Wait for that redirect to settle before navigating back to the
+        // original workspace; otherwise the two navigations race and Layout
+        // can render the switcher from the previous company list.
+        await page.waitForURL(/\/companies\/second-co(?:\/)?$/, { timeout: 10000 });
+
         // Main App View
         await page.goto('/companies/nw');
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
