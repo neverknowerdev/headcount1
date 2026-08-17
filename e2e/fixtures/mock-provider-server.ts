@@ -50,6 +50,7 @@ interface ScenarioState {
     index: number;
     inboundEntries?: ScenarioEntry[];
     inboundIndex?: number;
+    inboundActive?: boolean;
     inboundReadyFor?: Set<string>;
 }
 
@@ -362,6 +363,7 @@ function handleChatCompletionsRoute(
                 index: 0,
                 inboundEntries: template.inboundEntries,
                 inboundIndex: 0,
+                inboundActive: false,
                 inboundReadyFor: new Set<string>(),
             };
             state.scenarios.set(sessionKey, modelScenario);
@@ -372,7 +374,9 @@ function handleChatCompletionsRoute(
         const sc = scenario;
         const hasIncoming = requestHasIncoming(request);
         const inboundIndex = sc.inboundIndex ?? 0;
-        const usingInboundScenario = hasIncoming && !!sc.inboundEntries && inboundIndex < sc.inboundEntries.length;
+        const usingInboundScenario = !!sc.inboundEntries
+            && (hasIncoming || sc.inboundActive === true)
+            && inboundIndex < sc.inboundEntries.length;
         const candidate = usingInboundScenario
             ? sc.inboundEntries![inboundIndex]
             : sc.index < sc.entries.length ? sc.entries[sc.index] : null;
@@ -437,6 +441,7 @@ function handleChatCompletionsRoute(
         if (!waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
             if (usingInboundScenario) {
                 sc.inboundIndex = inboundIndex + 1;
+                sc.inboundActive = true;
             } else {
                 sc.index++;
             }
