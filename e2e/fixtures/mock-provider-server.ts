@@ -399,7 +399,9 @@ function handleChatCompletionsRoute(
         // follow-up will re-enter BeforeTurn and receive it without consuming
         // the scripted answer prematurely.
         const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
-        const entry = waitingForIncoming || waitingForForwardedQuestion
+        const waitingForHelpers = candidate?.tool_call?.id === 'cto-spec'
+            && !helperWorkersAreTerminal(request);
+        const entry = waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
             ? requestTools.some((tool: any) => tool?.function?.name === 'report_status')
                 ? {
                     // Keep the session inside the agent loop while the sender
@@ -416,7 +418,7 @@ function handleChatCompletionsRoute(
                     text: 'Waiting for the next routed message.',
                 }
             : candidate;
-        if (!waitingForIncoming && !waitingForForwardedQuestion && candidate) {
+        if (!waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
             if (inboundGate) {
                 sc.inboundReadyFor?.delete(inboundGate);
                 sc.inboundReadyFor?.delete(GENERIC_FORWARDING_INBOUND);
@@ -536,6 +538,22 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
 
 function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry | null): boolean {
     return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
+}
+
+function helperWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const workerLists = (Array.isArray(request.messages) ? request.messages : [])
+        .filter((message: any) => message.role === 'tool')
+        .map((message: any) => String(message.content ?? ''))
+        .filter((content: string) => content.startsWith('[{') && content.includes('"status"'));
+    const latest = workerLists.at(-1);
+    if (!latest) return false;
+    try {
+        const workers = JSON.parse(latest) as Array<{ status?: string }>;
+        return workers.length >= 4 && workers.every((worker) =>
+            worker.status !== 'running' && worker.status !== 'waiting');
+    } catch {
+        return false;
+    }
 }
 
 function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
