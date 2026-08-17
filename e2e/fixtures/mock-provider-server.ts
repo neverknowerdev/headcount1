@@ -48,6 +48,7 @@ export interface ScenarioEntry {
 interface ScenarioState {
     entries: ScenarioEntry[];
     index: number;
+    inboundReadyFor?: Set<string>;
 }
 
 interface ScenarioTemplate {
@@ -280,7 +281,7 @@ function handleTestRoutes(
     }
     if (req.url === '/__test/set-scenario' && req.method === 'POST') {
         const data = body as { entries: ScenarioEntry[]; inbound_entries?: ScenarioEntry[]; fork_entries?: ScenarioEntry[]; retry_entries?: ScenarioEntry[]; model?: string };
-        const next = { entries: data.entries ?? [], index: 0 };
+        const next = { entries: data.entries ?? [], index: 0, inboundReadyFor: new Set<string>() };
         if (data.model) {
             state.scenarios.set(data.model, next);
             state.scenarioTemplates.set(data.model, {
@@ -352,7 +353,7 @@ function handleChatCompletionsRoute(
             const entries = content.includes('Fork replay') && template.forkEntries ? template.forkEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
                     : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
-            modelScenario = { entries, index: 0 };
+            modelScenario = { entries, index: 0, inboundReadyFor: new Set<string>() };
             state.scenarios.set(sessionKey, modelScenario);
         }
     }
@@ -361,11 +362,13 @@ function handleChatCompletionsRoute(
         const sc = scenario;
         const candidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
         const hasIncomingAnswer = answerTool && requestHasIncoming(request);
+        const inboundGate = scenarioEntryInboundGate(candidate);
         // An inbound event can arrive while a long orchestration turn is
         // already consuming scripted management actions. Answer it at the
         // next request that includes the event instead of relying on the
         // scripted action index to line up with delivery timing.
         if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate)) {
+            if (inboundGate) sc.inboundReadyFor?.add(inboundGate);
             const message = latestIncomingContent(request) ?? '';
             const messageID = pendingIncomingMessageID(request);
             const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
@@ -376,13 +379,18 @@ function handleChatCompletionsRoute(
             else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(buildScenarioResponse(answer, request))); }
             return true;
         }
+        // Keep the orchestrator from entering a blocking outbound route before
+        // the worker question it is meant to forward has reached its inbox.
+        // This removes scheduler timing from the E2E scenario while still
+        // exercising the real durable answer and routing paths.
+        const waitingForForwardedQuestion = inboundGate && !sc.inboundReadyFor?.has(inboundGate) && !requestHasIncoming(request);
         // A worker may finish its owner-wait at the same moment the
         // orchestrator sends the next message. Keep an answer entry queued if
         // that message has not reached this turn yet; the engine's forced
         // follow-up will re-enter BeforeTurn and receive it without consuming
         // the scripted answer prematurely.
         const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
-        const entry = waitingForIncoming
+        const entry = waitingForIncoming || waitingForForwardedQuestion
             ? requestTools.some((tool: any) => tool?.function?.name === 'report_status')
                 ? {
                     // Keep the session inside the agent loop while the sender
@@ -520,6 +528,12 @@ function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
     // correlated answer. Only answer_message consumes the pending event.
     return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) =>
         toolCall.name === 'answer_message');
+}
+
+function scenarioEntryInboundGate(entry: ScenarioEntry | null): string | null {
+    const id = (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : []))[0]?.id;
+    if (id === 'route-coder-to-cto' || id === 'route-qa-issue-to-coder') return id;
+    return null;
 }
 
 function requestHasIncoming(request: ChatCompletionRequest): boolean {
