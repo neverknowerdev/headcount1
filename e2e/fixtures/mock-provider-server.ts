@@ -330,10 +330,7 @@ function handleChatCompletionsRoute(
         // next request that includes the event instead of relying on the
         // scripted action index to line up with delivery timing.
         if (hasIncomingAnswer && !scenarioEntryNeedsIncomingAnswer(candidate)) {
-            const message = (request.messages ?? [])
-                .filter((item: any) => item.role === 'user' && String(item.content).includes('Incoming'))
-                .map((item: any) => String(item.content))
-                .join('\n');
+            const message = latestIncomingContent(request) ?? '';
             const match = message.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
             const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
                 message_id: match ? Number(match[1]) : 1,
@@ -373,8 +370,7 @@ function handleChatCompletionsRoute(
     const hasToolResult = messages.some((m: any) => m.role === 'tool');
     const isOrchestrator = requestTools.some((tool: any) => tool?.function?.name === ORCHESTRATOR_TOOL_NAME);
     if (answerTool && !isOrchestrator) {
-        const message = messages.find((item: any) => item.role === 'user' && String(item.content).includes('Incoming'));
-        const match = String(message?.content ?? '').match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
+        const match = String(latestIncomingContent(request) ?? '').match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
         const answer = { tool_call: { id: 'call-e2e-answer', name: 'answer_message', arguments: {
             message_id: match ? Number(match[1]) : 1,
             answer: 'Use the existing event ordering and preserve the current API contract.',
@@ -473,7 +469,18 @@ function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry): boolean {
 }
 
 function requestHasIncoming(request: ChatCompletionRequest): boolean {
-    return (Array.isArray(request.messages) ? request.messages : []).some((message) => message.role === 'user' && String(message.content).includes('Incoming'));
+    return latestIncomingContent(request) !== null;
+}
+
+function latestIncomingContent(request: ChatCompletionRequest): string | null {
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        if (message.role === 'user' && String(message.content).includes('Incoming')) {
+            return String(message.content);
+        }
+    }
+    return null;
 }
 
 /** Resolve IDs that are assigned by the database during an E2E run. A zero in
@@ -482,10 +489,7 @@ function requestHasIncoming(request: ChatCompletionRequest): boolean {
 function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest): ScenarioToolCall {
     if (!request) return toolCall;
     const messages = Array.isArray(request.messages) ? request.messages : [];
-    const incoming = messages
-        .filter((item) => item.role === 'user' && String(item.content).includes('Incoming'))
-        .map((item) => String(item.content))
-        .join('\n');
+    const incoming = latestIncomingContent(request) ?? '';
     const messageID = incoming.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/)?.[1];
     const toolResults = messages
         .filter((item) => item.role === 'tool')
