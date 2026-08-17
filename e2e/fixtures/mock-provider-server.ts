@@ -408,9 +408,12 @@ function handleChatCompletionsRoute(
                     tool_call: { id: 'wait-for-routed-message', name: 'report_status', arguments: { status: 'Waiting for the next routed message.' } },
                 }
                 : {
-                    // The orchestrator has no report_status tool; use its
-                    // registered read-only management tool for the same wait.
-                    tool_call: { id: 'wait-for-routed-message', name: 'get_session_list', arguments: {} },
+                    // Orchestrator activations are bounded: a text completion
+                    // returns control to the outer durable-event poller, which
+                    // can observe a question that arrives after this turn.
+                    // Keeping get_session_list here would trap the model in
+                    // one activation until its 300-turn limit.
+                    text: 'Waiting for the next routed message.',
                 }
             : candidate;
         if (!waitingForIncoming && candidate) {
