@@ -737,11 +737,16 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		return "", err
 	}
 	if forkTask.RunID != nil {
-		if *forkTask.RunID != source.ID {
+		// The orchestrator owns the task lock for its whole worker tree. A
+		// source session may also own it in legacy/non-orchestrated flows, but
+		// a fork requested by the orchestrator must not reject its own lock.
+		if *forkTask.RunID != source.ID && *forkTask.RunID != orchestratorRunID {
 			return "", fmt.Errorf("task %d is locked by run %d, not source session %d", forkTask.ID, *forkTask.RunID, source.ID)
 		}
-		if err := e.q.UnlockTaskRun(ctx, forkTask.ID); err != nil {
-			return "", fmt.Errorf("unlock source task: %w", err)
+		if *forkTask.RunID == source.ID {
+			if err := e.q.UnlockTaskRun(ctx, forkTask.ID); err != nil {
+				return "", fmt.Errorf("unlock source task: %w", err)
+			}
 		}
 	}
 	history, safeMessageID, err := aicli.LoadSafeMessageHistoryAtOrBefore(source.LogFilePath, messageID)

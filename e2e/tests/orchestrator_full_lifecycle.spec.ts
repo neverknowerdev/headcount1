@@ -184,9 +184,9 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         const coderRuns = agentSessions.filter((run: any) => run.agent_id === coder.id);
         const qaRuns = agentSessions.filter((run: any) => run.agent_id === qa.id);
         expect(orchestrator).toBeTruthy();
-        expect(ctoRuns.length).toBeGreaterThanOrEqual(2);
-        expect(coderRuns.length).toBeGreaterThanOrEqual(3);
-        expect(qaRuns.length).toBeGreaterThanOrEqual(2);
+        expect(ctoRuns.length, JSON.stringify(ctoRuns)).toBeGreaterThanOrEqual(2);
+        expect(coderRuns.length, JSON.stringify(coderRuns)).toBeGreaterThanOrEqual(3);
+        expect(qaRuns.length, JSON.stringify(qaRuns)).toBeGreaterThanOrEqual(2);
         expect(helperWorkers.length).toBeGreaterThanOrEqual(4);
         expect(helperWorkers.every((run: any) => run.status === 'completed')).toBeTruthy();
         expect(coderRuns.some((run: any) => run.status === 'canceled')).toBeTruthy();
