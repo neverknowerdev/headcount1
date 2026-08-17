@@ -87,11 +87,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
                 { tool_call: { id: 'inspect-forked-coder-again', name: 'get_session', arguments: { session_id: 0 } } },
                 { tool_call: { id: 'launch-qa-retry', name: 'run_new_session', arguments: { agent_name: qa.name, prompt: 'Re-verify the repaired implementation from the fork; all regression checks must pass.' } } },
                 { tool_call: { id: 'inspect-qa-retry', name: 'get_session', arguments: { session_id: 0 } } },
-                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: {
-                    task_status: 'done',
-                    finish_status: 'Final verification passed; task execution is complete.',
-                    result_details: 'The CTO design, Coder implementation, QA repair, controlled stop, fork replay, and final regression verification all completed successfully.',
-                } } },
+                { text: 'Final verification is complete; the repaired implementation is ready.' },
             ],
         });
 
