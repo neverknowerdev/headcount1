@@ -64,6 +64,16 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         });
 
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+            model: 'e2e-helper-model', entries: [
+                { tool_call: { id: 'helper-finish', name: 'finish_work', arguments: {
+                    status: 'done',
+                    summary: 'Repository inspection completed.',
+                    details: 'The helper returned its bounded one-shot evidence to the CTO.',
+                } } },
+            ],
+        });
+
+        await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             model: 'e2e-orchestrator-model', entries: [
                 { tool_call: { id: 'launch-cto', name: 'run_new_session', arguments: { agent_name: cto.name, prompt: 'Design the technical solution, coordinate research workers, write the technical specification artifact, and finish the design handoff.' } } },
                 { tool_call: { id: 'inspect-cto-1', name: 'get_session', arguments: { session_id: 0 } } },

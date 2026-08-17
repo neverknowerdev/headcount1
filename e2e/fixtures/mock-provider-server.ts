@@ -575,9 +575,16 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
         : toolCall.id.includes('coder') ? 'coder'
             : toolCall.id.includes('qa') ? 'qa'
                 : '';
-    const matchingSession = wantedRole
-        ? sessionMatches.filter((match) => match[2].toLowerCase().includes(wantedRole)).at(-1)?.[1]
-        : undefined;
+    const matchingSessions = wantedRole
+        ? sessionMatches.filter((match) => match[2].toLowerCase().includes(wantedRole))
+        : [];
+    // Nested helper workers inherit their parent agent's name. For a CTO
+    // route, select the first (parent) CTO session rather than the most recent
+    // nested helper; Coder/QA recovery routes intentionally select the latest
+    // matching agent session.
+    const matchingSession = wantedRole === 'cto'
+        ? matchingSessions[0]?.[1]
+        : matchingSessions.at(-1)?.[1];
     const sessionID = matchingSession ?? (toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0]);
     const args = { ...toolCall.arguments };
     if (toolCall.name === 'answer_message' && Number(args.message_id) === 0) {
