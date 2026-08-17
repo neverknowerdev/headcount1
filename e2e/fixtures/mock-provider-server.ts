@@ -328,7 +328,12 @@ function handleChatCompletionsRoute(
         // follow-up will re-enter BeforeTurn and receive it without consuming
         // the scripted answer prematurely.
         const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
-        const entry = waitingForIncoming ? { text: 'Waiting for the next routed message.' } : candidate;
+        const entry = waitingForIncoming ? {
+            // Keep the session inside the agent loop while the sender queues
+            // the message. A plain text response would end the run before
+            // BeforeTurn can observe the routed event on the next turn.
+            tool_call: { id: 'wait-for-routed-message', name: 'report_status', arguments: { status: 'Waiting for the next routed message.' } },
+        } : candidate;
         if (!waitingForIncoming && candidate) sc.index++;
 
         if (wantsStream) {
