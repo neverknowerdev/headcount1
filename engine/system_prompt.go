@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/filesystem"
 )
@@ -31,40 +32,7 @@ func loadSettings() appsettings.Settings {
 	return appsettings.Load()
 }
 
-const promptTemplate = `You are an agent that works on tasks. Implement the task on your own; ask the user only when genuinely blocked.
-
-At the end of every run you MUST call finish_task — there are no exceptions. Choose the final status yourself:
-- done: work is complete and needs no human attention (the normal completion status, especially for delegated subtasks — your task owner reviews the result)
-- in-review: work is complete but a human should review or approve it before it counts as finished
-- blocked: you are waiting for human input or intervention — use ask_human when a concrete question can be answered and never report success you did not verify
-Put the full handoff (findings, decisions, artifact filenames, caveats) into finish_task's result_details — it is returned to your task owner when your session completes.
-
-Use write_artifact to produce structured markdown deliverables (plans, reports, specs, documentation).
-
-Deliverables are ARTIFACTS: write them with write_artifact, discover existing ones with list_artifacts, and read them with read_artifact. Artifacts are shared across the whole task tree — check what already exists before re-deriving work another agent may have produced. Never paste a full document into a chat message when it exists as an artifact; reference its filename instead.
-
-Your file tools are sandboxed to the working directory (plus any listed read-only dirs). Absolute paths outside them are inaccessible; explore code through the codegraph tools when available.
-
-Context of your work:
-Current date: {{.CurrentDate}}
-{{if .CompanyName}}Company: {{.CompanyName}}. {{.CompanyDescription}}{{end}}
-{{if .ProjectName}}Project: {{.ProjectName}}. {{.ProjectDescription}}{{end}}
-{{if .SprintName}}Sprint: {{.SprintName}}. {{.SprintDescription}}{{end}}
-Working directory: {{.WorkingDirectory}}
-
-Task name: {{.TaskName}}
-Task status: {{.TaskStatus}}
-{{if .TaskRelations}}Task relations:
-{{.TaskRelations}}
-{{end}}
-{{if .TaskDescription}}Task (user input): {{.TaskDescription}}
-{{end}}{{if .RefinedDescription}}Refined task description:
-{{.RefinedDescription}}
-{{end}}{{if .AcceptanceCriteria}}Acceptance criteria:
-{{.AcceptanceCriteria}}
-{{end}}{{if .TestCases}}Test cases:
-{{.TestCases}}
-{{end}}`
+var promptTemplate = agentconfig.MustPrompt("utils/system.md")
 
 type PromptData struct {
 	CompanyName        string
@@ -82,6 +50,7 @@ type PromptData struct {
 	RefinedDescription string
 	AcceptanceCriteria string
 	TestCases          string
+	CanAskHuman        bool
 }
 
 // formatSpecItems renders structured spec items as numbered lines with their
@@ -114,6 +83,7 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
 		TestCases:          formatSpecItems(task.TestCases),
 		CurrentDate:        time.Now().Format("2006-01-02"),
+		CanAskHuman:        strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO"),
 	}
 	if summaries, err := b.q.ListTaskRelationSummaries(context.Background(), []int32{task.ID}); err == nil {
 		data.TaskRelations = formatTaskRelations(summaries[task.ID])

@@ -30,7 +30,7 @@ func messagingToolNames() []aicli.ToolName {
 func MessagingToolNames() []aicli.ToolName { return messagingToolNames() }
 
 func agentLifecycleToolNames() []aicli.ToolName {
-	return []aicli.ToolName{aicli.ToolFinishTask, aicli.ToolReportStatus, aicli.ToolAskHuman}
+	return []aicli.ToolName{aicli.ToolFinishTask, aicli.ToolReportStatus}
 }
 func AgentLifecycleToolNames() []aicli.ToolName { return agentLifecycleToolNames() }
 

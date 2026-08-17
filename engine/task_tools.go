@@ -11,7 +11,7 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 )
 
-func (e *NativeEngine) createDurableSubtask(ctx context.Context, parent db.Task, p tools.DurableSubtaskParams) (string, error) {
+func (e *NativeEngine) createSubtask(ctx context.Context, parent db.Task, p tools.CreateSubtaskParams) (string, error) {
 	status := db.TaskStatusBacklog
 	child, err := e.q.CreateTask(ctx, db.Task{
 		CompanyID: parent.CompanyID, ProjectID: parent.ProjectID, SprintID: parent.SprintID,

@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 )
 
@@ -30,6 +31,9 @@ func (e *NativeEngine) buildSessionPrompt(
 		systemPrompt += taskContext
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	if agent.CanUseWorkers {
+		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))
+	}
 	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {
 		systemPrompt += fmt.Sprintf("\nTask Git branch: %s (shared by every run and sub-run in this task)", branch)
 	}
@@ -52,7 +56,7 @@ func (e *NativeEngine) buildSessionPrompt(
 		}
 	}
 	if options.Instruction != "" && options.IncludeTaskContext && options.SeedHistory == nil {
-		initialMessages = append(initialMessages, aicli.Message{Role: "user", Content: "Orchestrator instruction for this session: " + options.Instruction})
+		initialMessages = append(initialMessages, aicli.Message{Role: "user", Content: strings.TrimSpace(agentconfig.MustPrompt("utils/orchestrator_instruction.md")) + "\n" + options.Instruction})
 	}
 	return systemPrompt, initialMessages
 }

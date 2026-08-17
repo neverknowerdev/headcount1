@@ -197,3 +197,13 @@ func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
 	coder, _ := f.GetConfig("Coder")
 	assert.False(t, coder.CanUseWorkers)
 }
+
+func TestDefaultFactoryPromptsMatchToolCapabilities(t *testing.T) {
+	f := agentconfig.NewDefaultFactory()
+	ceo, _ := f.GetConfig("CEO")
+	cto, _ := f.GetConfig("CTO")
+	cmo, _ := f.GetConfig("CMO")
+	assert.Contains(t, ceo.Prompt, "helper worker")
+	assert.NotContains(t, cto.Prompt, "ask_human")
+	assert.NotContains(t, cmo.Prompt, "ask_human")
+}

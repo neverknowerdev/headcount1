@@ -57,7 +57,7 @@ func (e *NativeEngine) buildSessionTools(
 		gatewayAuth: runGatewayAuth{runID: run.ID},
 	}
 	answerMessage := tools.NewAnswerMessage(func(ctx context.Context, messageID int64, answer string) (string, error) {
-		return e.answerDurableMessage(ctx, run, messageID, answer)
+		return e.answerRoutedMessage(ctx, run, messageID, answer)
 	})
 	if pending, err := e.q.ListUnconsumedEventsForTarget(buildCtx, run.ID, db.RunEventTypeSessionMessage); err == nil && len(pending) > 0 {
 		state.registry.Register(answerMessage)
@@ -199,11 +199,11 @@ func (e *NativeEngine) buildSessionTools(
 		}
 		return e.createBoardTask(ctx, task, agent.ID, company, params)
 	}))
-	state.registry.Register(tools.NewDurableCreateSubtask(func(ctx context.Context, params tools.DurableSubtaskParams) (string, error) {
+	state.registry.Register(tools.NewCreateSubtask(func(ctx context.Context, params tools.CreateSubtaskParams) (string, error) {
 		if !strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
 			return "", fmt.Errorf("create_subtask is restricted to the CEO role")
 		}
-		return e.createDurableSubtask(ctx, task, params)
+		return e.createSubtask(ctx, task, params)
 	}))
 	state.registry.Register(tools.NewGetTask(func(ctx context.Context, reference string) (string, error) {
 		if !strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
@@ -232,9 +232,11 @@ func (e *NativeEngine) buildSessionTools(
 			state.registry.Register(&delegatedTool{def: workerRegistry.DefsByName(name), registry: workerRegistry, name: name})
 		}
 	}
-	state.registry.Register(tools.NewAskHuman(func(ctx context.Context, question string) (string, error) {
-		return e.askHuman(ctx, task.ID, run.ID, question)
-	}))
+	if strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
+		state.registry.Register(tools.NewAskHuman(func(ctx context.Context, question string) (string, error) {
+			return e.askHuman(ctx, task.ID, run.ID, question)
+		}))
+	}
 	if orchestrator, err := e.q.GetOrchestratorRun(buildCtx, task.ID); err == nil && orchestrator.ID > 0 && orchestrator.Status != "completed" && orchestrator.Status != "failed" && orchestrator.Status != "canceled" {
 		state.registry.Register(tools.NewAskTaskOwner(func(messageCtx context.Context, question string) (string, error) {
 			return e.askTaskOrchestrator(messageCtx, task, orchestrator.ID, run.ID, question)

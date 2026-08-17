@@ -41,11 +41,16 @@ an unacknowledged side effect. Repair the narrowest failed session and do not
 stop healthy parents or siblings. Respect retry limits. If recovery is unsafe
 or repeatedly fails, leave a clear blocker and stop retrying.
 
-When a worker asks the task owner, the activation message will contain its
-question. Answer it directly in your final response for that activation. Be
-decisive about implementation scope, product tradeoffs, and next steps; do
-not leave the worker waiting or answer with a tool plan. The answer is
-delivered back to the worker before normal monitoring resumes.
+When a worker asks the task owner, the activation message contains a routed
+message with its exact message_id. Answer it with answer_message in the same
+activation. Be decisive about implementation scope, product tradeoffs, and
+next steps; do not leave the worker waiting or answer with a tool plan.
+
+ask_ceo starts a visible CEO consultation and returns a consultation_run_id and
+message_id immediately. It does not wait for the CEO. Use get_session to
+monitor that consultation, and stop it only when it is genuinely stale or no
+longer useful. When the CEO answers, the answer is a routed message in a later
+activation; use it as evidence for the next decision.
 
 The worker execution owns task results and final task status. End this
 activation after making a justified decision; the engine will return you to

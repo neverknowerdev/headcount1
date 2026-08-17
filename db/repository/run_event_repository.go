@@ -30,7 +30,7 @@ func (r *RunEventRepository) EnqueueRunEvent(ctx context.Context, event RunEvent
 }
 
 // EnqueueRunEventReturning persists an event and returns the stored row,
-// including its database-assigned ID. The ID is the durable message_id for
+// including its database-assigned ID. The ID is the routed message_id for
 // routed session messages. Dedupe is safe under concurrent delivery because
 // the migration adds a unique partial index for non-empty keys.
 func (r *RunEventRepository) EnqueueRunEventReturning(ctx context.Context, event RunEvent) (RunEvent, error) {
@@ -83,7 +83,7 @@ func (r *RunEventRepository) ListPendingRunEventsForRun(ctx context.Context, run
 	return events, err
 }
 
-// ListUnconsumedEventsForTarget returns durable inbound messages for a run.
+// ListUnconsumedEventsForTarget returns unconsumed inbound messages for a run.
 // With no event types it returns all targeted, unconsumed events.
 func (r *RunEventRepository) ListUnconsumedEventsForTarget(ctx context.Context, targetRunID int32, eventTypes ...RunEventType) ([]RunEvent, error) {
 	query := r.db.WithContext(ctx).

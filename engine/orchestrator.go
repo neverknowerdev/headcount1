@@ -3,7 +3,6 @@ package engine
 import (
 	"context"
 	"crypto/sha1"
-	_ "embed"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
@@ -12,6 +11,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
@@ -20,8 +20,7 @@ import (
 
 const statusReportFreshness = 10 * time.Minute
 
-//go:embed prompts/task_orchestrator.md
-var orchestratorPrompt string
+var orchestratorPrompt = agentconfig.MustPrompt("task_orchestrator.md")
 
 // createTaskOrchestrator creates the task-owned root run before its worker
 // starts. Worker and delegated runs then form a normal child tree beneath it.
@@ -100,9 +99,9 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 		b.WriteString("Sprint: none assigned\n")
 	}
 	fmt.Fprintf(&b, "Task: %s (id: %d, ref: %s)\n", task.Title, task.ID, task.RefKey)
-	mode := "implementation"
+	mode := executionModeImplementation
 	if task.Status == db.TaskStatusRefinement {
-		mode = "refinement"
+		mode = executionModeRefinement
 	}
 	fmt.Fprintf(&b, "Execution mode: %s\nTask status: %s\nPriority: %s\n", mode, valueOrUnavailable(task.Status), valueOrUnavailable(task.Priority))
 	fmt.Fprintf(&b, "Task description: %s\n", valueOrUnavailable(task.Description))
@@ -145,7 +144,7 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 			b.WriteByte('\n')
 		}
 	}
-	b.WriteString("\nStart execution by selecting the most appropriate available agent and calling run_new_session with a concrete prompt. The orchestrator owns coordination; workers own implementation and finish_task.")
+	b.WriteString("\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/orchestrator_start.md")))
 	return b.String(), nil
 }
 
@@ -212,8 +211,8 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		GetSession: func(c context.Context, id int32) (tools.ManagedSessionDetails, error) {
 			return e.orchestratorSessionDetails(c, task, orchestrator.ID, id)
 		},
-		AskAgent: func(c context.Context, id int32, question string) (string, error) {
-			return e.orchestratorAskSession(c, task, orchestrator.ID, id, question)
+		SendMessage: func(c context.Context, id int32, message string) (string, error) {
+			return e.orchestratorSendMessage(c, task, orchestrator.ID, id, message)
 		},
 		RunNewSession: func(c context.Context, source *int32, agentName, prompt string) (string, error) {
 			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentName, prompt)
@@ -225,7 +224,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return e.orchestratorFork(c, orchestrator.ID, sessionID, messageID)
 		},
 		AnswerMessage: func(c context.Context, messageID int64, answer string) (string, error) {
-			return e.answerDurableMessage(c, orchestrator, messageID, answer)
+			return e.answerRoutedMessage(c, orchestrator, messageID, answer)
 		},
 		AskCEO: func(c context.Context, taskID int32, message string) (string, error) {
 			if taskID != task.ID {
@@ -252,8 +251,15 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return
 		}
 		events, _ := e.q.ListPendingRunEvents(ctx, task.ID)
-		inbound, _ := e.q.ListUnconsumedEventsForTarget(ctx, orchestrator.ID, db.RunEventTypeSessionMessage)
-		if len(inbound) > 0 {
+		inbound, _ := e.q.ListUnconsumedEventsForTarget(ctx, orchestrator.ID, db.RunEventTypeSessionMessage, db.RunEventTypeSessionAnswer)
+		hasPendingMessage := false
+		for _, event := range inbound {
+			if event.EventType == db.RunEventTypeSessionMessage {
+				hasPendingMessage = true
+				break
+			}
+		}
+		if hasPendingMessage {
 			tools.RegisterOrchestratorAnswerMessage(registry, callbacks.AnswerMessage)
 		} else {
 			registry.Unregister(string(aicli.ToolAnswerMessage))
@@ -281,11 +287,11 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		}
 		if len(events) > 0 {
 			eventJSON, _ := json.Marshal(events)
-			message += "\nDurable lifecycle events since the last activation:\n" + string(eventJSON)
+			message += "\nRouted lifecycle events since the last activation:\n" + string(eventJSON)
 		}
 		if len(inbound) > 0 {
 			messageJSON, _ := json.Marshal(inbound)
-			message += "\nIncoming messages (answer each required message with answer_message and its exact ID):\n" + string(messageJSON)
+			message += "\nIncoming routed messages (answer each required message with answer_message and its exact ID):\n" + string(messageJSON)
 		}
 		_, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
@@ -301,6 +307,18 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 				ids = append(ids, event.ID)
 			}
 			if consumeErr := e.q.ConsumeRunEvents(ctx, ids); consumeErr != nil {
+				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, consumeErr.Error(), "failed")
+				return
+			}
+		}
+		answerIDs := make([]int64, 0)
+		for _, event := range inbound {
+			if event.EventType == db.RunEventTypeSessionAnswer {
+				answerIDs = append(answerIDs, event.ID)
+			}
+		}
+		if len(answerIDs) > 0 {
+			if consumeErr := e.q.ConsumeRunEvents(ctx, answerIDs); consumeErr != nil {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, consumeErr.Error(), "failed")
 				return
 			}
@@ -410,24 +428,21 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 	return true, err
 }
 
-// orchestratorAskSession sends a durable routed message to another managed
-// session and waits for its correlated answer. The method name remains for
-// source compatibility with older engine tests; runtime delivery is durable.
-func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
+// orchestratorSendMessage routes a message to another managed session and
+// waits for its correlated answer.
+func (e *NativeEngine) orchestratorSendMessage(ctx context.Context, task db.Task, orchestratorID, sessionID int32, message string) (string, error) {
 	if _, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID); err != nil {
 		return "", err
 	}
-	question = strings.TrimSpace(question)
-	if question == "" {
-		return "", fmt.Errorf("question is required")
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", fmt.Errorf("message is required")
 	}
-	payload, _ := json.Marshal(db.NewSessionMessage(question))
+	payload, _ := json.Marshal(db.NewSessionMessage(message))
 	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, orchestratorID, sessionID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("orchestrator-message:%d:%d:%d", orchestratorID, sessionID, time.Now().UnixNano()))
 	if err != nil {
 		return "", fmt.Errorf("queue message for session %d: %w", sessionID, err)
 	}
-	deadline := time.NewTimer(orchestratorQuestionTimeout)
-	defer deadline.Stop()
 	for {
 		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
 		if findErr == nil {
@@ -436,8 +451,6 @@ func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task,
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-deadline.C:
-			return "", fmt.Errorf("message %d timed out waiting for session %d", event.ID, sessionID)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
@@ -462,10 +475,8 @@ func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, or
 	payload, _ := json.Marshal(db.NewSessionMessage(question))
 	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, workerRunID, orchestratorID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("session-message:%d:%d:%d", workerRunID, orchestratorID, time.Now().UnixNano()))
 	if err != nil {
-		return "", fmt.Errorf("queue durable task-owner message: %w", err)
+		return "", fmt.Errorf("queue routed task-owner message: %w", err)
 	}
-	deadline := time.NewTimer(orchestratorQuestionTimeout)
-	defer deadline.Stop()
 	for {
 		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
 		if findErr == nil {
@@ -474,15 +485,13 @@ func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, or
 		select {
 		case <-ctx.Done():
 			return "", ctx.Err()
-		case <-deadline.C:
-			return "", fmt.Errorf("message %d timed out waiting for orchestrator %d", event.ID, orchestratorID)
 		case <-time.After(50 * time.Millisecond):
 		}
 	}
 }
 
 // askCEO starts a task-scoped CEO consultation. The consultation receives the
-// normal task bootstrap and the caller's message as a durable inbound event;
+// normal task bootstrap and the caller's message as a routed inbound event;
 // no serialized task snapshot is passed through the orchestrator tool call.
 func (e *NativeEngine) askCEO(ctx context.Context, orchestrator db.Run, task db.Task, message string) (string, error) {
 	message = strings.TrimSpace(message)
@@ -509,28 +518,13 @@ func (e *NativeEngine) askCEO(ctx context.Context, orchestrator db.Run, task db.
 	}
 	consultationTask := task
 	consultationTask.AgentID = &ceo.ID
-	go e.executeSession(context.Background(), consultationTask, "implement", &parentSession{
+	go e.executeSession(context.Background(), consultationTask, sessionModeImplement, &parentSession{
 		parentRunID: orchestrator.ID, rootRunID: rootID, rootTaskID: task.ID,
 	}, nil, sessionOptions{IncludeTaskContext: true, SkipTaskLock: true, PrecreatedRun: &consultation, Consultation: true})
-
-	deadline := time.NewTimer(orchestratorQuestionTimeout)
-	defer deadline.Stop()
-	for {
-		answer, findErr := e.q.FindAnswerForMessage(ctx, inbound.ID)
-		if findErr == nil {
-			return answer.Payload, nil
-		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-deadline.C:
-			return "", fmt.Errorf("CEO consultation %d timed out waiting for answer", consultation.ID)
-		case <-time.After(50 * time.Millisecond):
-		}
-	}
+	return fmt.Sprintf(`{"consultation_run_id":%d,"message_id":%d,"status":"started"}`, consultation.ID, inbound.ID), nil
 }
 
-func (e *NativeEngine) answerDurableMessage(ctx context.Context, run db.Run, messageID int64, answer string) (string, error) {
+func (e *NativeEngine) answerRoutedMessage(ctx context.Context, run db.Run, messageID int64, answer string) (string, error) {
 	if strings.TrimSpace(answer) == "" {
 		return "", fmt.Errorf("answer is required")
 	}
@@ -616,7 +610,7 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 		rootRunID:   orchestratorRunID,
 		rootTaskID:  task.ID,
 	}
-	go e.executeSession(context.Background(), sessionTask, "implement", workerParent, nil, sessionOptions{
+	go e.executeSession(context.Background(), sessionTask, sessionModeImplement, workerParent, nil, sessionOptions{
 		Instruction:        prompt,
 		IncludeTaskContext: true,
 		SkipTaskLock:       true,
@@ -697,7 +691,7 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		return "", fmt.Errorf("create forked session: %w", err)
 	}
 	forkTask.AgentID = &source.AgentID
-	go e.executeSession(context.Background(), forkTask, "implement", nil, nil, sessionOptions{
+	go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, sessionOptions{
 		SeedHistory: history, IncludeTaskContext: true, PrecreatedRun: &newRun,
 	})
 	return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil

@@ -4,6 +4,8 @@ import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
 const CEO_MODEL_ID = 'e2e-ceo-model';
+const AGENT_A_MODEL_ID = 'e2e-agent-a-model';
+const AGENT_B_MODEL_ID = 'e2e-agent-b-model';
 const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
 const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
@@ -292,6 +294,8 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
                 { id: MOCK_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-orchestrator-model', object: 'model', owned_by: 'e2e' },
                 { id: CEO_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: AGENT_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: AGENT_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
             ],
         }));
         return true;
@@ -337,8 +341,8 @@ function handleChatCompletionsRoute(
     const isOrchestrator = requestTools.some((tool: any) => tool?.function?.name === ORCHESTRATOR_TOOL_NAME);
     const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
     if (answerTool && !isOrchestrator) {
-        const message = messages.find((item: any) => item.role === 'user' && String(item.content).includes('Incoming messages'));
-        const match = String(message?.content ?? '').match(/"id"\s*:\s*(\d+)/);
+        const message = messages.find((item: any) => item.role === 'user' && String(item.content).includes('Incoming'));
+        const match = String(message?.content ?? '').match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
         const answer = { tool_call: { id: 'call-e2e-answer', name: 'answer_message', arguments: {
             message_id: match ? Number(match[1]) : 1,
             answer: 'Use the existing event ordering and preserve the current API contract.',
@@ -378,13 +382,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatComple
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => {
-        if (toolCall.name !== 'answer_message' || Number(toolCall.arguments.message_id) !== 0 || !request) return toolCall;
-        const messages = Array.isArray(request.messages) ? request.messages : [];
-        const content = messages.find((item) => item.role === 'user' && String(item.content).includes('Incoming messages'))?.content ?? '';
-        const match = String(content).match(/"id"\s*:\s*(\d+)/);
-        return { ...toolCall, arguments: { ...toolCall.arguments, message_id: match ? Number(match[1]) : 1 } };
-    });
+    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request));
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -422,13 +420,7 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => {
-            if (toolCall.name !== 'answer_message' || Number(toolCall.arguments.message_id) !== 0 || !request) return toolCall;
-            const messages = Array.isArray(request.messages) ? request.messages : [];
-            const content = messages.find((item) => item.role === 'user' && String(item.content).includes('Incoming messages'))?.content ?? '';
-            const match = String(content).match(/"id"\s*:\s*(\d+)/);
-            return { ...toolCall, arguments: { ...toolCall.arguments, message_id: match ? Number(match[1]) : 1 } };
-        });
+        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request));
         for (const [index, tc] of toolCalls.entries()) {
             res.write(formatSSE(chunk({
                 tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
@@ -442,6 +434,37 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
 
     res.write('data: [DONE]\n\n');
     res.end();
+}
+
+/** Resolve IDs that are assigned by the database during an E2E run. A zero in
+ * a scenario means "the relevant ID from this conversation", so the test
+ * describes message direction without hard-coding database sequence values. */
+function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest): ScenarioToolCall {
+    if (!request) return toolCall;
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const incoming = messages
+        .filter((item) => item.role === 'user' && String(item.content).includes('Incoming'))
+        .map((item) => String(item.content))
+        .join('\n');
+    const messageID = incoming.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/)?.[1];
+    const toolResults = messages
+        .filter((item) => item.role === 'tool')
+        .map((item) => String(item.content))
+        .join('\n');
+    const consultationID = toolResults.match(/consultation_run_id["=:]+(\d+)/)?.[1];
+    const sessionIDs = [...toolResults.matchAll(/(?:new|replacement) child session (\d+)/g)].map((match) => match[1]);
+    const sessionID = toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0];
+    const args = { ...toolCall.arguments };
+    if (toolCall.name === 'answer_message' && Number(args.message_id) === 0) {
+        args.message_id = messageID ? Number(messageID) : 1;
+    }
+    if (toolCall.name === 'get_session' && Number(args.session_id) === 0) {
+        args.session_id = consultationID ? Number(consultationID) : (sessionID ? Number(sessionID) : 1);
+    }
+    if (toolCall.name === 'send_message_to_session' && Number(args.session_id) === 0) {
+        args.session_id = sessionID ? Number(sessionID) : 1;
+    }
+    return { ...toolCall, arguments: args };
 }
 
 function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: boolean): object {

@@ -128,7 +128,7 @@ func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 		GetSession: func(context.Context, int32) (orchestratorTools.ManagedSessionDetails, error) {
 			return orchestratorTools.ManagedSessionDetails{}, nil
 		},
-		AskAgent: func(context.Context, int32, string) (string, error) {
+		SendMessage: func(context.Context, int32, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
 		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },

@@ -2,6 +2,7 @@ package db_test
 
 import (
 	"context"
+	"sync"
 	"testing"
 
 	"agent-orchestrator/db"
@@ -39,6 +40,49 @@ func TestRunEventDurableMessageAnswerIsRoutedAndIdempotent(t *testing.T) {
 	found, err := q.FindAnswerForMessage(ctx, request.ID)
 	require.NoError(t, err)
 	require.Equal(t, answer.ID, found.ID)
+}
+
+func TestRunEventConcurrentAnswersHaveOneCorrelatedResult(t *testing.T) {
+	database := setupModelGroupTestDB(t)
+	q := db.New(database)
+	request, err := q.EnqueueRoutedEvent(context.Background(), 7, 11, 22, db.RunEventTypeSessionMessage, "question", "concurrent-message")
+	require.NoError(t, err)
+
+	const attempts = 24
+	answers := make(chan db.RunEvent, attempts)
+	errors := make(chan error, attempts)
+	var wg sync.WaitGroup
+	for i := 0; i < attempts; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			answer, answerErr := q.AnswerPendingMessage(context.Background(), 22, request.ID, "one answer", "concurrent-answer")
+			if answerErr != nil {
+				errors <- answerErr
+				return
+			}
+			answers <- answer
+		}()
+	}
+	wg.Wait()
+	close(answers)
+	close(errors)
+
+	for err := range errors {
+		require.NoError(t, err)
+	}
+	var first db.RunEvent
+	for answer := range answers {
+		if first.ID == 0 {
+			first = answer
+		}
+		require.Equal(t, first.ID, answer.ID)
+		require.Equal(t, request.ID, *answer.ReplyToEventID)
+	}
+	require.NotZero(t, first.ID)
+	var persisted []db.RunEvent
+	require.NoError(t, database.Where("reply_to_event_id = ?", request.ID).Find(&persisted).Error)
+	require.Len(t, persisted, 1)
 }
 
 func TestRunEventDurableMessageRejectsWrongTarget(t *testing.T) {

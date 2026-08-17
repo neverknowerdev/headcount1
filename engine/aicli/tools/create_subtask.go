@@ -8,22 +8,22 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-type DurableSubtaskParams struct {
+type CreateSubtaskParams struct {
 	Title            string  `json:"title"`
 	Description      string  `json:"description"`
 	DependsOnTaskIDs []int32 `json:"depends_on_task_ids"`
 	RelatedToTaskIDs []int32 `json:"related_to_task_ids"`
 }
 
-type DurableCreateSubtask struct {
-	fn func(context.Context, DurableSubtaskParams) (string, error)
+type CreateSubtask struct {
+	fn func(context.Context, CreateSubtaskParams) (string, error)
 }
 
-func NewDurableCreateSubtask(fn func(context.Context, DurableSubtaskParams) (string, error)) *DurableCreateSubtask {
-	return &DurableCreateSubtask{fn: fn}
+func NewCreateSubtask(fn func(context.Context, CreateSubtaskParams) (string, error)) *CreateSubtask {
+	return &CreateSubtask{fn: fn}
 }
 
-func (t *DurableCreateSubtask) Def() aicli.ToolDef {
+func (t *CreateSubtask) Def() aicli.ToolDef {
 	return aicli.ToolDef{Type: "function", Function: aicli.FuncMeta{
 		Name:        string(aicli.ToolCreateSubtask),
 		Description: "Create a durable child task for later orchestrator scheduling. This records planning only; it does not assign an agent, start a run, or wait.",
@@ -31,8 +31,8 @@ func (t *DurableCreateSubtask) Def() aicli.ToolDef {
 	}}
 }
 
-func (t *DurableCreateSubtask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
-	var p DurableSubtaskParams
+func (t *CreateSubtask) Execute(ctx context.Context, args json.RawMessage) (string, error) {
+	var p CreateSubtaskParams
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("create_subtask: %w", err)
 	}

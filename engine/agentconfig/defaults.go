@@ -62,7 +62,6 @@ var ceoTools = aicli.Names(
 var ctoTools = aicli.Names(
 	aicli.ToolCodegraphWildcard,
 	aicli.ToolAskTaskOwner,
-	aicli.ToolAskHuman,
 	aicli.ToolReportStatus,
 	aicli.ToolFinishTask,
 	aicli.ToolRead,
@@ -76,7 +75,6 @@ var ctoTools = aicli.Names(
 // cmoTools: the CMO plans and delegates marketing work, owning strategy docs.
 var cmoTools = aicli.Names(
 	aicli.ToolAskTaskOwner,
-	aicli.ToolAskHuman,
 	aicli.ToolReportStatus,
 	aicli.ToolFinishTask,
 	aicli.ToolRead,

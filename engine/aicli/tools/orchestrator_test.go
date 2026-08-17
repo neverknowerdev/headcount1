@@ -15,7 +15,7 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
-		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
+		SendMessage:   func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
@@ -47,15 +47,15 @@ func TestOrchestratorToolValidation(t *testing.T) {
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
-		AskAgent:      func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
+		SendMessage:   func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
 		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	_, err := r.Execute(context.Background(), string(OrchestratorToolAskAgent), json.RawMessage(`{"session_id":0,"question":"x"}`))
+	_, err := r.Execute(context.Background(), string(OrchestratorToolSendMessage), json.RawMessage(`{"session_id":0,"message":"x"}`))
 	require.Error(t, err)
 	require.False(t, called)
-	_, err = r.Execute(context.Background(), string(OrchestratorToolAskAgent), json.RawMessage(`{"session_id":3,"question":"status?"}`))
+	_, err = r.Execute(context.Background(), string(OrchestratorToolSendMessage), json.RawMessage(`{"session_id":3,"message":"status?"}`))
 	require.NoError(t, err)
 	require.True(t, called)
 }
@@ -100,7 +100,7 @@ func TestRunNewSessionPassesPromptAndAgentName(t *testing.T) {
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
-		AskAgent: func(context.Context, int32, string) (string, error) { return "", nil },
+		SendMessage: func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(_ context.Context, source *int32, agent, prompt string) (string, error) {
 			gotSource, gotAgent, gotPrompt = source, agent, prompt
 			return "queued", nil
@@ -139,7 +139,7 @@ func TestForkSessionValidatesCanonicalMessageID(t *testing.T) {
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
-		AskAgent:      func(context.Context, int32, string) (string, error) { return "", nil },
+		SendMessage:   func(context.Context, int32, string) (string, error) { return "", nil },
 		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(_ context.Context, sessionID int32, messageID int64) (string, error) {

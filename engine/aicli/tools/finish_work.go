@@ -9,10 +9,18 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
+type FinishWorkStatus string
+
+const (
+	FinishWorkStatusDone    FinishWorkStatus = "done"
+	FinishWorkStatusBlocked FinishWorkStatus = "blocked"
+	FinishWorkStatusFailed  FinishWorkStatus = "failed"
+)
+
 type FinishWorkResult struct {
-	Status  string `json:"status"`
-	Summary string `json:"summary"`
-	Details string `json:"details,omitempty"`
+	Status  FinishWorkStatus `json:"status"`
+	Summary string           `json:"summary"`
+	Details string           `json:"details,omitempty"`
 }
 
 type FinishWork struct {
@@ -36,7 +44,7 @@ func (t *FinishWork) Execute(ctx context.Context, args json.RawMessage) (string,
 	if err := json.Unmarshal(args, &p); err != nil {
 		return "", fmt.Errorf("finish_work: %w", err)
 	}
-	if p.Status != "done" && p.Status != "blocked" && p.Status != "failed" {
+	if p.Status != FinishWorkStatusDone && p.Status != FinishWorkStatusBlocked && p.Status != FinishWorkStatusFailed {
 		return "", fmt.Errorf("finish_work: unsupported status %q", p.Status)
 	}
 	if strings.TrimSpace(p.Summary) == "" {

@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
@@ -25,6 +26,13 @@ import (
 )
 
 const runStatusCompleted = "completed"
+
+const (
+	executionModeImplementation = "implementation"
+	executionModeRefinement     = "refinement" // refinement (planning)
+	sessionModeImplement        = "implement"
+	sessionModePlan             = "plan"
+)
 
 // ResumeCause identifies why a persisted session is being continued. The
 // update path uses only ResumeAfterUpdate automatically; failed and stale
@@ -77,8 +85,6 @@ type sessionOptions struct {
 	WorkerModel        string
 	Consultation       bool
 }
-
-const orchestratorQuestionTimeout = 2 * time.Minute
 
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
@@ -248,7 +254,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 	case db.TaskStatusRefinement:
 		// Refinement is a planning-only execution mode. It returns the task to
 		// to-do after a valid specification handoff.
-		go e.run(context.Background(), task, "plan")
+		go e.run(context.Background(), task, sessionModePlan)
 	case db.TaskStatusDependsOnTask:
 		ready, blockers, err := e.q.CanStartTask(ctx, task.ID)
 		if err != nil {
@@ -268,7 +274,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 		e.broadcastTaskStatus(task, prevStatus, task.Status, blockers)
 		return e.processTask(ctx, task.ID, forceRerun)
 	case db.TaskStatusInProgress:
-		go e.run(context.Background(), task, "implement")
+		go e.run(context.Background(), task, sessionModeImplement)
 	case db.TaskStatusInReview, db.TaskStatusBlocked, db.TaskStatusDone:
 		// Only an explicit re-run (Re-run button, Run Agent comment) may pull
 		// a task out of these statuses; a plain status change never does.
@@ -299,7 +305,7 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 			return err
 		}
 		e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
-		go e.run(context.Background(), task, "implement")
+		go e.run(context.Background(), task, sessionModeImplement)
 	}
 
 	return nil
@@ -329,7 +335,7 @@ func (e *NativeEngine) startQueuedTask(ctx context.Context, task db.Task, forceR
 		return err
 	}
 	e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
-	mode := "implement"
+	mode := sessionModeImplement
 	go e.run(context.Background(), task, mode)
 	return nil
 }
@@ -760,7 +766,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		ctx, agent, task, rootTask, mode, options, workspacePath, readOnlyDirs, artifactDir, rootTaskID,
 	)
 	if options.Worker {
-		systemPrompt += "\n\n## Helper worker boundary\nPerform only the isolated assignment. The parent workspace and task artifacts are read-only inputs. Use the temporary work directory only for scratch files. Do not create tasks, alter task state, persist artifacts, or perform Git delivery. Report progress when useful and finish exactly once with finish_work."
+		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_init.md"))
 	}
 
 	var toolState *sessionToolState
@@ -773,13 +779,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	registry := toolState.registry
 	gatewayAuth := &toolState.gatewayAuth
 
-	var integrations sessionIntegrations
-	integrations.close = func() {}
-	if options.Worker {
-		integrations = e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, true)
-	} else {
-		integrations = e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, false)
-	}
+	allCompanyMCP := options.Worker
+	integrations := e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, allCompanyMCP)
 	registry = integrations.registry
 	systemPrompt = integrations.systemPrompt
 	listingCostTotal := integrations.listingCostTotal
@@ -848,10 +849,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			}
 			if hasMessage {
 				registry.Register(tools.NewAnswerMessage(func(answerCtx context.Context, messageID int64, answer string) (string, error) {
-					return e.answerDurableMessage(answerCtx, run, messageID, answer)
+					return e.answerRoutedMessage(answerCtx, run, messageID, answer)
 				}))
 				var b strings.Builder
-				b.WriteString("Incoming messages (answer with the exact message_id when a response is required):\n")
+				b.WriteString(strings.TrimSpace(agentconfig.MustPrompt("utils/incoming_messages.md")) + "\n")
 				for _, event := range incoming {
 					fmt.Fprintf(&b, "- message_id=%d type=%s: %s\n", event.ID, event.EventType, event.Payload)
 				}
@@ -877,7 +878,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			for _, event := range events {
 				ids = append(ids, event.ID)
 				if event.EventType == db.RunEventTypeStatusRefresh {
-					messages = append(messages, aicli.Message{Role: "user", Content: "The orchestrator requested a fresh progress update. Call report_status with your current stage and any blocker, then continue the task."})
+					messages = append(messages, aicli.Message{Role: "user", Content: strings.TrimSpace(agentconfig.MustPrompt("utils/status_refresh.md"))})
 					continue
 				}
 				return nil, fmt.Errorf("unsupported worker control event %d", event.ID)
@@ -997,9 +998,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr == nil && !toolState.taskFinished {
 		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
-		followPrompt := "You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, or 'blocked' if waiting for human input. Provide a short one-sentence finish_status."
+		followPrompt := strings.TrimSpace(agentconfig.MustPrompt("utils/forced_finish_task.md"))
 		if options.Worker {
-			followPrompt = "You must call finish_work before ending. Use status done, blocked, or failed and provide a concise summary with evidence or caveats."
+			followPrompt = strings.TrimSpace(agentconfig.MustPrompt("utils/forced_finish_work.md"))
 		}
 		_, followErr := aiAgent.Run(runCtx, systemPrompt, followPrompt)
 		if followErr != nil {

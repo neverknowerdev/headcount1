@@ -103,16 +103,12 @@ const (
 	OrchestratorToolStopSession    OrchestratorToolName = "stop_session"
 	OrchestratorToolForkSession    OrchestratorToolName = "fork_session"
 	OrchestratorToolAskCEO         OrchestratorToolName = "ask_ceo"
-	// OrchestratorToolAskAgent is retained as a source-compatibility alias for
-	// callers compiled against the pre-cutover Go API. It never registers the
-	// legacy model-facing name.
-	OrchestratorToolAskAgent OrchestratorToolName = OrchestratorToolSendMessage
 )
 
 type OrchestratorCallbacks struct {
 	GetSessionList func(context.Context) ([]ManagedSessionSummary, error)
 	GetSession     func(context.Context, int32) (ManagedSessionDetails, error)
-	AskAgent       func(context.Context, int32, string) (string, error)
+	SendMessage    func(context.Context, int32, string) (string, error)
 	RunNewSession  func(context.Context, *int32, string, string) (string, error)
 	StopSession    func(context.Context, int32, string) (string, error)
 	ForkSession    func(context.Context, int32, int64) (string, error)
@@ -182,23 +178,19 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolSendMessage,
-		def:  orchestratorDef(OrchestratorToolSendMessage, "Send a durable message to the agent running a managed session and wait for its correlated answer.", `{"type":"object","properties":{"session_id":{"type":"integer"},"message":{"type":"string"}},"required":["session_id","message"]}`),
+		def:  orchestratorDef(OrchestratorToolSendMessage, "Send a routed message to the agent running a managed session and wait for its correlated answer.", `{"type":"object","properties":{"session_id":{"type":"integer"},"message":{"type":"string"}},"required":["session_id","message"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
-				SessionID      int32  `json:"session_id"`
-				Question       string `json:"message"`
-				LegacyQuestion string `json:"question"`
+				SessionID int32  `json:"session_id"`
+				Question  string `json:"message"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
 				return "", fmt.Errorf("send_message_to_session: %w", err)
 			}
-			if p.Question == "" {
-				p.Question = p.LegacyQuestion
-			}
 			if p.SessionID <= 0 || p.Question == "" {
-				return "", fmt.Errorf("session_id and question are required")
+				return "", fmt.Errorf("session_id and message are required")
 			}
-			return cb.AskAgent(ctx, p.SessionID, p.Question)
+			return cb.SendMessage(ctx, p.SessionID, p.Question)
 		},
 	})
 	r.Register(&orchestratorManagementTool{

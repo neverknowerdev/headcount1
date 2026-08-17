@@ -45,12 +45,12 @@ func TestOrchestratorAskSessionWaitsForExactDurableMessageAnswer(t *testing.T) {
 			time.Sleep(time.Millisecond)
 		}
 	}()
-	answer, err := engine.orchestratorAskSession(context.Background(), task, orchestrator.ID, worker.ID, "What is the exact state?")
+	answer, err := engine.orchestratorSendMessage(context.Background(), task, orchestrator.ID, worker.ID, "What is the exact state?")
 	require.NoError(t, err)
 	assert.Equal(t, "exact answer", answer)
 }
 
-func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
+func TestOrchestratorSendMessageWaitsUntilCallerCancels(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	sqlDB, dbErr := database.DB()
@@ -73,7 +73,7 @@ func TestOrchestratorAskSessionReturnsTimeoutAsError(t *testing.T) {
 	engine := NewNativeEngine(database, eventhub.NewHub())
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
 	defer cancel()
-	_, err = engine.orchestratorAskSession(ctx, task, orchestrator.ID, worker.ID, "Will this time out?")
+	_, err = engine.orchestratorSendMessage(ctx, task, orchestrator.ID, worker.ID, "Will this wait?")
 	require.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 }

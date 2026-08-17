@@ -9,7 +9,7 @@ import (
 )
 
 // AskTaskOwner lets a child session ask its task orchestrator a question and
-// wait for the durable routed-message answer. The engine wires the callback;
+// wait for the routed-message answer. The engine wires the callback;
 // the tool only owns validation and the model-facing schema.
 type AskTaskOwner struct {
 	fn func(ctx context.Context, question string) (string, error)
@@ -24,7 +24,7 @@ func (t *AskTaskOwner) Def() aicli.ToolDef {
 		Type: "function",
 		Function: aicli.FuncMeta{
 			Name: string(aicli.ToolAskTaskOwner),
-			Description: "Ask the agent that created your subtask (your task owner) a question and wait for the answer. " +
+			Description: "Ask the task owner (the task orchestrator) a question and wait for the routed answer. " +
 				"Use it when your instructions are ambiguous or you need a decision that belongs to the owner. " +
 				"Your session pauses until the owner replies.",
 			Parameters: json.RawMessage(`{

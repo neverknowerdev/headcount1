@@ -33,10 +33,10 @@ func (e *NativeEngine) buildWorkerSessionTools(ctx context.Context, task db.Task
 		FinishWork: func(finishCtx context.Context, result tools.FinishWorkResult) (string, error) {
 			state.workerFinished = true
 			status := db.TaskStatusDone
-			if result.Status == "blocked" {
+			if result.Status == tools.FinishWorkStatusBlocked {
 				status = db.TaskStatusBlocked
 			}
-			if result.Status == "failed" {
+			if result.Status == tools.FinishWorkStatusFailed {
 				status = db.TaskStatusBlocked
 			}
 			state.finishResult = tools.FinishTaskResult{Status: status, FinishStatus: result.Summary, ResultDetails: result.Details}
@@ -44,15 +44,15 @@ func (e *NativeEngine) buildWorkerSessionTools(ctx context.Context, task db.Task
 				return "", err
 			}
 			if run.ParentRunID != nil {
-				payload, _ := json.Marshal(db.WorkerFinishedMessage{SchemaVersion: 1, WorkerRunID: run.ID, Status: result.Status, Summary: result.Summary, Details: result.Details})
+				payload, _ := json.Marshal(db.WorkerFinishedMessage{SchemaVersion: 1, WorkerRunID: run.ID, Status: string(result.Status), Summary: result.Summary, Details: result.Details})
 				if _, err := e.q.EnqueueRoutedEvent(finishCtx, task.ID, run.ID, *run.ParentRunID, db.RunEventTypeWorkerFinished, string(payload), fmt.Sprintf("worker-finished:%d", run.ID)); err != nil {
 					return "", err
 				}
 			}
 			if logger != nil {
-				logger.LogInfo("Helper worker finished: " + result.Status + " — " + result.Summary)
+				logger.LogInfo("Helper worker finished: " + string(result.Status) + " — " + result.Summary)
 			}
-			return fmt.Sprintf("Worker result recorded as %s.", result.Status), nil
+			return fmt.Sprintf("Worker result recorded as %s.", string(result.Status)), nil
 		},
 	})
 	return state

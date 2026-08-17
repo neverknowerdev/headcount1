@@ -32,7 +32,7 @@ func TestFinishWorkValidatesStructuredTerminalContract(t *testing.T) {
 	called := false
 	tool := NewFinishWork(func(_ context.Context, result FinishWorkResult) (string, error) {
 		called = true
-		require.Equal(t, "done", result.Status)
+		require.Equal(t, FinishWorkStatusDone, result.Status)
 		return "recorded", nil
 	})
 	_, err := tool.Execute(context.Background(), []byte(`{"status":"done","summary":"evidence collected"}`))
