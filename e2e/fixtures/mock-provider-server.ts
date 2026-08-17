@@ -369,7 +369,7 @@ function handleChatCompletionsRoute(
         // already consuming scripted management actions. Answer it at the
         // next request that includes the event instead of relying on the
         // scripted action index to line up with delivery timing.
-        if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate)) {
+        if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate) && !inboundGate) {
             // The owner may receive a worker question before the scripted
             // inspection turn that precedes its forwarding action. Remember
             // that the question was answered so the later route cannot wait
