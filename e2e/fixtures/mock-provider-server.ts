@@ -50,6 +50,13 @@ interface ScenarioState {
     index: number;
 }
 
+interface ScenarioTemplate {
+    entries: ScenarioEntry[];
+    inboundEntries?: ScenarioEntry[];
+    forkEntries?: ScenarioEntry[];
+    retryEntries?: ScenarioEntry[];
+}
+
 interface ChatCompletionRequest {
     model?: string;
     messages?: Array<{ role: string; content: string }>;
@@ -102,6 +109,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         requestCount: 0,
         scenario: null as ScenarioState | null,
         scenarios: new Map<string, ScenarioState>(),
+        scenarioTemplates: new Map<string, ScenarioTemplate>(),
         // Hold support (used by the auto-update drain/resume test): while active,
         // every /chat/completions request blocks after being logged and before
         // responding, until POST /__test/release resolves it. This lets a test
@@ -199,6 +207,7 @@ interface MockState {
     requestCount: number;
     scenario: ScenarioState | null;
     scenarios: Map<string, ScenarioState>;
+    scenarioTemplates: Map<string, ScenarioTemplate>;
     holdActive: boolean;
     holdModelFilter: Set<string> | null;
     holdWaiters: Array<() => void>;
@@ -254,6 +263,7 @@ function handleTestRoutes(
         state.orchestratorStartedTasks.clear();
         state.scenario = null;
         state.scenarios.clear();
+        state.scenarioTemplates.clear();
         state.holdActive = false;
         state.holdModelFilter = null;
         const waiters = state.holdWaiters.splice(0);
@@ -269,9 +279,15 @@ function handleTestRoutes(
         return true;
     }
     if (req.url === '/__test/set-scenario' && req.method === 'POST') {
-        const data = body as { entries: ScenarioEntry[]; model?: string };
+        const data = body as { entries: ScenarioEntry[]; inbound_entries?: ScenarioEntry[]; fork_entries?: ScenarioEntry[]; retry_entries?: ScenarioEntry[]; model?: string };
         const next = { entries: data.entries ?? [], index: 0 };
-        if (data.model) state.scenarios.set(data.model, next);
+        if (data.model) {
+            state.scenarios.set(data.model, next);
+            state.scenarioTemplates.set(data.model, {
+                entries: data.entries ?? [], inboundEntries: data.inbound_entries,
+                forkEntries: data.fork_entries, retryEntries: data.retry_entries,
+            });
+        }
         else state.scenario = next;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', count: next.entries.length, model: data.model || null }));
@@ -296,6 +312,10 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
                 { id: CEO_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: AGENT_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: AGENT_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-cto-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-coder-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-qa-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-helper-model', object: 'model', owned_by: 'e2e' },
             ],
         }));
         return true;
@@ -319,7 +339,23 @@ function handleChatCompletionsRoute(
     const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
 
     // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
-    const modelScenario = state.scenarios.get(String(request.model || ''));
+    const model = String(request.model || '');
+    const sessionID = runtimeSessionID(request);
+    let modelScenario = state.scenarios.get(model);
+    const template = state.scenarioTemplates.get(model);
+    if (template && sessionID) {
+        const sessionKey = `${model}#${sessionID}`;
+        modelScenario = state.scenarios.get(sessionKey);
+        if (!modelScenario) {
+            const content = (Array.isArray(request.messages) ? request.messages : [])
+                .map((message) => String(message.content ?? '')).join('\n');
+            const entries = content.includes('Fork replay') && template.forkEntries ? template.forkEntries
+                : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
+                    : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
+            modelScenario = { entries, index: 0 };
+            state.scenarios.set(sessionKey, modelScenario);
+        }
+    }
     const scenario = modelScenario || state.scenario;
     if (scenario) {
         const sc = scenario;
@@ -329,7 +365,7 @@ function handleChatCompletionsRoute(
         // already consuming scripted management actions. Answer it at the
         // next request that includes the event instead of relying on the
         // scripted action index to line up with delivery timing.
-        if (hasIncomingAnswer && !scenarioEntryNeedsIncomingAnswer(candidate)) {
+        if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate)) {
             const message = latestIncomingContent(request) ?? '';
             const messageID = pendingIncomingMessageID(request);
             const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
@@ -346,12 +382,20 @@ function handleChatCompletionsRoute(
         // follow-up will re-enter BeforeTurn and receive it without consuming
         // the scripted answer prematurely.
         const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
-        const entry = waitingForIncoming ? {
-            // Keep the session inside the agent loop while the sender queues
-            // the message. A plain text response would end the run before
-            // BeforeTurn can observe the routed event on the next turn.
-            tool_call: { id: 'wait-for-routed-message', name: 'report_status', arguments: { status: 'Waiting for the next routed message.' } },
-        } : candidate;
+        const entry = waitingForIncoming
+            ? requestTools.some((tool: any) => tool?.function?.name === 'report_status')
+                ? {
+                    // Keep the session inside the agent loop while the sender
+                    // queues the message. A plain text response would end the
+                    // run before BeforeTurn can observe the routed event.
+                    tool_call: { id: 'wait-for-routed-message', name: 'report_status', arguments: { status: 'Waiting for the next routed message.' } },
+                }
+                : {
+                    // The orchestrator has no report_status tool; use its
+                    // registered read-only management tool for the same wait.
+                    tool_call: { id: 'wait-for-routed-message', name: 'get_session_list', arguments: {} },
+                }
+            : candidate;
         if (!waitingForIncoming && candidate) sc.index++;
 
         if (wantsStream) {
@@ -468,6 +512,11 @@ function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry | null): boolean 
     return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
 }
 
+function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
+    return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) =>
+        toolCall.name === 'answer_message' || toolCall.name === 'send_message_to_session');
+}
+
 function requestHasIncoming(request: ChatCompletionRequest): boolean {
     return latestIncomingContent(request) !== null;
 }
@@ -485,6 +534,12 @@ function latestIncomingContent(request: ChatCompletionRequest): string | null {
         }
     }
     return null;
+}
+
+function runtimeSessionID(request: ChatCompletionRequest): string | null {
+    const system = (Array.isArray(request.messages) ? request.messages : [])
+        .find((message) => message.role === 'system')?.content ?? '';
+    return String(system).match(/Runtime session ID:\s*(\d+)/)?.[1] ?? null;
 }
 
 function pendingIncomingMessageID(request: ChatCompletionRequest): number | null {
@@ -514,7 +569,16 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
     // result; recover child IDs from the authoritative session snapshot too.
     const snapshotSessionIDs = [...String(messages.map((item) => item.content).join('\n')).matchAll(/\{\s*"id"\s*:\s*(\d+)\s*,\s*"name"\s*:/g)].map((match) => match[1]);
     const sessionIDs = [...new Set([...toolResultSessionIDs, ...snapshotSessionIDs])];
-    const sessionID = toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0];
+    const snapshot = String(messages.map((item) => item.content).join('\n'));
+    const sessionMatches = [...snapshot.matchAll(/\{"id":(\d+),.*?"agent_name":"([^"]+)"/g)];
+    const wantedRole = toolCall.id.includes('cto') ? 'cto'
+        : toolCall.id.includes('coder') ? 'coder'
+            : toolCall.id.includes('qa') ? 'qa'
+                : '';
+    const matchingSession = wantedRole
+        ? sessionMatches.filter((match) => match[2].toLowerCase().includes(wantedRole)).at(-1)?.[1]
+        : undefined;
+    const sessionID = matchingSession ?? (toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0]);
     const args = { ...toolCall.arguments };
     if (toolCall.name === 'answer_message' && Number(args.message_id) === 0) {
         args.message_id = messageID ?? 1;
@@ -524,6 +588,13 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
     }
     if (toolCall.name === 'send_message_to_session' && Number(args.session_id) === 0) {
         args.session_id = sessionID ? Number(sessionID) : 1;
+    }
+    if (toolCall.name === 'fork_session' && Number(args.session_id) === 0) {
+        args.session_id = sessionID ? Number(sessionID) : 1;
+    }
+    if (toolCall.name === 'fork_session' && Number(args.fork_message_id) === 0) {
+        const statusMessageIDs = [...snapshot.matchAll(/"message_id":(\d+)/g)].map((match) => Number(match[1]));
+        args.fork_message_id = statusMessageIDs.at(-1) ?? 1;
     }
     return { ...toolCall, arguments: args };
 }

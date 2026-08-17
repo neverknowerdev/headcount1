@@ -431,20 +431,65 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 // orchestratorSendMessage routes a message to another managed session and
 // waits for its correlated answer.
 func (e *NativeEngine) orchestratorSendMessage(ctx context.Context, task db.Task, orchestratorID, sessionID int32, message string) (string, error) {
-	if _, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID); err != nil {
+	target, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
+	if err != nil {
 		return "", err
 	}
 	message = strings.TrimSpace(message)
 	if message == "" {
 		return "", fmt.Errorf("message is required")
 	}
+	if isTerminalRunStatus(target.Status) || target.Status == db.RunStatusPaused {
+		return e.orchestratorMessageTerminalSession(ctx, task, orchestratorID, target, message)
+	}
+	return e.orchestratorSendMessageToRun(ctx, task.ID, orchestratorID, sessionID, message)
+}
+
+func (e *NativeEngine) orchestratorSendMessageToRun(ctx context.Context, taskID int32, sourceRunID, targetRunID int32, message string) (string, error) {
 	payload, _ := json.Marshal(db.NewSessionMessage(message))
-	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, orchestratorID, sessionID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("orchestrator-message:%d:%d:%d", orchestratorID, sessionID, time.Now().UnixNano()))
+	event, err := e.q.EnqueueRoutedEvent(ctx, taskID, sourceRunID, targetRunID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("orchestrator-message:%d:%d:%d", sourceRunID, targetRunID, time.Now().UnixNano()))
 	if err != nil {
-		return "", fmt.Errorf("queue message for session %d: %w", sessionID, err)
+		return "", fmt.Errorf("queue message for session %d: %w", targetRunID, err)
 	}
 	for {
 		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
+		if findErr == nil {
+			return answer.Payload, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+func (e *NativeEngine) orchestratorMessageTerminalSession(ctx context.Context, task db.Task, orchestratorID int32, source db.Run, message string) (string, error) {
+	agent, err := e.q.GetAgent(ctx, source.AgentID)
+	if err != nil {
+		return "", fmt.Errorf("load terminal session agent: %w", err)
+	}
+	replacement, err := e.createOrchestratorChildRun(ctx, task, orchestratorID, agent)
+	if err != nil {
+		return "", fmt.Errorf("create terminal-session replacement: %w", err)
+	}
+	payload, _ := json.Marshal(db.NewSessionMessage(message))
+	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, orchestratorID, replacement.ID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("orchestrator-terminal-replacement:%d:%d:%d", source.ID, replacement.ID, time.Now().UnixNano()))
+	if err != nil {
+		_ = e.q.UpdateRunLog(ctx, replacement.ID, err.Error(), "failed")
+		return "", fmt.Errorf("queue message for replacement session %d: %w", replacement.ID, err)
+	}
+	e.startOrchestratorChildSession(task, agent, replacement, "Answer the task owner's routed question using the existing design context.")
+	answer, err := e.waitForRoutedAnswer(ctx, event.ID)
+	if err != nil {
+		return "", fmt.Errorf("terminal session %d replacement %d: %w", source.ID, replacement.ID, err)
+	}
+	return answer, nil
+}
+
+func (e *NativeEngine) waitForRoutedAnswer(ctx context.Context, eventID int64) (string, error) {
+	for {
+		answer, findErr := e.q.FindAnswerForMessage(ctx, eventID)
 		if findErr == nil {
 			return answer.Payload, nil
 		}
@@ -592,34 +637,46 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 	if selectedAgent.CompanyID != launchTask.CompanyID {
 		return "", fmt.Errorf("agent %d does not belong to task company", selectedAgent.ID)
 	}
-	sessionTask := launchTask
-	sessionTask.AgentID = &selectedAgent.ID
-	parentID, rootID := orchestratorRunID, orchestratorRunID
-	precreated, err := e.q.CreateRun(context.Background(), db.Run{
-		TaskID: sessionTask.ID, AgentID: selectedAgent.ID, Kind: db.RunKindAgentSession, Status: "running", StartedAt: time.Now(),
-		ParentRunID: &parentID, RootRunID: &rootID,
-	})
+	precreated, err := e.createOrchestratorChildRun(ctx, launchTask, orchestratorRunID, selectedAgent)
 	if err != nil {
 		return "", fmt.Errorf("create worker session: %w", err)
 	}
-	// A child session is owned by the sidecar, so it never claims or unlocks
-	// the root task lock. Its ask_task_owner tool is wired to the orchestrator's
-	// durable question inbox by buildSessionTools.
+	e.startOrchestratorChildSession(launchTask, selectedAgent, precreated, prompt)
+	if source != nil {
+		return fmt.Sprintf("replacement child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
+	}
+	return fmt.Sprintf("new child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
+}
+
+func (e *NativeEngine) createOrchestratorChildRun(ctx context.Context, task db.Task, orchestratorRunID int32, agent db.Agent) (db.Run, error) {
+	parentID, rootID := orchestratorRunID, orchestratorRunID
+	return e.q.CreateRun(ctx, db.Run{
+		TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, Status: "running", StartedAt: time.Now(),
+		ParentRunID: &parentID, RootRunID: &rootID,
+	})
+}
+
+func (e *NativeEngine) startOrchestratorChildSession(task db.Task, agent db.Agent, run db.Run, prompt string) {
+	sessionTask := task
+	sessionTask.AgentID = &agent.ID
+	parentID, rootID := run.ID, run.ID
+	if run.ParentRunID != nil {
+		parentID = *run.ParentRunID
+	}
+	if run.RootRunID != nil {
+		rootID = *run.RootRunID
+	}
 	workerParent := &parentSession{
-		parentRunID: orchestratorRunID,
-		rootRunID:   orchestratorRunID,
+		parentRunID: parentID,
+		rootRunID:   rootID,
 		rootTaskID:  task.ID,
 	}
 	go e.executeSession(context.Background(), sessionTask, sessionModeImplement, workerParent, nil, sessionOptions{
 		Instruction:        prompt,
 		IncludeTaskContext: true,
 		SkipTaskLock:       true,
-		PrecreatedRun:      &precreated,
+		PrecreatedRun:      &run,
 	})
-	if source != nil {
-		return fmt.Sprintf("replacement child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
-	}
-	return fmt.Sprintf("new child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
 }
 
 func (e *NativeEngine) waitForOrchestratorForkStop(ctx context.Context, runID int32) error {
@@ -691,10 +748,33 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		return "", fmt.Errorf("create forked session: %w", err)
 	}
 	forkTask.AgentID = &source.AgentID
-	go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, sessionOptions{
-		SeedHistory: history, IncludeTaskContext: true, PrecreatedRun: &newRun,
-	})
+	options := sessionOptions{SeedHistory: history, IncludeTaskContext: true, PrecreatedRun: &newRun}
+	if historyContainsToolCalls(history) {
+		options.ReplayHistory = history
+		replayReady := make(chan error, 1)
+		options.ForkReplayReady = replayReady
+		go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, options)
+		select {
+		case replayErr := <-replayReady:
+			if replayErr != nil {
+				return "", fmt.Errorf("fork session %d tool replay: %w", newRun.ID, replayErr)
+			}
+		case <-ctx.Done():
+			return "", ctx.Err()
+		}
+		return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil
+	}
+	go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, options)
 	return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil
+}
+
+func historyContainsToolCalls(history []aicli.Message) bool {
+	for _, message := range history {
+		if message.Role == "assistant" && len(message.ToolCalls) > 0 {
+			return true
+		}
+	}
+	return false
 }
 
 func orchestratorFingerprint(s []tools.ManagedSessionSummary) string {

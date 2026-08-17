@@ -21,6 +21,7 @@ func (e *NativeEngine) buildSessionPrompt(
 	readOnlyDirs []string,
 	artifactDir string,
 	rootTaskID int32,
+	runID int32,
 ) (string, []aicli.Message) {
 	systemPrompt := strings.TrimSpace(agent.SystemPrompt)
 	if options.IncludeTaskContext {
@@ -31,6 +32,10 @@ func (e *NativeEngine) buildSessionPrompt(
 		systemPrompt += taskContext
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	systemPrompt += fmt.Sprintf("\nRuntime session ID: %d", runID)
+	if options.ReplayHistory != nil {
+		systemPrompt += "\nFork replay: completed stateful tool calls have been restored before this session continues."
+	}
 	if agent.CanUseWorkers {
 		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))
 	}
