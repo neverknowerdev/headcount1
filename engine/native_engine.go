@@ -124,6 +124,16 @@ type sessionOptions struct {
 	Consultation       bool
 }
 
+// sessionFinished uses the terminal flag owned by the session's tool set.
+// Helper workers intentionally expose finish_work rather than finish_task, so
+// their completion must not be judged by the root-session flag.
+func sessionFinished(options sessionOptions, state *sessionToolState) bool {
+	if options.Worker {
+		return state.workerFinished
+	}
+	return state.taskFinished
+}
+
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
 	q    *db.Queries
@@ -1050,7 +1060,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	// If finish_task was not called, force a follow-up turn.
 	forcedFinish := false
-	if agentErr == nil && !toolState.taskFinished {
+	finished := sessionFinished(options, toolState)
+	if agentErr == nil && !finished {
 		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
 		followPrompt := strings.TrimSpace(agentconfig.MustPrompt("utils/forced_finish_task.md"))
@@ -1062,7 +1073,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 			status = "failed"
 			runErrMsg = fmt.Sprintf("finish_task was not called and the forced follow-up failed: %v", followErr)
-		} else if !toolState.taskFinished {
+		} else if !sessionFinished(options, toolState) {
 			status = "failed"
 			if options.Worker {
 				runErrMsg = "helper worker ended without calling finish_work, including during the forced follow-up"
@@ -1105,10 +1116,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		case agentErr != nil:
 			endReason = "error"
 			summary = agentErr.Error()
-		case toolState.taskFinished && forcedFinish:
+		case sessionFinished(options, toolState) && forcedFinish:
 			endReason = "finish_task_forced"
-		case toolState.taskFinished:
-			endReason = string(aicli.ToolFinishTask)
+		case sessionFinished(options, toolState):
+			if options.Worker {
+				endReason = string(aicli.ToolFinishWork)
+			} else {
+				endReason = string(aicli.ToolFinishTask)
+			}
 		}
 		proxyLogger.LogOutcome(status, endReason, toolState.finishResult.Status, agentDisplayName, task.ID, summary)
 	}
