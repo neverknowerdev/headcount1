@@ -315,6 +315,8 @@ function handleChatCompletionsRoute(
 
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
+    const requestTools = Array.isArray((request as any).tools) ? (request as any).tools : [];
+    const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
 
     // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
     const modelScenario = state.scenarios.get(String(request.model || ''));
@@ -322,6 +324,25 @@ function handleChatCompletionsRoute(
     if (scenario) {
         const sc = scenario;
         const candidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        const hasIncomingAnswer = answerTool && requestHasIncoming(request);
+        // An inbound event can arrive while a long orchestration turn is
+        // already consuming scripted management actions. Answer it at the
+        // next request that includes the event instead of relying on the
+        // scripted action index to line up with delivery timing.
+        if (hasIncomingAnswer && !scenarioEntryNeedsIncomingAnswer(candidate)) {
+            const message = (request.messages ?? [])
+                .filter((item: any) => item.role === 'user' && String(item.content).includes('Incoming'))
+                .map((item: any) => String(item.content))
+                .join('\n');
+            const match = message.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
+            const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
+                message_id: match ? Number(match[1]) : 1,
+                answer: 'Use the existing event ordering and preserve the current API contract.',
+            } } };
+            if (wantsStream) writeStreamingScenarioEntry(res, answer, request);
+            else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(buildScenarioResponse(answer, request))); }
+            return true;
+        }
         // A worker may finish its owner-wait at the same moment the
         // orchestrator sends the next message. Keep an answer entry queued if
         // that message has not reached this turn yet; the engine's forced
@@ -350,9 +371,7 @@ function handleChatCompletionsRoute(
     // onboarding flow representative of the mandatory orchestrator runtime.
     const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
     const hasToolResult = messages.some((m: any) => m.role === 'tool');
-    const requestTools = Array.isArray((request as any).tools) ? (request as any).tools : [];
     const isOrchestrator = requestTools.some((tool: any) => tool?.function?.name === ORCHESTRATOR_TOOL_NAME);
-    const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
     if (answerTool && !isOrchestrator) {
         const message = messages.find((item: any) => item.role === 'user' && String(item.content).includes('Incoming'));
         const match = String(message?.content ?? '').match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
