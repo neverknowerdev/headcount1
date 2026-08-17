@@ -63,13 +63,13 @@ test.describe.serial('orchestrator messaging matrix', () => {
             { tool_call: { id: 'finish-root', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Messaging matrix completed.', result_details: 'Both workers and the CEO consultation completed through routed messages.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-a-model', entries: [
-            { tool_call: { id: 'a-ask-owner', name: 'ask_task_owner', arguments: { question: 'Should I preserve the existing event ordering?' } } },
             { tool_call: { id: 'a-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'The implementation boundary is clear and safe.' } } },
+            { tool_call: { id: 'a-ask-owner', name: 'ask_task_owner', arguments: { question: 'Should I preserve the existing event ordering?' } } },
             { tool_call: { id: 'a-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Agent A completed the implementation.', result_details: 'Agent A answered the orchestrator and received the owner decision.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-b-model', entries: [
-            { tool_call: { id: 'b-ask-owner', name: 'ask_task_owner', arguments: { question: 'What evidence should I prioritize?' } } },
             { tool_call: { id: 'b-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'Independent verification passed with the requested evidence.' } } },
+            { tool_call: { id: 'b-ask-owner', name: 'ask_task_owner', arguments: { question: 'What evidence should I prioritize?' } } },
             { tool_call: { id: 'b-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Agent B completed verification.', result_details: 'Agent B answered the orchestrator independently.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-ceo-model', entries: [
