@@ -143,6 +143,10 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
                 { tool_call: { id: 'coder-write-fix', name: 'write', arguments: { path: 'qa-fix.txt', content: 'repair applied' } } },
                 { tool_call: { id: 'coder-status-bad', name: 'report_status', arguments: { status: 'Bad status: repair is blocked by an unsafe partial workspace state.' } } },
                 { tool_call: { id: 'coder-status-stale', name: 'report_status', arguments: { status: 'Stale status: no safe progress can be claimed.' } } },
+                // Keep this replacement session alive after its bad status so
+                // the orchestrator exercises an explicit stop before forking,
+                // rather than recovering a session that already failed.
+                { tool_call: { id: 'coder-wait-for-recovery', name: 'answer_message', arguments: { message_id: 0, answer: 'Waiting for the orchestrator to choose a safe recovery boundary.' } } },
             ],
             fork_entries: [
                 { tool_call: { id: 'coder-fork-status', name: 'report_status', arguments: { status: 'Fork restored the previous workspace state; completing the repair.' } } },
