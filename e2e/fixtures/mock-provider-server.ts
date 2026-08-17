@@ -331,9 +331,9 @@ function handleChatCompletionsRoute(
         // scripted action index to line up with delivery timing.
         if (hasIncomingAnswer && !scenarioEntryNeedsIncomingAnswer(candidate)) {
             const message = latestIncomingContent(request) ?? '';
-            const match = message.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
+            const messageID = pendingIncomingMessageID(request);
             const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
-                message_id: match ? Number(match[1]) : 1,
+                message_id: messageID ?? 1,
                 answer: 'Use the existing event ordering and preserve the current API contract.',
             } } };
             if (wantsStream) writeStreamingScenarioEntry(res, answer, request);
@@ -487,14 +487,22 @@ function latestIncomingContent(request: ChatCompletionRequest): string | null {
     return null;
 }
 
+function pendingIncomingMessageID(request: ChatCompletionRequest): number | null {
+    const incoming = latestIncomingContent(request);
+    if (!incoming) return null;
+    const direct = incoming.match(/message_id=(\d+)/);
+    if (direct) return Number(direct[1]);
+    const routedMessage = incoming.match(/\{"id":(\d+)[^{}]*"event_type":"session_message"/);
+    return routedMessage ? Number(routedMessage[1]) : null;
+}
+
 /** Resolve IDs that are assigned by the database during an E2E run. A zero in
  * a scenario means "the relevant ID from this conversation", so the test
  * describes message direction without hard-coding database sequence values. */
 function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest): ScenarioToolCall {
     if (!request) return toolCall;
     const messages = Array.isArray(request.messages) ? request.messages : [];
-    const incoming = latestIncomingContent(request) ?? '';
-    const messageID = incoming.match(/(?:message_id|"id")\s*[=:]\s*(\d+)/)?.[1];
+    const messageID = pendingIncomingMessageID(request);
     const toolResults = messages
         .filter((item) => item.role === 'tool')
         .map((item) => String(item.content))
@@ -509,7 +517,7 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
     const sessionID = toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0];
     const args = { ...toolCall.arguments };
     if (toolCall.name === 'answer_message' && Number(args.message_id) === 0) {
-        args.message_id = messageID ? Number(messageID) : 1;
+        args.message_id = messageID ?? 1;
     }
     if (toolCall.name === 'get_session' && Number(args.session_id) === 0) {
         args.session_id = consultationID ? Number(consultationID) : (sessionID ? Number(sessionID) : 1);

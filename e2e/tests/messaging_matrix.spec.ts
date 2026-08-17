@@ -60,7 +60,6 @@ test.describe.serial('orchestrator messaging matrix', () => {
             { text: 'Agent A answered; Agent B is now being started.' },
             { tool_call: { id: 'send-b', name: 'send_message_to_session', arguments: { session_id: 0, message: 'Run an independent verification and return the evidence.' } } },
             { text: 'All routed questions have been answered.' },
-            { tool_call: { id: 'finish-root', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Messaging matrix completed.', result_details: 'Both workers and the CEO consultation completed through routed messages.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-a-model', entries: [
             { tool_call: { id: 'a-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'The implementation boundary is clear and safe.' } } },
@@ -79,21 +78,7 @@ test.describe.serial('orchestrator messaging matrix', () => {
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok(), await kick.text()).toBeTruthy();
-        try {
-            await waitForTaskStatus(request, task.id, 'in-review', 120_000);
-        } catch (error) {
-            const runsResponse = await request.get(`/api/tasks/${task.id}/runs`, { timeout: 10_000 }).catch(() => null);
-            const runs = runsResponse?.ok() ? await runsResponse.json() : [];
-            const mockResponse = await request.get(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`, { timeout: 10_000 }).catch(() => null);
-            const mockLog = mockResponse?.ok() ? await mockResponse.json() : { requests: [] };
-            const runSummary = runs.map((run: any) => ({ id: run.id, kind: run.kind, agent_id: run.agent_id, status: run.status, result: run.result_description }));
-            const modelSummary = (mockLog.requests as any[]).filter((entry) => entry.path.includes('/chat/completions')).map((entry) => ({
-                model: entry.body?.model,
-                tools: (entry.body?.tools ?? []).map((tool: any) => tool?.function?.name),
-                messages: (entry.body?.messages ?? []).slice(-2),
-            }));
-            throw new Error(`${String(error)}\nMESSAGING_MATRIX_DEBUG_RUNS=${JSON.stringify(runSummary)}\nMESSAGING_MATRIX_DEBUG_MODELS=${JSON.stringify(modelSummary)}`);
-        }
+        await waitForTaskStatus(request, task.id, 'in-review', 120_000);
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${task.id}/runs`);
             const runs = await response.json();
