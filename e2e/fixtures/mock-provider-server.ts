@@ -504,7 +504,7 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
     // Orchestrator activations intentionally start with a fresh model history.
     // Later turns therefore no longer contain the earlier run_new_session tool
     // result; recover child IDs from the authoritative session snapshot too.
-    const snapshotSessionIDs = [...String(messages.map((item) => item.content).join('\n')).matchAll(/"id"\s*:\s*(\d+)[\s\S]{0,240}?"kind"\s*:\s*"(?:agent_session|helper_worker)"/g)].map((match) => match[1]);
+    const snapshotSessionIDs = [...String(messages.map((item) => item.content).join('\n')).matchAll(/\{\s*"id"\s*:\s*(\d+)\s*,\s*"name"\s*:/g)].map((match) => match[1]);
     const sessionIDs = [...new Set([...toolResultSessionIDs, ...snapshotSessionIDs])];
     const sessionID = toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0];
     const args = { ...toolCall.arguments };
