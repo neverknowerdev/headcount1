@@ -452,14 +452,14 @@ func (e *NativeEngine) orchestratorSendMessageToRun(ctx context.Context, taskID 
 		return "", fmt.Errorf("queue message for session %d: %w", targetRunID, err)
 	}
 	for {
-		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
-		if findErr == nil {
+		if answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID); findErr == nil {
 			return answer.Payload, nil
 		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		if target, runErr := e.q.GetRun(ctx, targetRunID); runErr == nil && isTerminalRunStatus(target.Status) {
+			return "", fmt.Errorf("target session %d ended as %s before answering", targetRunID, target.Status)
+		}
+		if err := waitForRoutedAnswerPoll(ctx); err != nil {
+			return "", err
 		}
 	}
 }
@@ -480,24 +480,33 @@ func (e *NativeEngine) orchestratorMessageTerminalSession(ctx context.Context, t
 		return "", fmt.Errorf("queue message for replacement session %d: %w", replacement.ID, err)
 	}
 	e.startOrchestratorChildSession(task, agent, replacement, "Answer the task owner's routed question using the existing design context.")
-	answer, err := e.waitForRoutedAnswer(ctx, event.ID)
+	answer, err := e.waitForRoutedAnswer(ctx, event.ID, replacement.ID)
 	if err != nil {
 		return "", fmt.Errorf("terminal session %d replacement %d: %w", source.ID, replacement.ID, err)
 	}
 	return answer, nil
 }
 
-func (e *NativeEngine) waitForRoutedAnswer(ctx context.Context, eventID int64) (string, error) {
+func (e *NativeEngine) waitForRoutedAnswer(ctx context.Context, eventID int64, targetRunID int32) (string, error) {
 	for {
-		answer, findErr := e.q.FindAnswerForMessage(ctx, eventID)
-		if findErr == nil {
+		if answer, findErr := e.q.FindAnswerForMessage(ctx, eventID); findErr == nil {
 			return answer.Payload, nil
 		}
-		select {
-		case <-ctx.Done():
-			return "", ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		if target, runErr := e.q.GetRun(ctx, targetRunID); runErr == nil && isTerminalRunStatus(target.Status) {
+			return "", fmt.Errorf("replacement session %d ended as %s before answering", targetRunID, target.Status)
 		}
+		if err := waitForRoutedAnswerPoll(ctx); err != nil {
+			return "", err
+		}
+	}
+}
+
+func waitForRoutedAnswerPoll(ctx context.Context) error {
+	select {
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-time.After(50 * time.Millisecond):
+		return nil
 	}
 }
 
