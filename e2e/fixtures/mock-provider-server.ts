@@ -51,6 +51,8 @@ interface ScenarioState {
     inboundReadyFor?: Set<string>;
 }
 
+const GENERIC_FORWARDING_INBOUND = '__forwarding-inbound__';
+
 interface ScenarioTemplate {
     entries: ScenarioEntry[];
     inboundEntries?: ScenarioEntry[];
@@ -368,7 +370,11 @@ function handleChatCompletionsRoute(
         // next request that includes the event instead of relying on the
         // scripted action index to line up with delivery timing.
         if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate)) {
-            if (inboundGate) sc.inboundReadyFor?.add(inboundGate);
+            // The owner may receive a worker question before the scripted
+            // inspection turn that precedes its forwarding action. Remember
+            // that the question was answered so the later route cannot wait
+            // forever for an event that was already consumed durably.
+            sc.inboundReadyFor?.add(inboundGate ?? GENERIC_FORWARDING_INBOUND);
             const message = latestIncomingContent(request) ?? '';
             const messageID = pendingIncomingMessageID(request);
             const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
@@ -383,7 +389,10 @@ function handleChatCompletionsRoute(
         // the worker question it is meant to forward has reached its inbox.
         // This removes scheduler timing from the E2E scenario while still
         // exercising the real durable answer and routing paths.
-        const waitingForForwardedQuestion = inboundGate && !sc.inboundReadyFor?.has(inboundGate) && !requestHasIncoming(request);
+        const waitingForForwardedQuestion = inboundGate
+            && !sc.inboundReadyFor?.has(inboundGate)
+            && !sc.inboundReadyFor?.has(GENERIC_FORWARDING_INBOUND)
+            && !requestHasIncoming(request);
         // A worker may finish its owner-wait at the same moment the
         // orchestrator sends the next message. Keep an answer entry queued if
         // that message has not reached this turn yet; the engine's forced
@@ -404,7 +413,13 @@ function handleChatCompletionsRoute(
                     tool_call: { id: 'wait-for-routed-message', name: 'get_session_list', arguments: {} },
                 }
             : candidate;
-        if (!waitingForIncoming && candidate) sc.index++;
+        if (!waitingForIncoming && candidate) {
+            if (inboundGate) {
+                sc.inboundReadyFor?.delete(inboundGate);
+                sc.inboundReadyFor?.delete(GENERIC_FORWARDING_INBOUND);
+            }
+            sc.index++;
+        }
 
         if (wantsStream) {
             writeStreamingScenarioEntry(res, entry, request);
