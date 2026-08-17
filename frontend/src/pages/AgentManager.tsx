@@ -129,15 +129,10 @@ export const AgentManager: React.FC = () => {
                                         {cfg.reasoning_level && (
                                             <span className="bg-purple-50 text-purple-700 px-1.5 py-0.5 rounded">reasoning: {cfg.reasoning_level}</span>
                                         )}
-                                        {cfg.parent_agent && (
-                                            <span className="bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded">reports to {cfg.parent_agent}</span>
+                                        {cfg.can_use_workers && (
+                                            <span className="bg-green-50 text-green-700 px-1.5 py-0.5 rounded">helper workers enabled by default</span>
                                         )}
                                     </div>
-                                    {cfg.subagents?.length > 0 && (
-                                        <div className="text-xs text-gray-500">
-                                            <span className="font-medium text-gray-600">Delegates to:</span> {cfg.subagents.join(', ')}
-                                        </div>
-                                    )}
                                     <details className="mt-auto">
                                         <summary className="text-xs text-indigo-600 cursor-pointer hover:underline">System prompt</summary>
                                         <div className="mt-1 text-xs text-gray-700 bg-gray-50 p-2 rounded border overflow-y-auto max-h-40 whitespace-pre-wrap font-mono">

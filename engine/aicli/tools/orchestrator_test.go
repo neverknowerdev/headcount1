@@ -20,8 +20,24 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	require.Equal(t, []string{"ask_agent", "fork_session", "get_session", "get_session_list", "run_new_session", "stop_session"}, r.Names())
+	require.Equal(t, []string{"ask_ceo", "fork_session", "get_session", "get_session_list", "run_new_session", "send_message_to_session", "stop_session"}, r.Names())
 	require.Error(t, func() error { _, err := r.Execute(context.Background(), string(aicli.ToolWrite), nil); return err }())
+}
+
+func TestAskCEOCarriesOnlyTaskIDAndMessage(t *testing.T) {
+	var taskID int32
+	var message string
+	r := NewOrchestratorRegistry(OrchestratorCallbacks{AskCEO: func(_ context.Context, id int32, text string) (string, error) {
+		taskID, message = id, text
+		return "answer", nil
+	}})
+	result, err := r.Execute(context.Background(), "ask_ceo", json.RawMessage(`{"task_id":17,"message":"Should we split this work?"}`))
+	require.NoError(t, err)
+	require.Equal(t, "answer", result)
+	require.Equal(t, int32(17), taskID)
+	require.Equal(t, "Should we split this work?", message)
+	_, err = r.Execute(context.Background(), "ask_ceo", json.RawMessage(`{"task_id":17,"message":""}`))
+	require.Error(t, err)
 }
 
 func TestOrchestratorToolValidation(t *testing.T) {

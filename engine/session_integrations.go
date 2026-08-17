@@ -29,6 +29,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 	registry *aicli.Registry,
 	systemPrompt string,
 	logger *logging.ProxyLogger,
+	allCompanyMCP bool,
 ) sessionIntegrations {
 	accountIDByName := make(map[string]int32)
 	serverIDByName := make(map[string]int32)
@@ -72,14 +73,16 @@ func (e *NativeEngine) configureSessionIntegrations(
 
 	closeIntegrations := func() {}
 	if servers, err := e.q.ListCodegraphProjectServers(ctx, task.CompanyID); err == nil && len(servers) > 0 {
-		if assignments, assignErr := e.q.GetAgentCodegraphAssignments(ctx, agent.ID); assignErr == nil && len(assignments) > 0 {
-			filtered := make([]db.CodegraphProjectServer, 0, len(servers))
-			for _, server := range servers {
-				if enabled, explicit := assignments[server.Server.ID]; !explicit || enabled {
-					filtered = append(filtered, server)
+		if !allCompanyMCP {
+			if assignments, assignErr := e.q.GetAgentCodegraphAssignments(ctx, agent.ID); assignErr == nil && len(assignments) > 0 {
+				filtered := make([]db.CodegraphProjectServer, 0, len(servers))
+				for _, server := range servers {
+					if enabled, explicit := assignments[server.Server.ID]; !explicit || enabled {
+						filtered = append(filtered, server)
+					}
 				}
+				servers = filtered
 			}
-			servers = filtered
 		}
 		if len(servers) > 0 {
 			proxy := tools.NewCodegraphProxy(taskProject, servers)
@@ -92,7 +95,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 		e.logInfo(logger, fmt.Sprintf("Warning: failed to load codegraph servers: %v", err))
 	}
 
-	if strings.TrimSpace(agent.Permissions) != "" {
+	if !allCompanyMCP && strings.TrimSpace(agent.Permissions) != "" {
 		var permissions map[string]string
 		if err := json.Unmarshal([]byte(agent.Permissions), &permissions); err != nil {
 			e.logInfo(logger, fmt.Sprintf("Warning: invalid agent tool permissions: %v; leaving tools unchanged", err))
@@ -110,8 +113,19 @@ func (e *NativeEngine) configureSessionIntegrations(
 
 	var listingCostTotal int
 	var listingCostByServer map[string]int
-	if accounts, err := e.q.ListMCPAccountsForAgent(ctx, agent.ID); err == nil && len(accounts) > 0 {
-		allServers, _ := e.q.ListMCPServers(ctx, 0, 0)
+	var accounts []db.MCPAccount
+	var allServers []db.MCPServer
+	var accountErr error
+	if allCompanyMCP {
+		allServers, accountErr = e.q.ListMCPServers(ctx, task.CompanyID, e.ownerUserIDForCompany(ctx, task.CompanyID))
+		for _, server := range allServers {
+			accounts = append(accounts, server.Accounts...)
+		}
+	} else {
+		accounts, accountErr = e.q.ListMCPAccountsForAgent(ctx, agent.ID)
+		allServers, _ = e.q.ListMCPServers(ctx, 0, 0)
+	}
+	if accountErr == nil && len(accounts) > 0 {
 		serverByID := make(map[int32]db.MCPServer, len(allServers))
 		for _, server := range allServers {
 			serverByID[server.ID] = server
@@ -120,7 +134,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 		allowedMCPs := decodeAgentNames(agent.AllowedMCPs)
 		for _, account := range accounts {
 			server, ok := serverByID[account.MCPServerID]
-			if !ok || server.Transport == "builtin" || !mcpAllowed(server.Name, allowedMCPs) {
+			if !ok || server.Transport == "builtin" || (!allCompanyMCP && !mcpAllowed(server.Name, allowedMCPs)) {
 				continue
 			}
 			synthetic := server
@@ -167,8 +181,8 @@ func (e *NativeEngine) configureSessionIntegrations(
 				listingCostTotal += cost
 			}
 		}
-	} else if err != nil {
-		e.logInfo(logger, fmt.Sprintf("Warning: failed to load MCP accounts for agent: %v", err))
+	} else if accountErr != nil {
+		e.logInfo(logger, fmt.Sprintf("Warning: failed to load MCP accounts: %v", accountErr))
 	}
 	e.logInfo(logger, "Effective tools: "+strings.Join(registry.Names(), ", "))
 	return sessionIntegrations{registry, systemPrompt, listingCostTotal, listingCostByServer, closeIntegrations}

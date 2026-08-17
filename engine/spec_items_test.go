@@ -19,10 +19,10 @@ func TestGetRootTask(t *testing.T) {
 
 	root := seedTestData(t, database, "http://unused")
 	rootID := root.ID
-	child, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &rootID, Title: "child", TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+	child, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &rootID, Title: "child", Status: "to-do", Priority: "Normal"})
 	require.NoError(t, err)
 	childID := child.ID
-	grandchild, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &childID, Title: "grandchild", TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+	grandchild, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &childID, Title: "grandchild", Status: "to-do", Priority: "Normal"})
 	require.NoError(t, err)
 
 	got, err := q.GetRootTask(ctx, grandchild.ID)
@@ -75,7 +75,7 @@ func TestTaskRefKeys(t *testing.T) {
 
 	rootID := root.ID
 	mk := func(title string) db.Task {
-		sub, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &rootID, Title: title, TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+		sub, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &rootID, Title: title, Status: "to-do", Priority: "Normal"})
 		require.NoError(t, err)
 		return sub
 	}
@@ -91,7 +91,7 @@ func TestTaskRefKeys(t *testing.T) {
 
 	// Nested subtask builds on the parent's key.
 	s2ID := s2.ID
-	nested, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &s2ID, Title: "nested", TaskType: db.TaskTypeImplement, Status: "to-do", Priority: "Normal"})
+	nested, err := q.CreateTask(ctx, db.Task{CompanyID: root.CompanyID, SprintID: root.SprintID, ParentID: &s2ID, Title: "nested", Status: "to-do", Priority: "Normal"})
 	require.NoError(t, err)
 	assert.Equal(t, s2.RefKey+"-1", nested.RefKey)
 }

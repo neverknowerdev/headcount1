@@ -27,23 +27,29 @@ var orchestratorPrompt string
 // starts. Worker and delegated runs then form a normal child tree beneath it.
 func (e *NativeEngine) createTaskOrchestrator(ctx context.Context, task db.Task, agent db.Agent) (db.Run, db.LLMProvider, string, bool, bool) {
 	uid := e.ownerUserIDForCompany(ctx, task.CompanyID)
-	setting, err := e.q.GetDefaultModelSetting(ctx, uid, db.PurposeTaskOrchestrator)
-	if err != nil || (setting.ProviderID == nil && setting.ModelGroupID == nil) {
-		return db.Run{}, db.LLMProvider{}, "", false, false
-	}
-	baseProvider, baseModel, err := resolveProvider(ctx, e.q, agent)
+	provider, model, err := e.resolveRequiredPurposeModel(ctx, uid, db.PurposeTaskOrchestrator)
 	if err != nil {
-		return db.Run{}, db.LLMProvider{}, "", false, false
-	}
-	provider, model := e.resolvePurposeModel(ctx, uid, db.PurposeTaskOrchestrator, baseProvider, baseModel)
-	if provider.ID == 0 || strings.TrimSpace(model) == "" {
+		// Leave a visible failed orchestration attempt and block the task. The
+		// assigned agent is never started until the user fixes configuration and
+		// explicitly restarts/unblocks the task.
+		ended := time.Now()
+		failed := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "failed", StartedAt: ended, EndedAt: &ended, ResultExplanation: "ORCHESTRATOR_MODEL_REQUIRED: " + err.Error()}
+		if created, createErr := e.q.CreateRun(ctx, failed); createErr == nil {
+			_ = e.q.UpdateRunLog(ctx, created.ID, failed.ResultExplanation, "failed")
+			_ = e.q.SetTaskOrchestratorRun(ctx, task.ID, created.ID)
+		}
+		if current, getErr := e.q.GetTask(ctx, task.ID); getErr == nil {
+			current.Status = db.TaskStatusBlocked
+			_, _ = e.q.UpdateTask(ctx, current)
+		}
+		_, _ = e.q.CreateComment(ctx, db.Comment{TaskID: task.ID, AuthorType: "system", CommentType: "orchestrator_preflight_failed", Content: "ORCHESTRATOR_MODEL_REQUIRED: " + err.Error()})
 		return db.Run{}, db.LLMProvider{}, "", false, false
 	}
 	if existing, err := e.q.GetOrchestratorRun(ctx, task.ID); err == nil && existing.ID != 0 && (existing.Status == "running" || existing.Status == "waiting") {
 		return existing, provider, model, true, false
 	}
 	orchestrator := db.Run{
-		TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: time.Now(),
+		TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "running", StartedAt: time.Now(),
 		Name: fmt.Sprintf("%s-orchestrator", task.RefKey),
 	}
 	created, err := e.q.CreateRun(ctx, orchestrator)
@@ -94,7 +100,11 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 		b.WriteString("Sprint: none assigned\n")
 	}
 	fmt.Fprintf(&b, "Task: %s (id: %d, ref: %s)\n", task.Title, task.ID, task.RefKey)
-	fmt.Fprintf(&b, "Task type: %s\nTask status: %s\nPriority: %s\n", valueOrUnavailable(task.TaskType), valueOrUnavailable(task.Status), valueOrUnavailable(task.Priority))
+	mode := "implementation"
+	if task.Status == db.TaskStatusRefinement {
+		mode = "refinement"
+	}
+	fmt.Fprintf(&b, "Execution mode: %s\nTask status: %s\nPriority: %s\n", mode, valueOrUnavailable(task.Status), valueOrUnavailable(task.Priority))
 	fmt.Fprintf(&b, "Task description: %s\n", valueOrUnavailable(task.Description))
 	fmt.Fprintf(&b, "Refined description: %s\n", valueOrUnavailable(task.RefinedDescription))
 	fmt.Fprintf(&b, "Acceptance criteria: %s\n", valueOrUnavailable(formatSpecItems(task.AcceptanceCriteria)))
@@ -169,16 +179,8 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 		if task.AgentID == nil {
 			continue
 		}
-		agent, err := e.q.GetAgent(ctx, *task.AgentID)
-		if err != nil {
-			continue
-		}
-		baseProvider, baseModel, err := resolveProvider(ctx, e.q, agent)
-		if err != nil {
-			continue
-		}
-		provider, model := e.resolvePurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeTaskOrchestrator, baseProvider, baseModel)
-		if provider.ID == 0 || model == "" {
+		provider, model, err := e.resolveRequiredPurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeTaskOrchestrator)
+		if err != nil || provider.ID == 0 || model == "" {
 			continue
 		}
 		go e.runOrchestrator(orch, task, provider, model)
@@ -195,15 +197,6 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 	defer logger.Close()
 	defer e.q.UnlockTaskRun(context.Background(), task.ID)
 	_ = e.q.UpdateRunLogFilePath(ctx, orchestrator.ID, logger.FilePath())
-	questionBroker := newOrchestratorQuestionBroker()
-	actualBroker, loaded := e.runs.orchestratorQuestionBrokers.LoadOrStore(orchestrator.ID, questionBroker)
-	if loaded {
-		questionBroker = actualBroker.(*orchestratorQuestionBroker)
-	}
-	defer func() {
-		e.runs.orchestratorQuestionBrokers.Delete(orchestrator.ID)
-		questionBroker.close(fmt.Errorf("orchestrator session %d ended before answering the worker", orchestrator.ID))
-	}()
 	systemPrompt, promptErr := e.buildOrchestratorSystemPrompt(ctx, task)
 	if promptErr != nil {
 		_ = e.q.UpdateRunLog(ctx, orchestrator.ID, promptErr.Error(), "failed")
@@ -231,6 +224,15 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		ForkSession: func(c context.Context, sessionID int32, messageID int64) (string, error) {
 			return e.orchestratorFork(c, orchestrator.ID, sessionID, messageID)
 		},
+		AnswerMessage: func(c context.Context, messageID int64, answer string) (string, error) {
+			return e.answerDurableMessage(c, orchestrator, messageID, answer)
+		},
+		AskCEO: func(c context.Context, taskID int32, message string) (string, error) {
+			if taskID != task.ID {
+				return "", fmt.Errorf("ask_ceo task_id %d is outside orchestrator task %d", taskID, task.ID)
+			}
+			return e.askCEO(c, orchestrator, task, message)
+		},
 	}
 	registry := tools.NewOrchestratorRegistry(callbacks)
 	logger.LogInfo("Effective tools: " + strings.Join(registry.Names(), ", "))
@@ -250,10 +252,15 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return
 		}
 		events, _ := e.q.ListPendingRunEvents(ctx, task.ID)
-		question, _ := questionBroker.receive()
+		inbound, _ := e.q.ListUnconsumedEventsForTarget(ctx, orchestrator.ID, db.RunEventTypeSessionMessage)
+		if len(inbound) > 0 {
+			tools.RegisterOrchestratorAnswerMessage(registry, callbacks.AnswerMessage)
+		} else {
+			registry.Unregister(string(aicli.ToolAnswerMessage))
+		}
 		fingerprint := orchestratorFingerprint(sessions)
 		taskNow, _ := e.q.GetTask(ctx, task.ID)
-		if !first && fingerprint == lastFingerprint && len(events) == 0 && question == nil {
+		if !first && fingerprint == lastFingerprint && len(events) == 0 && len(inbound) == 0 {
 			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
 				return
@@ -276,17 +283,11 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			eventJSON, _ := json.Marshal(events)
 			message += "\nDurable lifecycle events since the last activation:\n" + string(eventJSON)
 		}
-		if question != nil {
-			message += fmt.Sprintf("\n\nA worker is waiting for your answer. Respond directly to this worker question in your final text; do not leave it unanswered. Worker run %d asks:\n%s", question.workerRunID, question.question)
+		if len(inbound) > 0 {
+			messageJSON, _ := json.Marshal(inbound)
+			message += "\nIncoming messages (answer each required message with answer_message and its exact ID):\n" + string(messageJSON)
 		}
-		answer, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
-		if question != nil {
-			result := sessionQuestionResult{answer: strings.TrimSpace(answer), err: runErr}
-			select {
-			case question.result <- result:
-			default:
-			}
-		}
+		_, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
 		if runErr != nil && !errors.Is(runErr, context.Canceled) {
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, runErr.Error(), "failed")
 			return
@@ -409,50 +410,36 @@ func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, or
 	return true, err
 }
 
-// orchestratorAskSession synchronously exchanges one isolated question/answer
-// turn with another managed session. The worker's normal conversation is
-// paused at its next safe boundary; provider/tool errors and timeouts are
-// returned so the orchestrator agent receives them as the tool result.
+// orchestratorAskSession sends a durable routed message to another managed
+// session and waits for its correlated answer. The method name remains for
+// source compatibility with older engine tests; runtime delivery is durable.
 func (e *NativeEngine) orchestratorAskSession(ctx context.Context, task db.Task, orchestratorID, sessionID int32, question string) (string, error) {
-	_, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID)
-	if err != nil {
+	if _, err := e.orchestratorSessionRun(ctx, orchestratorID, sessionID); err != nil {
 		return "", err
 	}
 	question = strings.TrimSpace(question)
 	if question == "" {
 		return "", fmt.Errorf("question is required")
 	}
-	channelValue, ok := e.runs.sessionQuestionBrokers.Load(sessionID)
-	if !ok {
-		return "", fmt.Errorf("session %d is not actively processing an LLM turn", sessionID)
-	}
-	questionBroker, ok := channelValue.(*sessionQuestionBroker)
-	if !ok {
-		return "", fmt.Errorf("session %d question broker is invalid", sessionID)
-	}
-	questionCtx, cancel := context.WithTimeout(ctx, orchestratorQuestionTimeout)
-	defer cancel()
-	request := &sessionQuestionRequest{question: question, ctx: questionCtx, result: make(chan sessionQuestionResult, 1)}
-	// Keep a visible audit trail, but target the worker session rather than
-	// attributing the question to the orchestrator run. Record it before
-	// delivery so an audit failure cannot leave an untracked in-flight request.
-	rid := sessionID
-	comment, err := e.q.CreateComment(ctx, db.Comment{TaskID: task.ID, AuthorType: "system", CommentType: "orchestrator_question", Content: question, RunID: &rid})
+	payload, _ := json.Marshal(db.NewSessionMessage(question))
+	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, orchestratorID, sessionID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("orchestrator-message:%d:%d:%d", orchestratorID, sessionID, time.Now().UnixNano()))
 	if err != nil {
-		return "", err
+		return "", fmt.Errorf("queue message for session %d: %w", sessionID, err)
 	}
-	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
-	if err := questionBroker.submit(questionCtx, request); err != nil {
-		return "", fmt.Errorf("orchestrator question delivery failed for session %d: %w", sessionID, err)
-	}
-	select {
-	case result := <-request.result:
-		if result.err != nil {
-			return "", result.err
+	deadline := time.NewTimer(orchestratorQuestionTimeout)
+	defer deadline.Stop()
+	for {
+		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
+		if findErr == nil {
+			return answer.Payload, nil
 		}
-		return result.answer, nil
-	case <-questionCtx.Done():
-		return "", fmt.Errorf("orchestrator question timed out waiting for session %d response: %w", sessionID, questionCtx.Err())
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+			return "", fmt.Errorf("message %d timed out waiting for session %d", event.ID, sessionID)
+		case <-time.After(50 * time.Millisecond):
+		}
 	}
 }
 
@@ -464,16 +451,6 @@ func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, or
 	if question == "" {
 		return "", fmt.Errorf("question is required")
 	}
-	value, ok := e.runs.orchestratorQuestionBrokers.Load(orchestratorID)
-	if !ok {
-		return "", fmt.Errorf("orchestrator session %d is not active", orchestratorID)
-	}
-	broker, ok := value.(*orchestratorQuestionBroker)
-	if !ok {
-		return "", fmt.Errorf("orchestrator session %d question broker is invalid", orchestratorID)
-	}
-	questionCtx, cancel := context.WithTimeout(ctx, orchestratorQuestionTimeout)
-	defer cancel()
 	rid := workerRunID
 	comment, err := e.q.CreateComment(ctx, db.Comment{
 		TaskID: task.ID, AuthorType: "agent", CommentType: "ask_owner", Content: question, RunID: &rid,
@@ -482,32 +459,86 @@ func (e *NativeEngine) askTaskOrchestrator(ctx context.Context, task db.Task, or
 		return "", fmt.Errorf("record worker question: %w", err)
 	}
 	e.broadcastForTask(ctx, task.ID, "comment_created", comment)
-	payload, _ := json.Marshal(map[string]interface{}{
-		"worker_run_id": workerRunID,
-		"question":      question,
+	payload, _ := json.Marshal(db.NewSessionMessage(question))
+	event, err := e.q.EnqueueRoutedEvent(ctx, task.ID, workerRunID, orchestratorID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("session-message:%d:%d:%d", workerRunID, orchestratorID, time.Now().UnixNano()))
+	if err != nil {
+		return "", fmt.Errorf("queue durable task-owner message: %w", err)
+	}
+	deadline := time.NewTimer(orchestratorQuestionTimeout)
+	defer deadline.Stop()
+	for {
+		answer, findErr := e.q.FindAnswerForMessage(ctx, event.ID)
+		if findErr == nil {
+			return answer.Payload, nil
+		}
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+			return "", fmt.Errorf("message %d timed out waiting for orchestrator %d", event.ID, orchestratorID)
+		case <-time.After(50 * time.Millisecond):
+		}
+	}
+}
+
+// askCEO starts a task-scoped CEO consultation. The consultation receives the
+// normal task bootstrap and the caller's message as a durable inbound event;
+// no serialized task snapshot is passed through the orchestrator tool call.
+func (e *NativeEngine) askCEO(ctx context.Context, orchestrator db.Run, task db.Task, message string) (string, error) {
+	message = strings.TrimSpace(message)
+	if message == "" {
+		return "", fmt.Errorf("message is required")
+	}
+	ceo, err := e.findAgentForRole(ctx, task.CompanyID, "CEO")
+	if err != nil {
+		return "", fmt.Errorf("resolve CEO: %w", err)
+	}
+	parentID, rootID := orchestrator.ID, orchestrator.ID
+	consultation, err := e.q.CreateRun(ctx, db.Run{
+		TaskID: task.ID, AgentID: ceo.ID, Kind: db.RunKindCEOConsultation,
+		ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now(),
 	})
-	if err := e.q.EnqueueRunEvent(ctx, db.RunEvent{
-		TaskID: task.ID, RunID: workerRunID, EventType: db.RunEventTypeWorkerQuestion,
-		Payload: string(payload), DedupeKey: fmt.Sprintf("worker-question:%d:%d:%d", orchestratorID, workerRunID, time.Now().UnixNano()),
-	}); err != nil {
-		return "", fmt.Errorf("queue worker question: %w", err)
+	if err != nil {
+		return "", fmt.Errorf("create CEO consultation: %w", err)
 	}
-	request := &orchestratorQuestionRequest{workerRunID: workerRunID, question: question, ctx: questionCtx, result: make(chan sessionQuestionResult, 1)}
-	if err := broker.submit(questionCtx, request); err != nil {
-		return "", fmt.Errorf("worker question delivery failed: %w", err)
+	payload, _ := json.Marshal(db.NewSessionMessage(message))
+	inbound, err := e.q.EnqueueRoutedEvent(ctx, task.ID, orchestrator.ID, consultation.ID, db.RunEventTypeSessionMessage, string(payload), fmt.Sprintf("ceo-consultation:%d:%d", orchestrator.ID, consultation.ID))
+	if err != nil {
+		_ = e.q.UpdateRunLog(ctx, consultation.ID, err.Error(), "failed")
+		return "", fmt.Errorf("queue CEO consultation message: %w", err)
 	}
-	select {
-	case result := <-request.result:
-		if result.err != nil {
-			return "", result.err
+	consultationTask := task
+	consultationTask.AgentID = &ceo.ID
+	go e.executeSession(context.Background(), consultationTask, "implement", &parentSession{
+		parentRunID: orchestrator.ID, rootRunID: rootID, rootTaskID: task.ID,
+	}, nil, sessionOptions{IncludeTaskContext: true, SkipTaskLock: true, PrecreatedRun: &consultation, Consultation: true})
+
+	deadline := time.NewTimer(orchestratorQuestionTimeout)
+	defer deadline.Stop()
+	for {
+		answer, findErr := e.q.FindAnswerForMessage(ctx, inbound.ID)
+		if findErr == nil {
+			return answer.Payload, nil
 		}
-		if strings.TrimSpace(result.answer) == "" {
-			return "", fmt.Errorf("orchestrator returned an empty answer")
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case <-deadline.C:
+			return "", fmt.Errorf("CEO consultation %d timed out waiting for answer", consultation.ID)
+		case <-time.After(50 * time.Millisecond):
 		}
-		return result.answer, nil
-	case <-questionCtx.Done():
-		return "", fmt.Errorf("timed out waiting for orchestrator %d response: %w", orchestratorID, questionCtx.Err())
 	}
+}
+
+func (e *NativeEngine) answerDurableMessage(ctx context.Context, run db.Run, messageID int64, answer string) (string, error) {
+	if strings.TrimSpace(answer) == "" {
+		return "", fmt.Errorf("answer is required")
+	}
+	event, err := e.q.AnswerPendingMessage(ctx, run.ID, messageID, answer, fmt.Sprintf("session-answer:%d", messageID))
+	if err != nil {
+		return "", err
+	}
+	return event.Payload, nil
 }
 
 func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, sessionID int32, reason string) (string, error) {
@@ -571,23 +602,19 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 	sessionTask.AgentID = &selectedAgent.ID
 	parentID, rootID := orchestratorRunID, orchestratorRunID
 	precreated, err := e.q.CreateRun(context.Background(), db.Run{
-		TaskID: sessionTask.ID, AgentID: selectedAgent.ID, Status: "running", StartedAt: time.Now(),
+		TaskID: sessionTask.ID, AgentID: selectedAgent.ID, Kind: db.RunKindAgentSession, Status: "running", StartedAt: time.Now(),
 		ParentRunID: &parentID, RootRunID: &rootID,
 	})
 	if err != nil {
 		return "", fmt.Errorf("create worker session: %w", err)
 	}
-	// A worker is a child owned by the sidecar, so it never claims or unlocks
-	// the root task lock. Its ask_task_owner callback is wired to the
-	// orchestrator's durable question inbox.
+	// A child session is owned by the sidecar, so it never claims or unlocks
+	// the root task lock. Its ask_task_owner tool is wired to the orchestrator's
+	// durable question inbox by buildSessionTools.
 	workerParent := &parentSession{
 		parentRunID: orchestratorRunID,
 		rootRunID:   orchestratorRunID,
 		rootTaskID:  task.ID,
-		depth:       1,
-		askOwner: func(questionCtx context.Context, question string) (string, error) {
-			return e.askTaskOrchestrator(questionCtx, task, orchestratorRunID, precreated.ID, question)
-		},
 	}
 	go e.executeSession(context.Background(), sessionTask, "implement", workerParent, nil, sessionOptions{
 		Instruction:        prompt,
@@ -663,7 +690,7 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 	}
 	parentID, rootID := orchestratorRunID, orchestratorRunID
 	newRun, err := e.q.CreateRun(ctx, db.Run{
-		TaskID: source.TaskID, AgentID: source.AgentID, ParentRunID: &parentID, RootRunID: &rootID,
+		TaskID: source.TaskID, AgentID: source.AgentID, Kind: db.RunKindAgentSession, ParentRunID: &parentID, RootRunID: &rootID,
 		Status: "running", StartedAt: time.Now(),
 	})
 	if err != nil {

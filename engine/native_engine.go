@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"agent-orchestrator/db"
@@ -69,239 +68,17 @@ type sessionOptions struct {
 	// PrecreatedRun is used by fork_session so the caller can return the new
 	// run ID synchronously while executeSession still owns normal setup and
 	// terminal-state cleanup.
-	PrecreatedRun *db.Run
+	PrecreatedRun      *db.Run
+	Worker             bool
+	WorkerPrompt       string
+	WorkerWorkspace    string
+	WorkerReadOnlyDirs []string
+	WorkerProvider     db.LLMProvider
+	WorkerModel        string
+	Consultation       bool
 }
 
 const orchestratorQuestionTimeout = 2 * time.Minute
-
-type sessionQuestionRequest struct {
-	question string
-	ctx      context.Context
-	result   chan sessionQuestionResult
-}
-
-type sessionQuestionResult struct {
-	answer string
-	err    error
-}
-
-type sessionQuestionBroker struct {
-	ch chan *sessionQuestionRequest
-	// done is closed on shutdown. The request channel stays open so a
-	// concurrent submitter can never panic with "send on closed channel".
-	done   chan struct{}
-	mu     sync.Mutex
-	closed bool
-	err    error
-}
-
-func newSessionQuestionBroker() *sessionQuestionBroker {
-	return &sessionQuestionBroker{ch: make(chan *sessionQuestionRequest, 8), done: make(chan struct{})}
-}
-
-func (b *sessionQuestionBroker) submit(ctx context.Context, request *sessionQuestionRequest) error {
-	if request == nil {
-		return fmt.Errorf("session question request is nil")
-	}
-	b.mu.Lock()
-	if b.closed {
-		err := b.err
-		b.mu.Unlock()
-		if err == nil {
-			err = fmt.Errorf("session is no longer active")
-		}
-		return err
-	}
-	done := b.done
-	b.mu.Unlock()
-
-	select {
-	case b.ch <- request:
-		b.mu.Lock()
-		closed, err := b.closed, b.err
-		b.mu.Unlock()
-		if closed {
-			b.failRequest(request, err)
-			return brokerClosedError(err)
-		}
-		return nil
-	case <-done:
-		return b.closedError()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (b *sessionQuestionBroker) receive() (*sessionQuestionRequest, bool) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return nil, false
-	}
-	b.mu.Unlock()
-	select {
-	case request := <-b.ch:
-		b.mu.Lock()
-		closed, err := b.closed, b.err
-		b.mu.Unlock()
-		if closed {
-			b.failRequest(request, err)
-			return nil, false
-		}
-		return request, true
-	default:
-		return nil, true
-	}
-}
-
-func (b *sessionQuestionBroker) close(err error) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return
-	}
-	b.closed = true
-	b.err = err
-	close(b.done)
-	b.mu.Unlock()
-	b.drain()
-}
-
-func (b *sessionQuestionBroker) drain() {
-	for {
-		select {
-		case request := <-b.ch:
-			b.failRequest(request, b.closedError())
-		default:
-			return
-		}
-	}
-}
-
-func (b *sessionQuestionBroker) closedError() error {
-	b.mu.Lock()
-	err := b.err
-	b.mu.Unlock()
-	return brokerClosedError(err)
-}
-
-func brokerClosedError(err error) error {
-	if err == nil {
-		return fmt.Errorf("session is no longer active")
-	}
-	return err
-}
-
-func (b *sessionQuestionBroker) failRequest(request *sessionQuestionRequest, err error) {
-	if request == nil {
-		return
-	}
-	select {
-	case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
-	default:
-	}
-}
-
-// orchestratorQuestionBroker carries a worker's ask_task_owner request to the
-// task orchestrator and blocks that worker until the orchestrator's next LLM
-// activation returns a direct answer. It follows the same shutdown rules as
-// sessionQuestionBroker: done is closed, but ch remains open so concurrent
-// submitters cannot panic during teardown.
-type orchestratorQuestionRequest struct {
-	workerRunID int32
-	question    string
-	ctx         context.Context
-	result      chan sessionQuestionResult
-}
-
-type orchestratorQuestionBroker struct {
-	ch     chan *orchestratorQuestionRequest
-	done   chan struct{}
-	mu     sync.Mutex
-	closed bool
-	err    error
-}
-
-func newOrchestratorQuestionBroker() *orchestratorQuestionBroker {
-	return &orchestratorQuestionBroker{ch: make(chan *orchestratorQuestionRequest, 8), done: make(chan struct{})}
-}
-
-func (b *orchestratorQuestionBroker) submit(ctx context.Context, request *orchestratorQuestionRequest) error {
-	if request == nil {
-		return fmt.Errorf("orchestrator question request is nil")
-	}
-	b.mu.Lock()
-	if b.closed {
-		err := b.err
-		b.mu.Unlock()
-		return brokerClosedError(err)
-	}
-	done := b.done
-	b.mu.Unlock()
-	select {
-	case b.ch <- request:
-		b.mu.Lock()
-		closed, err := b.closed, b.err
-		b.mu.Unlock()
-		if closed {
-			select {
-			case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
-			default:
-			}
-			return brokerClosedError(err)
-		}
-		return nil
-	case <-done:
-		return b.closedError()
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-func (b *orchestratorQuestionBroker) receive() (*orchestratorQuestionRequest, bool) {
-	b.mu.Lock()
-	closed := b.closed
-	b.mu.Unlock()
-	if closed {
-		return nil, false
-	}
-	select {
-	case request := <-b.ch:
-		return request, true
-	default:
-		return nil, true
-	}
-}
-
-func (b *orchestratorQuestionBroker) close(err error) {
-	b.mu.Lock()
-	if b.closed {
-		b.mu.Unlock()
-		return
-	}
-	b.closed = true
-	b.err = err
-	close(b.done)
-	b.mu.Unlock()
-	for {
-		select {
-		case request := <-b.ch:
-			select {
-			case request.result <- sessionQuestionResult{err: brokerClosedError(err)}:
-			default:
-			}
-		default:
-			return
-		}
-	}
-}
-
-func (b *orchestratorQuestionBroker) closedError() error {
-	b.mu.Lock()
-	err := b.err
-	b.mu.Unlock()
-	return brokerClosedError(err)
-}
 
 // NativeEngine implements Engine using the aicli package for direct LLM communication.
 type NativeEngine struct {
@@ -414,85 +191,13 @@ func (e *NativeEngine) WaitForActiveRuns(ctx context.Context) {
 	e.runs.waitForActiveRoots(ctx)
 }
 
-// maxDelegationDepth caps how deep delegation sessions can nest: the main
-// task (depth 0, CEO) and first-level subtasks (depth 1, e.g. CTO/CMO) can
-// create subtasks; deeper sessions (depth 2, the implementers) cannot.
-const maxDelegationDepth = 2
-
-// parentSession links a delegated child session to the session that spawned
-// it: run hierarchy ids, the parent's workspace, a hook that fires once the
-// child's run record exists (so the parent can log the session start), and
-// the askOwner callback backing the child's ask_task_owner tool.
+// parentSession carries durable run-tree context for an auxiliary session.
+// Coordination itself is handled by persisted RunEvents and the task
+// orchestrator; this is execution metadata, not an in-process channel.
 type parentSession struct {
-	parentRunID   int32
-	rootRunID     int32
-	rootTaskID    int32
-	workspacePath string
-	depth         int
-	onRunCreated  func(run db.Run)
-	askOwner      func(ctx context.Context, question string) (string, error)
-}
-
-// subtaskEvent is what a running subtask session reports back to the waiting
-// owner session: either a question from the sub-agent (via ask_task_owner) or
-// the session's final status.
-type subtaskEvent struct {
-	question string
-	status   string
-	done     bool
-}
-
-// delegationState tracks one running subtask session so the owner session can
-// wait for its completion and exchange question/answer messages with it.
-type delegationState struct {
-	subtaskID  int32
-	agentName  string
-	title      string
-	childRunID int32
-	eventCh    chan subtaskEvent
-	answerCh   chan string
-}
-
-// pendingSubtasks holds the delegation states whose sub-agent is paused on an
-// unanswered ask_task_owner question, keyed by subtask id.
-type pendingSubtasks struct {
-	mu sync.Mutex
-	m  map[int32]*delegationState
-}
-
-func (p *pendingSubtasks) put(state *delegationState) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	p.m[state.subtaskID] = state
-}
-
-// take removes and returns the state for the given subtask id. A zero id is
-// accepted when exactly one question is pending.
-func (p *pendingSubtasks) take(subtaskID int32) (*delegationState, error) {
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	if len(p.m) == 0 {
-		return nil, fmt.Errorf("no subtask has a pending question")
-	}
-	if subtaskID == 0 {
-		if len(p.m) == 1 {
-			for id, state := range p.m {
-				delete(p.m, id)
-				return state, nil
-			}
-		}
-		return nil, fmt.Errorf("multiple subtasks have pending questions — pass subtask_id explicitly")
-	}
-	state, ok := p.m[subtaskID]
-	if !ok {
-		ids := make([]string, 0, len(p.m))
-		for id := range p.m {
-			ids = append(ids, fmt.Sprintf("#%d", id))
-		}
-		return nil, fmt.Errorf("subtask %d has no pending question (pending: %s)", subtaskID, strings.Join(ids, ", "))
-	}
-	delete(p.m, subtaskID)
-	return state, nil
+	parentRunID int32
+	rootRunID   int32
+	rootTaskID  int32
 }
 
 // ProcessTask reacts to a task's current status and spawns a goroutine to run
@@ -540,6 +245,10 @@ func (e *NativeEngine) processTask(ctx context.Context, taskID int32, forceRerun
 	switch task.Status {
 	case db.TaskStatusTodo:
 		return e.startQueuedTask(ctx, task, forceRerun)
+	case db.TaskStatusRefinement:
+		// Refinement is a planning-only execution mode. It returns the task to
+		// to-do after a valid specification handoff.
+		go e.run(context.Background(), task, "plan")
 	case db.TaskStatusDependsOnTask:
 		ready, blockers, err := e.q.CanStartTask(ctx, task.ID)
 		if err != nil {
@@ -621,9 +330,6 @@ func (e *NativeEngine) startQueuedTask(ctx context.Context, task db.Task, forceR
 	}
 	e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
 	mode := "implement"
-	if task.TaskType != db.TaskTypeImplement {
-		mode = "plan"
-	}
 	go e.run(context.Background(), task, mode)
 	return nil
 }
@@ -716,6 +422,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 				}
 				return
 			}
+			// Orchestration is mandatory. A failed preflight has already recorded
+			// a blocked task and visible configuration error; never fall back to
+			// the assigned agent's provider/model.
+			return
 		}
 	}
 	e.executeSession(ctx, task, mode, nil, nil, sessionOptions{IncludeTaskContext: true})
@@ -885,7 +595,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		if parent == nil {
 			orchestrator, orchestratorProvider, orchestratorModel, orchestratorEnabled, orchestratorStart = e.createTaskOrchestrator(ctx, task, agent)
 		}
-		newRun := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running", StartedAt: time.Now()}
+		newRun := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, Status: "running", StartedAt: time.Now()}
 		if parent != nil {
 			parentID := parent.parentRunID
 			rootID := parent.rootRunID
@@ -916,11 +626,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}
 
-	// Track active root runs so a graceful shutdown (BeginDrain +
-	// WaitForActiveRuns) knows when it's safe to proceed. A root run's
-	// goroutine only returns once its whole delegation tree (if any) has
-	// finished, so tracking roots alone covers entire trees.
-	if parent == nil {
+	// Track root sessions and durable workers so a graceful shutdown waits for
+	// each resumable run to persist its pause checkpoint. Legacy in-process
+	// delegation remains covered by its root session.
+	trackForDrain := parent == nil || options.PrecreatedRun != nil || run.Kind == db.RunKindHelperWorker
+	if trackForDrain {
 		e.runs.activeRoots.Add(1)
 		defer e.runs.activeRoots.Done()
 	}
@@ -1013,17 +723,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 	}()
 
-	// Let the delegating session record the child run before any slow work.
-	if parent != nil && parent.onRunCreated != nil {
-		parent.onRunCreated(run)
-	}
-
 	// A resumed run re-enters "running", so it reuses the same run_started
 	// event a fresh run emits: the Run Logs UI re-fetches the list on it (the
 	// run reappears as active) and no consumer has to learn a new event type.
 	e.hub.BroadcastEventForCompany(task.CompanyID, "run_started", run)
 
-	environment, preparedRun, environmentErr := e.prepareSessionEnvironment(ctx, &task, agent, run, parent, resumeRun != nil)
+	var environment sessionEnvironment
+	var preparedRun db.Run
+	var environmentErr error
+	if options.Worker {
+		environment, preparedRun, environmentErr = e.prepareWorkerEnvironment(ctx, &task, run, options)
+	} else {
+		environment, preparedRun, environmentErr = e.prepareSessionEnvironment(ctx, &task, agent, run, parent, resumeRun != nil)
+	}
 	if environmentErr != nil {
 		e.failRun(ctx, run.ID, environmentErr.Error())
 		return "failed"
@@ -1034,7 +746,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	rootTask := environment.rootTask
 	rootRunID := environment.rootRunID
 	rootTaskID := environment.rootTaskID
-	depth := environment.depth
 	groupMode := environment.groupMode
 	provider := environment.provider
 	model := environment.model
@@ -1048,12 +759,27 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	systemPrompt, initialMessages := e.buildSessionPrompt(
 		ctx, agent, task, rootTask, mode, options, workspacePath, readOnlyDirs, artifactDir, rootTaskID,
 	)
+	if options.Worker {
+		systemPrompt += "\n\n## Helper worker boundary\nPerform only the isolated assignment. The parent workspace and task artifacts are read-only inputs. Use the temporary work directory only for scratch files. Do not create tasks, alter task state, persist artifacts, or perform Git delivery. Report progress when useful and finish exactly once with finish_work."
+	}
 
-	toolState := e.buildSessionTools(task, run, agent, company, parent, provider, model, workspacePath, readOnlyDirs, artifactDir, rootRunID, rootTaskID, depth, proxyLogger)
+	var toolState *sessionToolState
+	if options.Worker {
+		toolState = e.buildWorkerSessionTools(ctx, task, run, agent, provider, model, workspacePath, readOnlyDirs, proxyLogger)
+	} else {
+		toolState = e.buildSessionTools(ctx, task, run, agent, company, parent, provider, model, workspacePath, readOnlyDirs, artifactDir, rootRunID, rootTaskID, proxyLogger, mode)
+		toolState.consultation = options.Consultation
+	}
 	registry := toolState.registry
 	gatewayAuth := &toolState.gatewayAuth
 
-	integrations := e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger)
+	var integrations sessionIntegrations
+	integrations.close = func() {}
+	if options.Worker {
+		integrations = e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, true)
+	} else {
+		integrations = e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, false)
+	}
 	registry = integrations.registry
 	systemPrompt = integrations.systemPrompt
 	listingCostTotal := integrations.listingCostTotal
@@ -1093,19 +819,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			return "failed"
 		}
 	}
-	questionBroker := newSessionQuestionBroker()
-	e.runs.sessionQuestionBrokers.Store(run.ID, questionBroker)
-	defer func() {
-		e.runs.sessionQuestionBrokers.Delete(run.ID)
-		questionBroker.close(fmt.Errorf("session %d ended before answering the orchestrator question", run.ID))
-	}()
-	handleQuestion := func(questionCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
-		request, open := questionBroker.receive()
-		if !open || request == nil {
-			return nil, nil
-		}
-		return e.answerSessionQuestion(questionCtx, request, llmClient, reasoningLevel, history)
-	}
 	agentCfgObj := aicli.Config{
 		Client:                      llmClient,
 		Registry:                    registry,
@@ -1121,9 +834,30 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		Logger:                      proxyLogger,
 		InitialConversationSequence: run.Recovery.CheckpointSequence,
 		BeforeTurn: func(controlCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
-			messages, questionErr := handleQuestion(controlCtx, history)
-			if questionErr != nil {
-				return nil, questionErr
+			var messages []aicli.Message
+			incoming, incomingErr := e.q.ListUnconsumedEventsForTarget(controlCtx, run.ID, db.RunEventTypeSessionMessage, db.RunEventTypeWorkerFinished)
+			if incomingErr != nil {
+				return nil, incomingErr
+			}
+			hasMessage := false
+			for _, event := range incoming {
+				if event.EventType == db.RunEventTypeSessionMessage {
+					hasMessage = true
+					break
+				}
+			}
+			if hasMessage {
+				registry.Register(tools.NewAnswerMessage(func(answerCtx context.Context, messageID int64, answer string) (string, error) {
+					return e.answerDurableMessage(answerCtx, run, messageID, answer)
+				}))
+				var b strings.Builder
+				b.WriteString("Incoming messages (answer with the exact message_id when a response is required):\n")
+				for _, event := range incoming {
+					fmt.Fprintf(&b, "- message_id=%d type=%s: %s\n", event.ID, event.EventType, event.Payload)
+				}
+				messages = append(messages, aicli.Message{Role: "user", Content: b.String()})
+			} else {
+				registry.Unregister(string(aicli.ToolAnswerMessage))
 			}
 			refreshEvents, eventErr := e.q.ListPendingRunEventsForRun(controlCtx, run.ID, db.RunEventTypeStatusRefresh)
 			if eventErr != nil {
@@ -1153,10 +887,11 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			}
 			return messages, nil
 		},
-		Interrupt: func(interruptCtx context.Context, history []aicli.Message) ([]aicli.Message, error) {
-			return handleQuestion(interruptCtx, history)
-		},
+		Interrupt:            func(context.Context, []aicli.Message) ([]aicli.Message, error) { return nil, nil },
 		HistoryAlreadyLogged: resumeRun != nil,
+	}
+	if options.Worker {
+		agentCfgObj.TerminalTools = []string{string(aicli.ToolFinishWork)}
 	}
 	if resumeRun != nil {
 		initiator := run.Recovery.RecoveryInitiator
@@ -1202,17 +937,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		e.logInfo(proxyLogger, fmt.Sprintf("Resuming session %d (%d saved messages)", run.ID, len(seedHistory)))
 	}
 
-	// Only root sessions ever pause: a session with an active delegation tree
-	// (parent != nil, or a root session currently blocked inside a delegating
-	// tool call) is left to run to completion rather than attempting to pause
-	// mid-delegation — the parent/child coordination channels in
-	// waitForSubtaskEvent cannot survive a process restart. Since the pause
-	// check only fires between a session's OWN turns (never while blocked
-	// inside a tool call), a root session currently waiting on a child is
-	// naturally not interrupted by draining; it only gets a chance to pause
-	// once that delegation returns and it starts its next turn.
+	// Root sessions and durable orchestrator-owned child runs pause at safe turn boundaries.
 	var pauseFn aicli.PauseRequested
-	if parent == nil {
+	if parent == nil || options.PrecreatedRun != nil || run.Kind == db.RunKindAgentSession || run.Kind == db.RunKindHelperWorker {
 		pauseFn = e.runs.draining.Load
 	}
 
@@ -1258,7 +985,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 			}
 			e.q.UpdateRunLog(context.Background(), run.ID, "", "canceled")
 			e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": "canceled"})
-			e.notifyParentOfSubtaskCompletion(context.Background(), task, "canceled")
 			return "canceled"
 		}
 		status = "failed"
@@ -1271,15 +997,22 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if agentErr == nil && !toolState.taskFinished {
 		forcedFinish = true
 		e.logInfo(proxyLogger, "finish_task not called. Sending follow-up to force it.")
-		_, followErr := aiAgent.Run(runCtx, systemPrompt,
-			"You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, or 'blocked' if waiting for human input. Provide a short one-sentence finish_status.")
+		followPrompt := "You must call finish_task before ending. Choose the appropriate status: 'done' if complete, 'in-review' if a human should review the result, or 'blocked' if waiting for human input. Provide a short one-sentence finish_status."
+		if options.Worker {
+			followPrompt = "You must call finish_work before ending. Use status done, blocked, or failed and provide a concise summary with evidence or caveats."
+		}
+		_, followErr := aiAgent.Run(runCtx, systemPrompt, followPrompt)
 		if followErr != nil {
 			e.logError(proxyLogger, fmt.Sprintf("Follow-up failed: %v", followErr))
 			status = "failed"
 			runErrMsg = fmt.Sprintf("finish_task was not called and the forced follow-up failed: %v", followErr)
 		} else if !toolState.taskFinished {
 			status = "failed"
-			runErrMsg = "agent ended without calling finish_task, including during the forced follow-up"
+			if options.Worker {
+				runErrMsg = "helper worker ended without calling finish_work, including during the forced follow-up"
+			} else {
+				runErrMsg = "agent ended without calling finish_task, including during the forced follow-up"
+			}
 		}
 	}
 
@@ -1344,98 +1077,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	e.broadcastForTask(ctx, run.TaskID, "run_ended", map[string]interface{}{"run_id": run.ID, "status": status})
 
-	// Notify the parent task that this subtask has completed or failed.
-	e.notifyParentOfSubtaskCompletion(ctx, task, status)
-
 	// A dependent must not start until this run's Git, result, and cleanup work
 	// has finished. Reconcile only an accepted task completion; reopening or
 	// review states are handled by the next explicit transition/start gate.
-	if toolState.finishResult.Status == db.TaskStatusDone {
+	if !options.Worker && toolState.finishResult.Status == db.TaskStatusDone {
 		e.ReconcileDependents(context.Background(), task.ID)
 	}
 
 	return status
-}
-
-// answerSessionQuestion performs the orchestrator interruption as an isolated
-// completion request. It reuses the worker's complete current conversation
-// and appends the orchestrator question as the newest user message. Tools stay
-// disabled so this side-channel turn produces an answer rather than starting
-// an unrelated side effect. The returned user/assistant pair is appended to
-// the worker history by the agent loop after the side-channel result is sent.
-func (e *NativeEngine) answerSessionQuestion(ctx context.Context, request *sessionQuestionRequest, client *aicli.Client, reasoningLevel string, history []aicli.Message) ([]aicli.Message, error) {
-	if request == nil {
-		return nil, fmt.Errorf("nil session question request")
-	}
-	question := strings.TrimSpace(request.question)
-	if question == "" {
-		return nil, fmt.Errorf("session question is empty")
-	}
-	requestCtx := request.ctx
-	if requestCtx == nil {
-		requestCtx = ctx
-	}
-	callCtx, cancel := context.WithCancel(ctx)
-	defer cancel()
-	go func() {
-		select {
-		case <-requestCtx.Done():
-			cancel()
-		case <-callCtx.Done():
-		}
-	}()
-	questionHistory := make([]aicli.Message, 0, len(history)+1)
-	questionHistory = append(questionHistory, history...)
-	questionHistory = append(questionHistory, aicli.Message{Role: "user", Content: question})
-	response, _, err := client.Complete(callCtx, aicli.ChatRequest{
-		Messages:        questionHistory,
-		ReasoningEffort: reasoningLevel,
-	})
-	if err != nil {
-		if requestCtx.Err() != nil {
-			err = requestCtx.Err()
-		} else if ctx.Err() != nil {
-			err = ctx.Err()
-		}
-		failure := fmt.Errorf("orchestrator question failed: %w", err)
-		select {
-		case request.result <- sessionQuestionResult{err: failure}:
-		default:
-		}
-		return []aicli.Message{
-			{Role: "user", Content: question},
-			{Role: "assistant", Content: "[orchestrator question failed: " + failure.Error() + "]"},
-		}, nil
-	}
-	if response == nil || len(response.Choices) == 0 {
-		failure := fmt.Errorf("orchestrator question returned no response")
-		select {
-		case request.result <- sessionQuestionResult{err: failure}:
-		default:
-		}
-		return []aicli.Message{
-			{Role: "user", Content: question},
-			{Role: "assistant", Content: "[orchestrator question failed: " + failure.Error() + "]"},
-		}, nil
-	}
-	answerMessage := response.Choices[0].Message
-	answer := answerMessage.Content
-	if strings.TrimSpace(answer) == "" {
-		encoded, marshalErr := json.Marshal(answerMessage)
-		if marshalErr != nil {
-			answer = "[assistant response contained no text]"
-		} else {
-			answer = string(encoded)
-		}
-	}
-	select {
-	case request.result <- sessionQuestionResult{answer: answer}:
-	default:
-	}
-	return []aicli.Message{
-		{Role: "user", Content: question},
-		{Role: "assistant", Content: answer},
-	}, nil
 }
 
 func (e *NativeEngine) publishTaskPR(ctx context.Context, logger *logging.ProxyLogger, gitMgr *git.GitManager, workspace string, task db.Task, finish tools.FinishTaskResult) {
@@ -1683,231 +1332,6 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 	}
 }
 
-// makeCreateSubtaskFunc returns the callback behind the create_subtask tool.
-// It creates a child task, runs it as a nested session linked to the parent
-// run, and blocks until the sub-agent either finishes (returning its result
-// and artifacts) or asks the owner a question via ask_task_owner (returning
-// the question, to be answered with answer_subtask_question).
-func (e *NativeEngine) makeCreateSubtaskFunc(
-	parentTask db.Task,
-	parentRun db.Run,
-	parentLogger *logging.ProxyLogger,
-	rootRunID, rootTaskID int32,
-	workspacePath string,
-	depth int,
-	allowedAgents []string,
-	pending *pendingSubtasks,
-) func(callCtx context.Context, title, description, agentName string) (string, error) {
-	return func(callCtx context.Context, title, description, agentName string) (string, error) {
-		// Reject if another subtask of this parent is already running — that
-		// includes a subtask paused on an unanswered ask_task_owner question.
-		runningCount, err := e.q.CountRunningSubtasks(callCtx, parentTask.ID)
-		if err != nil {
-			return "", fmt.Errorf("failed to check running subtasks: %w", err)
-		}
-		if runningCount > 0 {
-			return "", fmt.Errorf("a subtask of task %d is already running; wait for it to finish — if it asked a question, reply with answer_subtask_question first", parentTask.ID)
-		}
-
-		allowed := len(allowedAgents) == 0
-		for _, a := range allowedAgents {
-			if a == agentName {
-				allowed = true
-				break
-			}
-		}
-		if !allowed {
-			return "", fmt.Errorf("agent %q is not one of your sub-agents (%s)", agentName, strings.Join(allowedAgents, ", "))
-		}
-
-		parentID := parentTask.ID
-		// Bind the child task to the selected database Agent so its complete
-		// runtime configuration follows the row the user configured.
-		targetAgent, targetErr := e.findAgentForRole(callCtx, parentTask.CompanyID, agentName)
-		if targetErr != nil {
-			return "", targetErr
-		}
-		agentID := targetAgent.ID
-		subtask, err := e.q.CreateTask(callCtx, db.Task{
-			CompanyID: parentTask.CompanyID,
-			ProjectID: parentTask.ProjectID,
-			SprintID:  parentTask.SprintID,
-			AgentID:   &agentID,
-			ParentID:  &parentID,
-			Title:     title,
-			// Delegated subtasks have no raw user input: the owner's
-			// instructions ARE the refined description.
-			RefinedDescription: description,
-			TaskType:           db.TaskTypeImplement,
-			Status:             "in-progress",
-			Priority:           "Normal",
-			GitHubBranch:       parentTask.GitHubBranch,
-		})
-		if err != nil {
-			return "", fmt.Errorf("failed to create subtask: %w", err)
-		}
-
-		e.hub.BroadcastEventForCompany(subtask.CompanyID, "task_created", map[string]interface{}{
-			"id":        subtask.ID,
-			"parent_id": parentTask.ID,
-			"title":     subtask.Title,
-		})
-
-		state := &delegationState{
-			subtaskID: subtask.ID,
-			agentName: agentName,
-			title:     title,
-			eventCh:   make(chan subtaskEvent),
-			answerCh:  make(chan string),
-		}
-
-		session := &parentSession{
-			parentRunID:   parentRun.ID,
-			rootRunID:     rootRunID,
-			rootTaskID:    rootTaskID,
-			workspacePath: workspacePath,
-			depth:         depth + 1,
-			onRunCreated: func(childRun db.Run) {
-				state.childRunID = childRun.ID
-				if parentLogger != nil {
-					parentLogger.LogSessionStarted(childRun.ID, subtask.ID, agentName, title, fmt.Sprintf("session-%d.jsonl", childRun.ID))
-				}
-				e.hub.BroadcastEventForCompany(subtask.CompanyID, "session_started", map[string]interface{}{
-					"parent_run_id": parentRun.ID,
-					"run_id":        childRun.ID,
-					"task_id":       subtask.ID,
-					"agent_name":    agentName,
-					"title":         title,
-				})
-			},
-			askOwner: func(qCtx context.Context, question string) (string, error) {
-				e.recordSubtaskQA(qCtx, subtask.ID, state.childRunID, "ask_owner", question)
-				select {
-				case state.eventCh <- subtaskEvent{question: question}:
-				case <-qCtx.Done():
-					return "", qCtx.Err()
-				}
-				select {
-				case answer := <-state.answerCh:
-					return answer, nil
-				case <-qCtx.Done():
-					return "", qCtx.Err()
-				}
-			},
-		}
-
-		// Run the child session in a goroutine so this call can also react to
-		// ask_task_owner questions while the session is still in flight.
-		go func() {
-			status := e.executeSession(callCtx, subtask, "implement", session, nil, sessionOptions{IncludeTaskContext: true})
-			select {
-			case state.eventCh <- subtaskEvent{status: status, done: true}:
-			case <-callCtx.Done():
-			}
-		}()
-
-		return e.waitForSubtaskEvent(callCtx, state, rootTaskID, pending, parentLogger, parentRun)
-	}
-}
-
-// waitForSubtaskEvent blocks until the subtask session either asks the owner
-// a question (recorded in pending, question returned as the tool result) or
-// finishes (final result returned).
-func (e *NativeEngine) waitForSubtaskEvent(
-	ctx context.Context,
-	state *delegationState,
-	rootTaskID int32,
-	pending *pendingSubtasks,
-	logger *logging.ProxyLogger,
-	ownerRun db.Run,
-) (string, error) {
-	select {
-	case <-ctx.Done():
-		return "", ctx.Err()
-	case ev := <-state.eventCh:
-		if !ev.done {
-			pending.put(state)
-			e.logInfo(logger, fmt.Sprintf("Subtask #%d asked its owner: %s", state.subtaskID, ev.question))
-			e.broadcastForTask(ctx, state.subtaskID, "subtask_question", map[string]interface{}{
-				"subtask_id":   state.subtaskID,
-				"owner_run_id": ownerRun.ID,
-				"question":     ev.question,
-			})
-			return fmt.Sprintf("Subtask #%d (%s, %q) asks you a question and is paused until you reply:\n\n%s\n\n"+
-				"Reply with answer_subtask_question (subtask_id=%d). The subtask keeps its full context and resumes with your answer.",
-				state.subtaskID, state.agentName, state.title, ev.question, state.subtaskID), nil
-		}
-		return e.buildSubtaskReply(state, ev.status, rootTaskID, logger, ownerRun)
-	}
-}
-
-// buildSubtaskReply assembles the create_subtask / answer_subtask_question
-// tool result for a finished subtask session: final status, result summary,
-// detailed handoff, and the artifacts the session produced.
-func (e *NativeEngine) buildSubtaskReply(
-	state *delegationState,
-	status string,
-	rootTaskID int32,
-	logger *logging.ProxyLogger,
-	ownerRun db.Run,
-) (string, error) {
-	result := ""
-	var childErr, childRunName, childDetails, childArtifacts string
-	if state.childRunID > 0 {
-		if childRun, runErr := e.q.GetRun(context.Background(), state.childRunID); runErr == nil {
-			result = childRun.ResultDescription
-			childRunName = childRun.Name
-			if childRun.ResultExplanation != "" && childRun.ResultExplanation != childRun.ResultDescription {
-				childDetails = "\nDetails:\n" + childRun.ResultExplanation
-			}
-			if childRun.Status == "failed" {
-				childErr = childRun.LogContent
-			}
-		}
-		if arts, aErr := e.q.ListArtifactsByTaskTree(context.Background(), rootTaskID); aErr == nil {
-			var written []string
-			for _, a := range arts {
-				if a.RunID == state.childRunID {
-					written = append(written, fmt.Sprintf("%q", a.Filename))
-				}
-			}
-			if len(written) > 0 {
-				childArtifacts = fmt.Sprintf("\nArtifacts written by this subtask: %s — read them with read_artifact.", strings.Join(written, ", "))
-			}
-		}
-	}
-	if logger != nil {
-		logger.LogSessionEnded(state.childRunID, status, result)
-	}
-	e.broadcastForTask(context.Background(), ownerRun.TaskID, "session_ended", map[string]interface{}{
-		"parent_run_id": ownerRun.ID,
-		"run_id":        state.childRunID,
-		"status":        status,
-	})
-
-	taskStatus := ""
-	if finalTask, taskErr := e.q.GetTask(context.Background(), state.subtaskID); taskErr == nil {
-		taskStatus = finalTask.Status
-	}
-	if result == "" {
-		result = "(no result summary provided)"
-	}
-	runLabel := fmt.Sprintf("run #%d", state.childRunID)
-	if childRunName != "" {
-		runLabel = fmt.Sprintf("%s (run #%d)", childRunName, state.childRunID)
-	}
-	reply := fmt.Sprintf("Subtask #%d (%s) finished.\nSession: %s, status %s\nSubtask status: %s\nResult: %s",
-		state.subtaskID, state.agentName, runLabel, status, taskStatus, result)
-	reply += childDetails + childArtifacts
-	if status != runStatusCompleted {
-		if childErr != "" {
-			reply += "\nError: " + childErr
-		}
-		reply += "\nThe subtask session did not complete successfully. Decide how to proceed: retry with better instructions, assign a different sub-agent, or escalate via ask_human."
-	}
-	return reply, nil
-}
-
 // createBoardTask is the callback behind the create_task tool: it creates a
 // new top-level task on the board (mirroring the API's CreateTask endpoint)
 // and, when created in "to-do", kicks off its execution as an independent
@@ -1923,10 +1347,6 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	priority := p.Priority
 	if priority == "" {
 		priority = "Normal"
-	}
-	taskType := p.TaskType
-	if taskType == "" {
-		taskType = db.TaskTypePlanAndImplement
 	}
 	selectedAgentID := agentID
 	if p.AgentName != "" {
@@ -1969,7 +1389,6 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 		AgentID:      &selectedAgentID,
 		Title:        p.Title,
 		Description:  p.Description,
-		TaskType:     taskType,
 		Status:       status,
 		Priority:     priority,
 		DueDate:      dueDate,
@@ -1978,14 +1397,19 @@ func (e *NativeEngine) createBoardTask(ctx context.Context, creator db.Task, age
 	if err != nil {
 		return "", fmt.Errorf("failed to create task: %w", err)
 	}
+	rollback := func(cause error) (string, error) {
+		_ = e.q.DeleteTaskRelationsForTask(ctx, newTask.ID)
+		_ = e.q.DeleteTask(ctx, newTask.ID)
+		return "", cause
+	}
 	for _, prerequisiteID := range p.DependsOnTaskIDs {
 		if _, relationErr := e.q.CreateTaskRelation(ctx, db.TaskRelation{CompanyID: company.ID, SourceTaskID: newTask.ID, TargetTaskID: prerequisiteID, Kind: db.TaskRelationDependsOn}); relationErr != nil {
-			return "", fmt.Errorf("failed to add dependency on task %d: %w", prerequisiteID, relationErr)
+			return rollback(fmt.Errorf("failed to add dependency on task %d: %w", prerequisiteID, relationErr))
 		}
 	}
 	for _, relatedID := range p.RelatedToTaskIDs {
 		if _, relationErr := e.q.CreateTaskRelation(ctx, db.TaskRelation{CompanyID: company.ID, SourceTaskID: newTask.ID, TargetTaskID: relatedID, Kind: db.TaskRelationRelatedTo}); relationErr != nil {
-			return "", fmt.Errorf("failed to relate task %d: %w", relatedID, relationErr)
+			return rollback(fmt.Errorf("failed to relate task %d: %w", relatedID, relationErr))
 		}
 	}
 	e.hub.BroadcastEventForCompany(newTask.CompanyID, "task_created", newTask)
@@ -2079,50 +1503,61 @@ func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, pu
 	return sessionProvider, sessionModel
 }
 
-// recordSubtaskQA stores an ask_task_owner question or the owner's answer as
-// a comment on the subtask, so the exchange is visible in the task activity.
-func (e *NativeEngine) recordSubtaskQA(ctx context.Context, taskID, runID int32, commentType, content string) {
-	comment := db.Comment{
-		TaskID:      taskID,
-		AuthorType:  "agent",
-		CommentType: commentType,
-		Content:     content,
-	}
-	if runID > 0 {
-		rid := runID
-		comment.RunID = &rid
-	}
-	created, err := e.q.CreateComment(ctx, comment)
+// resolveRequiredPurposeModel resolves only the configured internal purpose.
+// It deliberately has no session-provider fallback: control-plane work must
+// not silently run on the assigned agent's model.
+func (e *NativeEngine) resolveRequiredPurposeModel(ctx context.Context, userID int32, purpose string) (db.LLMProvider, string, error) {
+	setting, err := e.q.GetDefaultModelSetting(ctx, userID, purpose)
 	if err != nil {
-		fmt.Printf("Warning: failed to record subtask %s comment: %v\n", commentType, err)
-		return
+		return db.LLMProvider{}, "", fmt.Errorf("required model setting %q is unavailable: %w", purpose, err)
 	}
-	e.broadcastForTask(ctx, taskID, "comment_created", created)
+	if setting.ModelGroupID != nil {
+		group, err := e.q.GetModelGroup(ctx, *setting.ModelGroupID)
+		if err != nil {
+			return db.LLMProvider{}, "", fmt.Errorf("model group for %q cannot be resolved: %w", purpose, err)
+		}
+		members := db.ExpandModelGroupMembers(group.Members)
+		if len(members) == 0 {
+			return db.LLMProvider{}, "", fmt.Errorf("model group %q for %q has no usable members", group.Name, purpose)
+		}
+		sort.SliceStable(members, func(i, j int) bool {
+			if members[i].IsFree != members[j].IsFree {
+				return members[i].IsFree
+			}
+			return members[i].Priority < members[j].Priority
+		})
+		if strings.TrimSpace(members[0].Model) == "" {
+			return db.LLMProvider{}, "", fmt.Errorf("model group %q for %q has no model", group.Name, purpose)
+		}
+		return members[0].Provider, members[0].Model, nil
+	}
+	if setting.ProviderID == nil {
+		return db.LLMProvider{}, "", fmt.Errorf("required model setting %q is not configured", purpose)
+	}
+	provider, err := e.q.GetLLMProvider(ctx, *setting.ProviderID)
+	if err != nil {
+		return db.LLMProvider{}, "", fmt.Errorf("provider for %q cannot be resolved: %w", purpose, err)
+	}
+	model := strings.TrimSpace(setting.Model)
+	if model == "" {
+		model = strings.TrimSpace(provider.DefaultModel)
+	}
+	if model == "" {
+		return db.LLMProvider{}, "", fmt.Errorf("required model setting %q has no model", purpose)
+	}
+	return provider, model, nil
 }
 
-// notifyParentOfSubtaskCompletion adds a comment to the parent task when this
-// subtask finishes, so the parent agent can react to the result.
-func (e *NativeEngine) notifyParentOfSubtaskCompletion(ctx context.Context, subtask db.Task, status string) {
-	if subtask.ParentID == nil {
-		return
+func (e *NativeEngine) resolveHelperWorkerModel(ctx context.Context, userID int32) (db.LLMProvider, string, error) {
+	setting, settingErr := e.q.GetDefaultModelSetting(ctx, userID, db.PurposeHelperWorker)
+	if settingErr == nil && (setting.ProviderID != nil || setting.ModelGroupID != nil) {
+		// An explicit helper override is independent. If it is invalid, fail
+		// rather than silently switching models.
+		return e.resolveRequiredPurposeModel(ctx, userID, db.PurposeHelperWorker)
 	}
-	msg := fmt.Sprintf("Subtask #%d %q completed with status: %s.", subtask.ID, subtask.Title, status)
-	comment, err := e.q.CreateComment(ctx, db.Comment{
-		TaskID:     *subtask.ParentID,
-		AuthorType: "system",
-		Content:    msg,
-	})
-	if err != nil {
-		fmt.Printf("Warning: failed to notify parent task %d of subtask completion: %v\n", *subtask.ParentID, err)
-		return
-	}
-	e.broadcastForTask(ctx, *subtask.ParentID, "comment_created", comment)
-	e.broadcastForTask(ctx, *subtask.ParentID, "subtask_completed", map[string]interface{}{
-		"subtask_id":    subtask.ID,
-		"parent_id":     *subtask.ParentID,
-		"status":        status,
-		"subtask_title": subtask.Title,
-	})
+	// An empty helper setting means "use orchestrator model". Resolve that
+	// setting directly; never pass the parent session provider as a fallback.
+	return e.resolveRequiredPurposeModel(ctx, userID, db.PurposeTaskOrchestrator)
 }
 
 // formatArtifactList renders artifact metadata (never content) for agent

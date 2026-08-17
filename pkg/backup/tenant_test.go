@@ -49,7 +49,7 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	sealed := fmt.Sprintf("enc:u1:%d:%s", srcUser.ID, cipherBody)
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
 
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, Priority: "Normal"}
 	database.Create(&task)
 	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed"}
 	database.Create(&run)
@@ -101,7 +101,7 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	targetDB.Create(&otherComp)
 	otherSprint := db.Sprint{CompanyID: otherComp.ID, Name: "OS"}
 	targetDB.Create(&otherSprint)
-	otherTask := db.Task{CompanyID: otherComp.ID, SprintID: otherSprint.ID, Title: "other task", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	otherTask := db.Task{CompanyID: otherComp.ID, SprintID: otherSprint.ID, Title: "other task", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	targetDB.Create(&otherTask)
 
 	impUser := db.User{Email: "importer@new.io"}
@@ -362,7 +362,7 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 	// Give it a slug like the app's BeforeCreate hook would.
 	prov.Slug = db.ProviderSlug(prov)
 	database.Create(&prov)
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, Title: "root", RefKey: "ACME-1", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, Title: "root", RefKey: "ACME-1", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&task)
 
 	countAll := func() (companies, projects, tasks, providers, sprints int64) {
@@ -410,7 +410,7 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 
 	// Now add a genuinely new task, re-import, and confirm ONLY it is added
 	// (merge of new children onto the existing, deduped subtree).
-	newTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "second", RefKey: "ACME-2", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	newTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "second", RefKey: "ACME-2", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&newTask)
 	stats = exportAndImport()
 	if stats.Tasks != 0 {
@@ -443,8 +443,8 @@ func TestTenantImportMergeChildren(t *testing.T) {
 	srcDB.Create(&sComp)
 	sSprint := db.Sprint{CompanyID: sComp.ID, Name: "S1"}
 	srcDB.Create(&sSprint)
-	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "shared", RefKey: "ACME-1", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"})
-	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "only-in-source", RefKey: "ACME-2", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"})
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "shared", RefKey: "ACME-1", Status: db.TaskStatusBacklog, Priority: "Normal"})
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "only-in-source", RefKey: "ACME-2", Status: db.TaskStatusBacklog, Priority: "Normal"})
 
 	var buf bytes.Buffer
 	if err := ExportTenant(ctx, &buf, srcBase, srcDB, sUser.ID); err != nil {
@@ -465,7 +465,7 @@ func TestTenantImportMergeChildren(t *testing.T) {
 	tgtDB.Create(&tComp)
 	tSprint := db.Sprint{CompanyID: tComp.ID, Name: "S1"}
 	tgtDB.Create(&tSprint)
-	tgtDB.Create(&db.Task{CompanyID: tComp.ID, SprintID: tSprint.ID, Title: "shared (target copy)", RefKey: "ACME-1", Status: db.TaskStatusDone, TaskType: db.TaskTypeImplement, Priority: "Normal"})
+	tgtDB.Create(&db.Task{CompanyID: tComp.ID, SprintID: tSprint.ID, Title: "shared (target copy)", RefKey: "ACME-1", Status: db.TaskStatusDone, Priority: "Normal"})
 
 	stats, err := ImportTenant(ctx, archivePath, t.TempDir(), tgtDB, tUser.ID, tTeam.ID)
 	if err != nil {

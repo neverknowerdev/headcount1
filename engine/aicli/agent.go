@@ -65,19 +65,18 @@ var mcpDispatcherTools = map[string]bool{
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
-// ask_human, create_subtask, answer_subtask_question and ask_task_owner block
-// by design (waiting on a human reply, a nested delegated session, or the
-// task owner's answer) and can legitimately take hours. browser_use is
+// ask_human, create_subtask and ask_task_owner block
+// by design (waiting on a human reply, a durable child session, or the
+// orchestrator's answer) and can legitimately take hours. browser_use is
 // stateful: it parents a headless browser on the first call's context so the
 // browser survives for the whole run — a per-call cancel would kill it
 // between turns and lose all navigation state. Its operations carry their
 // own internal timeouts instead.
 var blockingTools = map[string]bool{
-	string(ToolAskHuman):              true,
-	string(ToolCreateSubtask):         true,
-	string(ToolAnswerSubtaskQuestion): true,
-	string(ToolAskTaskOwner):          true,
-	string(ToolBrowserUse):            true,
+	string(ToolAskHuman):      true,
+	string(ToolCreateSubtask): true,
+	string(ToolAskTaskOwner):  true,
+	string(ToolBrowserUse):    true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool
@@ -166,10 +165,8 @@ type Agent struct {
 	conversationSequence int64
 	beforeTurn           func(context.Context, []Message) ([]Message, error)
 	// interrupt is checked after a response that would otherwise end the run.
-	// It lets a host temporarily service an out-of-band question and then
-	// continue the original conversation with the question and answer appended.
-	// The complete current conversation is supplied so the side-channel answer
-	// can be grounded in the worker's existing context.
+	// Hosts may use it for an explicit control-plane interruption; normal
+	// session messaging is delivered through BeforeTurn and durable RunEvents.
 	interrupt func(context.Context, []Message) ([]Message, error)
 }
 

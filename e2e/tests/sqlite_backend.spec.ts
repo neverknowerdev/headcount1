@@ -121,8 +121,13 @@ test.describe.serial('SQLite export/import round-trip', () => {
         // ── Seed: provider → company → project/sprint/agent/skill/mcp → task ──
         const provider = await postJSON(request, '/api/providers', {
             name: 'e2e-mock', base_url: env.E2E_MOCK_PROVIDER_URL, api_key: 'test-key',
-            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model',
+            provider_type: 'openai', default_model: 'e2e-mock-model',
+            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         });
+        const orchestratorSetting = await request.put('/api/default-model-settings/task_orchestrator', {
+            data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
+        });
+        expect(orchestratorSetting.ok(), await orchestratorSetting.text()).toBeTruthy();
         const company = await postJSON(request, '/api/companies', {
             name: 'Backup Co', short_name: 'backup-co', color: '#0ea5e9',
         });
@@ -150,36 +155,56 @@ test.describe.serial('SQLite export/import round-trip', () => {
         // a project would pull in repo/workspace setup the run doesn't need).
         const task = await postJSON(request, '/api/tasks', {
             company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
-            title: 'Do the thing', description: 'a task to execute', task_type: 'implement',
+            title: 'Do the thing', description: 'a task to execute',
         });
 
         // ── Produce a real run with log entries via the mock provider ────────
-        const scenario = {
+        const workerScenario = {
             entries: [
                 { tool_call: { id: 'r1', name: 'report_status', arguments: { status: 'Working on it' } } },
                 { tool_call: { id: 'r2', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'All done.' } } },
             ],
         };
-        const scRes = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(scenario),
+        const workerScenarioResponse = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                ...workerScenario,
+                model: 'e2e-mock-model',
+            }),
         });
-        expect(scRes.ok).toBeTruthy();
+        expect(workerScenarioResponse.ok).toBeTruthy();
+        const orchestratorScenarioResponse = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
+                model: 'e2e-orchestrator-model',
+                entries: [{ tool_call: { id: 'launch-worker', name: 'run_new_session', arguments: {
+                    agent_name: 'Runner', prompt: 'Complete the assigned task and finish it for review.',
+                } } }],
+            }),
+        });
+        expect(orchestratorScenarioResponse.ok).toBeTruthy();
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok()).toBeTruthy();
         await waitForTaskStatus(request, task.id, 'in-review', 90_000);
         await expect.poll(async () => {
             const rs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
-            return rs.length === 1 ? rs[0].status : '';
+            const worker = (rs as any[]).find((run) => run.kind === 'agent_session');
+            return worker?.status ?? '';
         }, { timeout: 30_000, message: 'run should complete' }).toBe('completed');
+        await expect.poll(async () => {
+            const rs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
+            const orchestrator = (rs as any[]).find((run) => run.kind === 'task_orchestrator');
+            return orchestrator?.status ?? '';
+        }, { timeout: 30_000, message: 'orchestrator should complete before backup' }).toBe('completed');
 
         // ── Snapshot BEFORE the backup ───────────────────────────────────────
         const before = await snapshot(request, company.id, task.id);
         // Sanity: the run really has log entries (otherwise the round-trip
         // check below would be vacuously true).
-        expect(before.runs).toHaveLength(1);
-        expect(Array.isArray(before.runs[0].log_entries)).toBe(true);
-        expect(before.runs[0].log_entries.length).toBeGreaterThan(0);
+        expect(before.runs).toHaveLength(2);
+        const beforeWorker = before.runs.find((run: any) => run.kind === 'agent_session');
+        expect(beforeWorker).toBeTruthy();
+        expect(Array.isArray(beforeWorker.log_entries)).toBe(true);
+        expect(beforeWorker.log_entries.length).toBeGreaterThan(0);
         expect(before.mcp?.accounts?.[0]?.has_token).toBe(true);
 
         // ── Back up, then wipe ───────────────────────────────────────────────
@@ -216,9 +241,13 @@ test.describe.serial('SQLite export/import round-trip', () => {
             .toEqual(before.mcp.accounts.map((a) => pick(a, MCP_ACCOUNT_KEYS)));
 
         // The run and — crucially — its log entries come back intact.
-        expect(after.runs).toHaveLength(1);
-        expect(pick(after.runs[0], RUN_KEYS)).toEqual(pick(before.runs[0], RUN_KEYS));
-        expect(after.runs[0].log_entries).toEqual(before.runs[0].log_entries);
+        expect(after.runs).toHaveLength(2);
+        for (const beforeRun of before.runs) {
+            const afterRun = after.runs.find((run: any) => run.kind === beforeRun.kind);
+            expect(afterRun, `missing restored ${beforeRun.kind} run`).toBeTruthy();
+            expect(pick(afterRun, RUN_KEYS)).toEqual(pick(beforeRun, RUN_KEYS));
+            expect(afterRun.log_entries).toEqual(beforeRun.log_entries);
+        }
     });
 });
 
@@ -227,10 +256,13 @@ const PROJECT_KEYS = ['id', 'company_id', 'name', 'description'];
 const SPRINT_KEYS = ['id', 'company_id', 'name', 'goal'];
 const AGENT_KEYS = ['id', 'company_id', 'name', 'system_prompt', 'model', 'provider_id'];
 const SKILL_KEYS = ['id', 'company_id', 'name', 'description'];
-const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status', 'task_type'];
+const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status'];
 const MCP_KEYS = ['id', 'name', 'transport', 'url', 'display_name', 'auth_type'];
 const MCP_ACCOUNT_KEYS = ['id', 'mcp_server_id', 'name', 'has_token'];
-const RUN_KEYS = ['id', 'task_id', 'agent_id', 'status', 'latest_reported_status', 'result_description'];
+const RUN_KEYS = [
+    'id', 'task_id', 'agent_id', 'kind', 'name', 'parent_run_id', 'root_run_id',
+    'status', 'latest_reported_status', 'result_description',
+];
 
 function pick(obj: any, keys: string[]): Record<string, unknown> {
     return Object.fromEntries(keys.map((k) => [k, obj?.[k]]));

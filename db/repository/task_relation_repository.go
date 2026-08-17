@@ -80,6 +80,10 @@ func (q *TaskRelationRepository) DeleteTaskRelation(ctx context.Context, relatio
 	return q.db.WithContext(ctx).Delete(&TaskRelation{}, relationID).Error
 }
 
+func (q *TaskRelationRepository) DeleteTaskRelationsForTask(ctx context.Context, taskID int32) error {
+	return q.db.WithContext(ctx).Where("source_task_id = ? OR target_task_id = ?", taskID, taskID).Delete(&TaskRelation{}).Error
+}
+
 func (q *TaskRelationRepository) GetTaskRelation(ctx context.Context, relationID int32) (TaskRelation, error) {
 	var relation TaskRelation
 	err := q.db.WithContext(ctx).First(&relation, relationID).Error

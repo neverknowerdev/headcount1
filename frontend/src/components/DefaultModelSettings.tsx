@@ -11,13 +11,13 @@ const PURPOSE_LABELS: Record<string, { title: string; description: string }> = {
         title: 'Commit Messages',
         description: 'Summarizes a task\'s code changes into a git commit message after a run finishes.',
     },
-    ask_artifact: {
-        title: 'Artifact Q&A (ask_artifact)',
-        description: 'Answers an agent\'s question about one artifact via a separate one-shot reader call, so the artifact never enters the asking session\'s context.',
-    },
     task_orchestrator: {
         title: 'Task Orchestrator',
-        description: 'Owns task execution by selecting, starting, monitoring, and recovering worker sessions. It never performs implementation work. Select DeepSeek V4 Flash (or the exact model ID exposed by your provider).',
+        description: 'Required control-plane model. It selects, starts, monitors, and recovers worker sessions; it never performs implementation work.',
+    },
+    helper_worker: {
+        title: 'Helper Worker Model',
+        description: 'Model for bounded ephemeral research and verification workers. Leave unset to use the Task Orchestrator model; this never falls back to the parent agent model.',
     },
 };
 
@@ -94,6 +94,8 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                 {settings.map(s => {
                     const info = PURPOSE_LABELS[s.purpose] || { title: s.purpose, description: '' };
                     const value = forms[s.purpose] || toFormValue(s);
+                    const isOrchestrator = s.purpose === 'task_orchestrator';
+                    const isHelper = s.purpose === 'helper_worker';
                     return (
                         <div key={s.purpose} className="bg-white p-6 rounded-lg border shadow-sm space-y-3">
                             <div>
@@ -104,14 +106,14 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                                 label="Provider or Model Group"
                                 providers={providers}
                                 modelGroups={modelGroups}
-                                noneLabel="Session's own model (no override)"
+                                noneLabel={isHelper ? 'Use Task Orchestrator model' : (isOrchestrator ? 'Required — choose a model' : "Session's own model (no override)")}
                                 value={value}
                                 onChange={v => setForms(f => ({ ...f, [s.purpose]: v }))}
                             />
                             <div className="flex items-center gap-3 pt-1">
                                 <button
                                     onClick={() => handleSave(s.purpose)}
-                                    disabled={savingPurpose === s.purpose}
+                                    disabled={savingPurpose === s.purpose || (isOrchestrator && !value.provider_id && !value.model_group_id)}
                                     className={`bg-indigo-600 text-white px-3 py-1.5 rounded text-sm hover:bg-indigo-700 ${savingPurpose === s.purpose ? 'opacity-50 cursor-not-allowed' : ''}`}
                                 >
                                     {savingPurpose === s.purpose ? 'Saving...' : 'Save'}

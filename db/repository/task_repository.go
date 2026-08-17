@@ -135,6 +135,16 @@ func (q *TaskRepository) GetTask(ctx context.Context, id int32) (Task, error) {
 	return t, err
 }
 
+func (q *TaskRepository) GetTaskByRefKey(ctx context.Context, refKey string) (Task, error) {
+	var t Task
+	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").Where("ref_key = ?", refKey).First(&t).Error
+	return t, err
+}
+
+func (q *TaskRepository) DeleteTask(ctx context.Context, id int32) error {
+	return q.db.WithContext(ctx).Delete(&Task{}, id).Error
+}
+
 func (q *TaskRepository) LockTaskRun(ctx context.Context, taskID int32, runID int32) error {
 	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND run_id IS NULL", taskID).Update("run_id", runID).Error
 }

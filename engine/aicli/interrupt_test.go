@@ -117,7 +117,7 @@ func TestAgentBeforeTurnInterruptionRunsAfterToolResults(t *testing.T) {
 
 func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 	transport := &queuedCompletionTransport{responses: [][]byte{
-		toolCallWithArgumentsBody(t, "ask-1", "ask_agent", `{"session_id":7,"question":"status?"}`),
+		toolCallWithArgumentsBody(t, "ask-1", "send_message_to_session", `{"session_id":7,"message":"status?"}`),
 		completionBody(t, "I saw the question error and can continue."),
 	}}
 	client := aicli.NewClient("http://unused", "", "test-model")

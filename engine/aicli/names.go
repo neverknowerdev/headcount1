@@ -6,27 +6,33 @@ package aicli
 type ToolName string
 
 const (
-	ToolBash                  ToolName = "bash"
-	ToolRead                  ToolName = "read"
-	ToolWrite                 ToolName = "write"
-	ToolListDir               ToolName = "ls"
-	ToolGrep                  ToolName = "grep"
-	ToolWebFetch              ToolName = "web_fetch"
-	ToolBrowserUse            ToolName = "browser_use"
-	ToolFinishTask            ToolName = "finish_task"
-	ToolWriteArtifact         ToolName = "write_artifact"
-	ToolListArtifacts         ToolName = "list_artifacts"
-	ToolReadArtifact          ToolName = "read_artifact"
-	ToolAskArtifact           ToolName = "ask_artifact"
-	ToolCreateSubtask         ToolName = "create_subtask"
-	ToolAnswerSubtaskQuestion ToolName = "answer_subtask_question"
-	ToolAskTaskOwner          ToolName = "ask_task_owner"
-	ToolCreateTask            ToolName = "create_task"
-	ToolAskHuman              ToolName = "ask_human"
-	ToolReportStatus          ToolName = "report_status"
-	ToolCallMCP               ToolName = "call_mcp_tool"
-	ToolDiscoverMCP           ToolName = "discover_mcp_tool"
-	ToolCodegraphWildcard     ToolName = "codegraph_*"
+	ToolBash              ToolName = "bash"
+	ToolRead              ToolName = "read"
+	ToolWrite             ToolName = "write"
+	ToolListDir           ToolName = "ls"
+	ToolGrep              ToolName = "grep"
+	ToolWebFetch          ToolName = "web_fetch"
+	ToolBrowserUse        ToolName = "browser_use"
+	ToolFinishTask        ToolName = "finish_task"
+	ToolWriteArtifact     ToolName = "write_artifact"
+	ToolListArtifacts     ToolName = "list_artifacts"
+	ToolReadArtifact      ToolName = "read_artifact"
+	ToolCreateSubtask     ToolName = "create_subtask"
+	ToolAskTaskOwner      ToolName = "ask_task_owner"
+	ToolCreateTask        ToolName = "create_task"
+	ToolGetTask           ToolName = "get_task"
+	ToolAskHuman          ToolName = "ask_human"
+	ToolReportStatus      ToolName = "report_status"
+	ToolAnswerMessage     ToolName = "answer_message"
+	ToolFinishWork        ToolName = "finish_work"
+	ToolRunWorker         ToolName = "run_worker"
+	ToolWorkerList        ToolName = "worker_list"
+	ToolGetWorkerInfo     ToolName = "get_worker_info"
+	ToolStopWorker        ToolName = "stop_worker"
+	ToolAskCEO            ToolName = "ask_ceo"
+	ToolCallMCP           ToolName = "call_mcp_tool"
+	ToolDiscoverMCP       ToolName = "discover_mcp_tool"
+	ToolCodegraphWildcard ToolName = "codegraph_*"
 )
 
 // Names converts canonical tool names to the string slices expected by the
@@ -52,13 +58,7 @@ func ConfigurableToolNames() []string {
 		ToolGrep,
 		ToolWebFetch,
 		ToolBrowserUse,
-		ToolWriteArtifact,
-		ToolListArtifacts,
-		ToolReadArtifact,
-		ToolAskArtifact,
-		ToolCreateSubtask,
-		ToolAnswerSubtaskQuestion,
-		ToolAskTaskOwner,
-		ToolCreateTask,
+		// All other capabilities are derived from role, persisted settings,
+		// connected MCPs, and transient runtime state.
 	)
 }

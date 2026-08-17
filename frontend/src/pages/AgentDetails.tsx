@@ -27,7 +27,7 @@ export const AgentDetails: React.FC = () => {
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
     const [modelGroups, setModelGroups] = useState<any[]>([]);
-    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', mode: 'primary', chat_type: 'message_history', reasoning_level: '', subagents: '', allowed_mcps: '', permissions: '{}' });
+    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', chat_type: 'message_history', reasoning_level: '', allowed_mcps: '', permissions: '{}', can_use_workers: false });
 
     const fetchData = useCallback(async () => {
         try {
@@ -52,12 +52,11 @@ export const AgentDetails: React.FC = () => {
                 model: agentRes.data.model || '',
                 provider_id: agentRes.data.provider_id?.toString() || '',
                 model_group_id: agentRes.data.model_group_id?.toString() || '',
-                mode: agentRes.data.mode || 'primary',
                 chat_type: agentRes.data.chat_type || 'message_history',
                 reasoning_level: agentRes.data.reasoning_level || '',
-                subagents: agentRes.data.subagents || '',
                 allowed_mcps: agentRes.data.allowed_mcps || '',
-                permissions: agentRes.data.permissions || '{}'
+                permissions: agentRes.data.permissions || '{}',
+                can_use_workers: !!agentRes.data.can_use_workers
             });
         } catch (e) {
             console.error(e);
@@ -268,15 +267,12 @@ export const AgentDetails: React.FC = () => {
                     <div className="max-w-2xl space-y-6">
                         <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-4">
                             <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
-                                <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
-                                    <option value="primary">Primary</option>
-                                    <option value="subagent">Subagent</option>
-                                </select>
-                            </div>
+                            <label className="flex items-start gap-3 rounded border bg-indigo-50 p-3">
+                                <input type="checkbox" checked={formData.can_use_workers} onChange={e => setFormData({...formData, can_use_workers: e.target.checked})} className="mt-0.5 h-4 w-4 text-indigo-600" />
+                                <span><span className="block text-sm font-medium text-gray-900">Can use helper workers</span><span className="block text-xs text-gray-600 mt-1">Allows bounded ephemeral research and verification workers. Workers cannot create tasks, change task state, or write artifacts.</span></span>
+                            </label>
                             <div className="pt-4">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Basic tools</label>
                                 <div className="space-y-2">
                                     {toolNames.map(tool => {
                                         const perms = JSON.parse(formData.permissions || '{}');
@@ -304,6 +300,14 @@ export const AgentDetails: React.FC = () => {
                                             </div>
                                         );
                                     })}
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Effective capabilities</label>
+                                <div className="space-y-2 text-sm">
+                                    {['finish_task', 'report_status', 'ask_task_owner', 'artifact tools', 'session lifecycle', 'connected MCPs'].map(capability => (
+                                        <label key={capability} className="flex items-center gap-2 text-gray-600"><input type="checkbox" checked readOnly disabled className="h-4 w-4" />{capability}<span className="text-xs text-gray-400">derived / read-only</span></label>
+                                    ))}
                                 </div>
                             </div>
                             <div className="pt-4 border-t mt-6 flex items-center gap-3">
@@ -571,10 +575,6 @@ export const AgentDetails: React.FC = () => {
                             </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Can delegate to (JSON array)</label>
-                                <textarea rows={2} value={formData.subagents} onChange={e => setFormData({...formData, subagents: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["CTO", "CMO"]' />
-                            </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Allowed MCPs (JSON array)</label>
                                 <textarea rows={2} value={formData.allowed_mcps} onChange={e => setFormData({...formData, allowed_mcps: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["github"]' />

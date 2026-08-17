@@ -342,9 +342,6 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 			if field := copy.FieldByName("Status"); field.IsValid() && field.CanSet() {
 				field.SetString(db.TaskStatusTodo)
 			}
-			if field := copy.FieldByName("TaskType"); field.IsValid() && field.CanSet() {
-				field.SetString(db.TaskTypeImplement)
-			}
 		}
 		if field := copy.FieldByName("EventType"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
 			field.SetString(string(db.RunEventTypeLifecycleStatus))
@@ -429,15 +426,15 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&groupMember)
 	defaultSetting := db.DefaultModelSetting{ID: 1, Purpose: repository.PurposeTaskOrchestrator, UserID: ptrInt32(1), ProviderID: ptrInt32(1), Model: "fixture-model", ModelGroupID: ptrInt32(1)}
 	insert(&defaultSetting)
-	agent := db.Agent{ID: 1, CompanyID: 1, Name: "fixture-agent", RoleKey: "fixture-agent", SystemPrompt: "integration", ProviderID: ptrInt32(1), ModelGroupID: ptrInt32(1), Model: "fixture-model", Mode: "primary", ChatType: "message_history"}
+	agent := db.Agent{ID: 1, CompanyID: 1, Name: "fixture-agent", RoleKey: "fixture-agent", SystemPrompt: "integration", ProviderID: ptrInt32(1), ModelGroupID: ptrInt32(1), Model: "fixture-model", ChatType: "message_history"}
 	insert(&agent)
 	skill := db.Skill{ID: 1, CompanyID: 1, Name: "fixture-skill", LocalPath: "/tmp/fixture-skill"}
 	insert(&skill)
-	task := db.Task{ID: 1, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), Title: "fixture-task", TaskType: db.TaskTypePlanAndImplement, Priority: "Normal", Status: db.TaskStatusTodo, GitBaseBranch: "main"}
+	task := db.Task{ID: 1, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), Title: "fixture-task", Priority: "Normal", Status: db.TaskStatusTodo, GitBaseBranch: "main"}
 	insert(&task)
-	childTask := db.Task{ID: 2, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), ParentID: ptrInt32(1), Title: "fixture-child", TaskType: db.TaskTypeImplement, Priority: "Normal", Status: db.TaskStatusDone, GitBaseBranch: "main"}
+	childTask := db.Task{ID: 2, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), ParentID: ptrInt32(1), Title: "fixture-child", Priority: "Normal", Status: db.TaskStatusDone, GitBaseBranch: "main"}
 	insert(&childTask)
-	thirdTask := db.Task{ID: 3, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), Title: "fixture-third", TaskType: db.TaskTypeImplement, Priority: "Normal", Status: db.TaskStatusTodo, GitBaseBranch: "main"}
+	thirdTask := db.Task{ID: 3, CompanyID: 1, ProjectID: ptrInt32(1), SprintID: 1, AgentID: ptrInt32(1), Title: "fixture-third", Priority: "Normal", Status: db.TaskStatusTodo, GitBaseBranch: "main"}
 	insert(&thirdTask)
 	run := db.Run{ID: 1, TaskID: 1, AgentID: 1, Name: "fixture-run", Status: "running", SessionID: "fixture-session", StartedAt: now, LastMessageTime: ptrTime(now)}
 	insert(&run)

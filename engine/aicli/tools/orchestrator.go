@@ -98,10 +98,15 @@ type OrchestratorToolName string
 const (
 	OrchestratorToolGetSessionList OrchestratorToolName = "get_session_list"
 	OrchestratorToolGetSession     OrchestratorToolName = "get_session"
-	OrchestratorToolAskAgent       OrchestratorToolName = "ask_agent"
+	OrchestratorToolSendMessage    OrchestratorToolName = "send_message_to_session"
 	OrchestratorToolRunNewSession  OrchestratorToolName = "run_new_session"
 	OrchestratorToolStopSession    OrchestratorToolName = "stop_session"
 	OrchestratorToolForkSession    OrchestratorToolName = "fork_session"
+	OrchestratorToolAskCEO         OrchestratorToolName = "ask_ceo"
+	// OrchestratorToolAskAgent is retained as a source-compatibility alias for
+	// callers compiled against the pre-cutover Go API. It never registers the
+	// legacy model-facing name.
+	OrchestratorToolAskAgent OrchestratorToolName = OrchestratorToolSendMessage
 )
 
 type OrchestratorCallbacks struct {
@@ -111,12 +116,20 @@ type OrchestratorCallbacks struct {
 	RunNewSession  func(context.Context, *int32, string, string) (string, error)
 	StopSession    func(context.Context, int32, string) (string, error)
 	ForkSession    func(context.Context, int32, int64) (string, error)
+	AnswerMessage  func(context.Context, int64, string) (string, error)
+	AskCEO         func(context.Context, int32, string) (string, error)
 }
 
 type orchestratorManagementTool struct {
 	name OrchestratorToolName
 	def  aicli.ToolDef
 	fn   func(context.Context, json.RawMessage) (string, error)
+}
+
+func RegisterOrchestratorAnswerMessage(r *aicli.Registry, fn func(context.Context, int64, string) (string, error)) {
+	if fn != nil {
+		r.Register(NewAnswerMessage(fn))
+	}
 }
 
 func (t *orchestratorManagementTool) Def() aicli.ToolDef { return t.def }
@@ -168,15 +181,19 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(&orchestratorManagementTool{
-		name: OrchestratorToolAskAgent,
-		def:  orchestratorDef(OrchestratorToolAskAgent, "Ask the agent running a managed session a question. The worker finishes its current provider/tool operation, answers using its existing conversation history, and returns the answer or an explicit timeout/provider error before its normal conversation continues.", `{"type":"object","properties":{"session_id":{"type":"integer"},"question":{"type":"string"}},"required":["session_id","question"]}`),
+		name: OrchestratorToolSendMessage,
+		def:  orchestratorDef(OrchestratorToolSendMessage, "Send a durable message to the agent running a managed session and wait for its correlated answer.", `{"type":"object","properties":{"session_id":{"type":"integer"},"message":{"type":"string"}},"required":["session_id","message"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
-				SessionID int32  `json:"session_id"`
-				Question  string `json:"question"`
+				SessionID      int32  `json:"session_id"`
+				Question       string `json:"message"`
+				LegacyQuestion string `json:"question"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
-				return "", fmt.Errorf("ask_agent: %w", err)
+				return "", fmt.Errorf("send_message_to_session: %w", err)
+			}
+			if p.Question == "" {
+				p.Question = p.LegacyQuestion
 			}
 			if p.SessionID <= 0 || p.Question == "" {
 				return "", fmt.Errorf("session_id and question are required")
@@ -239,5 +256,6 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			return cb.ForkSession(ctx, p.SessionID, p.ForkMessageID)
 		},
 	})
+	r.Register(NewAskCEO(cb.AskCEO))
 	return r
 }

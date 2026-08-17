@@ -151,7 +151,11 @@ test.describe.serial('Headcount1 App', () => {
         expect(runsRes.ok()).toBeTruthy();
         const runs = await runsRes.json();
         expect(runs.length).toBeGreaterThan(0);
-        const run = runs[0];
+        // The mandatory orchestration flow creates a root orchestrator plus
+        // one or more child agent sessions. Logs are grouped by the root run,
+        // so select that root rather than assuming the newest row is the log
+        // directory owner.
+        const run = runs.find((candidate: any) => candidate.kind === 'task_orchestrator') ?? runs[runs.length - 1];
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         // Session-based JSONL layout: logs are grouped per main run in
         // logs/{company}/{taskId}/run-{id}/, the root session writing

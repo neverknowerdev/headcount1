@@ -50,8 +50,6 @@ chat_type = "message_history"
 allowed_models = ["model-x", "model-y"]
 reasoning_level = "medium"
 allowed_tools = ["read", "grep"]
-subagents = ["Other"]
-parent_agent = "Boss"
 `
 
 func TestLoadFromBytes_ValidTOML(t *testing.T) {
@@ -63,8 +61,6 @@ func TestLoadFromBytes_ValidTOML(t *testing.T) {
 	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
 	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
 	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
-	assert.Equal(t, []string{"Other"}, cfg.Subagents)
-	assert.Equal(t, "Boss", cfg.ParentAgent)
 }
 
 func TestLoadFromBytes_InvalidTOML(t *testing.T) {
@@ -186,26 +182,18 @@ func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	}
 }
 
-func TestDefaultFactory_SubagentHierarchy(t *testing.T) {
+func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 
 	ceo, _ := f.GetConfig("CEO")
-	assert.Contains(t, ceo.Subagents, "CTO")
-	assert.Contains(t, ceo.Subagents, "CMO")
-	assert.Contains(t, ceo.Subagents, "Designer")
+	assert.True(t, ceo.CanUseWorkers)
 
 	cto, _ := f.GetConfig("CTO")
-	assert.Equal(t, "CEO", cto.ParentAgent)
-	assert.Contains(t, cto.Subagents, "Coder")
-	assert.Contains(t, cto.Subagents, "Debugger")
-	assert.Contains(t, cto.Subagents, "QA")
+	assert.True(t, cto.CanUseWorkers)
 
 	cmo, _ := f.GetConfig("CMO")
-	assert.Equal(t, "CEO", cmo.ParentAgent)
-	assert.Contains(t, cmo.Subagents, "SMM")
-	assert.Contains(t, cmo.Subagents, "PPC Specialist")
-	assert.Contains(t, cmo.Subagents, "Post Writer")
+	assert.True(t, cmo.CanUseWorkers)
 
 	coder, _ := f.GetConfig("Coder")
-	assert.Equal(t, "CTO", coder.ParentAgent)
+	assert.False(t, coder.CanUseWorkers)
 }

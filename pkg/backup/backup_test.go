@@ -46,9 +46,9 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	agent := db.Agent{CompanyID: comp.ID, Name: "dev"}
 	database.Create(&agent)
 	agentID := agent.ID
-	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: db.TaskStatusDone, TaskType: db.TaskTypePlanAndImplement, Priority: "Normal"}
+	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: db.TaskStatusDone, Priority: "Normal"}
 	database.Create(&parentTask)
-	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: db.TaskStatusBacklog, TaskType: db.TaskTypePlanAndImplement, Priority: "Normal"}
+	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&childTask)
 	comment := db.Comment{TaskID: parentTask.ID, AuthorType: "human", Content: "hi"}
 	database.Create(&comment)

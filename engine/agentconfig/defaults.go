@@ -37,27 +37,23 @@ var ppcPrompt string
 //go:embed prompts/post_writer.md
 var postWriterPrompt string
 
-// Tool sets per role. An agent only ever sees tools from its own list; the
-// engine additionally registers create_subtask / answer_subtask_question only
-// while the delegation depth cap allows it, and ask_task_owner only in
-// delegated (child) sessions.
+// Tool sets per role. The engine derives lifecycle, task, messaging, worker,
+// and MCP capabilities from the actor and current runtime state; these lists
+// remain compatibility metadata for the built-in configuration endpoint.
 
 // ceoTools: the CEO delegates all real work — no file/shell/web access.
-// It can LIST artifacts and VERIFY their content by asking targeted
-// questions (ask_artifact — answered by a separate cheap reader call), but
-// deliberately cannot READ full artifact content: consuming deliverables is
-// the sub-agents' job, and the CEO acts on their finish_task handoffs.
+// It can inspect artifacts and own durable task planning; execution is
+// delegated through the task orchestrator.
 // read_file is withheld too — the artifacts dir is readable by the file
 // sandbox, so read_file would be a trivial bypass of that restriction.
 var ceoTools = aicli.Names(
 	aicli.ToolCreateSubtask,
-	aicli.ToolAnswerSubtaskQuestion,
 	aicli.ToolCreateTask,
+	aicli.ToolGetTask,
 	aicli.ToolAskHuman,
 	aicli.ToolReportStatus,
 	aicli.ToolFinishTask,
 	aicli.ToolListArtifacts,
-	aicli.ToolAskArtifact,
 )
 
 // ctoTools: the CTO explores code (codegraph + read-only file tools), writes
@@ -65,8 +61,6 @@ var ceoTools = aicli.Names(
 // the runtime registry names in engine/aicli/tools/default.go.
 var ctoTools = aicli.Names(
 	aicli.ToolCodegraphWildcard,
-	aicli.ToolCreateSubtask,
-	aicli.ToolAnswerSubtaskQuestion,
 	aicli.ToolAskTaskOwner,
 	aicli.ToolAskHuman,
 	aicli.ToolReportStatus,
@@ -76,14 +70,11 @@ var ctoTools = aicli.Names(
 	aicli.ToolGrep,
 	aicli.ToolListArtifacts,
 	aicli.ToolReadArtifact,
-	aicli.ToolAskArtifact,
 	aicli.ToolWriteArtifact,
 )
 
 // cmoTools: the CMO plans and delegates marketing work, owning strategy docs.
 var cmoTools = aicli.Names(
-	aicli.ToolCreateSubtask,
-	aicli.ToolAnswerSubtaskQuestion,
 	aicli.ToolAskTaskOwner,
 	aicli.ToolAskHuman,
 	aicli.ToolReportStatus,
@@ -92,7 +83,6 @@ var cmoTools = aicli.Names(
 	aicli.ToolWebFetch,
 	aicli.ToolListArtifacts,
 	aicli.ToolReadArtifact,
-	aicli.ToolAskArtifact,
 	aicli.ToolWriteArtifact,
 )
 
@@ -171,7 +161,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(ceoPrompt),
 			ChatType:       ChatTypeCompactThinking,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"CTO", "CMO", "Designer"},
+			CanUseWorkers:  true,
 			AllowedTools:   ceoTools,
 		},
 		{
@@ -181,8 +171,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(ctoPrompt),
 			ChatType:       ChatTypeCompactThinking,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"Coder", "Debugger", "QA"},
-			ParentAgent:    "CEO",
+			CanUseWorkers:  true,
 			AllowedTools:   ctoTools,
 		},
 		{
@@ -192,8 +181,7 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(cmoPrompt),
 			ChatType:       ChatTypeCompactThinking,
 			ReasoningLevel: ReasoningLevelMax,
-			Subagents:      []string{"SMM", "PPC Specialist", "Post Writer"},
-			ParentAgent:    "CEO",
+			CanUseWorkers:  true,
 			AllowedTools:   cmoTools,
 		},
 		{
@@ -203,7 +191,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(coderPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CTO",
 			AllowedTools:   implementerTools,
 		},
 		{
@@ -213,7 +200,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(debuggerPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CTO",
 			AllowedTools:   implementerTools,
 		},
 		{
@@ -223,7 +209,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(qaPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CTO",
 			AllowedTools:   qaTools,
 		},
 		{
@@ -233,7 +218,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(designerPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CEO",
 			AllowedTools:   contentTools,
 		},
 		{
@@ -243,7 +227,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(smmPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CMO",
 			AllowedTools:   contentTools,
 		},
 		{
@@ -253,7 +236,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(ppcPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CMO",
 			AllowedTools:   contentTools,
 		},
 		{
@@ -263,7 +245,6 @@ func builtinConfigs() []*AgentConfig {
 			Prompt:         strings.TrimSpace(postWriterPrompt),
 			ChatType:       ChatTypeMessageHistory,
 			ReasoningLevel: ReasoningLevelMedium,
-			ParentAgent:    "CMO",
 			AllowedTools:   contentTools,
 		},
 	}

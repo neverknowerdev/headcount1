@@ -122,7 +122,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID      int32   `json:"sprint_id"`
 		ParentID      *int32  `json:"parent_id"`
 		Title         string  `json:"title"`
-		TaskType      string  `json:"task_type"`
 		Description   string  `json:"description"`
 		Priority      string  `json:"priority"`
 		GitBaseBranch string  `json:"git_base_branch"`
@@ -143,10 +142,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		priority = "Normal"
 	}
 
-	taskType := req.TaskType
-	if taskType == "" {
-		taskType = db.TaskTypePlanAndImplement
-	}
 	gitBaseBranch := strings.TrimSpace(req.GitBaseBranch)
 	if gitBaseBranch == "" {
 		gitBaseBranch = db.DefaultTaskGitBaseBranch
@@ -174,7 +169,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		CompanyID:     req.CompanyID,
 		ProjectID:     req.ProjectID,
 		Title:         req.Title,
-		TaskType:      taskType,
 		Status:        db.TaskStatusBacklog,
 		AgentID:       req.AgentID,
 		SprintID:      req.SprintID,
@@ -213,7 +207,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 func isTaskStatus(status string) bool {
 	switch status {
 	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInProgress,
-		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone:
+		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone, db.TaskStatusRefinement:
 		return true
 	default:
 		return false
@@ -266,7 +260,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID      *int32  `json:"sprint_id"`
 		ParentID      *int32  `json:"parent_id"`
 		Title         string  `json:"title"`
-		TaskType      string  `json:"task_type"`
 		Description   string  `json:"description"`
 		Priority      string  `json:"priority"`
 		GitBaseBranch string  `json:"git_base_branch"`
@@ -301,9 +294,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if req.Status != "" && req.Status != task.Status {
 		task.Status = req.Status
 		statusChanged = true
-	}
-	if req.TaskType != "" {
-		task.TaskType = req.TaskType
 	}
 
 	if req.Title != "" {

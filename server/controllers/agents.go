@@ -11,19 +11,13 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// defaultSubagentsForRole copies a built-in template's initial delegation
-// list into the database when a built-in role is first created. After that,
-// Agent.Subagents is authoritative and can be edited independently.
-func defaultSubagentsForRole(roleKey, name string) string {
+func defaultCanUseWorkers(roleKey, name string) bool {
 	for _, cfg := range agentconfig.BuiltinConfigs() {
 		if strings.EqualFold(strings.TrimSpace(roleKey), cfg.Name) || strings.EqualFold(strings.TrimSpace(name), cfg.Name) {
-			encoded, err := json.Marshal(cfg.Subagents)
-			if err == nil {
-				return string(encoded)
-			}
+			return cfg.CanUseWorkers
 		}
 	}
-	return ""
+	return false
 }
 
 // authorizeAgentBindings verifies the provider and model group an agent is
@@ -77,20 +71,19 @@ func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name           string  `json:"name"`
-		RoleKey        string  `json:"role_key"`
-		ShortName      string  `json:"short_name"`
-		Description    string  `json:"description"`
-		SystemPrompt   string  `json:"system_prompt"`
-		Model          string  `json:"model"`
-		Mode           string  `json:"mode"`
-		ChatType       string  `json:"chat_type"`
-		ReasoningLevel string  `json:"reasoning_level"`
-		Subagents      *string `json:"subagents"`
-		AllowedMCPs    string  `json:"allowed_mcps"`
-		Permissions    string  `json:"permissions"`
-		ProviderID     *int32  `json:"provider_id"`
-		ModelGroupID   *int32  `json:"model_group_id"`
+		Name           string `json:"name"`
+		RoleKey        string `json:"role_key"`
+		ShortName      string `json:"short_name"`
+		Description    string `json:"description"`
+		SystemPrompt   string `json:"system_prompt"`
+		Model          string `json:"model"`
+		ChatType       string `json:"chat_type"`
+		ReasoningLevel string `json:"reasoning_level"`
+		AllowedMCPs    string `json:"allowed_mcps"`
+		Permissions    string `json:"permissions"`
+		CanUseWorkers  *bool  `json:"can_use_workers"`
+		ProviderID     *int32 `json:"provider_id"`
+		ModelGroupID   *int32 `json:"model_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -115,23 +108,20 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.Model != "" {
 		agent.Model = req.Model
 	}
-	if req.Mode != "" {
-		agent.Mode = req.Mode
-	}
 	if req.ChatType != "" {
 		agent.ChatType = req.ChatType
 	}
 	if req.ReasoningLevel != "" {
 		agent.ReasoningLevel = req.ReasoningLevel
 	}
-	if req.Subagents != nil {
-		agent.Subagents = *req.Subagents
-	}
 	if req.AllowedMCPs != "" {
 		agent.AllowedMCPs = req.AllowedMCPs
 	}
 	if req.Permissions != "" {
 		agent.Permissions = req.Permissions
+	}
+	if req.CanUseWorkers != nil {
+		agent.CanUseWorkers = *req.CanUseWorkers
 	}
 	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
 		api.respondError(w, http.StatusNotFound, "provider or model group not found")
@@ -169,21 +159,20 @@ func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID      int32   `json:"company_id"`
-		Name           string  `json:"name"`
-		RoleKey        string  `json:"role_key"`
-		ShortName      string  `json:"short_name"`
-		Description    string  `json:"description"`
-		SystemPrompt   string  `json:"system_prompt"`
-		Model          string  `json:"model"`
-		Mode           string  `json:"mode"`
-		ChatType       string  `json:"chat_type"`
-		ReasoningLevel string  `json:"reasoning_level"`
-		Subagents      *string `json:"subagents"`
-		AllowedMCPs    string  `json:"allowed_mcps"`
-		Permissions    string  `json:"permissions"`
-		ProviderID     *int32  `json:"provider_id"`
-		ModelGroupID   *int32  `json:"model_group_id"`
+		CompanyID      int32  `json:"company_id"`
+		Name           string `json:"name"`
+		RoleKey        string `json:"role_key"`
+		ShortName      string `json:"short_name"`
+		Description    string `json:"description"`
+		SystemPrompt   string `json:"system_prompt"`
+		Model          string `json:"model"`
+		ChatType       string `json:"chat_type"`
+		ReasoningLevel string `json:"reasoning_level"`
+		AllowedMCPs    string `json:"allowed_mcps"`
+		Permissions    string `json:"permissions"`
+		CanUseWorkers  *bool  `json:"can_use_workers"`
+		ProviderID     *int32 `json:"provider_id"`
+		ModelGroupID   *int32 `json:"model_group_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -197,12 +186,6 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "provider or model group not found")
 		return
 	}
-	subagents := ""
-	if req.Subagents != nil {
-		subagents = *req.Subagents
-	} else {
-		subagents = defaultSubagentsForRole(req.RoleKey, req.Name)
-	}
 	p := db.Agent{
 		CompanyID:      req.CompanyID,
 		Name:           req.Name,
@@ -211,14 +194,16 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		SystemPrompt:   req.SystemPrompt,
 		Description:    req.Description,
 		Model:          req.Model,
-		Mode:           req.Mode,
 		ChatType:       req.ChatType,
 		ReasoningLevel: req.ReasoningLevel,
-		Subagents:      subagents,
 		AllowedMCPs:    req.AllowedMCPs,
 		Permissions:    req.Permissions,
+		CanUseWorkers:  defaultCanUseWorkers(req.RoleKey, req.Name),
 		ProviderID:     req.ProviderID,
 		ModelGroupID:   req.ModelGroupID,
+	}
+	if req.CanUseWorkers != nil {
+		p.CanUseWorkers = *req.CanUseWorkers
 	}
 
 	agent, err := api.q.CreateAgent(r.Context(), p)

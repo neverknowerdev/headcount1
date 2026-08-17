@@ -29,6 +29,17 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Def().Function.Name] = t
 }
 
+// Unregister removes a transient control-plane tool after its activation
+// window.
+func (r *Registry) Unregister(name string) { delete(r.tools, name) }
+
+func (r *Registry) DefsByName(name string) ToolDef {
+	if tool, ok := r.tools[name]; ok {
+		return tool.Def()
+	}
+	return ToolDef{Type: "function", Function: FuncMeta{Name: name}}
+}
+
 // Defs returns the ToolDef slice for inclusion in a ChatRequest.
 func (r *Registry) Defs() []ToolDef {
 	defs := make([]ToolDef, 0, len(r.tools))

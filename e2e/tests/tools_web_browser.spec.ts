@@ -12,7 +12,7 @@ import { AddressInfo } from 'net';
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import { loadE2EEnv } from '../helpers/env';
-import { waitForTaskStatus } from '../helpers/wait-for';
+import { waitForTaskStatus as waitForTaskStatusRaw } from '../helpers/wait-for';
 import { resetE2E } from '../helpers/reset';
 import { requireFetchOK } from '../helpers/http';
 import type { ScenarioEntry } from '../fixtures/mock-provider-server';
@@ -63,10 +63,53 @@ async function startMultiRouteServer(routes: Record<string, string>): Promise<{
 
 /** Configure the mock LLM provider to run a specific scenario. */
 async function setScenario(request: APIRequestContext, entries: ScenarioEntry[]): Promise<void> {
-    const res = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-        data: { entries },
+    const workerRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+        data: { entries, model: 'e2e-mock-model' },
     });
-    expect(res.ok(), `set-scenario failed: ${await res.text()}`).toBeTruthy();
+    expect(workerRes.ok(), `set worker scenario failed: ${await workerRes.text()}`).toBeTruthy();
+    const orchestratorRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+        data: {
+            model: 'e2e-orchestrator-model',
+            entries: [{
+                tool_call: {
+                    id: 'orch-run-worker',
+                    name: 'run_new_session',
+                    arguments: { agent_name: 'QA', prompt: 'Execute the assigned tool scenario and finish the task for review.' },
+                },
+            }, {
+                text: 'The worker completed the assigned scenario successfully.',
+            }],
+        },
+    });
+    expect(orchestratorRes.ok(), `set orchestrator scenario failed: ${await orchestratorRes.text()}`).toBeTruthy();
+}
+
+/** Wait until the durable task orchestrator has observed the worker result. */
+async function waitForTaskStatus(
+    request: APIRequestContext,
+    taskId: number,
+    status: string,
+    timeoutMs: number,
+): Promise<void> {
+    await waitForTaskStatusRaw(request, taskId, status, timeoutMs);
+    const deadline = Date.now() + 30_000;
+    let lastRuns: any[] = [];
+    while (Date.now() < deadline) {
+        const taskRes = await request.get(`/api/tasks/${taskId}`);
+        if (taskRes.ok()) {
+            const task = await taskRes.json();
+            const runsRes = await request.get(`/api/runs?company_id=${task.company_id}`);
+            if (runsRes.ok()) {
+                const runs = await runsRes.json() as any[];
+                lastRuns = runs.filter((run) => run.task_id === taskId && run.kind === 'task_orchestrator');
+                if (lastRuns.length > 0 && lastRuns.every((run) => ['completed', 'failed', 'canceled'].includes(run.status))) {
+                    return;
+                }
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`task ${taskId} orchestrator did not settle: ${JSON.stringify(lastRuns)}`);
 }
 
 /** Reset the mock LLM provider to default mode and clear recorded requests. */
@@ -115,11 +158,16 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
             api_key: 'test-key',
             provider_type: 'openai',
             default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model',
+            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         },
     });
     expect(provRes.ok(), `create provider: ${await provRes.text()}`).toBeTruthy();
     const provider = await provRes.json();
+
+    const orchestratorRes = await request.put('/api/default-model-settings/task_orchestrator', {
+        data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
+    });
+    expect(orchestratorRes.ok(), `configure task orchestrator: ${await orchestratorRes.text()}`).toBeTruthy();
 
     const agentRes = await request.post('/api/agents', {
         data: {
@@ -153,7 +201,6 @@ async function runTask(
             company_id: companyId,
             sprint_id: sprintId,
             title,
-            task_type: 'implement',
             agent_id: agentId,
         },
     });

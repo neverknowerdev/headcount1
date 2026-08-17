@@ -6,10 +6,9 @@ import (
 )
 
 const (
-	TaskTypePlanAndImplement = "plan and implement"
-	TaskTypeImplement        = "implement"
 	TaskStatusBacklog        = "backlog"
 	TaskStatusTodo           = "to-do"
+	TaskStatusRefinement     = "refinement"
 	TaskStatusInProgress     = "in-progress"
 	TaskStatusBlocked        = "blocked"
 	TaskStatusDependsOnTask  = "depends-on-task"
@@ -40,7 +39,6 @@ type Task struct {
 	ParentID           *int32               `json:"parent_id"`
 	Parent             *Task                `json:"parent" gorm:"foreignKey:ParentID;constraint:OnDelete:SET NULL;"`
 	Title              string               `json:"title" gorm:"not null"`
-	TaskType           string               `json:"task_type" gorm:"not null;default:'plan and implement'"`
 	Description        string               `json:"description"`
 	RefKey             string               `json:"ref_key" gorm:"index"`
 	RefinedDescription string               `json:"refined_description" gorm:"type:text;default:''"`

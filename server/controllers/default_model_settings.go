@@ -9,7 +9,7 @@ import (
 
 // ListDefaultModelSettings returns the configured target (provider+model or
 // model group) for every known internal-use purpose, e.g. commit-message
-// generation and the ask_artifact one-shot reader.
+// generation, task orchestration, and helper-worker execution.
 func (api *API) ListDefaultModelSettings(w http.ResponseWriter, r *http.Request) {
 	list, err := api.q.ListDefaultModelSettings(r.Context(), api.currentUserID(r))
 	if err != nil {

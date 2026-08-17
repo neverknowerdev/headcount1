@@ -19,7 +19,6 @@ type sessionEnvironment struct {
 	rootTask      db.Task
 	rootRunID     int32
 	rootTaskID    int32
-	depth         int
 	groupMode     bool
 	provider      db.LLMProvider
 	model         string
@@ -57,7 +56,6 @@ func (e *NativeEngine) prepareSessionEnvironment(
 	if parent != nil {
 		environment.rootRunID = parent.rootRunID
 		environment.rootTaskID = parent.rootTaskID
-		environment.depth = parent.depth
 	}
 	environment.groupMode = agent.ModelGroupID != nil
 	environment.provider, environment.model, err = resolveProvider(ctx, e.q, agent)

@@ -34,6 +34,8 @@ type ProxyRequestLog = models.ProxyRequestLog
 type RefreshToken = models.RefreshToken
 type Run = models.Run
 type RunEvent = models.RunEvent
+type SessionMessage = models.SessionMessage
+type WorkerFinishedMessage = models.WorkerFinishedMessage
 type RunEventType = models.RunEventType
 type RunRecovery = models.RunRecovery
 type RunStatusReport = models.RunStatusReport
@@ -64,6 +66,16 @@ const RunEventTypeLifecycleStatus = models.RunEventTypeLifecycleStatus
 const RunEventTypeStatusRefresh = models.RunEventTypeStatusRefresh
 const RunEventTypeStatusReport = models.RunEventTypeStatusReport
 const RunEventTypeWorkerQuestion = models.RunEventTypeWorkerQuestion
+const RunEventTypeSessionMessage = models.RunEventTypeSessionMessage
+const RunEventTypeSessionAnswer = models.RunEventTypeSessionAnswer
+const RunEventTypeWorkerFinished = models.RunEventTypeWorkerFinished
+const RunKindTaskOrchestrator = models.RunKindTaskOrchestrator
+const RunKindAgentSession = models.RunKindAgentSession
+const RunKindCEOConsultation = models.RunKindCEOConsultation
+const RunKindHelperWorker = models.RunKindHelperWorker
+
+var NewSessionMessage = models.NewSessionMessage
+
 const TaskRelationDependsOn = models.TaskRelationDependsOn
 const TaskRelationRelatedTo = models.TaskRelationRelatedTo
 const TaskStatusBacklog = models.TaskStatusBacklog
@@ -73,8 +85,7 @@ const TaskStatusDone = models.TaskStatusDone
 const TaskStatusInProgress = models.TaskStatusInProgress
 const TaskStatusInReview = models.TaskStatusInReview
 const TaskStatusTodo = models.TaskStatusTodo
-const TaskTypeImplement = models.TaskTypeImplement
-const TaskTypePlanAndImplement = models.TaskTypePlanAndImplement
+const TaskStatusRefinement = models.TaskStatusRefinement
 const TeamRoleMember = models.TeamRoleMember
 const TeamRoleOwner = models.TeamRoleOwner
 

@@ -14,7 +14,6 @@ type CreateTaskParams struct {
 	Description string `json:"description"`
 	Status      string `json:"status"`
 	Priority    string `json:"priority"`
-	TaskType    string `json:"task_type"`
 	SprintID    int32  `json:"sprint_id"`
 	ProjectID   int32  `json:"project_id"`
 	DueDate     string `json:"due_date"`
@@ -66,11 +65,6 @@ func (t *CreateTask) Def() aicli.ToolDef {
 						"type":"string",
 						"enum":["Low","Normal","High","Urgent"],
 						"description":"Task priority (default Normal)"
-					},
-					"task_type":{
-						"type":"string",
-						"enum":["plan and implement","implement"],
-						"description":"Task type (default \"plan and implement\")"
 					},
 					"sprint_id":{
 						"type":"integer",

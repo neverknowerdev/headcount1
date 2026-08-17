@@ -8,10 +8,9 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-// AskTaskOwner lets a delegated sub-agent ask the agent that created its
-// subtask a question. The call blocks until the task owner replies (via
-// answer_subtask_question in the owner's session), and the reply is returned
-// as the tool result.
+// AskTaskOwner lets a child session ask its task orchestrator a question and
+// wait for the durable routed-message answer. The engine wires the callback;
+// the tool only owns validation and the model-facing schema.
 type AskTaskOwner struct {
 	fn func(ctx context.Context, question string) (string, error)
 }

@@ -43,7 +43,7 @@ func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testi
 	require.NoError(t, database.Create(&qa).Error)
 	task := db.Task{
 		CompanyID: company.ID, ProjectID: &project.ID, SprintID: sprint.ID, RefKey: "ACME-42",
-		Title: "Add audit export", TaskType: "implement", Status: "to-do", Priority: "High",
+		Title: "Add audit export", Status: "to-do", Priority: "High",
 		Description: "Export a patient's audit trail as CSV.", RefinedDescription: "Use the existing event ordering.",
 		AcceptanceCriteria: "CSV downloads with stable headers", TestCases: "Empty audit trail; large audit trail",
 		Company: company, Project: &project, Sprint: sprint,

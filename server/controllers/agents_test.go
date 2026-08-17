@@ -6,8 +6,9 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestDefaultSubagentsForRole(t *testing.T) {
-	require.Equal(t, `["CTO","CMO","Designer"]`, defaultSubagentsForRole("CEO", "Custom CEO"))
-	require.Equal(t, `["Coder","Debugger","QA"]`, defaultSubagentsForRole("", "CTO"))
-	require.Empty(t, defaultSubagentsForRole("Researcher", "Researcher"))
+func TestDefaultCanUseWorkersForBuiltInRoles(t *testing.T) {
+	require.True(t, defaultCanUseWorkers("CEO", "Custom CEO"))
+	require.True(t, defaultCanUseWorkers("", "CTO"))
+	require.True(t, defaultCanUseWorkers("CMO", ""))
+	require.False(t, defaultCanUseWorkers("Researcher", "Researcher"))
 }

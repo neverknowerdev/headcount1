@@ -3,9 +3,16 @@ import * as net from 'net';
 import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
+const CEO_MODEL_ID = 'e2e-ceo-model';
 const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
 const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
+const ORCHESTRATOR_TOOL_NAME = 'run_new_session';
+const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
+const ORCHESTRATOR_TOOL_ARGS = {
+    agent_name: 'E2E Agent',
+    prompt: 'Complete the assigned task and finish the task when the implementation is ready for review.',
+};
 const COMPLETION_TEXT = 'Task is now in review. All done.';
 
 interface ReceivedRequest {
@@ -99,8 +106,10 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         // catch an agent run provably mid-turn (blocked on its LLM call) so it
         // can SIGTERM the server and exercise graceful drain deterministically.
         holdActive: false,
+        holdModelFilter: null as Set<string> | null,
         holdWaiters: [] as Array<() => void>,
         completionsReceived: 0,
+        orchestratorStartedTasks: new Set<string>(),
         shutdown: null as (() => Promise<void>) | null,
     };
 
@@ -121,7 +130,8 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         const isCompletions = (req.url?.includes('/chat/completions') ?? false) && req.method === 'POST';
         if (isCompletions) {
             state.completionsReceived++;
-            if (state.holdActive) {
+            const model = String((body as ChatCompletionRequest | null)?.model || '');
+            if (state.holdActive && (!state.holdModelFilter || state.holdModelFilter.has(model))) {
                 await new Promise<void>((resolve) => state.holdWaiters.push(resolve));
             }
         }
@@ -149,6 +159,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
     const stop = async (): Promise<void> => {
         // Release requests held by the drain/resume scenario before closing.
         state.holdActive = false;
+        state.holdModelFilter = null;
         for (const resolve of state.holdWaiters.splice(0)) resolve();
         if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
         for (const socket of sockets) socket.destroy();
@@ -187,8 +198,10 @@ interface MockState {
     scenario: ScenarioState | null;
     scenarios: Map<string, ScenarioState>;
     holdActive: boolean;
+    holdModelFilter: Set<string> | null;
     holdWaiters: Array<() => void>;
     completionsReceived: number;
+    orchestratorStartedTasks: Set<string>;
     shutdown: (() => Promise<void>) | null;
 }
 
@@ -210,13 +223,22 @@ function handleTestRoutes(
     // Activate hold: subsequent chat-completions calls block until released.
     if (req.url === '/__test/hold' && req.method === 'POST') {
         state.holdActive = true;
+        state.holdModelFilter = null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', hold: true }));
+        return true;
+    }
+    if (req.url === '/__test/hold-worker' && req.method === 'POST') {
+        state.holdActive = true;
+        state.holdModelFilter = new Set([MOCK_MODEL_ID]);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', hold: true, model: MOCK_MODEL_ID }));
         return true;
     }
     // Release: deactivate hold and unblock every currently-waiting call.
     if (req.url === '/__test/release' && req.method === 'POST') {
         state.holdActive = false;
+        state.holdModelFilter = null;
         const waiters = state.holdWaiters.splice(0);
         for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -227,9 +249,11 @@ function handleTestRoutes(
         state.received.length = 0;
         state.requestCount = 0;
         state.completionsReceived = 0;
+        state.orchestratorStartedTasks.clear();
         state.scenario = null;
         state.scenarios.clear();
         state.holdActive = false;
+        state.holdModelFilter = null;
         const waiters = state.holdWaiters.splice(0);
         for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -267,6 +291,7 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
             data: [
                 { id: MOCK_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-orchestrator-model', object: 'model', owned_by: 'e2e' },
+                { id: CEO_MODEL_ID, object: 'model', owned_by: 'e2e' },
             ],
         }));
         return true;
@@ -295,29 +320,49 @@ function handleChatCompletionsRoute(
         const entry = sc.index < sc.entries.length ? sc.entries[sc.index++] : null;
 
         if (wantsStream) {
-            writeStreamingScenarioEntry(res, entry);
+            writeStreamingScenarioEntry(res, entry, request);
         } else {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(buildScenarioResponse(entry)));
+            res.end(JSON.stringify(buildScenarioResponse(entry, request)));
         }
         return true;
     }
 
-    // Default mode: first call returns finish_task, subsequent calls return text.
+    // Default mode: task orchestrators launch the configured worker first;
+    // ordinary agent sessions finish the task directly. This keeps the basic
+    // onboarding flow representative of the mandatory orchestrator runtime.
     const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
     const hasToolResult = messages.some((m: any) => m.role === 'tool');
-    const isFirstCall = !hasToolResult;
+    const requestTools = Array.isArray((request as any).tools) ? (request as any).tools : [];
+    const isOrchestrator = requestTools.some((tool: any) => tool?.function?.name === ORCHESTRATOR_TOOL_NAME);
+    const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
+    if (answerTool && !isOrchestrator) {
+        const message = messages.find((item: any) => item.role === 'user' && String(item.content).includes('Incoming messages'));
+        const match = String(message?.content ?? '').match(/"id"\s*:\s*(\d+)/);
+        const answer = { tool_call: { id: 'call-e2e-answer', name: 'answer_message', arguments: {
+            message_id: match ? Number(match[1]) : 1,
+            answer: 'Use the existing event ordering and preserve the current API contract.',
+        } } };
+        if (wantsStream) writeStreamingScenarioEntry(res, answer, request);
+        else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(buildScenarioResponse(answer, request))); }
+        return true;
+    }
+    const systemContext = messages.find((message: any) => message.role === 'system')?.content ?? '';
+    const taskMatch = String(systemContext).match(/Task:.*?\(id:\s*(\d+)\)/);
+    const taskKey = taskMatch?.[1] ?? 'unknown-task';
+    const isFirstCall = !hasToolResult && (!isOrchestrator || !state.orchestratorStartedTasks.has(taskKey));
+    if (isOrchestrator && isFirstCall) state.orchestratorStartedTasks.add(taskKey);
 
     if (wantsStream) {
-        writeStreamingChatCompletion(res, isFirstCall);
+        writeStreamingChatCompletion(res, isFirstCall, isOrchestrator);
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall)));
+        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall, isOrchestrator)));
     }
     return true;
 }
 
-function buildScenarioResponse(entry: ScenarioEntry | null): object {
+function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatCompletionRequest): object {
     if (!entry || entry.text !== undefined) {
         const text = entry?.text ?? 'Done.';
         return {
@@ -333,7 +378,13 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
+    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => {
+        if (toolCall.name !== 'answer_message' || Number(toolCall.arguments.message_id) !== 0 || !request) return toolCall;
+        const messages = Array.isArray(request.messages) ? request.messages : [];
+        const content = messages.find((item) => item.role === 'user' && String(item.content).includes('Incoming messages'))?.content ?? '';
+        const match = String(content).match(/"id"\s*:\s*(\d+)/);
+        return { ...toolCall, arguments: { ...toolCall.arguments, message_id: match ? Number(match[1]) : 1 } };
+    });
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -356,7 +407,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
     };
 }
 
-function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null): void {
+function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null, request?: ChatCompletionRequest): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -371,7 +422,13 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
+        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => {
+            if (toolCall.name !== 'answer_message' || Number(toolCall.arguments.message_id) !== 0 || !request) return toolCall;
+            const messages = Array.isArray(request.messages) ? request.messages : [];
+            const content = messages.find((item) => item.role === 'user' && String(item.content).includes('Incoming messages'))?.content ?? '';
+            const match = String(content).match(/"id"\s*:\s*(\d+)/);
+            return { ...toolCall, arguments: { ...toolCall.arguments, message_id: match ? Number(match[1]) : 1 } };
+        });
         for (const [index, tc] of toolCalls.entries()) {
             res.write(formatSSE(chunk({
                 tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
@@ -387,17 +444,20 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
     res.end();
 }
 
-function buildChatCompletionResponse(withToolCall: boolean): object {
+function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: boolean): object {
+    const useOrchestratorTool = withToolCall && isOrchestrator;
     const message = withToolCall
         ? {
             role: 'assistant' as const,
-            content: 'I have analyzed the E2E task and completed it successfully.',
+            content: useOrchestratorTool
+                ? 'I have selected the implementation worker for this task.'
+                : 'I have analyzed the E2E task and completed it successfully.',
             tool_calls: [{
-                id: TOOL_CALL_ID,
+                id: useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID,
                 type: 'function',
                 function: {
-                    name: TOOL_NAME,
-                    arguments: JSON.stringify(TOOL_ARGS),
+                    name: useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME,
+                    arguments: JSON.stringify(useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS),
                 },
             }],
         }
@@ -420,7 +480,7 @@ function buildChatCompletionResponse(withToolCall: boolean): object {
     };
 }
 
-function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean): void {
+function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean, isOrchestrator: boolean): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -432,18 +492,22 @@ function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: bo
     res.write(formatSSE(chunk({ role: 'assistant' }, null)));
 
     if (withToolCall) {
+        const useOrchestratorTool = isOrchestrator;
+        const toolName = useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
+        const toolCallID = useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
+        const toolArgs = useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
         res.write(formatSSE(chunk({
             tool_calls: [{
                 index: 0,
-                id: TOOL_CALL_ID,
-                function: { name: TOOL_NAME, arguments: '' },
+                id: toolCallID,
+                function: { name: toolName, arguments: '' },
             }],
         }, null)));
 
         res.write(formatSSE(chunk({
             tool_calls: [{
                 index: 0,
-                function: { arguments: JSON.stringify(TOOL_ARGS) },
+                function: { arguments: JSON.stringify(toolArgs) },
             }],
         }, null)));
 

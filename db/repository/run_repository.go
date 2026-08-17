@@ -20,6 +20,12 @@ func (q *RunRepository) ListAllRuns(ctx context.Context) ([]Run, error) {
 	return runs, err
 }
 
+func (q *RunRepository) ListRunsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Preload("Agent").Where("task_id = ?", taskID).Order("started_at asc, id asc").Find(&runs).Error
+	return runs, err
+}
+
 const (
 	RunStatusPaused            = "paused"
 	RunStatusRecoverableFailed = "recoverable_failed"

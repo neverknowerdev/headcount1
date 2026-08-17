@@ -28,7 +28,7 @@ test.describe.serial('task sidecar orchestrator', () => {
             name: 'orchestrator-e2e', base_url: env.E2E_MOCK_PROVIDER_URL,
             api_key: 'test-key', provider_type: 'openai',
             default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model,e2e-orchestrator-model,e2e-coder-model',
+            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         });
         const setting = await request.put('/api/default-model-settings/task_orchestrator', {
             data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
@@ -49,12 +49,6 @@ test.describe.serial('task sidecar orchestrator', () => {
             company_id: companyId, name: 'Backend Builder', role_key: 'backend', short_name: 'BE',
             description: 'Implements APIs and database changes.',
             system_prompt: 'You are the implementation worker.', model: 'e2e-mock-model', provider_id: provider.id,
-            subagents: '["Coder"]',
-        });
-        const coder = await postJSON(request, '/api/agents', {
-            company_id: companyId, name: 'Coder', role_key: 'coder', short_name: 'CODER',
-            description: 'Implements focused code changes for a parent worker.',
-            system_prompt: 'You are a focused coding sub-agent.', model: 'e2e-coder-model', provider_id: provider.id,
         });
         const sprint = await postJSON(request, '/api/sprints', {
             company_id: companyId, name: 'Orchestrator Sprint', goal: 'Ship the audit export beta',
@@ -66,21 +60,8 @@ test.describe.serial('task sidecar orchestrator', () => {
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             method: 'POST', headers: { 'content-type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-mock-model', entries: [
-                { tool_call: { id: 'worker-status', name: 'report_status', arguments: { status: 'waiting for Coder to finish its work' } } },
-                { tool_call: { id: 'worker-delegate', name: 'create_subtask', arguments: {
-                    title: 'Implement CSV dependency helper',
-                    description: 'Implement the focused dependency helper and report the result.',
-                    agent_name: 'Coder',
-                } } },
-                { tool_call: { id: 'worker-question', name: 'ask_task_owner', arguments: { question: 'Should the CSV preserve the existing event ordering?' } } },
+                { tool_call: { id: 'worker-status', name: 'report_status', arguments: { status: 'implementing the audit export' } } },
                 { tool_call: { id: 'worker-finish', name: 'finish_task', arguments: { task_status: 'done', finish_status: 'worker complete', result_details: 'worker complete' } } },
-            ] }),
-        });
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-coder-model', entries: [
-                { tool_call: { id: 'coder-status', name: 'report_status', arguments: { status: 'working on dependencies' } } },
-                { tool_call: { id: 'coder-finish', name: 'finish_task', arguments: { task_status: 'done', finish_status: 'dependency helper complete', result_details: 'dependency helper complete' } } },
             ] }),
         });
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
@@ -92,15 +73,13 @@ test.describe.serial('task sidecar orchestrator', () => {
                 } } },
                 { text: 'Worker session started with the implementation brief.' },
                 { tool_call: { id: 'orch-status-1', name: 'get_session', arguments: { session_id: 2 } } },
-                { text: 'Yes. Preserve the existing event ordering and headers.' },
-                { text: 'Yes. Preserve the existing event ordering and headers.' },
                 { tool_call: { id: 'orch-status-2', name: 'get_session', arguments: { session_id: 2 } } },
                 { text: 'Worker execution is complete.' },
             ] }),
         });
         const task = await postJSON(request, '/api/tasks', {
             company_id: companyId, project_id: project.id, sprint_id: sprint.id, agent_id: ceo.id,
-            title: 'Add audit export', description: 'Export a patient audit trail as CSV.', task_type: 'implement',
+            title: 'Add audit export', description: 'Export a patient audit trail as CSV.',
             refined_description: 'Use the existing event ordering.',
             acceptance_criteria: 'CSV downloads with stable headers', test_cases: 'Empty audit trail; large audit trail',
         });
@@ -129,32 +108,18 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(workers.length).toBe(1);
         expect(workers[0].agent_id).toBe(worker.id);
         expect(workers[0].root_run_id).toBe(orchestrator.id);
-        await expect.poll(async () => {
-            const response = await request.get(`/api/runs/${workers[0].id}/children`);
-            if (!response.ok()) return [];
-            return response.json();
-        }, { timeout: 20_000 }).toEqual(expect.arrayContaining([
-            expect.objectContaining({ agent_id: coder.id, parent_run_id: workers[0].id, root_run_id: orchestrator.id }),
-        ]));
         const taskResponse = await request.get(`/api/tasks/${taskId}`);
         expect(taskResponse.ok()).toBeTruthy();
         expect((await taskResponse.json()).orchestrator_run_id).toBe(orchestrator.id);
 
-        const questionLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
-        const questionSeen = (questionLog.requests as any[]).some((r: any) =>
-            r.body?.model === 'e2e-orchestrator-model' &&
-            (r.body?.messages || []).some((m: any) => typeof m.content === 'string' &&
-                m.content.includes('Should the CSV preserve the existing event ordering?')));
-        expect(questionSeen, JSON.stringify(questionLog.requests)).toBeTruthy();
         const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
         const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
-        const expectedTools = [
-            'ask_agent', 'fork_session', 'get_session', 'get_session_list', 'run_new_session', 'stop_session',
-        ];
         const toolNameSets = orchestratorRequests.map((r: any) =>
             ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());
-        expect(toolNameSets).toContainEqual(expectedTools);
+        expect(toolNameSets.some((names: string[]) => names.includes('send_message_to_session'))).toBeTruthy();
+        expect(toolNameSets.some((names: string[]) => names.includes('run_new_session'))).toBeTruthy();
+        expect(JSON.stringify(toolNameSets)).not.toContain('ask_agent');
 
         const statusRequests = orchestratorRequests.filter((r: any) =>
             JSON.stringify(r.body?.messages || []).includes('last_reported_status'));
@@ -167,10 +132,9 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(allOrchestratorJSON).toContain('Backend Builder');
         expect(allOrchestratorJSON).toContain('Implements APIs and database changes.');
         expect(allOrchestratorJSON).toContain('agent_name');
-        expect(allOrchestratorJSON).toContain('Preserve the existing event ordering');
         expect(allOrchestratorJSON).toContain('child_statuses');
         expect(allOrchestratorJSON).toContain('up to five');
-        expect(JSON.stringify(statusRequests)).toContain('waiting for Coder to finish its work');
+        expect(JSON.stringify(statusRequests)).toContain('implementing the audit export');
         expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
         expect(JSON.stringify(statusRequests)).toContain('run_status_history');
         const reportEventRequests = orchestratorRequests.filter((r: any) =>
@@ -182,15 +146,9 @@ test.describe.serial('task sidecar orchestrator', () => {
             .map((m: any) => {
                 try { return JSON.parse(m.content); } catch { return null; }
             })
-            .filter((p: any) => p?.last_run_status?.last_reported_status?.includes('waiting for Coder to finish its work')));
+            .filter((p: any) => p?.last_run_status?.last_reported_status?.includes('implementing the audit export')));
         expect(statusPayloads.length).toBeGreaterThanOrEqual(1);
         expect(statusPayloads[0].last_run_status.last_reported_message_id).toBeGreaterThan(0);
 
-        const workerRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-mock-model');
-        const ownerAnswers = workerRequests.flatMap((r: any) => (r.body?.messages || [])
-            .filter((m: any) => m.role === 'tool' && m.tool_call_id === 'worker-question')
-            .map((m: any) => m.content));
-        expect(ownerAnswers.length).toBeGreaterThan(0);
-        expect(ownerAnswers.some((answer: string) => answer && !answer.includes('not active') && !answer.includes('timed out'))).toBeTruthy();
     });
 });

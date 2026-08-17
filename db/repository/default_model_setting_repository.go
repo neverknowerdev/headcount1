@@ -15,11 +15,11 @@ func NewDefaultModelSettingRepository(db *gorm.DB) *DefaultModelSettingRepositor
 
 const (
 	PurposeCommitMessages   = "commit_messages"
-	PurposeAskArtifact      = "ask_artifact"
 	PurposeTaskOrchestrator = "task_orchestrator"
+	PurposeHelperWorker     = "helper_worker"
 )
 
-var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeAskArtifact, PurposeTaskOrchestrator}
+var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeTaskOrchestrator, PurposeHelperWorker}
 
 func (q *DefaultModelSettingRepository) GetDefaultModelSetting(ctx context.Context, userID int32, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
