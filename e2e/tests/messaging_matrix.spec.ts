@@ -96,7 +96,7 @@ test.describe.serial('orchestrator messaging matrix', () => {
         expect(consultation.status).toBe('completed');
 
         const log = await (await request.get(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
-        const bodies = (log.requests as any[]).filter((entry) => entry.path.includes('/chat/completions')).map((entry) => JSON.stringify(entry.body));
+        const bodies = (log.requests as any[]).filter((entry) => String(entry.path).includes('/chat/completions')).map((entry) => JSON.stringify(entry.body));
         const joined = bodies.join('\n');
         expect(joined).toContain('send_message_to_session');
         expect(joined).toContain('answer_message');
@@ -106,10 +106,10 @@ test.describe.serial('orchestrator messaging matrix', () => {
         expect(joined).not.toContain('ask_agent');
 
         const workerRequests = (log.requests as any[]).filter((entry) => ['e2e-agent-a-model', 'e2e-agent-b-model'].includes(entry.body?.model));
-        expect(workerRequests.some((entry) => JSON.stringify(entry.body?.tools).includes('answer_message'))).toBeTruthy();
-        expect(workerRequests.every((entry) => !JSON.stringify(entry.body?.tools).includes('ask_human'))).toBeTruthy();
+        expect(workerRequests.some((entry) => JSON.stringify(entry.body?.tools ?? []).includes('answer_message'))).toBeTruthy();
+        expect(workerRequests.every((entry) => !JSON.stringify(entry.body?.tools ?? []).includes('ask_human'))).toBeTruthy();
         const ceoRequests = (log.requests as any[]).filter((entry) => entry.body?.model === 'e2e-ceo-model');
-        expect(ceoRequests.some((entry) => JSON.stringify(entry.body?.tools).includes('answer_message'))).toBeTruthy();
-        expect(ceoRequests.some((entry) => JSON.stringify(entry.body?.tools).includes('ask_human'))).toBeTruthy();
+        expect(ceoRequests.some((entry) => JSON.stringify(entry.body?.tools ?? []).includes('answer_message'))).toBeTruthy();
+        expect(ceoRequests.some((entry) => JSON.stringify(entry.body?.tools ?? []).includes('ask_human'))).toBeTruthy();
     });
 });
