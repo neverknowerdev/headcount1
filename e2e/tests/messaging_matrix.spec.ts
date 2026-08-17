@@ -42,8 +42,11 @@ test.describe.serial('orchestrator messaging matrix', () => {
             company_id: company.id, name: 'Matrix Agent B', role_key: 'qa', short_name: 'B',
             system_prompt: 'Verify the result independently and report evidence.', model: 'e2e-agent-b-model', provider_id: provider.id,
         });
+        const sprint = await postJSON(request, '/api/sprints', {
+            company_id: company.id, name: 'Messaging Matrix Sprint', goal: 'Verify routed communication across the task tree.',
+        });
         const task = await postJSON(request, '/api/tasks', {
-            company_id: company.id, agent_id: ceo.id, title: 'Exercise every messaging direction',
+            company_id: company.id, sprint_id: sprint.id, agent_id: ceo.id, title: 'Exercise every messaging direction',
             description: 'Coordinate two workers, exchange routed answers, consult the CEO, and verify the final result.',
         });
 
