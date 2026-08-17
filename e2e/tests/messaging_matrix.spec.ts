@@ -86,9 +86,13 @@ test.describe.serial('orchestrator messaging matrix', () => {
             const runs = runsResponse?.ok() ? await runsResponse.json() : [];
             const mockResponse = await request.get(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`, { timeout: 10_000 }).catch(() => null);
             const mockLog = mockResponse?.ok() ? await mockResponse.json() : { requests: [] };
-            console.log('MESSAGING_MATRIX_DEBUG_RUNS', JSON.stringify(runs.map((run: any) => ({ id: run.id, kind: run.kind, agent_id: run.agent_id, status: run.status, result: run.result_description }))));
-            console.log('MESSAGING_MATRIX_DEBUG_MODELS', JSON.stringify((mockLog.requests as any[]).filter((entry) => entry.path.includes('/chat/completions')).map((entry) => ({ model: entry.body?.model, tools: (entry.body?.tools ?? []).map((tool: any) => tool?.function?.name), messages: (entry.body?.messages ?? []).slice(-2) }))));
-            throw error;
+            const runSummary = runs.map((run: any) => ({ id: run.id, kind: run.kind, agent_id: run.agent_id, status: run.status, result: run.result_description }));
+            const modelSummary = (mockLog.requests as any[]).filter((entry) => entry.path.includes('/chat/completions')).map((entry) => ({
+                model: entry.body?.model,
+                tools: (entry.body?.tools ?? []).map((tool: any) => tool?.function?.name),
+                messages: (entry.body?.messages ?? []).slice(-2),
+            }));
+            throw new Error(`${String(error)}\nMESSAGING_MATRIX_DEBUG_RUNS=${JSON.stringify(runSummary)}\nMESSAGING_MATRIX_DEBUG_MODELS=${JSON.stringify(modelSummary)}`);
         }
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${task.id}/runs`);
