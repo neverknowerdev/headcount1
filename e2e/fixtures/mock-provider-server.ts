@@ -401,8 +401,11 @@ function handleChatCompletionsRoute(
         const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
         const waitingForHelpers = candidate?.tool_call?.id === 'cto-spec'
             && !helperWorkersAreTerminal(request);
+        const waitingForWorkerRefresh = waitingForHelpers && requestTools.some((tool: any) => tool?.function?.name === 'worker_list');
         const entry = waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
-            ? requestTools.some((tool: any) => tool?.function?.name === 'report_status')
+            ? waitingForWorkerRefresh
+                ? { tool_call: { id: 'wait-for-helper-status', name: 'worker_list', arguments: {} } }
+                : requestTools.some((tool: any) => tool?.function?.name === 'report_status')
                 ? {
                     // Keep the session inside the agent loop while the sender
                     // queues the message. A plain text response would end the
