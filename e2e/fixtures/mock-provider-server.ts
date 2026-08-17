@@ -48,6 +48,8 @@ export interface ScenarioEntry {
 interface ScenarioState {
     entries: ScenarioEntry[];
     index: number;
+    inboundEntries?: ScenarioEntry[];
+    inboundIndex?: number;
     inboundReadyFor?: Set<string>;
 }
 
@@ -355,14 +357,25 @@ function handleChatCompletionsRoute(
             const entries = content.includes('Fork replay') && template.forkEntries ? template.forkEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
                     : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
-            modelScenario = { entries, index: 0, inboundReadyFor: new Set<string>() };
+            modelScenario = {
+                entries,
+                index: 0,
+                inboundEntries: template.inboundEntries,
+                inboundIndex: 0,
+                inboundReadyFor: new Set<string>(),
+            };
             state.scenarios.set(sessionKey, modelScenario);
         }
     }
     const scenario = modelScenario || state.scenario;
     if (scenario) {
         const sc = scenario;
-        const candidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        const hasIncoming = requestHasIncoming(request);
+        const inboundIndex = sc.inboundIndex ?? 0;
+        const usingInboundScenario = hasIncoming && !!sc.inboundEntries && inboundIndex < sc.inboundEntries.length;
+        const candidate = usingInboundScenario
+            ? sc.inboundEntries![inboundIndex]
+            : sc.index < sc.entries.length ? sc.entries[sc.index] : null;
         const hasIncomingAnswer = answerTool && requestHasIncoming(request);
         const inboundGate = scenarioEntryInboundGate(candidate);
         // An inbound event can arrive while a long orchestration turn is
@@ -422,11 +435,15 @@ function handleChatCompletionsRoute(
                 }
             : candidate;
         if (!waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
+            if (usingInboundScenario) {
+                sc.inboundIndex = inboundIndex + 1;
+            } else {
+                sc.index++;
+            }
             if (inboundGate) {
                 sc.inboundReadyFor?.delete(inboundGate);
                 sc.inboundReadyFor?.delete(GENERIC_FORWARDING_INBOUND);
             }
-            sc.index++;
         }
 
         if (wantsStream) {
