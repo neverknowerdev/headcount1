@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-orchestrator/db"
@@ -168,6 +169,11 @@ type Agent struct {
 	// Hosts may use it for an explicit control-plane interruption; normal
 	// session messaging is delivered through BeforeTurn and durable RunEvents.
 	interrupt func(context.Context, []Message) ([]Message, error)
+	// asyncPersistence tracks the small, non-critical bookkeeping writes that
+	// are launched while executing a tool. A canceled session joins them before
+	// it returns so an E2E database wipe (or shutdown) cannot race a late log or
+	// token-stat write from an already-stopped session.
+	asyncPersistence sync.WaitGroup
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -290,6 +296,15 @@ func BuildHistory(systemPrompt string, messages []Message) []Message {
 // completion. On early termination it returns the history as of that point
 // alongside either ErrPaused (see PauseRequested) or another error.
 func (a *Agent) RunWithHistory(ctx context.Context, history []Message, pause PauseRequested) (string, []Message, error) {
+	defer func() {
+		// Normal completion keeps bookkeeping writes off the model turn's
+		// critical path. Cancellation is different: the caller is about to
+		// tear down the session, so join the writes that were given the
+		// canceled session context and let them exit before returning.
+		if ctx.Err() != nil {
+			a.asyncPersistence.Wait()
+		}
+	}()
 	switch a.Mode {
 	case ModeMessageHistory, "":
 		return a.runMessageHistory(ctx, history, "", pause)
@@ -408,12 +423,18 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				ReasoningTokens:  resp.Usage.CompletionTokensDetails.ReasoningTokens,
 			}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -425,12 +446,18 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				MCPServerTokens: a.MCPServerListingCosts,
 			}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -519,7 +546,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		argTokens := tokens.EstimateBytes(argsRaw)
 
 		// Log the tool call invocation.
-		a.appendRunLog("tool_call", tc.Function.Arguments, map[string]interface{}{
+		a.appendRunLog(ctx, "tool_call", tc.Function.Arguments, map[string]interface{}{
 			"tool_name":     tc.Function.Name,
 			"input_tokens":  argTokens,
 			"output_tokens": argTokens, // backwards-compat alias
@@ -537,7 +564,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			output = fmt.Sprintf("error: %v", execErr)
 			// Surface the failure as a visible error entry in the run log,
 			// in addition to returning it to the LLM as the tool result.
-			a.appendRunLog("error", fmt.Sprintf("tool %s failed: %v", tc.Function.Name, execErr), map[string]interface{}{
+			a.appendRunLog(ctx, "error", fmt.Sprintf("tool %s failed: %v", tc.Function.Name, execErr), map[string]interface{}{
 				"tool_name": tc.Function.Name,
 			})
 		} else if a.TerminalTools[tc.Function.Name] {
@@ -558,7 +585,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		}
 
 		// Log the tool result.
-		a.appendRunLog("tool_response", preview, map[string]interface{}{
+		a.appendRunLog(ctx, "tool_response", preview, map[string]interface{}{
 			"tool_name":     tc.Function.Name,
 			"output_tokens": outTokens,
 		})
@@ -567,12 +594,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		if a.q != nil && a.runID > 0 {
 			delta := db.RunTokenStats{ToolOutputTokens: outTokens}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -600,12 +633,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	if a.q != nil && a.runID > 0 && mcpTotalTokens > 0 {
 		delta := db.RunTokenStats{MCPToolTokens: mcpTotalTokens, MCPServerTokens: mcpServerTokens}
 		runID := a.runID
+		a.asyncPersistence.Add(1)
 		go func() {
+			defer a.asyncPersistence.Done()
 			for i := 0; i < 3; i++ {
-				if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+				if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 					break
 				}
-				time.Sleep(100 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
 		}()
 	}
@@ -613,7 +652,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
+func (a *Agent) appendRunLog(ctx context.Context, entryType, content string, extra map[string]interface{}) {
 	if a.q == nil || a.runID <= 0 {
 		return
 	}
@@ -626,12 +665,18 @@ func (a *Agent) appendRunLog(entryType, content string, extra map[string]interfa
 		entry[k] = v
 	}
 	runID := a.runID
+	a.asyncPersistence.Add(1)
 	go func() {
+		defer a.asyncPersistence.Done()
 		for i := 0; i < 3; i++ {
-			if err := a.q.AppendRunLogEntry(context.Background(), runID, entry); err == nil {
+			if err := a.q.AppendRunLogEntry(ctx, runID, entry); err == nil {
 				break
 			}
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 	}()
 }
