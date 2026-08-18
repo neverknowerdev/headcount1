@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/agentconfig"
@@ -13,7 +12,7 @@ import (
 
 func defaultCanUseWorkers(roleKey, name string) bool {
 	for _, cfg := range agentconfig.BuiltinConfigs() {
-		if strings.EqualFold(strings.TrimSpace(roleKey), cfg.Name) || strings.EqualFold(strings.TrimSpace(name), cfg.Name) {
+		if agentconfig.RoleMatches(roleKey, name, cfg.Name) {
 			return cfg.CanUseWorkers
 		}
 	}

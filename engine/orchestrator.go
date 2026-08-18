@@ -289,6 +289,14 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		// Task completion is authoritative. Do not spend another model turn
+		// reacting to the fingerprint change caused by the final worker or
+		// finish_task update. This also prevents a late lifecycle event from
+		// keeping a completed parent run alive indefinitely.
+		if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
+			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
+			return
+		}
 		if !first && fingerprint == lastFingerprint && len(events) == 0 && len(inbound) == 0 {
 			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
@@ -845,7 +853,7 @@ func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 		return false
 	}
 	for _, v := range s {
-		if v.LifecycleStatus == "running" || v.LifecycleStatus == "waiting" || v.LifecycleStatus == "interrupted" {
+		if !isTerminalRunStatus(v.LifecycleStatus) {
 			return false
 		}
 	}

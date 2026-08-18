@@ -83,7 +83,7 @@ func (b *defaultSystemPromptBuilder) Build(agent db.Agent, task db.Task) string 
 		AcceptanceCriteria: formatSpecItems(task.AcceptanceCriteria),
 		TestCases:          formatSpecItems(task.TestCases),
 		CurrentDate:        time.Now().Format("2006-01-02"),
-		CanAskHuman:        strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO"),
+		CanAskHuman:        agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO"),
 	}
 	if summaries, err := b.q.ListTaskRelationSummaries(context.Background(), []int32{task.ID}); err == nil {
 		data.TaskRelations = formatTaskRelations(summaries[task.ID])

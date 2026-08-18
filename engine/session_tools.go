@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
@@ -194,24 +195,24 @@ func (e *NativeEngine) buildSessionTools(
 	// the callback as an authorization boundary even if a malformed registry
 	// exposes one of these tools.
 	state.registry.Register(tools.NewCreateTask(func(ctx context.Context, params tools.CreateTaskParams) (string, error) {
-		if !strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
+		if !agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO") {
 			return "", fmt.Errorf("create_task is restricted to the CEO role")
 		}
 		return e.createBoardTask(ctx, task, agent.ID, company, params)
 	}))
 	state.registry.Register(tools.NewCreateSubtask(func(ctx context.Context, params tools.CreateSubtaskParams) (string, error) {
-		if !strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
+		if !agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO") {
 			return "", fmt.Errorf("create_subtask is restricted to the CEO role")
 		}
 		return e.createSubtask(ctx, task, params)
 	}))
 	state.registry.Register(tools.NewGetTask(func(ctx context.Context, reference string) (string, error) {
-		if !strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
+		if !agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO") {
 			return "", fmt.Errorf("get_task is restricted to the CEO role")
 		}
 		return e.getTaskOperationalView(ctx, task.CompanyID, reference)
 	}))
-	if agent.CanUseWorkers {
+	if agentCanUseWorkers(agent) {
 		workerRegistry := tools.NewWorkerControlRegistry(tools.WorkerControlCallbacks{
 			RunWorker: func(workerCtx context.Context, prompt string) (string, error) {
 				return e.runWorker(workerCtx, run, task, prompt)
@@ -232,7 +233,7 @@ func (e *NativeEngine) buildSessionTools(
 			state.registry.Register(&delegatedTool{def: workerRegistry.DefsByName(name), registry: workerRegistry, name: name})
 		}
 	}
-	if strings.EqualFold(strings.TrimSpace(agent.RoleKey), "CEO") {
+	if agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO") {
 		state.registry.Register(tools.NewAskHuman(func(ctx context.Context, question string) (string, error) {
 			return e.askHuman(ctx, task.ID, run.ID, question)
 		}))

@@ -13,6 +13,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
+	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"github.com/glebarez/sqlite"
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,22 @@ func TestStatusReportFreshnessWindow(t *testing.T) {
 	require.False(t, isStatusReportStale(db.RunStatusReport{ReportedAt: now.Add(-9 * time.Minute)}, true, now))
 	require.True(t, isStatusReportStale(db.RunStatusReport{ReportedAt: now.Add(-10*time.Minute - time.Second)}, true, now))
 	require.True(t, isStatusReportStale(db.RunStatusReport{}, false, now))
+}
+
+func TestAllWorkerSessionsTerminalUsesRunTerminalStates(t *testing.T) {
+	require.False(t, allWorkerSessionsTerminal(nil))
+	require.True(t, allWorkerSessionsTerminal([]tools.ManagedSessionSummary{
+		{LifecycleStatus: "completed"},
+		{LifecycleStatus: db.RunStatusRecoverableFailed},
+		{LifecycleStatus: "interrupted"},
+	}))
+	require.False(t, allWorkerSessionsTerminal([]tools.ManagedSessionSummary{
+		{LifecycleStatus: "completed"},
+		{LifecycleStatus: db.RunStatusPaused},
+	}))
+	require.False(t, allWorkerSessionsTerminal([]tools.ManagedSessionSummary{
+		{LifecycleStatus: "running"},
+	}))
 }
 
 func TestWakeStalledOrchestratorEmitsOnlyWhenWorkersAreAllInactive(t *testing.T) {

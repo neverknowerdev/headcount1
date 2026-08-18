@@ -1,8 +1,8 @@
 package engine
 
 import (
-	"strings"
-
+	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 )
 
@@ -50,7 +50,7 @@ func orchestratorToolNames() []aicli.ToolName {
 func OrchestratorToolNames() []aicli.ToolName { return orchestratorToolNames() }
 
 func workerDefaultForRole(roleKey string) bool {
-	switch strings.ToUpper(strings.TrimSpace(roleKey)) {
+	switch agentconfig.CanonicalRole(roleKey) {
 	case "CEO", "CTO", "CMO":
 		return true
 	default:
@@ -59,3 +59,14 @@ func workerDefaultForRole(roleKey string) bool {
 }
 
 func RoleDefaultCanUseWorkers(roleKey string) bool { return workerDefaultForRole(roleKey) }
+
+// agentCanUseWorkers preserves the persisted opt-in while recognizing
+// built-in role aliases created by older UI flows (for example "CEO Agent").
+func agentCanUseWorkers(agent db.Agent) bool {
+	if agent.CanUseWorkers || workerDefaultForRole(agent.RoleKey) {
+		return true
+	}
+	return agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CEO") ||
+		agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CTO") ||
+		agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CMO")
+}

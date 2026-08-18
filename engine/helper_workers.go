@@ -103,7 +103,7 @@ func (e *NativeEngine) runWorker(ctx context.Context, parent db.Run, task db.Tas
 	if err != nil {
 		return "", err
 	}
-	if !agent.CanUseWorkers {
+	if !agentCanUseWorkers(agent) {
 		return "", fmt.Errorf("agent %q is not allowed to use helper workers", agent.Name)
 	}
 	children, err := e.q.ListChildRuns(ctx, parent.ID)

@@ -79,7 +79,7 @@ func (e *NativeEngine) buildSessionPrompt(
 	if options.ReplayHistory != nil {
 		systemPrompt += "\n" + forkReplayNotice
 	}
-	if agent.CanUseWorkers {
+	if agentCanUseWorkers(agent) {
 		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))
 	}
 	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {

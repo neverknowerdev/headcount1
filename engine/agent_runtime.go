@@ -7,6 +7,7 @@ import (
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 )
 
 func decodeAgentNames(raw string) []string {
@@ -33,8 +34,7 @@ func (e *NativeEngine) findAgentForRole(ctx context.Context, companyID int32, ro
 		return db.Agent{}, fmt.Errorf("list agents for %q: %w", requested, err)
 	}
 	for _, agent := range agents {
-		if strings.EqualFold(strings.TrimSpace(agent.RoleKey), requested) ||
-			strings.EqualFold(strings.TrimSpace(agent.Name), requested) {
+		if agentconfig.RoleMatches(agent.RoleKey, agent.Name, requested) {
 			return agent, nil
 		}
 	}
