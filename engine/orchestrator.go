@@ -298,7 +298,11 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			return
 		}
 		if !first && fingerprint == lastFingerprint && len(events) == 0 && len(inbound) == 0 {
-			if isOrchestratorTaskComplete(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
+			// An in-review handoff gets one model activation above so the
+			// orchestrator can launch the next stage. If that activation makes
+			// no change, the terminal task state and terminal worker tree mean
+			// there is no remaining orchestration work.
+			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
 				return
 			}
