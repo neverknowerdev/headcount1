@@ -143,12 +143,39 @@ func TestHandleHumanReplyIsIdempotentUnderConcurrentDelivery(t *testing.T) {
 	updatedTask, err := db.New(database).GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
 	assert.Equal(t, db.TaskStatusInProgress, updatedTask.Status)
+	assert.False(t, updatedTask.IsArchived, "human reply must not archive the task")
 	updatedRun, err := db.New(database).GetRun(context.Background(), questionRun.ID)
 	require.NoError(t, err)
 	assert.Equal(t, "running", updatedRun.Status)
 	var answers []db.RunEvent
 	require.NoError(t, database.Where("target_run_id = ? AND event_type = ?", orchestrator.ID, db.RunEventTypeHumanInputAnswered).Find(&answers).Error)
 	assert.Len(t, answers, 1, "duplicate HTTP delivery must produce one durable answer event")
+}
+
+func TestHandleHumanReplyPreservesArchiveState(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:human-reply-archive-preservation?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Archived Human Reply Co", ShortName: "AHR"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", ShortName: "CEO"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "preserve archive", Status: db.TaskStatusBlocked, IsArchived: true}
+	require.NoError(t, database.Create(&task).Error)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "waiting"}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("orchestrator_run_id", orchestrator.ID).Error)
+	questionRun := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "waiting", Recovery: db.RunRecovery{WaitReason: "awaiting_human_input"}}
+	require.NoError(t, database.Create(&questionRun).Error)
+	require.NoError(t, database.Create(&db.Comment{TaskID: task.ID, AuthorType: "agent", CommentType: "ask_user", Content: "confirm?", RunID: &questionRun.ID}).Error)
+	require.NoError(t, database.Create(&db.Comment{TaskID: task.ID, AuthorType: "human", Content: "confirmed"}).Error)
+
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.HandleHumanReply(context.Background(), task.ID))
+	updatedTask, err := db.New(database).GetTask(context.Background(), task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.TaskStatusInProgress, updatedTask.Status)
+	assert.True(t, updatedTask.IsArchived, "status-only reply transition must preserve archive state")
 }
 
 func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testing.T) {

@@ -37,6 +37,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [task, setTask] = useState<any>(null);
     const [comments, setComments] = useState<any[]>([]);
     const [newComment, setNewComment] = useState('');
+    const [commentError, setCommentError] = useState('');
+    const [isPostingComment, setIsPostingComment] = useState(false);
 
     const [isSaving, setIsSaving] = useState(false);
     const [runs, setRuns] = useState<any[]>([]);
@@ -241,16 +243,34 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const handleAddComment = async (e: React.FormEvent) => {
         e.preventDefault();
         if (!newComment.trim() || !taskId) return;
+        const content = newComment.trim();
+        setIsPostingComment(true);
+        setCommentError('');
         try {
-            await axios.post('/api/comments', {
+            const response = await axios.post('/api/comments', {
                 task_id: taskId,
                 author_type: 'human',
-                content: newComment,
+                content,
                 run_agent: task?.status === 'blocked' ? false : runAgent
             });
             setNewComment('');
-        } catch (e) {
+            setComments(prev => prev.some((c: any) => c.id === response.data?.id) ? prev : [...prev, response.data]);
+            // The reply changes task/run state asynchronously. Re-read both
+            // streams so the modal immediately leaves the human-wait state,
+            // even when the websocket event was missed during the transition.
+            await fetchActivity();
+            const taskRes = await axios.get(`/api/tasks/${taskId}`);
+            setTask((prev: any) => prev ? { ...prev, ...taskRes.data } : taskRes.data);
+            setFormData(prev => ({
+                ...prev,
+                status: taskRes.data.status,
+                is_archived: taskRes.data.is_archived,
+            }));
+        } catch (e: any) {
             console.error(e);
+            setCommentError(e.response?.data?.error || 'Could not submit the reply. Please try again.');
+        } finally {
+            setIsPostingComment(false);
         }
     };
 
@@ -275,7 +295,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
             if (taskId) {
                 payload.status = formData.status;
-                payload.is_archived = formData.is_archived;
                 await axios.put(`/api/tasks/${taskId}`, payload);
             } else {
                 await axios.post('/api/tasks', payload);
@@ -794,6 +813,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                             </div>
                                         </div>
                                     ) : (
+                                        <>
                                         <form onSubmit={handleAddComment} className="flex gap-2">
                                             <input
                                                 type="text"
@@ -801,6 +821,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 onChange={(e) => setNewComment(e.target.value)}
                                                 placeholder="Add a comment..."
                                                 className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+                                                disabled={isPostingComment}
                                             />
                                             {task?.status === 'blocked' ? (
                                                 <span className="flex items-center px-2 text-xs text-amber-700">Answer pending question</span>
@@ -815,10 +836,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
                                                 </div>
                                             )}
-                                            <button type="submit" className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700">
+                                            <button type="submit" disabled={isPostingComment || !newComment.trim()} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
                                                 <Send size={18} />
                                             </button>
                                         </form>
+                                        {commentError && <p className="mt-1 text-xs text-red-600">{commentError}</p>}
+                                        </>
                                     )}
                                 </div>
 

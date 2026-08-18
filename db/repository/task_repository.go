@@ -129,6 +129,16 @@ func (q *TaskRepository) UpdateTask(ctx context.Context, t Task) (Task, error) {
 	return t, err
 }
 
+// SetTaskStatusIf changes only the task status when it still has the expected
+// value. Lifecycle signals such as a human reply must not Save a stale full
+// task row: that could overwrite an archive flag or another concurrent edit.
+func (q *TaskRepository) SetTaskStatusIf(ctx context.Context, taskID int32, from, to string) (bool, error) {
+	result := q.db.WithContext(ctx).Model(&Task{}).
+		Where("id = ? AND status = ?", taskID, from).
+		Update("status", to)
+	return result.RowsAffected == 1, result.Error
+}
+
 func (q *TaskRepository) GetTask(ctx context.Context, id int32) (Task, error) {
 	var t Task
 	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error

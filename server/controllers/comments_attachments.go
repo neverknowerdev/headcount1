@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -69,8 +70,10 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 			HandleHumanReply(context.Context, int32) error
 		}); ok {
 			if err := handler.HandleHumanReply(r.Context(), req.TaskID); err != nil {
-				api.respondError(w, http.StatusInternalServerError, err.Error())
-				return
+				// The comment is already durable. Do not turn a successful human
+				// reply into a 500 (which invites duplicate answers); the waiting
+				// session/watchdog can retry the idempotent control-plane transition.
+				log.Printf("human reply transition pending for task %d: %v", req.TaskID, err)
 			}
 		}
 	}

@@ -1467,12 +1467,21 @@ func (e *NativeEngine) HandleHumanReply(ctx context.Context, taskID int32) error
 	}
 	if task.Status == db.TaskStatusBlocked {
 		previous := task.Status
-		task.Status = db.TaskStatusInProgress
-		updated, updateErr := e.q.UpdateTask(ctx, task)
+		changed, updateErr := e.q.SetTaskStatusIf(ctx, task.ID, db.TaskStatusBlocked, db.TaskStatusInProgress)
 		if updateErr != nil {
 			return updateErr
 		}
-		e.broadcastTaskStatus(updated, previous, updated.Status, nil)
+		// Reload after the narrow update so subsequent routing uses the current
+		// orchestrator/archive pointers, even if another lifecycle update raced
+		// with the human reply.
+		updated, reloadErr := e.q.GetTask(ctx, task.ID)
+		if reloadErr != nil {
+			return reloadErr
+		}
+		task = updated
+		if changed {
+			e.broadcastTaskStatus(updated, previous, updated.Status, nil)
+		}
 	}
 	if question.RunID != nil {
 		if err := e.q.SetRunRunning(ctx, *question.RunID); err != nil {
