@@ -251,5 +251,14 @@ func (e *NativeEngine) buildSessionTools(
 		e.logInfo(logger, "Status: "+status)
 		return nil
 	}))
+	// Persisted database agents do not store the built-in config's
+	// AllowedTools list. Apply the canonical role contract at the runtime
+	// boundary so a CEO/CTO/QA row cannot accidentally receive implementation
+	// tools merely because the default registry contains them. Unknown custom
+	// roles retain the legacy unrestricted registry until they opt into an
+	// explicit capability policy.
+	if allowed := roleToolNames(agent); len(allowed) > 0 {
+		state.registry = state.registry.Filter(allowed)
+	}
 	return state
 }

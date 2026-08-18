@@ -70,3 +70,64 @@ func agentCanUseWorkers(agent db.Agent) bool {
 		agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CTO") ||
 		agentconfig.RoleMatches(agent.RoleKey, agent.Name, "CMO")
 }
+
+// roleToolNames returns the built-in runtime contract for persisted agents.
+// Database agents do not carry the TOML AgentConfig's AllowedTools field, so
+// role-aware rows must still receive the same least-privilege boundary as
+// built-in configurations. An empty result intentionally preserves the
+// historical full registry for custom roles.
+func roleToolNames(agent db.Agent) []string {
+	base := func(groups ...[]aicli.ToolName) []string {
+		seen := make(map[string]struct{})
+		var names []string
+		for _, group := range groups {
+			for _, name := range group {
+				if _, ok := seen[string(name)]; ok {
+					continue
+				}
+				seen[string(name)] = struct{}{}
+				names = append(names, string(name))
+			}
+		}
+		return names
+	}
+
+	common := append(messagingToolNames(), artifactToolNames()...)
+	common = append(common, agentLifecycleToolNames()...)
+	role := agentconfig.CanonicalRole(agent.RoleKey)
+	if role == agent.RoleKey || role == "" {
+		role = agentconfig.CanonicalRole(agent.Name)
+	}
+	switch role {
+	case "CEO":
+		return base(taskToolNames(), common, []aicli.ToolName{aicli.ToolAskHuman})
+	case "CTO":
+		return base(readOnlyToolNames(), common, workerControlToolNames(), []aicli.ToolName{aicli.ToolCodegraphWildcard})
+	case "CMO":
+		return base(contentToolNames(), common, workerControlToolNames())
+	case "Coder", "Debugger":
+		return base(implementationToolNames(), common)
+	case "QA":
+		return base(qaToolNames(), common)
+	case "Designer", "SMM", "PPC Specialist", "Post Writer":
+		return base(contentToolNames(), common)
+	default:
+		return nil
+	}
+}
+
+func qaToolNames() []aicli.ToolName {
+	return []aicli.ToolName{aicli.ToolRead, aicli.ToolListDir, aicli.ToolGrep, aicli.ToolBash, aicli.ToolWebFetch, aicli.ToolBrowserUse}
+}
+
+func readOnlyToolNames() []aicli.ToolName {
+	return []aicli.ToolName{aicli.ToolRead, aicli.ToolListDir, aicli.ToolGrep}
+}
+
+func implementationToolNames() []aicli.ToolName {
+	return []aicli.ToolName{aicli.ToolRead, aicli.ToolWrite, aicli.ToolBash, aicli.ToolListDir, aicli.ToolGrep, aicli.ToolCodegraphWildcard}
+}
+
+func contentToolNames() []aicli.ToolName {
+	return []aicli.ToolName{aicli.ToolRead, aicli.ToolWebFetch}
+}
