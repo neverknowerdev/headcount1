@@ -127,6 +127,10 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         holdWaiters: [] as Array<() => void>,
         completionsReceived: 0,
         orchestratorStartedTasks: new Set<string>(),
+        forkRequested: false,
+        forkedCoderStarted: false,
+        forkedCoderSessionID: null as string | null,
+        sourceCoderSessionID: null as string | null,
         shutdown: null as (() => Promise<void>) | null,
     };
 
@@ -220,6 +224,10 @@ interface MockState {
     holdWaiters: Array<() => void>;
     completionsReceived: number;
     orchestratorStartedTasks: Set<string>;
+    forkRequested: boolean;
+    forkedCoderStarted: boolean;
+    forkedCoderSessionID: string | null;
+    sourceCoderSessionID: string | null;
     shutdown: (() => Promise<void>) | null;
 }
 
@@ -268,6 +276,10 @@ function handleTestRoutes(
         state.requestCount = 0;
         state.completionsReceived = 0;
         state.orchestratorStartedTasks.clear();
+        state.forkRequested = false;
+        state.forkedCoderStarted = false;
+        state.forkedCoderSessionID = null;
+        state.sourceCoderSessionID = null;
         state.scenario = null;
         state.scenarios.clear();
         state.scenarioTemplates.clear();
@@ -344,6 +356,11 @@ function handleChatCompletionsRoute(
     const wantsStream = request.stream === true;
     const requestTools = Array.isArray((request as any).tools) ? (request as any).tools : [];
     const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
+    const requestContent = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? '')).join('\n');
+    if (request.model === 'e2e-orchestrator-model' && requestContent.includes('forked session ')) {
+        state.forkRequested = true;
+    }
 
     // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
     const model = String(request.model || '');
@@ -354,9 +371,20 @@ function handleChatCompletionsRoute(
         const sessionKey = `${model}#${sessionID}`;
         modelScenario = state.scenarios.get(sessionKey);
         if (!modelScenario) {
-            const content = (Array.isArray(request.messages) ? request.messages : [])
-                .map((message) => String(message.content ?? '')).join('\n');
-            const forkActive = content.includes('Fork replay') && !!template.forkEntries;
+            const content = requestContent;
+            const isForkedCoder = model === 'e2e-coder-model'
+                && !!sessionID
+                && state.forkRequested
+                && sessionID !== state.sourceCoderSessionID;
+            const forkActive = !!template.forkEntries && (content.includes('Fork replay') || isForkedCoder);
+            if (model === 'e2e-coder-model' && !state.sourceCoderSessionID) {
+                state.sourceCoderSessionID = sessionID;
+            }
+            if (forkActive && model === 'e2e-coder-model') {
+                state.forkedCoderStarted = true;
+                state.forkedCoderSessionID = sessionID;
+                state.forkRequested = false;
+            }
             const terminalReplacement = content.includes("Answer the task owner's routed question");
             const entries = forkActive ? template.forkEntries!
                 : terminalReplacement && template.inboundEntries ? template.inboundEntries
@@ -424,7 +452,12 @@ function handleChatCompletionsRoute(
         const waitingForHelpers = candidate?.tool_call?.id === 'cto-spec'
             && !helperWorkersAreTerminal(request);
         const waitingForWorkerRefresh = waitingForHelpers && requestTools.some((tool: any) => tool?.function?.name === 'worker_list');
-        const entry = waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
+        const waitingForForkedCoder = candidate?.tool_call?.id === 'launch-qa-retry'
+            && (state.forkRequested || state.forkedCoderStarted)
+            && !forkedCoderIsTerminal(request);
+        const entry = waitingForForkedCoder
+            ? { tool_call: { id: 'wait-for-forked-coder', name: 'get_session', arguments: { session_id: 0 } } }
+            : waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
             ? waitingForWorkerRefresh
                 ? { tool_call: { id: 'wait-for-helper-status', name: 'worker_list', arguments: {} } }
                 : requestTools.some((tool: any) => tool?.function?.name === 'report_status')
@@ -443,7 +476,7 @@ function handleChatCompletionsRoute(
                     text: 'Waiting for the next routed message.',
                 }
             : candidate;
-        if (!waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
+        if (!waitingForForkedCoder && !waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
             if (usingInboundScenario) {
                 sc.inboundIndex = inboundIndex + 1;
                 sc.inboundActive = true;
@@ -457,10 +490,10 @@ function handleChatCompletionsRoute(
         }
 
         if (wantsStream) {
-            writeStreamingScenarioEntry(res, entry, request);
+            writeStreamingScenarioEntry(res, entry, request, state);
         } else {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(buildScenarioResponse(entry, request)));
+            res.end(JSON.stringify(buildScenarioResponse(entry, request, state)));
         }
         return true;
     }
@@ -496,7 +529,7 @@ function handleChatCompletionsRoute(
     return true;
 }
 
-function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatCompletionRequest): object {
+function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatCompletionRequest, state?: MockState): object {
     if (!entry || entry.text !== undefined) {
         const text = entry?.text ?? 'Done.';
         return {
@@ -512,7 +545,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatComple
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request));
+    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request, state));
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -535,7 +568,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatComple
     };
 }
 
-function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null, request?: ChatCompletionRequest): void {
+function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null, request?: ChatCompletionRequest, state?: MockState): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -550,7 +583,7 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request));
+        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request, state));
         for (const [index, tc] of toolCalls.entries()) {
             res.write(formatSSE(chunk({
                 tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
@@ -584,6 +617,15 @@ function helperWorkersAreTerminal(request: ChatCompletionRequest): boolean {
     } catch {
         return false;
     }
+}
+
+function forkedCoderIsTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? '')).join('\n');
+    const statuses = [...content.matchAll(/"agent_name"\s*:\s*"[^"]*Coder"[\s\S]*?"status"\s*:\s*"([^"]+)"/g)]
+        .map((match) => match[1]);
+    const latest = statuses.at(-1);
+    return latest === 'completed' || latest === 'canceled' || latest === 'failed';
 }
 
 function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
@@ -639,7 +681,7 @@ function pendingIncomingMessageID(request: ChatCompletionRequest): number | null
 /** Resolve IDs that are assigned by the database during an E2E run. A zero in
  * a scenario means "the relevant ID from this conversation", so the test
  * describes message direction without hard-coding database sequence values. */
-function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest): ScenarioToolCall {
+function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest, state?: MockState): ScenarioToolCall {
     if (!request) return toolCall;
     const messages = Array.isArray(request.messages) ? request.messages : [];
     const messageID = pendingIncomingMessageID(request);
@@ -676,7 +718,9 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
         args.message_id = messageID ?? 1;
     }
     if (toolCall.name === 'get_session' && Number(args.session_id) === 0) {
-        args.session_id = consultationID ? Number(consultationID) : (sessionID ? Number(sessionID) : 1);
+        const forkedCoderSessionID = toolCall.id === 'wait-for-forked-coder' ? state?.forkedCoderSessionID : null;
+        args.session_id = forkedCoderSessionID ? Number(forkedCoderSessionID)
+            : consultationID ? Number(consultationID) : (sessionID ? Number(sessionID) : 1);
     }
     if (toolCall.name === 'send_message_to_session' && Number(args.session_id) === 0) {
         args.session_id = sessionID ? Number(sessionID) : 1;
@@ -685,8 +729,11 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
         args.session_id = sessionID ? Number(sessionID) : 1;
     }
     if (toolCall.name === 'fork_session' && Number(args.fork_message_id) === 0) {
-        const statusMessageIDs = [...snapshot.matchAll(/"message_id":(\d+)/g)].map((match) => Number(match[1]));
-        args.fork_message_id = statusMessageIDs.at(-1) ?? 1;
+        // The real API accepts a canonical conversation sequence, not a
+        // routed-event ID. Use a deliberately late sequence so the engine
+        // selects the nearest safe boundary that includes the Coder's prior
+        // stateful write, independent of PostgreSQL scheduling.
+        args.fork_message_id = 1_000_000_000;
     }
     return { ...toolCall, arguments: args };
 }
