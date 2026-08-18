@@ -271,6 +271,9 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const mockUrl = mock!.baseUrl;
         const markerA = 'run A resumed';
         const markerB = 'run B resumed';
+        const workerModelA = 'e2e-resume-a-model';
+        const workerModelB = 'e2e-resume-b-model';
+        const workerModels = new Set([workerModelA, workerModelB]);
 
         if (!server || server.exitCode !== null) await startServer();
 
@@ -278,29 +281,37 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         // build. Reset both stores so this test proves that the startup scan
         // handles more than one paused session in the same restart.
         await resetE2EBase(base, mockUrl);
-        await fetch(`${mockUrl}/__test/set-scenario`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-mock-model',
-                entries: [
+        await Promise.all([
+            fetch(`${mockUrl}/__test/set-scenario`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: workerModelA, entries: [
                     { tool_call: { id: 'rs-a', name: 'report_status', arguments: { status: markerA } } },
-                    { tool_call: { id: 'rs-b', name: 'report_status', arguments: { status: markerB } } },
                     { tool_call: { id: 'ft-a', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Run A resumed.' } } },
-                    { tool_call: { id: 'ft-b', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Run B resumed.' } } },
-                ],
+                ] }),
             }),
+            fetch(`${mockUrl}/__test/set-scenario`, {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ model: workerModelB, entries: [
+                    { tool_call: { id: 'rs-b', name: 'report_status', arguments: { status: markerB } } },
+                    { tool_call: { id: 'ft-b', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Run B resumed.' } } },
+                ] }),
+            }),
+        ]).then(async (responses) => {
+            for (const response of responses) expect(response.ok).toBeTruthy();
         });
         expect((await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-a', name: 'run_new_session', arguments: { agent_name: 'Runner', prompt: 'Complete the task.' } } },
-                { tool_call: { id: 'run-b', name: 'run_new_session', arguments: { agent_name: 'Runner', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-a', name: 'run_new_session', arguments: { agent_name: 'Runner A', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-b', name: 'run_new_session', arguments: { agent_name: 'Runner B', prompt: 'Complete the task.' } } },
                 { text: 'The workers completed the tasks.' },
             ] }),
         })).ok).toBeTruthy();
 
         const provider = await postJSON(`${base}/api/providers`, {
             name: 'mock', base_url: mockUrl, api_key: 'test-key',
-            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model,e2e-orchestrator-model',
+            provider_type: 'openai', default_model: workerModelA,
+            supported_models: `${workerModelA},${workerModelB},e2e-orchestrator-model`,
         });
         const orchestratorSetting = await fetch(`${base}/api/default-model-settings/task_orchestrator`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
@@ -313,16 +324,20 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         const sprint = await postJSON(`${base}/api/sprints`, {
             company_id: company.id, name: 'Sprint 1', goal: 'resume all runs',
         });
-        const agent = await postJSON(`${base}/api/agents`, {
-            company_id: company.id, name: 'Runner', system_prompt: 'You do the work.',
-            model: 'e2e-mock-model', provider_id: provider.id,
+        const agentA = await postJSON(`${base}/api/agents`, {
+            company_id: company.id, name: 'Runner A', system_prompt: 'You do the work.',
+            model: workerModelA, provider_id: provider.id,
+        });
+        const agentB = await postJSON(`${base}/api/agents`, {
+            company_id: company.id, name: 'Runner B', system_prompt: 'You do the work.',
+            model: workerModelB, provider_id: provider.id,
         });
         const taskA = await postJSON(`${base}/api/tasks`, {
-            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            company_id: company.id, sprint_id: sprint.id, agent_id: agentA.id,
             title: 'Resumable task A', description: 'first concurrent resumable task',
         });
         const taskB = await postJSON(`${base}/api/tasks`, {
-            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            company_id: company.id, sprint_id: sprint.id, agent_id: agentB.id,
             title: 'Resumable task B', description: 'second concurrent resumable task',
         });
 
@@ -338,7 +353,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
             .poll(async () => {
                 const requests = await (await fetch(`${mockUrl}/__test/requests`)).json();
                 return (requests.requests as any[]).filter((entry) =>
-                    entry.path?.includes('chat/completions') && entry.body?.model === 'e2e-mock-model').length;
+                    entry.path?.includes('chat/completions') && workerModels.has(entry.body?.model)).length;
             },
                 { timeout: 30_000, intervals: [200], message: 'both runs should reach their held first LLM call' })
             .toBe(2);
@@ -365,7 +380,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect(server?.exitCode).toBe(0);
         const pausedRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
         expect((pausedRequests.requests as any[]).filter((entry) =>
-            entry.path?.includes('chat/completions') && entry.body?.model === 'e2e-mock-model').length).toBe(2);
+            entry.path?.includes('chat/completions') && workerModels.has(entry.body?.model)).length).toBe(2);
 
         const resumeMark = serverLog.length;
         await startServer();
@@ -406,9 +421,9 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         // no tool was repeated and no extra model turn was generated.
         const finalRequests = await (await fetch(`${mockUrl}/__test/requests`)).json();
         expect((finalRequests.requests as any[]).filter((entry) =>
-            entry.path?.includes('chat/completions') && entry.body?.model === 'e2e-mock-model').length).toBe(4);
+            entry.path?.includes('chat/completions') && workerModels.has(entry.body?.model)).length).toBe(4);
         const resumedRequests = finalRequests.requests
-            .filter((request: any) => request.path.includes('/chat/completions') && request.body?.model === 'e2e-mock-model')
+            .filter((request: any) => request.path.includes('/chat/completions') && workerModels.has(request.body?.model))
             .slice(-2);
         expect(resumedRequests).toHaveLength(2);
         expect(resumedRequests.every((request: any) =>

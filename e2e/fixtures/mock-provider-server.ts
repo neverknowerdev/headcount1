@@ -6,6 +6,8 @@ const MOCK_MODEL_ID = 'e2e-mock-model';
 const CEO_MODEL_ID = 'e2e-ceo-model';
 const AGENT_A_MODEL_ID = 'e2e-agent-a-model';
 const AGENT_B_MODEL_ID = 'e2e-agent-b-model';
+const RESUME_A_MODEL_ID = 'e2e-resume-a-model';
+const RESUME_B_MODEL_ID = 'e2e-resume-b-model';
 const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
 const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
@@ -256,7 +258,7 @@ function handleTestRoutes(
     }
     if (req.url === '/__test/hold-worker' && req.method === 'POST') {
         state.holdActive = true;
-        state.holdModelFilter = new Set([MOCK_MODEL_ID]);
+        state.holdModelFilter = new Set([MOCK_MODEL_ID, RESUME_A_MODEL_ID, RESUME_B_MODEL_ID]);
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', hold: true, model: MOCK_MODEL_ID }));
         return true;
@@ -331,6 +333,8 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
                 { id: CEO_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: AGENT_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: AGENT_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: RESUME_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: RESUME_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-cto-model', object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-coder-model', object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-qa-model', object: 'model', owned_by: 'e2e' },
