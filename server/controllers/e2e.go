@@ -34,6 +34,9 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// handler deletes them. Serialize resets and stop active runs first.
 	e2eResetMu.Lock()
 	defer e2eResetMu.Unlock()
+	// PostgreSQL can take longer to flush the final run-log/bookkeeping writes
+	// after a large orchestration scenario; keep the wait bounded but allow that
+	// legitimate drain to finish before deleting shared E2E state.
 	resetCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := api.stopE2ERuns(resetCtx); err != nil {
