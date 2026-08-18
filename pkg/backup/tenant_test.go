@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
@@ -422,6 +423,84 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 	database.Model(&db.Task{}).Where("company_id = ?", comp.ID).Count(&taskCount)
 	if taskCount != 2 {
 		t.Errorf("task count = %d, want 2 (no duplication)", taskCount)
+	}
+}
+
+// TestTenantImportDedupLegacyTaskWithoutRefKey verifies that archives made from
+// legacy/directly-created tasks remain idempotent even when ref_key is empty.
+// The fallback must include creation metadata so two same-title tasks are not
+// incorrectly merged.
+func TestTenantImportDedupLegacyTaskWithoutRefKey(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("database setup: %v", err)
+		}
+	}
+
+	user := db.User{Email: "legacy-dedup@dedup.io"}
+	must(database.Create(&user).Error)
+	team := db.Team{Name: "Legacy dedup"}
+	must(database.Create(&team).Error)
+	must(database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner}).Error)
+	company := db.Company{Name: "Legacy", ShortName: "legacy", TeamID: &team.ID, UserID: &user.ID}
+	must(database.Create(&company).Error)
+	sprint := db.Sprint{CompanyID: company.ID, Name: "Legacy sprint"}
+	must(database.Create(&sprint).Error)
+
+	createdAt := time.Date(2024, 1, 2, 3, 4, 5, 678000000, time.UTC)
+	legacy := db.Task{
+		CompanyID: company.ID,
+		SprintID:  sprint.ID,
+		Title:     "same title",
+		Status:    db.TaskStatusBacklog,
+		Priority:  "Normal",
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+	must(database.Create(&legacy).Error)
+
+	var archive bytes.Buffer
+	if err := ExportTenant(ctx, &archive, basePath, database, user.ID); err != nil {
+		t.Fatalf("ExportTenant: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "legacy.tar.gz")
+	if err := os.WriteFile(archivePath, archive.Bytes(), 0644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	stats, err := ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("legacy task was duplicated: %+v", stats)
+	}
+
+	var count int64
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("task count = %d, want 1", count)
+	}
+
+	// A same-title task with a different creation timestamp is a separate task.
+	second := legacy
+	second.ID = 0
+	second.CreatedAt = createdAt.Add(time.Minute)
+	second.UpdatedAt = second.CreatedAt
+	must(database.Create(&second).Error)
+	stats, err = ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant after second task: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("same-title task was unexpectedly imported: %+v", stats)
+	}
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 2 {
+		t.Fatalf("task count after distinct same-title task = %d, want 2", count)
 	}
 }
 

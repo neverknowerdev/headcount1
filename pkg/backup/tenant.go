@@ -574,9 +574,10 @@ func (imp *tenantImporter) resolveOrInsertRow(tx *gorm.DB, table string, r row, 
 // target-side ids. Returns the existing primary key and true on a hit.
 //
 // Identity is the domain-level slug/key, never the archive's DB id: companies by
-// short_name, tasks by ref_key, runs/agents/skills/… by name within their
-// parent, providers by their derived slug, model groups / MCP servers by their
-// unique slug/name. Rows without a stable key (comments) never match here.
+// short_name, tasks by ref_key (or their legacy title/created-at identity when
+// ref_key is absent), runs/agents/skills/… by name within their parent,
+// providers by their derived slug, model groups / MCP servers by their unique
+// slug/name. Rows without a stable key (comments) never match here.
 func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64, bool) {
 	switch table {
 	case "companies":
@@ -589,10 +590,44 @@ func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64
 		return imp.byParentName(tx, table, "company_id", r["company_id"], strVal(r["name"]))
 	case "tasks":
 		refKey := strVal(r["ref_key"])
-		if refKey == "" {
+		if refKey != "" {
+			return imp.existingID(tx, "tasks", "company_id = ? AND ref_key = ?", r["company_id"], refKey)
+		}
+
+		// Older tasks (and rows created outside TaskRepository) can lack the
+		// generated ref_key. Their creation timestamp is preserved in the
+		// archive, so use it with the parent scope and title as a deterministic
+		// compatibility identity. Do not fall back to title alone: multiple
+		// legitimate tasks may share a title.
+		title, createdAt := strVal(r["title"]), strVal(r["created_at"])
+		if title == "" || createdAt == "" {
 			return 0, false
 		}
-		return imp.existingID(tx, "tasks", "company_id = ? AND ref_key = ?", r["company_id"], refKey)
+		createdAtTime, err := time.Parse(time.RFC3339Nano, createdAt)
+		if err != nil {
+			return 0, false
+		}
+		where := "company_id = ? AND sprint_id = ? AND title = ?"
+		args := []interface{}{r["company_id"], r["sprint_id"], title}
+		if parentID := asInt64(r["parent_id"]); parentID != 0 {
+			where += " AND parent_id = ?"
+			args = append(args, parentID)
+		} else {
+			where += " AND parent_id IS NULL"
+		}
+		var candidates []struct {
+			ID        int64
+			CreatedAt time.Time
+		}
+		if err := tx.Table("tasks").Select("id, created_at").Where(where, args...).Find(&candidates).Error; err != nil {
+			return 0, false
+		}
+		for _, candidate := range candidates {
+			if candidate.CreatedAt.Equal(createdAtTime) {
+				return candidate.ID, true
+			}
+		}
+		return 0, false
 	case "runs":
 		name := strVal(r["name"])
 		if name == "" {
