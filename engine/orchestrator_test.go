@@ -44,6 +44,12 @@ func TestAllWorkerSessionsTerminalUsesRunTerminalStates(t *testing.T) {
 	}))
 }
 
+func TestOrchestratorOnlyStopsOnDoneTask(t *testing.T) {
+	require.True(t, isOrchestratorTaskComplete(db.TaskStatusDone))
+	require.False(t, isOrchestratorTaskComplete(db.TaskStatusInReview))
+	require.False(t, isOrchestratorTaskComplete(db.TaskStatusBlocked))
+}
+
 func TestWakeStalledOrchestratorEmitsOnlyWhenWorkersAreAllInactive(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:watchdog-recovery?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

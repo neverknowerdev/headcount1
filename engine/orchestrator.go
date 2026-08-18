@@ -293,12 +293,12 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		// reacting to the fingerprint change caused by the final worker or
 		// finish_task update. This also prevents a late lifecycle event from
 		// keeping a completed parent run alive indefinitely.
-		if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
+		if isOrchestratorTaskComplete(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
 			return
 		}
 		if !first && fingerprint == lastFingerprint && len(events) == 0 && len(inbound) == 0 {
-			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
+			if isOrchestratorTaskComplete(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
 				return
 			}
@@ -847,6 +847,12 @@ func orchestratorFingerprintWithTask(s []tools.ManagedSessionSummary, taskStatus
 
 func isTerminalTaskStatus(s string) bool {
 	return s == "done" || s == "in-review"
+}
+
+// in-review is a worker handoff state: the orchestrator may still need to
+// launch the next stage. Only done means the entire task execution is over.
+func isOrchestratorTaskComplete(s string) bool {
+	return s == db.TaskStatusDone
 }
 func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 	if len(s) == 0 {
