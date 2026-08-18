@@ -411,9 +411,23 @@ function handleChatCompletionsRoute(
         const sc = scenario;
         const hasIncoming = requestHasIncoming(request);
         const inboundIndex = sc.inboundIndex ?? 0;
+        // Keep a session's primary scenario contiguous.  An unrelated routed
+        // event can arrive while the session is still doing its own work
+        // (for example, the Coder can ask the orchestrator about architecture
+        // while the CTO is still waiting for helper workers).  Switching to
+        // inbound_entries at that point would silently skip the primary
+        // scenario's remaining tool calls and make the fixture timing
+        // dependent.  Inbound entries become eligible once the primary
+        // scenario is exhausted, or when the primary scenario itself is
+        // explicitly blocked on answer_message.
+        const primaryCandidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        const primaryScenarioExhausted = sc.index >= sc.entries.length;
+        const primaryNeedsIncoming = scenarioEntryNeedsIncomingAnswer(primaryCandidate);
+        const inboundMayRun = primaryScenarioExhausted
+            || sc.inboundActive === true
+            || (hasIncoming && primaryNeedsIncoming);
         const usingInboundScenario = !sc.forkActive && !!sc.inboundEntries
-            && (hasIncoming || sc.inboundActive === true)
-            && inboundIndex < sc.inboundEntries.length;
+            && inboundMayRun && inboundIndex < sc.inboundEntries.length;
         const candidate = usingInboundScenario
             ? sc.inboundEntries![inboundIndex]
             : sc.index < sc.entries.length ? sc.entries[sc.index] : null;
