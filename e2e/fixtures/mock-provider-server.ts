@@ -51,6 +51,7 @@ interface ScenarioState {
     inboundEntries?: ScenarioEntry[];
     inboundIndex?: number;
     inboundActive?: boolean;
+    forkActive?: boolean;
     inboundReadyFor?: Set<string>;
 }
 
@@ -355,9 +356,10 @@ function handleChatCompletionsRoute(
         if (!modelScenario) {
             const content = (Array.isArray(request.messages) ? request.messages : [])
                 .map((message) => String(message.content ?? '')).join('\n');
+            const forkActive = content.includes('Fork replay') && !!template.forkEntries;
             const terminalReplacement = content.includes("Answer the task owner's routed question");
-            const entries = terminalReplacement && template.inboundEntries ? template.inboundEntries
-                : content.includes('Fork replay') && template.forkEntries ? template.forkEntries
+            const entries = forkActive ? template.forkEntries!
+                : terminalReplacement && template.inboundEntries ? template.inboundEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
                     : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
             modelScenario = {
@@ -366,6 +368,7 @@ function handleChatCompletionsRoute(
                 inboundEntries: template.inboundEntries,
                 inboundIndex: 0,
                 inboundActive: terminalReplacement,
+                forkActive,
                 inboundReadyFor: new Set<string>(),
             };
             state.scenarios.set(sessionKey, modelScenario);
@@ -376,7 +379,7 @@ function handleChatCompletionsRoute(
         const sc = scenario;
         const hasIncoming = requestHasIncoming(request);
         const inboundIndex = sc.inboundIndex ?? 0;
-        const usingInboundScenario = !!sc.inboundEntries
+        const usingInboundScenario = !sc.forkActive && !!sc.inboundEntries
             && (hasIncoming || sc.inboundActive === true)
             && inboundIndex < sc.inboundEntries.length;
         const candidate = usingInboundScenario

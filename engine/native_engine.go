@@ -1002,6 +1002,12 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		seedHistory = loaded
 		e.logInfo(proxyLogger, fmt.Sprintf("Resuming session %d (%d saved messages)", run.ID, len(seedHistory)))
 	}
+	if options.ReplayHistory != nil {
+		// SeedHistory is the source conversation for a fork, so the freshly
+		// built system prompt is intentionally not prepended a second time.
+		// Rebase its runtime-only workdir/session metadata instead.
+		seedHistory = rebaseForkHistoryRuntimeMetadata(seedHistory, run.ID, workspacePath)
+	}
 
 	// Root sessions and durable orchestrator-owned child runs pause at safe turn boundaries.
 	var pauseFn aicli.PauseRequested

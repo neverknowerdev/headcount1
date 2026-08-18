@@ -762,7 +762,15 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		return "", fmt.Errorf("create forked session: %w", err)
 	}
 	forkTask.AgentID = &source.AgentID
-	options := sessionOptions{SeedHistory: history, IncludeTaskContext: true, PrecreatedRun: &newRun}
+	// The orchestrator keeps the task lock for the whole worker tree. A forked
+	// child is therefore an auxiliary session like run_new_session: it must not
+	// race the orchestrator for the root task lock or clear that lock on exit.
+	options := sessionOptions{
+		SeedHistory:        history,
+		IncludeTaskContext: true,
+		SkipTaskLock:       true,
+		PrecreatedRun:      &newRun,
+	}
 	if historyContainsToolCalls(history) {
 		options.ReplayHistory = history
 		replayReady := make(chan error, 1)

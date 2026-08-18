@@ -10,6 +10,49 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
+const forkReplayNotice = "Fork replay: completed stateful tool calls have been restored before this session continues."
+
+// rebaseForkHistoryRuntimeMetadata keeps the source conversation intact while
+// replacing runtime-only values that must describe the newly-created fork.
+// Without this, a fork would inherit the source workdir and runtime session ID
+// from its persisted system message, making routing and isolation ambiguous.
+func rebaseForkHistoryRuntimeMetadata(history []aicli.Message, runID int32, workspacePath string) []aicli.Message {
+	seeded := append([]aicli.Message(nil), history...)
+	for index, message := range seeded {
+		if message.Role != "system" {
+			continue
+		}
+		lines := strings.Split(message.Content, "\n")
+		hasWorkdir, hasRuntimeID, hasForkNotice := false, false, false
+		for lineIndex, line := range lines {
+			switch {
+			case strings.HasPrefix(line, "Workdir: "):
+				lines[lineIndex] = fmt.Sprintf("Workdir: %s", workspacePath)
+				hasWorkdir = true
+			case strings.HasPrefix(line, "Runtime session ID: "):
+				lines[lineIndex] = fmt.Sprintf("Runtime session ID: %d", runID)
+				hasRuntimeID = true
+			case strings.TrimSpace(line) == forkReplayNotice:
+				hasForkNotice = true
+			}
+		}
+		if !hasWorkdir {
+			lines = append(lines, fmt.Sprintf("Workdir: %s", workspacePath))
+		}
+		if !hasRuntimeID {
+			lines = append(lines, fmt.Sprintf("Runtime session ID: %d", runID))
+		}
+		if !hasForkNotice {
+			lines = append(lines, forkReplayNotice)
+		}
+		seeded[index].Content = strings.Join(lines, "\n")
+		return seeded
+	}
+	return append(seeded, aicli.Message{Role: "system", Content: fmt.Sprintf(
+		"Workdir: %s\nRuntime session ID: %d\n%s", workspacePath, runID, forkReplayNotice,
+	)})
+}
+
 func (e *NativeEngine) buildSessionPrompt(
 	ctx context.Context,
 	agent db.Agent,
@@ -34,7 +77,7 @@ func (e *NativeEngine) buildSessionPrompt(
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
 	systemPrompt += fmt.Sprintf("\nRuntime session ID: %d", runID)
 	if options.ReplayHistory != nil {
-		systemPrompt += "\nFork replay: completed stateful tool calls have been restored before this session continues."
+		systemPrompt += "\n" + forkReplayNotice
 	}
 	if agent.CanUseWorkers {
 		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))

@@ -149,7 +149,6 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
                 { tool_call: { id: 'coder-wait-for-recovery', name: 'answer_message', arguments: { message_id: 0, answer: 'Waiting for the orchestrator to choose a safe recovery boundary.' } } },
             ],
             fork_entries: [
-                { tool_call: { id: 'coder-fork-status', name: 'report_status', arguments: { status: 'Fork restored the previous workspace state; completing the repair.' } } },
                 { tool_call: { id: 'coder-fork-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Forked repair completed.', result_details: 'The fork replayed the prior write and completed the repair from the safe boundary.' } } },
             ],
         });
@@ -190,7 +189,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         expect(helperWorkers.length).toBeGreaterThanOrEqual(4);
         expect(helperWorkers.every((run: any) => run.status === 'completed')).toBeTruthy();
         expect(coderRuns.some((run: any) => run.status === 'canceled')).toBeTruthy();
-        expect(coderRuns.some((run: any) => run.result_description?.includes('Forked repair completed'))).toBeTruthy();
+        expect(coderRuns.some((run: any) => run.result_description?.includes('Forked repair completed')), JSON.stringify(coderRuns)).toBeTruthy();
         expect(qaRuns.some((run: any) => run.result_description?.includes('QA passed all final verification checks'))).toBeTruthy();
 
         const log = await (await request.get(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
@@ -205,7 +204,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         expect(joined).toContain('technical-spec.md');
         expect(joined).toContain('controller-state.txt');
         expect(joined).toContain('qa-fix.txt');
-        expect(joined).toContain('Fork restored the previous workspace state');
+        expect(joined).toContain('Fork replay: completed stateful tool calls have been restored');
         expect(joined).not.toContain('ask_agent');
 
         const orchestratorRequests = completions.filter((entry) => entry.body?.model === 'e2e-orchestrator-model');

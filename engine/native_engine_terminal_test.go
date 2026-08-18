@@ -1,10 +1,28 @@
 package engine
 
 import (
+	"agent-orchestrator/engine/aicli"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
+
+func TestRebaseForkHistoryRuntimeMetadata(t *testing.T) {
+	history := []aicli.Message{{
+		Role:    "system",
+		Content: "task context\nWorkdir: /old/workdir\nRuntime session ID: 7",
+	}, {Role: "user", Content: "continue"}}
+
+	rebased := rebaseForkHistoryRuntimeMetadata(history, 11, "/new/workdir")
+	require.Len(t, rebased, 2)
+	require.Contains(t, rebased[0].Content, "Workdir: /new/workdir")
+	require.Contains(t, rebased[0].Content, "Runtime session ID: 11")
+	require.Contains(t, rebased[0].Content, forkReplayNotice)
+	require.NotContains(t, rebased[0].Content, "/old/workdir")
+	assert.Equal(t, "continue", rebased[1].Content)
+	assert.Equal(t, history[0].Content, "task context\nWorkdir: /old/workdir\nRuntime session ID: 7")
+}
 
 func TestSessionFinishedUsesWorkerTerminalFlag(t *testing.T) {
 	tests := []struct {

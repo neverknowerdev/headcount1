@@ -238,7 +238,9 @@ func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	})
 	source := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed", ParentRunID: &rootID, RootRunID: &rootID, LogFilePath: logPath}
 	require.NoError(t, database.Create(&source).Error)
-	locked := source.ID
+	// The orchestrator owns the task lock for the complete worker tree. The
+	// forked child must be allowed to run without trying to claim this lock.
+	locked := orchestrator.ID
 	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("run_id", locked).Error)
 
 	eng := NewNativeEngine(database, eventhub.NewHub())
@@ -255,9 +257,8 @@ func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	assert.Equal(t, orchestrator.ID, *fork.RootRunID)
 	loadedTask, err := db.New(database).GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
-	if loadedTask.RunID != nil {
-		assert.NotEqual(t, source.ID, *loadedTask.RunID)
-	}
+	require.NotNil(t, loadedTask.RunID)
+	assert.Equal(t, orchestrator.ID, *loadedTask.RunID)
 }
 
 func TestOrchestratorForkRejectsUnsafeAndOutOfTreeRequests(t *testing.T) {
