@@ -157,7 +157,7 @@ func (q *RunRepository) AppendRunLogEntry(ctx context.Context, id int32, entry m
 	if q.db.Dialector.Name() == "postgres" {
 		result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update(
 			"log_entries",
-			gorm.Expr("((COALESCE(log_entries, '[]')::jsonb || ?::jsonb)::text)", string(entryJSON)),
+			gorm.Expr("((COALESCE(NULLIF(log_entries, ''), '[]')::jsonb || ?::jsonb)::text)", string(entryJSON)),
 		)
 		return result.Error
 	}
