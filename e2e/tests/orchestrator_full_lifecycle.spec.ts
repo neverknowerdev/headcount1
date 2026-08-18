@@ -184,7 +184,12 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
             const comments = await response.json();
             return comments.some((comment: any) => comment.comment_type === 'ask_user');
         }, { timeout: 45_000 }).toBeTruthy();
-        expect((await (await request.get(`/api/tasks/${task.id}`)).json()).status).toBe('blocked');
+        // The ask_human comment and the controller's blocked transition are
+        // separate durable writes. Observe the task state until the event
+        // handler commits it instead of racing the comment read.
+        await expect.poll(async () => {
+            return (await (await request.get(`/api/tasks/${task.id}`)).json()).status;
+        }, { timeout: 45_000 }).toBe('blocked');
         await postJSON(request, '/api/comments', {
             task_id: task.id, author_type: 'human',
             content: 'Use the event-driven controller boundary and continue the execution.',
