@@ -15,6 +15,7 @@ import (
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/logging"
+	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
 )
 
@@ -179,7 +180,9 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 			continue
 		}
 		provider, model, err := e.resolveRequiredPurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeTaskOrchestrator)
-		if err != nil || provider.ID == 0 || model == "" {
+		// A model-group target is a synthetic provider (ID zero) that points
+		// at the local gateway, so provider.ID is not a validity check here.
+		if err != nil || model == "" {
 			continue
 		}
 		go e.runOrchestrator(orch, task, provider, model)
@@ -204,6 +207,15 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 
 	apiKey, _ := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
+	var gatewayAuth runGatewayAuth
+	if isModelGroupProxyBaseURL(provider.BaseUrl) {
+		gatewayAuth = runGatewayAuth{runID: orchestrator.ID, token: runtokens.Default().Issue(orchestrator.ID)}
+		defer runtokens.Default().Revoke(orchestrator.ID)
+		if authErr := gatewayAuth.configure(client, provider); authErr != nil {
+			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, authErr.Error(), "failed")
+			return
+		}
+	}
 	callbacks := tools.OrchestratorCallbacks{
 		GetSessionList: func(c context.Context) ([]tools.ManagedSessionSummary, error) {
 			return e.orchestratorSessions(c, orchestrator.ID)

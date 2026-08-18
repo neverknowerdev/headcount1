@@ -57,11 +57,14 @@ func (e *NativeEngine) prepareSessionEnvironment(
 		environment.rootRunID = parent.rootRunID
 		environment.rootTaskID = parent.rootTaskID
 	}
-	environment.groupMode = agent.ModelGroupID != nil
 	environment.provider, environment.model, err = resolveProvider(ctx, e.q, agent)
 	if err != nil {
 		return environment, run, err
 	}
+	// Internal-purpose runs use the same synthetic proxy provider as agents
+	// bound to a model group. Detect it from the resolved target so helper
+	// workers cannot accidentally call the first (usually free) member directly.
+	environment.groupMode = agent.ModelGroupID != nil || isModelGroupProxyBaseURL(environment.provider.BaseUrl)
 	if !resumed {
 		run = assignRunName(ctx, e.q, *task, agent, run, parent, environment.rootTaskID, environment.rootRunID)
 	}

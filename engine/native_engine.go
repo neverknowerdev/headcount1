@@ -1731,18 +1731,11 @@ func (e *NativeEngine) resolvePurposeModel(ctx context.Context, userID int32, pu
 		if gErr != nil {
 			return sessionProvider, sessionModel
 		}
-		members := db.ExpandModelGroupMembers(group.Members)
-		if len(members) == 0 {
+		provider, model, targetErr := resolveModelGroupTarget(group)
+		if targetErr != nil {
 			return sessionProvider, sessionModel
 		}
-		sort.SliceStable(members, func(i, j int) bool {
-			if members[i].IsFree != members[j].IsFree {
-				return members[i].IsFree
-			}
-			return members[i].Priority < members[j].Priority
-		})
-		best := members[0]
-		return best.Provider, best.Model
+		return provider, model
 	}
 
 	if setting.ProviderID != nil {
@@ -1773,20 +1766,11 @@ func (e *NativeEngine) resolveRequiredPurposeModel(ctx context.Context, userID i
 		if err != nil {
 			return db.LLMProvider{}, "", fmt.Errorf("model group for %q cannot be resolved: %w", purpose, err)
 		}
-		members := db.ExpandModelGroupMembers(group.Members)
-		if len(members) == 0 {
-			return db.LLMProvider{}, "", fmt.Errorf("model group %q for %q has no usable members", group.Name, purpose)
+		provider, model, targetErr := resolveModelGroupTarget(group)
+		if targetErr != nil {
+			return db.LLMProvider{}, "", fmt.Errorf("model group for %q has no usable members: %w", purpose, targetErr)
 		}
-		sort.SliceStable(members, func(i, j int) bool {
-			if members[i].IsFree != members[j].IsFree {
-				return members[i].IsFree
-			}
-			return members[i].Priority < members[j].Priority
-		})
-		if strings.TrimSpace(members[0].Model) == "" {
-			return db.LLMProvider{}, "", fmt.Errorf("model group %q for %q has no model", group.Name, purpose)
-		}
-		return members[0].Provider, members[0].Model, nil
+		return provider, model, nil
 	}
 	if setting.ProviderID == nil {
 		return db.LLMProvider{}, "", fmt.Errorf("required model setting %q is not configured", purpose)

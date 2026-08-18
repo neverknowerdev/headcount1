@@ -77,6 +77,7 @@ func (e *NativeEngine) prepareWorkerEnvironment(ctx context.Context, task *db.Ta
 	}
 	environment.provider = options.WorkerProvider
 	environment.model = options.WorkerModel
+	environment.groupMode = isModelGroupProxyBaseURL(environment.provider.BaseUrl)
 	environment.workspacePath = options.WorkerWorkspace
 	environment.readOnlyDirs = append([]string(nil), options.WorkerReadOnlyDirs...)
 	settings := loadSettings()
