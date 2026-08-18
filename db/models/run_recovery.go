@@ -15,6 +15,7 @@ type RunRecovery struct {
 	ResumeAttempts       int             `json:"resume_attempts,omitempty"`
 	LastResumeError      string          `json:"last_resume_error,omitempty"`
 	WaitReason           string          `json:"wait_reason,omitempty"`
+	WaitCommentID        int32           `json:"wait_comment_id,omitempty"`
 	StopCause            string          `json:"stop_cause,omitempty"`
 	RecoveryAttempts     int             `json:"recovery_attempts,omitempty"`
 }
