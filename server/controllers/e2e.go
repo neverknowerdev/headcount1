@@ -34,7 +34,7 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// handler deletes them. Serialize resets and stop active runs first.
 	e2eResetMu.Lock()
 	defer e2eResetMu.Unlock()
-	resetCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	resetCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := api.stopE2ERuns(resetCtx); err != nil {
 		api.respondError(w, http.StatusConflict, "cannot reset E2E database while runs are active: "+err.Error())

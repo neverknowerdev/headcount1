@@ -153,11 +153,17 @@ func (q *RunRepository) AppendRunLogEntry(ctx context.Context, id int32, entry m
 	// the same run concurrently. An application-side read/append/write loses
 	// entries and holds a transaction while copying an ever-growing JSON blob.
 	// Let PostgreSQL serialize the row update and append the object atomically;
-	// the existing transaction path remains the portable SQLite implementation.
+	// keep the stored value as text and avoid reparsing the entire growing JSON
+	// array on every log line. The existing transaction path remains the
+	// portable SQLite implementation.
 	if q.db.Dialector.Name() == "postgres" {
 		result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update(
 			"log_entries",
-			gorm.Expr("((COALESCE(NULLIF(log_entries, ''), '[]')::jsonb || ?::jsonb)::text)", string(entryJSON)),
+			gorm.Expr(`CASE
+				WHEN NULLIF(btrim(log_entries), '') IS NULL OR btrim(log_entries) = '[]'
+					THEN '[' || ? || ']'
+				ELSE left(rtrim(log_entries), length(rtrim(log_entries)) - 1) || ',' || ? || ']'
+			END`, string(entryJSON), string(entryJSON)),
 		)
 		return result.Error
 	}
