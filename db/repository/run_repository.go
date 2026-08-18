@@ -145,6 +145,22 @@ func (q *RunRepository) UpdateRunLogFilePath(ctx context.Context, id int32, file
 }
 
 func (q *RunRepository) AppendRunLogEntry(ctx context.Context, id int32, entry map[string]interface{}) error {
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	// PostgreSQL sessions can have the agent logger and proxy logger append to
+	// the same run concurrently. An application-side read/append/write loses
+	// entries and holds a transaction while copying an ever-growing JSON blob.
+	// Let PostgreSQL serialize the row update and append the object atomically;
+	// the existing transaction path remains the portable SQLite implementation.
+	if q.db.Dialector.Name() == "postgres" {
+		result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update(
+			"log_entries",
+			gorm.Expr("((COALESCE(log_entries, '[]')::jsonb || ?::jsonb)::text)", string(entryJSON)),
+		)
+		return result.Error
+	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var r Run
 		err := tx.First(&r, id).Error
