@@ -264,8 +264,19 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		} else {
 			registry.Unregister(string(aicli.ToolAnswerMessage))
 		}
-		fingerprint := orchestratorFingerprint(sessions)
 		taskNow, _ := e.q.GetTask(ctx, task.ID)
+		humanPending := e.humanInputPending(ctx, task.ID)
+		fingerprint := orchestratorFingerprintWithTask(sessions, taskNow.Status, humanPending)
+		if humanPending && taskNow.Status == db.TaskStatusBlocked {
+			// The ask_human tool owns the wait. Keep the sidecar durable and
+			// dormant; the human reply handler will change the task state and
+			// enqueue the only event needed to activate it again.
+			first = false
+			lastFingerprint = fingerprint
+			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "awaiting_human_input")
+			time.Sleep(200 * time.Millisecond)
+			continue
+		}
 		if !first && fingerprint == lastFingerprint && len(events) == 0 && len(inbound) == 0 {
 			if isTerminalTaskStatus(taskNow.Status) && allWorkerSessionsTerminal(sessions) {
 				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "worker execution is terminal", "completed")
@@ -800,13 +811,22 @@ func historyContainsToolCalls(history []aicli.Message) bool {
 }
 
 func orchestratorFingerprint(s []tools.ManagedSessionSummary) string {
-	b, _ := json.Marshal(s)
+	return orchestratorFingerprintWithTask(s, "", false)
+}
+
+func orchestratorFingerprintWithTask(s []tools.ManagedSessionSummary, taskStatus string, humanPending bool) string {
+	state := struct {
+		Sessions     []tools.ManagedSessionSummary `json:"sessions"`
+		TaskStatus   string                        `json:"task_status"`
+		HumanPending bool                          `json:"human_pending"`
+	}{Sessions: s, TaskStatus: taskStatus, HumanPending: humanPending}
+	b, _ := json.Marshal(state)
 	h := sha1.Sum(b)
 	return hex.EncodeToString(h[:])
 }
 
 func isTerminalTaskStatus(s string) bool {
-	return s == "done" || s == "in-review" || s == "blocked"
+	return s == "done" || s == "in-review"
 }
 func allWorkerSessionsTerminal(s []tools.ManagedSessionSummary) bool {
 	if len(s) == 0 {

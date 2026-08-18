@@ -70,7 +70,7 @@ func (r *RunEventRepository) EnqueueRoutedEvent(ctx context.Context, taskID, sou
 func (r *RunEventRepository) ListPendingRunEvents(ctx context.Context, taskID int32) ([]RunEvent, error) {
 	var events []RunEvent
 	err := r.db.WithContext(ctx).
-		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport, RunEventTypeWorkerQuestion}).
+		Where("task_id = ? AND consumed_at IS NULL AND event_type IN ?", taskID, []RunEventType{RunEventTypeLifecycleStatus, RunEventTypeStatusReport, RunEventTypeWorkerQuestion, RunEventTypeHumanInputRequested, RunEventTypeHumanInputAnswered}).
 		Order("created_at asc").Find(&events).Error
 	return events, err
 }

@@ -75,6 +75,7 @@ const (
 	ResumeAfterUpdate  ResumeCause = "binary_update"
 	ResumeAfterFailure ResumeCause = "failed_recovery"
 	ResumeAfterStale   ResumeCause = "stale_recovery"
+	ResumeAfterHuman   ResumeCause = "human_input"
 )
 
 func recoveryReason(run db.Run) string {
@@ -201,6 +202,62 @@ func (e *NativeEngine) CheckStaleRuns(ctx context.Context, threshold time.Durati
 	return stale, nil
 }
 
+// WakeStalledOrchestrators emits one durable recovery event when every
+// managed worker is inactive and at least one worker is stale. The monitor
+// performs this reconciliation; the orchestrator model never has to poll or
+// infer that a silent session needs attention. Human-gated tasks are an
+// explicit exception: silence is expected while the user is deciding.
+func (e *NativeEngine) WakeStalledOrchestrators(ctx context.Context, staleIDs []int32) error {
+	if len(staleIDs) == 0 {
+		return nil
+	}
+	staleSet := make(map[int32]struct{}, len(staleIDs))
+	for _, id := range staleIDs {
+		staleSet[id] = struct{}{}
+	}
+	orchestrators, err := e.q.ListWaitingOrchestrators(ctx)
+	if err != nil {
+		return err
+	}
+	for _, orchestrator := range orchestrators {
+		task, taskErr := e.q.GetTask(ctx, orchestrator.TaskID)
+		if taskErr != nil || isTerminalTaskStatus(task.Status) || e.humanInputPending(ctx, task.ID) {
+			continue
+		}
+		sessions, listErr := e.q.ListOrchestratorSessions(ctx, orchestrator.ID)
+		if listErr != nil {
+			return listErr
+		}
+		allInactive := true
+		hasStale := false
+		var source int32
+		for _, session := range sessions {
+			switch session.Status {
+			case "running", "waiting", db.RunStatusResuming:
+				allInactive = false
+			}
+			if _, marked := staleSet[session.ID]; marked || session.Status == db.RunStatusStale {
+				hasStale = true
+				if source == 0 {
+					source = session.ID
+				}
+			}
+		}
+		if !allInactive || !hasStale || source == 0 {
+			continue
+		}
+		payload, _ := json.Marshal(map[string]interface{}{
+			"kind": "watchdog_recovery", "task_id": task.ID, "stale_run_ids": staleIDs,
+			"message": "All managed sessions are inactive and at least one session is stale; reconcile the worker tree.",
+		})
+		if _, enqueueErr := e.q.EnqueueRoutedEvent(ctx, task.ID, source, orchestrator.ID,
+			db.RunEventTypeLifecycleStatus, string(payload), fmt.Sprintf("watchdog:%d:%d", orchestrator.ID, source)); enqueueErr != nil {
+			return enqueueErr
+		}
+	}
+	return nil
+}
+
 // StartLivenessMonitor runs the stale-session check on a bounded cadence. The
 // context owns the goroutine, making it safe to stop during server shutdown.
 func (e *NativeEngine) StartLivenessMonitor(ctx context.Context, interval, staleAfter time.Duration) {
@@ -218,8 +275,13 @@ func (e *NativeEngine) StartLivenessMonitor(ctx context.Context, interval, stale
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				if _, err := e.CheckStaleRuns(context.Background(), staleAfter); err != nil {
+				stale, err := e.CheckStaleRuns(context.Background(), staleAfter)
+				if err != nil {
 					fmt.Printf("Warning: stale-session monitor failed: %v\n", err)
+					continue
+				}
+				if err := e.WakeStalledOrchestrators(context.Background(), stale); err != nil {
+					fmt.Printf("Warning: orchestrator watchdog failed: %v\n", err)
 				}
 			}
 		}
@@ -490,7 +552,10 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 // root runs are ever paused (see BeginDrain/executeSession's pause wiring),
 // so this always passes parent = nil.
 func (e *NativeEngine) resumeSession(ctx context.Context, task db.Task, run db.Run) {
-	e.executeSession(ctx, task, "resume", nil, &run, sessionOptions{IncludeTaskContext: true})
+	e.executeSession(ctx, task, "resume", nil, &run, sessionOptions{
+		IncludeTaskContext: true,
+		SkipTaskLock:       run.ParentRunID != nil,
+	})
 }
 
 // ResumeSession claims and asynchronously resumes one checkpointed run. It is
@@ -524,6 +589,8 @@ func (e *NativeEngine) ResumeSession(ctx context.Context, runID int32, opts Resu
 	case ResumeAfterStale:
 		allowed = []string{db.RunStatusStale}
 	case ResumeAfterUpdate:
+	case ResumeAfterHuman:
+		allowed = []string{db.RunStatusPaused}
 	default:
 		return fmt.Errorf("resume run %d: unsupported cause %q", runID, cause)
 	}
@@ -593,6 +660,11 @@ func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
 	}
 	fmt.Printf("Resuming %d paused run(s) after restart...\n", len(runs))
 	for _, run := range runs {
+		if run.Recovery.RecoveryReason == string(ResumeAfterHuman) {
+			// Human-gated sessions remain paused across a restart until the
+			// outstanding question receives an answer.
+			continue
+		}
 		if resumeErr := e.ResumeSession(ctx, run.ID, ResumeOptions{Cause: ResumeAfterUpdate}); resumeErr != nil {
 			fmt.Printf("Warning: failed to resume run %d: %v\n", run.ID, resumeErr)
 		}
@@ -624,6 +696,10 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		return "failed"
 	}
 	requestedAgentID := task.AgentID
+	if resumeRun != nil {
+		resumeAgentID := resumeRun.AgentID
+		requestedAgentID = &resumeAgentID
+	}
 
 	// Delegated child tasks arrive fresh from CreateTask without preloaded
 	// associations (Company, Project, Sprint) — reload so the system prompt
@@ -634,7 +710,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		// same root task under a selected agent. The persisted root task keeps
 		// the CEO/product-owner assignment, so preserve the explicit child
 		// agent across this association reload.
-		if requestedAgentID != nil && (parent != nil || options.PrecreatedRun != nil) {
+		if requestedAgentID != nil && (parent != nil || options.PrecreatedRun != nil || resumeRun != nil) {
 			task.AgentID = requestedAgentID
 		}
 	}
@@ -1012,7 +1088,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	// Root sessions and durable orchestrator-owned child runs pause at safe turn boundaries.
 	var pauseFn aicli.PauseRequested
 	if parent == nil || options.PrecreatedRun != nil || run.Kind == db.RunKindAgentSession || run.Kind == db.RunKindHelperWorker {
-		pauseFn = e.runs.draining.Load
+		pauseFn = func() bool {
+			return e.runs.draining.Load() || e.humanInputPending(context.Background(), task.ID)
+		}
 	}
 
 	_, resultHistory, agentErr := aiAgent.RunWithHistory(runCtx, seedHistory, pauseFn)
@@ -1037,10 +1115,14 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		}
 		initiator, target := "", ""
 		initiator, target = run.Recovery.RecoveryInitiator, run.Recovery.RecoveryTarget
-		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, "binary_update", initiator, target, string(db.CheckpointPhaseBeforeTools)); pErr != nil {
+		pauseReason := string(ResumeAfterUpdate)
+		if e.humanInputPending(context.Background(), task.ID) {
+			pauseReason = string(ResumeAfterHuman)
+		}
+		if pErr := e.q.PauseRunWithMetadata(context.Background(), run.ID, sequence, pauseReason, initiator, target, string(db.CheckpointPhaseBeforeTools)); pErr != nil {
 			fmt.Printf("Warning: failed to persist paused run %d: %v\n", run.ID, pErr)
 		}
-		e.logInfo(proxyLogger, "Run paused for server update — will resume automatically after restart")
+		e.logInfo(proxyLogger, fmt.Sprintf("Run paused (%s)", pauseReason))
 		e.hub.BroadcastEventForCompany(task.CompanyID, "run_paused", map[string]interface{}{"run_id": run.ID, "status": db.RunStatusPaused})
 		paused = true
 		return db.RunStatusPaused
@@ -1349,9 +1431,101 @@ func (e *NativeEngine) buildInitialMessages(ctx context.Context, task db.Task, m
 	return messages
 }
 
+func (e *NativeEngine) humanInputPending(ctx context.Context, taskID int32) bool {
+	_, pending, err := e.q.FindPendingHumanQuestion(ctx, taskID)
+	return err == nil && pending
+}
+
+// HandleHumanReply is called after a human task comment is persisted. It is
+// the durable control-plane transition for ask_human: unblock the task,
+// release the asking run, resume sibling sessions paused at safe boundaries,
+// and wake the task orchestrator with a correlated event. It is idempotent;
+// ordinary human comments and duplicate delivery do nothing.
+func (e *NativeEngine) HandleHumanReply(ctx context.Context, taskID int32) error {
+	comments, err := e.q.ListCommentsByTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	var question, answer db.Comment
+	for _, comment := range comments {
+		if comment.CommentType == "ask_user" && comment.AuthorType == "agent" {
+			question = comment
+			answer = db.Comment{}
+			continue
+		}
+		if question.ID != 0 && comment.AuthorType == "human" && comment.ID > question.ID {
+			answer = comment
+		}
+	}
+	if question.ID == 0 || answer.ID == 0 {
+		return nil
+	}
+
+	task, err := e.q.GetTask(ctx, taskID)
+	if err != nil {
+		return err
+	}
+	if task.Status == db.TaskStatusBlocked {
+		previous := task.Status
+		task.Status = db.TaskStatusInProgress
+		updated, updateErr := e.q.UpdateTask(ctx, task)
+		if updateErr != nil {
+			return updateErr
+		}
+		e.broadcastTaskStatus(updated, previous, updated.Status, nil)
+	}
+	if question.RunID != nil {
+		if err := e.q.SetRunRunning(ctx, *question.RunID); err != nil {
+			return err
+		}
+	}
+
+	paused, err := e.q.GetRunsByRecoveryStates(ctx, []string{db.RunStatusPaused})
+	if err != nil {
+		return err
+	}
+	for _, run := range paused {
+		if run.TaskID != taskID || run.Recovery.RecoveryReason != string(ResumeAfterHuman) {
+			continue
+		}
+		if resumeErr := e.ResumeSession(ctx, run.ID, ResumeOptions{Cause: ResumeAfterHuman, Reason: "human input received"}); resumeErr != nil {
+			// Another concurrent delivery may have claimed this same run. The
+			// conditional resume lease makes that race harmless.
+			current, getErr := e.q.GetRun(ctx, run.ID)
+			if getErr != nil || current.Status == db.RunStatusPaused {
+				return resumeErr
+			}
+		}
+	}
+
+	if task.OrchestratorRunID != nil {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"task_id": taskID, "question_comment_id": question.ID,
+			"answer_comment_id": answer.ID, "answer": answer.Content,
+		})
+		_, err = e.q.EnqueueRoutedEvent(ctx, taskID, valueOrZero(question.RunID), *task.OrchestratorRunID,
+			db.RunEventTypeHumanInputAnswered, string(payload), fmt.Sprintf("human-answer:%d:%d", question.ID, answer.ID))
+		if err != nil {
+			return err
+		}
+	}
+	e.broadcastForTask(ctx, taskID, "human_input_answered", map[string]interface{}{
+		"task_id": taskID, "question_comment_id": question.ID, "answer_comment_id": answer.ID,
+	})
+	return nil
+}
+
+func valueOrZero(value *int32) int32 {
+	if value == nil {
+		return 0
+	}
+	return *value
+}
+
 // askHuman posts the agent's question as an ask_user comment and blocks until
-// a human replies on the task, returning the reply text. It keeps the run's
-// last_message_time fresh while waiting so the run isn't declared stale.
+// a human replies on the task, returning the reply text. The task-level
+// pending question is the durable gate used by sibling sessions and the
+// orchestrator watchdog.
 func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, question string) (string, error) {
 	rid := runID
 	questionComment, err := e.q.CreateComment(ctx, db.Comment{
@@ -1370,6 +1544,7 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 		"run_id":   runID,
 		"question": question,
 	})
+	_ = e.q.SetRunWaitStateForComment(context.Background(), runID, "awaiting_human_input", questionComment.ID)
 	if task, taskErr := e.q.GetTask(ctx, taskID); taskErr == nil && task.Status == db.TaskStatusInProgress {
 		prevStatus := task.Status
 		task.Status = db.TaskStatusBlocked
@@ -1377,8 +1552,16 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 			e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
 		}
 	}
-
-	ticker := time.NewTicker(2 * time.Second)
+	if task, taskErr := e.q.GetTask(ctx, taskID); taskErr == nil && task.OrchestratorRunID != nil {
+		payload, _ := json.Marshal(map[string]interface{}{
+			"task_id": taskID, "run_id": runID, "question_comment_id": questionComment.ID, "question": question,
+		})
+		if _, eventErr := e.q.EnqueueRoutedEvent(ctx, taskID, runID, *task.OrchestratorRunID,
+			db.RunEventTypeHumanInputRequested, string(payload), fmt.Sprintf("human-question:%d", questionComment.ID)); eventErr != nil {
+			return "", fmt.Errorf("ask_human: failed to notify orchestrator: %w", eventErr)
+		}
+	}
+	ticker := time.NewTicker(100 * time.Millisecond)
 	defer ticker.Stop()
 	for {
 		select {
@@ -1396,13 +1579,10 @@ func (e *NativeEngine) askHuman(ctx context.Context, taskID, runID int32, questi
 		}
 		for _, c := range comments {
 			if c.AuthorType == "human" && c.ID > questionComment.ID {
-				if task, taskErr := e.q.GetTask(context.Background(), taskID); taskErr == nil && task.Status == db.TaskStatusBlocked {
-					prevStatus := task.Status
-					task.Status = db.TaskStatusInProgress
-					if _, updateErr := e.q.UpdateTask(context.Background(), task); updateErr == nil {
-						e.broadcastTaskStatus(task, prevStatus, task.Status, nil)
-					}
-				}
+				// The HTTP/API path normally performs this transition before the
+				// polling loop observes the answer. Keep the direct engine path
+				// compatible for tests and non-HTTP callers as well.
+				_ = e.HandleHumanReply(context.Background(), taskID)
 				return c.Content, nil
 			}
 		}

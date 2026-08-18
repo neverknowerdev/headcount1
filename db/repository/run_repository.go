@@ -294,13 +294,41 @@ func (q *RunRepository) ListWaitingOrchestrators(ctx context.Context) ([]Run, er
 }
 
 func (q *RunRepository) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
+	return q.SetRunWaitStateForComment(ctx, runID, reason, 0)
+}
+
+// SetRunWaitStateForComment persists both the reason and the durable comment
+// that is waiting for an external answer. The comment ID lets recovery and UI
+// code explain exactly which human request is blocking a run.
+func (q *RunRepository) SetRunWaitStateForComment(ctx context.Context, runID int32, reason string, commentID int32) error {
 	var run Run
 	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
 		return err
 	}
 	run.Status = "waiting"
 	run.Recovery.WaitReason = reason
+	run.Recovery.WaitCommentID = commentID
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": run.Status, "recovery": recoveryJSON(run.Recovery)}).Error
+}
+
+// SetRunRunning clears a wait state after its external condition has been
+// satisfied. It is intentionally conditional so a concurrent recovery worker
+// cannot accidentally revive a terminal run.
+func (q *RunRepository) SetRunRunning(ctx context.Context, runID int32) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	if run.Status != "waiting" {
+		return nil
+	}
+	run.Recovery.WaitReason = ""
+	run.Recovery.WaitCommentID = 0
+	now := time.Now()
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, "waiting").Updates(map[string]interface{}{
+		"status": "running", "last_message_time": &now, "recovery": recoveryJSON(run.Recovery),
+	})
+	return result.Error
 }
 
 func (q *RunRepository) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
@@ -489,6 +517,7 @@ func (q *RunRepository) PauseRunWithMetadata(ctx context.Context, runID int32, s
 		CheckpointPhase: CheckpointPhase(phase), RecoveryReason: reason,
 		RecoveryInitiator: initiator, RecoveryTarget: target,
 		ResumeAttempts: run.Recovery.ResumeAttempts,
+		WaitReason:     run.Recovery.WaitReason, WaitCommentID: run.Recovery.WaitCommentID,
 	}
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
 		"status": RunStatusPaused, "recovery": recoveryJSON(recovery),

@@ -61,6 +61,19 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
+	if req.AuthorType == "human" {
+		// Human replies are a control-plane signal, not a new manual run. The
+		// native engine correlates the reply with the durable ask_user comment,
+		// unblocks the task, resumes gated sessions, and wakes the orchestrator.
+		if handler, ok := api.engine.(interface {
+			HandleHumanReply(context.Context, int32) error
+		}); ok {
+			if err := handler.HandleHumanReply(r.Context(), req.TaskID); err != nil {
+				api.respondError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+	}
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)

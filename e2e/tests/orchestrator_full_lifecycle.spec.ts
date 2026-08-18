@@ -20,7 +20,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
             name: 'full-lifecycle-mock', base_url: env.E2E_MOCK_PROVIDER_URL,
             api_key: 'test-key', provider_type: 'openai', default_model: 'e2e-helper-model',
             supported_models: [
-                'e2e-helper-model', 'e2e-orchestrator-model', 'e2e-cto-model',
+                'e2e-helper-model', 'e2e-orchestrator-model', 'e2e-ceo-model', 'e2e-cto-model',
                 'e2e-coder-model', 'e2e-qa-model',
             ].join(','),
         });
@@ -37,7 +37,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         });
         const ceo = await postJSON(request, '/api/agents', {
             company_id: company.id, name: 'Lifecycle CEO', role_key: 'CEO', short_name: 'CEO',
-            system_prompt: 'Own the final product decision.', model: 'e2e-cto-model', provider_id: provider.id,
+            system_prompt: 'Own the final product decision and ask the human when a product decision is required.', model: 'e2e-ceo-model', provider_id: provider.id,
         });
         const cto = await postJSON(request, '/api/agents', {
             company_id: company.id, name: 'Lifecycle CTO', role_key: 'CTO', short_name: 'CTO',
@@ -64,6 +64,14 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         });
 
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+            model: 'e2e-ceo-model', entries: [
+                { tool_call: { id: 'ceo-ask-human', name: 'ask_human', arguments: { question: 'Should the task use the event-driven controller boundary?' } } },
+                { tool_call: { id: 'ceo-status-after-human', name: 'report_status', arguments: { status: 'Human direction received; handing the decision to the CTO design stream.' } } },
+                { tool_call: { id: 'ceo-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Product direction confirmed.', result_details: 'The human selected the event-driven controller boundary.' } } },
+            ],
+        });
+
+        await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             model: 'e2e-helper-model', entries: [
                 { tool_call: { id: 'helper-finish', name: 'finish_work', arguments: {
                     status: 'done',
@@ -75,6 +83,8 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
 
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
             model: 'e2e-orchestrator-model', entries: [
+                { tool_call: { id: 'launch-ceo', name: 'run_new_session', arguments: { agent_name: ceo.name, prompt: 'Confirm the product direction with the human, then hand the decision to the CTO.' } } },
+                { tool_call: { id: 'inspect-ceo', name: 'get_session', arguments: { session_id: 0 } } },
                 { tool_call: { id: 'launch-cto', name: 'run_new_session', arguments: { agent_name: cto.name, prompt: 'Design the technical solution, coordinate research workers, write the technical specification artifact, and finish the design handoff.' } } },
                 { tool_call: { id: 'inspect-cto-1', name: 'get_session', arguments: { session_id: 0 } } },
                 { tool_call: { id: 'inspect-cto-2', name: 'get_session', arguments: { session_id: 0 } } },
@@ -168,6 +178,18 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok(), await kick.text()).toBeTruthy();
+
+        await expect.poll(async () => {
+            const response = await request.get(`/api/comments?task_id=${task.id}`);
+            const comments = await response.json();
+            return comments.some((comment: any) => comment.comment_type === 'ask_user');
+        }, { timeout: 45_000 }).toBeTruthy();
+        expect((await (await request.get(`/api/tasks/${task.id}`)).json()).status).toBe('blocked');
+        await postJSON(request, '/api/comments', {
+            task_id: task.id, author_type: 'human',
+            content: 'Use the event-driven controller boundary and continue the execution.',
+        });
+        await expect.poll(async () => (await (await request.get(`/api/tasks/${task.id}`)).json()).status, { timeout: 45_000 }).toBe('in-progress');
         await waitForTaskStatus(request, task.id, 'done', 180_000);
 
         await expect.poll(async () => {
@@ -181,9 +203,11 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         const agentSessions = runs.filter((run: any) => run.kind === 'agent_session');
         const helperWorkers = runs.filter((run: any) => run.kind === 'helper_worker');
         const ctoRuns = agentSessions.filter((run: any) => run.agent_id === cto.id);
+        const ceoRuns = agentSessions.filter((run: any) => run.agent_id === ceo.id);
         const coderRuns = agentSessions.filter((run: any) => run.agent_id === coder.id);
         const qaRuns = agentSessions.filter((run: any) => run.agent_id === qa.id);
         expect(orchestrator).toBeTruthy();
+        expect(ceoRuns.some((run: any) => run.status === 'completed'), JSON.stringify(ceoRuns)).toBeTruthy();
         expect(ctoRuns.length, JSON.stringify(ctoRuns)).toBeGreaterThanOrEqual(2);
         expect(coderRuns.length, JSON.stringify(coderRuns)).toBeGreaterThanOrEqual(3);
         expect(qaRuns.length, JSON.stringify(qaRuns)).toBeGreaterThanOrEqual(2);
@@ -202,6 +226,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         expect(joined).toContain('run_worker');
         expect(joined).toContain('worker_list');
         expect(joined).toContain('ask_task_owner');
+        expect(joined).toContain('ask_human');
         expect(joined).toContain('technical-spec.md');
         expect(joined).toContain('controller-state.txt');
         expect(joined).toContain('qa-fix.txt');
@@ -209,10 +234,12 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         expect(joined).not.toContain('ask_agent');
 
         const orchestratorRequests = completions.filter((entry) => entry.body?.model === 'e2e-orchestrator-model');
+        const ceoRequests = completions.filter((entry) => entry.body?.model === 'e2e-ceo-model');
         const ctoRequests = completions.filter((entry) => entry.body?.model === 'e2e-cto-model');
         const coderRequests = completions.filter((entry) => entry.body?.model === 'e2e-coder-model');
         const qaRequests = completions.filter((entry) => entry.body?.model === 'e2e-qa-model');
         expect(orchestratorRequests.length).toBeGreaterThan(10);
+        expect(ceoRequests.some((entry) => JSON.stringify(entry.body?.tools ?? []).includes('ask_human'))).toBeTruthy();
         expect(ctoRequests.length).toBeGreaterThan(8);
         expect(coderRequests.length).toBeGreaterThan(8);
         expect(qaRequests.length).toBeGreaterThan(4);

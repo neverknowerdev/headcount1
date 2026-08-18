@@ -672,7 +672,12 @@ function runtimeSessionID(request: ChatCompletionRequest): string | null {
 function pendingIncomingMessageID(request: ChatCompletionRequest): number | null {
     const incoming = latestIncomingContent(request);
     if (!incoming) return null;
-    const direct = incoming.match(/message_id=(\d+)/);
+    // Lifecycle completions and routed messages share the same inbound block.
+    // Only a session_message can be answered with answer_message; selecting
+    // the first message_id would incorrectly pick a preceding worker_finished
+    // event and make the deterministic fixture loop on "not a session
+    // message" forever.
+    const direct = incoming.match(/message_id=(\d+)\s+type=session_message\b/);
     if (direct) return Number(direct[1]);
     const routedMessage = incoming.match(/\{"id":(\d+)[^{}]*"event_type":"session_message"/);
     return routedMessage ? Number(routedMessage[1]) : null;

@@ -54,6 +54,7 @@ type SubtaskQuerier interface {
 type CommentQuerier interface {
 	CreateComment(ctx context.Context, c Comment) (Comment, error)
 	ListCommentsByTask(ctx context.Context, taskID int32) ([]Comment, error)
+	FindPendingHumanQuestion(ctx context.Context, taskID int32) (Comment, bool, error)
 }
 
 type AttachmentQuerier interface {
