@@ -28,7 +28,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 55, revisions)
+	require.Equal(t, 56, revisions)
 
 	_ = database.Close()
 }
@@ -48,7 +48,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 55, revisions)
+	require.Equal(t, 56, revisions)
 
 	_ = database.Close()
 }
