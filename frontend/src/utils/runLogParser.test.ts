@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { parseLogContent } from './runLogParser';
+import { normalizeRunLogEntries, parseLogContent } from './runLogParser';
 
 describe('parseLogContent', () => {
   it('normalizes assistant tool calls and tool results into paired entries', () => {
@@ -20,5 +20,21 @@ describe('parseLogContent', () => {
 
     expect(messages[0].entry.type).toBe('tool_call');
     expect(messages[1].entry.type).toBe('request');
+  });
+});
+
+describe('normalizeRunLogEntries', () => {
+  it('turns durable conversation messages into display rows', () => {
+    const rows = normalizeRunLogEntries([
+      { type: 'message', ts: '2026-08-19T00:00:00Z', seq: 1, content: JSON.stringify({ role: 'assistant', content: 'delegate', tool_calls: [{ id: 'c1' }] }) },
+      { type: 'message', ts: '2026-08-19T00:00:01Z', seq: 2, content: JSON.stringify({ role: 'tool', name: 'run_new_session', tool_call_id: 'c1', content: 'session 38 queued' }) },
+      { type: 'message', ts: '2026-08-19T00:00:02Z', seq: 3, content: JSON.stringify({ role: 'user', content: 'continue' }) },
+    ]);
+
+    expect(rows.map(row => row.entry.type)).toEqual(['response', 'tool_response', 'request']);
+    expect(rows[0].entry.content).toContain('delegate');
+    expect(rows[1].entry.tool_name).toBe('run_new_session');
+    expect(rows[2].entry.content).toContain('continue');
+    expect(rows.every(row => row.entry.content.startsWith('{') ? row.entry.type !== 'info' : true)).toBe(true);
   });
 });

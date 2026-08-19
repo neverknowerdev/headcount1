@@ -3,6 +3,64 @@ export interface ParsedRunLogMessage {
     entry: Record<string, any>;
 }
 
+function normalizeConversationMessage(parsed: Record<string, any>, base: Record<string, any>): Record<string, any> | null {
+    const shared = { ...base };
+    delete shared.content;
+    delete shared.type;
+
+    if (parsed.role === 'assistant') {
+        return { ...shared, type: 'response', content: JSON.stringify(parsed), model: base.model };
+    }
+    if (parsed.role === 'tool') {
+        return {
+            ...shared,
+            type: 'tool_response',
+            content: stringifyToolContent(parsed.content),
+            tool_name: parsed.name || parsed.tool_name || base.tool_name || 'tool',
+            tool_call_id: parsed.tool_call_id,
+        };
+    }
+    if (parsed.role === 'user') {
+        return { ...shared, type: 'request', content: JSON.stringify({ messages: [parsed] }), model: base.model };
+    }
+    return null;
+}
+
+// Convert durable `message` entries (the canonical conversation stream) into
+// the display-oriented rows understood by RunLogViewer. Older runs may also
+// contain an info row whose content is one of these JSON messages.
+export function normalizeRunLogEntries(entries: any[]): ParsedRunLogMessage[] {
+    const messages: ParsedRunLogMessage[] = [];
+    let id = 0;
+    for (const original of entries || []) {
+        const entry = original && typeof original === 'object' ? original : { type: 'info', content: String(original ?? '') };
+        const content = typeof entry.content === 'string' ? entry.content.trim() : '';
+        let parsed: Record<string, any> | null = null;
+        if (content.startsWith('{')) {
+            try { parsed = JSON.parse(content); } catch { parsed = null; }
+        }
+
+        if (entry.type === 'message' && parsed) {
+            const normalized = normalizeConversationMessage(parsed, entry);
+            if (normalized) {
+                messages.push({ id: id++, entry: normalized });
+                continue;
+            }
+        }
+
+        if (entry.type === 'info' && parsed?.role) {
+            const normalized = normalizeConversationMessage(parsed, entry);
+            if (normalized) {
+                messages.push({ id: id++, entry: normalized });
+                continue;
+            }
+        }
+
+        messages.push({ id: id++, entry });
+    }
+    return messages;
+}
+
 function stringifyToolContent(content: unknown): string {
     if (typeof content === 'string') return content;
     if (content == null) return '';
@@ -22,6 +80,13 @@ export function parseLogContent(logContent: string): ParsedRunLogMessage[] {
         if (trimmed.startsWith('{')) {
             try {
                 const parsed = JSON.parse(trimmed);
+                if (parsed.type === 'message') {
+                    const normalized = normalizeConversationMessage(JSON.parse(parsed.content), parsed);
+                    if (normalized) {
+                        messages.push({ id: i++, entry: normalized });
+                        continue;
+                    }
+                }
                 if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
                     messages.push({ id: i++, entry: { ...parsed, type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name } });
                     continue;

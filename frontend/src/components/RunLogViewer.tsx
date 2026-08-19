@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { normalizeRunLogEntries } from '../utils/runLogParser';
 
 interface TokenUsage {
   prompt?: number;
@@ -1328,7 +1329,8 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
-  const grouped = useMemo(() => groupMessages(messages || []), [messages]);
+  const displayMessages = useMemo(() => normalizeRunLogEntries(messages || []) as LogMessage[], [messages]);
+  const grouped = useMemo(() => groupMessages(displayMessages), [displayMessages]);
   const visibleItems = compact ? grouped.slice(-10) : grouped;
 
   const counts = useMemo(() => {
@@ -1349,7 +1351,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
     if (autoScroll && isAtBottom && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, autoScroll, isAtBottom]);
+  }, [displayMessages, autoScroll, isAtBottom]);
 
   const handleScroll = () => {
     if (!containerRef.current) return;
@@ -1411,7 +1413,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               {counts.tools > 0 && <span className="px-1.5 py-0.5 bg-amber-50  text-amber-700  rounded">{counts.tools} tools</span>}
             </div>
           )}
-          <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
+          <TokenStatsBar stats={tokenStats} messages={displayMessages} agentStats={agentStats} />
         </div>
         <div className="flex items-center gap-2 shrink-0">
           {runId && (
