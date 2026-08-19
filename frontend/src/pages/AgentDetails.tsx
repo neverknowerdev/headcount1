@@ -5,6 +5,16 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
 import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
 
+function parseAllowedMCPs(raw: string): string[] | null {
+    if (!raw.trim()) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -129,9 +139,15 @@ export const AgentDetails: React.FC = () => {
                     toolFilterPayload.push({ mcp_server_id: serverId, tool_name: toolName, enabled });
                 }
             }
+            const agentPayload = {
+                ...formData,
+                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+            };
             await Promise.all([
                 axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph }),
                 axios.put(`/api/agents/${id}/mcp-tool-filters`, toolFilterPayload),
+                axios.put(`/api/agents/${id}`, agentPayload),
             ]);
             setMcpSaveState('saved');
             setTimeout(() => setMcpSaveState('idle'), 2000);
@@ -305,9 +321,10 @@ export const AgentDetails: React.FC = () => {
                             <div className="pt-4 border-t">
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Effective capabilities</label>
                                 <div className="space-y-2 text-sm">
-                                    {['finish_task', 'report_status', 'ask_task_owner', 'artifact tools', 'session lifecycle', 'connected MCPs'].map(capability => (
+                                    {['finish_task', 'report_status', 'ask_task_owner', 'artifact tools', 'session lifecycle'].map(capability => (
                                         <label key={capability} className="flex items-center gap-2 text-gray-600"><input type="checkbox" checked readOnly disabled className="h-4 w-4" />{capability}<span className="text-xs text-gray-400">derived / read-only</span></label>
                                     ))}
+                                    <p className="text-xs text-gray-500 pt-1">Connected MCP access is editable below.</p>
                                 </div>
                             </div>
                             <div className="pt-4 border-t mt-6 flex items-center gap-3">
@@ -349,8 +366,35 @@ export const AgentDetails: React.FC = () => {
                                 if (allExternal.length === 0) return (
                                     <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
                                 );
+                                const allowed = parseAllowedMCPs(formData.allowed_mcps);
+                                const allNames = allExternal.map((srv: any) => srv.name);
+                                const isAllowed = (name: string) => allowed === null || allowed.includes(name);
+                                const toggleAllowed = (name: string, enabled: boolean) => {
+                                    const next = new Set(allowed === null ? allNames : allowed);
+                                    if (enabled) next.add(name); else next.delete(name);
+                                    const values = allNames.every((candidate: string) => next.has(candidate)) ? '' : JSON.stringify(allNames.filter((candidate: string) => next.has(candidate)));
+                                    setFormData(prev => ({ ...prev, allowed_mcps: values }));
+                                };
                                 return (
                                     <div className="space-y-3">
+                                        <div className="border border-indigo-100 rounded-lg bg-indigo-50 p-3" data-testid="connected-mcp-access">
+                                            <p className="text-sm font-semibold text-indigo-900">Connected MCP access</p>
+                                            <p className="text-xs text-indigo-700 mt-1">Choose which connected MCP servers this agent may use. No checked servers disables MCP access; selecting every server stores the default all-enabled policy.</p>
+                                            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                {allExternal.map((srv: any) => (
+                                                    <label key={`allowed-${srv.id}`} className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            aria-label={`Allow ${srv.display_name || srv.name}`}
+                                                            checked={isAllowed(srv.name)}
+                                                            onChange={e => toggleAllowed(srv.name, e.target.checked)}
+                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                                                        />
+                                                        {srv.display_name || srv.name}
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
                                         {allExternal.map((srv: any) => {
                                             const accounts: any[] = srv.accounts || [];
                                             const hasEnabledAccount = accounts.some((acc: any) => !!mcpAccountAssignments[acc.id]);

@@ -50,6 +50,13 @@ func TestOrchestratorOnlyStopsOnDoneTask(t *testing.T) {
 	require.False(t, isOrchestratorTaskComplete(db.TaskStatusBlocked))
 }
 
+func TestMCPAllowListDistinguishesAllFromNone(t *testing.T) {
+	require.True(t, mcpAllowed("github", nil), "unset allow-list keeps all enabled MCPs available")
+	require.False(t, mcpAllowed("github", []string{}), "explicit empty allow-list disables all MCPs")
+	require.True(t, mcpAllowed("github", []string{"github"}))
+	require.False(t, mcpAllowed("linear", []string{"github"}))
+}
+
 func TestWakeStalledOrchestratorEmitsOnlyWhenWorkersAreAllInactive(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:watchdog-recovery?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

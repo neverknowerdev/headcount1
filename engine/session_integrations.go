@@ -189,7 +189,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 }
 
 func mcpAllowed(name string, allowed []string) bool {
-	if len(allowed) == 0 {
+	if allowed == nil {
 		return true
 	}
 	for _, candidate := range allowed {

@@ -110,14 +110,17 @@ const (
 )
 
 type OrchestratorCallbacks struct {
-	GetSessionList func(context.Context) ([]ManagedSessionSummary, error)
-	GetSession     func(context.Context, int32) (ManagedSessionDetails, error)
-	SendMessage    func(context.Context, int32, string) (string, error)
-	RunNewSession  func(context.Context, *int32, string, string, string) (string, error)
-	StopSession    func(context.Context, int32, string) (string, error)
-	ForkSession    func(context.Context, int32, int64) (string, error)
-	AnswerMessage  func(context.Context, int64, string) (string, error)
-	AskCEO         func(context.Context, int32, string) (string, error)
+	// OrchestratorSessionID is excluded from the managed-session surface and
+	// cannot be targeted by session-control tools.
+	OrchestratorSessionID int32
+	GetSessionList        func(context.Context) ([]ManagedSessionSummary, error)
+	GetSession            func(context.Context, int32) (ManagedSessionDetails, error)
+	SendMessage           func(context.Context, int32, string) (string, error)
+	RunNewSession         func(context.Context, *int32, string, string, string) (string, error)
+	StopSession           func(context.Context, int32, string) (string, error)
+	ForkSession           func(context.Context, int32, int64) (string, error)
+	AnswerMessage         func(context.Context, int64, string) (string, error)
+	AskCEO                func(context.Context, int32, string) (string, error)
 }
 
 type orchestratorManagementTool struct {
@@ -175,6 +178,9 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			if p.SessionID <= 0 {
 				return "", fmt.Errorf("session_id must be positive")
 			}
+			if cb.OrchestratorSessionID != 0 && p.SessionID == cb.OrchestratorSessionID {
+				return "", fmt.Errorf("session %d is the orchestrator session and cannot be queried", p.SessionID)
+			}
 			v, err := cb.GetSession(ctx, p.SessionID)
 			if err != nil {
 				return "", err
@@ -196,6 +202,9 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			}
 			if p.SessionID <= 0 || p.Question == "" {
 				return "", fmt.Errorf("session_id and message are required")
+			}
+			if cb.OrchestratorSessionID != 0 && p.SessionID == cb.OrchestratorSessionID {
+				return "", fmt.Errorf("session %d is the orchestrator session and cannot receive messages", p.SessionID)
 			}
 			return cb.SendMessage(ctx, p.SessionID, p.Question)
 		},
@@ -222,6 +231,9 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			if p.SourceSessionID != nil && *p.SourceSessionID <= 0 {
 				return "", fmt.Errorf("source_session_id must be positive")
 			}
+			if p.SourceSessionID != nil && cb.OrchestratorSessionID != 0 && *p.SourceSessionID == cb.OrchestratorSessionID {
+				return "", fmt.Errorf("session %d is the orchestrator session and cannot be replaced", *p.SourceSessionID)
+			}
 			return cb.RunNewSession(ctx, p.SourceSessionID, p.AgentName, p.Title, p.Prompt)
 		},
 	})
@@ -239,6 +251,9 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			if p.SessionID <= 0 || p.Reason == "" {
 				return "", fmt.Errorf("session_id and reason are required")
 			}
+			if cb.OrchestratorSessionID != 0 && p.SessionID == cb.OrchestratorSessionID {
+				return "", fmt.Errorf("session %d is the orchestrator session and cannot be stopped", p.SessionID)
+			}
 			return cb.StopSession(ctx, p.SessionID, p.Reason)
 		},
 	})
@@ -255,6 +270,9 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 			}
 			if p.SessionID <= 0 || p.ForkMessageID <= 0 {
 				return "", fmt.Errorf("session_id and fork_message_id must be positive")
+			}
+			if cb.OrchestratorSessionID != 0 && p.SessionID == cb.OrchestratorSessionID {
+				return "", fmt.Errorf("session %d is the orchestrator session and cannot be forked", p.SessionID)
 			}
 			return cb.ForkSession(ctx, p.SessionID, p.ForkMessageID)
 		},

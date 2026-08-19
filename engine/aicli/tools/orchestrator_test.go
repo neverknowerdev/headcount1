@@ -60,6 +60,44 @@ func TestOrchestratorToolValidation(t *testing.T) {
 	require.True(t, called)
 }
 
+func TestOrchestratorCannotTargetItsOwnSession(t *testing.T) {
+	called := false
+	r := NewOrchestratorRegistry(OrchestratorCallbacks{
+		OrchestratorSessionID: 53,
+		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
+			called = true
+			return ManagedSessionDetails{}, nil
+		},
+		SendMessage: func(context.Context, int32, string) (string, error) {
+			called = true
+			return "", nil
+		},
+		StopSession: func(context.Context, int32, string) (string, error) {
+			called = true
+			return "", nil
+		},
+		ForkSession: func(context.Context, int32, int64) (string, error) {
+			called = true
+			return "", nil
+		},
+		RunNewSession: func(context.Context, *int32, string, string, string) (string, error) {
+			called = true
+			return "", nil
+		},
+	})
+	for name, args := range map[string]string{
+		string(OrchestratorToolGetSession):    `{"session_id":53}`,
+		string(OrchestratorToolSendMessage):  `{"session_id":53,"message":"hello"}`,
+		string(OrchestratorToolStopSession):  `{"session_id":53,"reason":"recovery"}`,
+		string(OrchestratorToolForkSession):  `{"session_id":53,"fork_message_id":7}`,
+		string(OrchestratorToolRunNewSession): `{"source_session_id":53,"agent_name":"Coder","title":"replacement","prompt":"continue"}`,
+	} {
+		_, err := r.Execute(context.Background(), name, json.RawMessage(args))
+		require.Error(t, err, name)
+	}
+	require.False(t, called)
+}
+
 func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 	gotID := int32(0)
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{

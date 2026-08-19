@@ -206,6 +206,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		_ = e.q.UpdateRunLog(ctx, orchestrator.ID, promptErr.Error(), "failed")
 		return
 	}
+	systemPrompt += fmt.Sprintf("\n\nYour orchestrator session id is %d. It is not a worker session: never pass this id to get_session, send_message_to_session, stop_session, fork_session, or run_new_session source_session_id. Use get_session_list to inspect worker sessions only.\n", orchestrator.ID)
 
 	apiKey, _ := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	client := aicli.NewClient(provider.BaseUrl, apiKey, model)
@@ -219,6 +220,7 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		}
 	}
 	callbacks := tools.OrchestratorCallbacks{
+		OrchestratorSessionID: orchestrator.ID,
 		GetSessionList: func(c context.Context) ([]tools.ManagedSessionSummary, error) {
 			return e.orchestratorSessions(c, orchestrator.ID)
 		},
@@ -371,6 +373,9 @@ func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRun
 	}
 	out := make([]tools.ManagedSessionSummary, 0, len(runs))
 	for _, r := range runs {
+		if r.ID == orchestratorRunID || r.Kind == db.RunKindTaskOrchestrator {
+			continue
+		}
 		out = append(out, managedSessionSummary(r))
 	}
 	return out, nil

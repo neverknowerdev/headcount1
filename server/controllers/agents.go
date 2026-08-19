@@ -2,8 +2,10 @@ package endpoints
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/agentconfig"
@@ -17,6 +19,34 @@ func defaultCanUseWorkers(roleKey, name string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeAllowedMCPs(raw string) (string, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return "", nil // empty means all enabled MCPs
+	}
+	var names []string
+	if err := json.Unmarshal([]byte(raw), &names); err != nil {
+		return "", fmt.Errorf("allowed_mcps must be a JSON array of server names")
+	}
+	seen := make(map[string]struct{}, len(names))
+	for i, name := range names {
+		name = strings.TrimSpace(name)
+		if name == "" {
+			return "", fmt.Errorf("allowed_mcps[%d] must not be empty", i)
+		}
+		if _, ok := seen[name]; ok {
+			return "", fmt.Errorf("allowed_mcps contains duplicate server %q", name)
+		}
+		seen[name] = struct{}{}
+		names[i] = name
+	}
+	encoded, err := json.Marshal(names)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
 }
 
 // authorizeAgentBindings verifies the provider and model group an agent is
@@ -88,6 +118,11 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
+	allowedMCPs, err := normalizeAllowedMCPs(req.AllowedMCPs)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 
 	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 
@@ -113,9 +148,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	if req.ReasoningLevel != "" {
 		agent.ReasoningLevel = req.ReasoningLevel
 	}
-	if req.AllowedMCPs != "" {
-		agent.AllowedMCPs = req.AllowedMCPs
-	}
+	agent.AllowedMCPs = allowedMCPs
 	if req.Permissions != "" {
 		agent.Permissions = req.Permissions
 	}
@@ -177,6 +210,11 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
+	allowedMCPs, err := normalizeAllowedMCPs(req.AllowedMCPs)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
 	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
 		return
@@ -195,7 +233,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		Model:          req.Model,
 		ChatType:       req.ChatType,
 		ReasoningLevel: req.ReasoningLevel,
-		AllowedMCPs:    req.AllowedMCPs,
+		AllowedMCPs:    allowedMCPs,
 		Permissions:    req.Permissions,
 		CanUseWorkers:  defaultCanUseWorkers(req.RoleKey, req.Name),
 		ProviderID:     req.ProviderID,
