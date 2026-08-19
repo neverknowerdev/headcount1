@@ -504,6 +504,56 @@ func TestTenantImportDedupLegacyTaskWithoutRefKey(t *testing.T) {
 	}
 }
 
+// TestTenantImportDedupTaskWithMissingTargetRefKey verifies that a newer
+// archive still deduplicates against a legacy target row whose ref_key is
+// empty. The exact key is preferred, while the title/creation-time identity is
+// the compatibility fallback when the target cannot match it.
+func TestTenantImportDedupTaskWithMissingTargetRefKey(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("database setup: %v", err)
+		}
+	}
+
+	user := db.User{Email: "mixed-version@dedup.io"}
+	must(database.Create(&user).Error)
+	team := db.Team{Name: "Mixed version"}
+	must(database.Create(&team).Error)
+	must(database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner}).Error)
+	company := db.Company{Name: "Mixed", ShortName: "mixed", TeamID: &team.ID, UserID: &user.ID}
+	must(database.Create(&company).Error)
+	sprint := db.Sprint{CompanyID: company.ID, Name: "Sprint"}
+	must(database.Create(&sprint).Error)
+	createdAt := time.Date(2024, 2, 3, 4, 5, 6, 789000000, time.UTC)
+	task := db.Task{CompanyID: company.ID, SprintID: sprint.ID, Title: "same task", RefKey: "MIXED-1", Status: db.TaskStatusBacklog, Priority: "Normal", CreatedAt: createdAt, UpdatedAt: createdAt}
+	must(database.Create(&task).Error)
+
+	var archive bytes.Buffer
+	if err := ExportTenant(ctx, &archive, basePath, database, user.ID); err != nil {
+		t.Fatalf("ExportTenant: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "mixed-version.tar.gz")
+	must(os.WriteFile(archivePath, archive.Bytes(), 0644))
+
+	// Simulate a target created before TaskRepository started generating ref_key.
+	must(database.Model(&db.Task{}).Where("id = ?", task.ID).Update("ref_key", "").Error)
+	stats, err := ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("task with a missing target ref_key was duplicated: %+v", stats)
+	}
+	var count int64
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("task count = %d, want 1", count)
+	}
+}
+
 // TestTenantImportMergeChildren verifies "merge children only": when a company
 // already exists in the target (matched by short_name), it is reused rather than
 // duplicated, and only the tasks/runs the target lacks are added.

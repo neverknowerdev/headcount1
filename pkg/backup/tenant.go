@@ -591,14 +591,17 @@ func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64
 	case "tasks":
 		refKey := strVal(r["ref_key"])
 		if refKey != "" {
-			return imp.existingID(tx, "tasks", "company_id = ? AND ref_key = ?", r["company_id"], refKey)
+			if existing, found := imp.existingID(tx, "tasks", "company_id = ? AND ref_key = ?", r["company_id"], refKey); found {
+				return existing, true
+			}
 		}
 
 		// Older tasks (and rows created outside TaskRepository) can lack the
-		// generated ref_key. Their creation timestamp is preserved in the
-		// archive, so use it with the parent scope and title as a deterministic
-		// compatibility identity. Do not fall back to title alone: multiple
-		// legitimate tasks may share a title.
+		// generated ref_key. A target row can also lack it when an archive with a
+		// ref_key is imported into a database created by an older version. Their
+		// creation timestamp is preserved in the archive, so use it with the
+		// parent scope and title as a deterministic compatibility identity. Do not
+		// fall back to title alone: multiple legitimate tasks may share a title.
 		title, createdAt := strVal(r["title"]), strVal(r["created_at"])
 		if title == "" || createdAt == "" {
 			return 0, false

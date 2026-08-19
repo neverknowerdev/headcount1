@@ -71,9 +71,19 @@ func (e *NativeEngine) startTaskOrchestrator(orchestrator db.Run, task db.Task, 
 	if !e.runs.tryStartOrchestrator(orchestrator.ID) {
 		return
 	}
+	// The orchestrator is a long-lived sidecar rather than a normal agent
+	// session, but it still owns a cancellable goroutine. Register it in the
+	// same process-local lifecycle registry as regular runs so E2E resets,
+	// shutdowns, and explicit stop requests can drain it deterministically.
+	runCtx, cancel := context.WithCancel(context.Background())
+	e.runs.cancelFuncs.Store(orchestrator.ID, cancel)
+	e.runs.activeRoots.Add(1)
 	go func() {
+		defer e.runs.activeRoots.Done()
+		defer cancel()
+		defer e.runs.cancelFuncs.Delete(orchestrator.ID)
 		defer e.runs.stopOrchestrator(orchestrator.ID)
-		e.runOrchestrator(orchestrator, task, provider, model)
+		e.runOrchestrator(runCtx, orchestrator, task, provider, model)
 	}()
 }
 
@@ -197,8 +207,15 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 	}
 }
 
-func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
-	ctx := context.Background()
+func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
+	markCanceled := func() {
+		_ = e.q.UpdateRunLog(context.Background(), orchestrator.ID, "orchestrator canceled", "canceled")
+		e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": orchestrator.ID, "status": "canceled"})
+	}
+	if ctx.Err() != nil {
+		markCanceled()
+		return
+	}
 	// A task may have moved to Done, Canceled, or another non-executable state
 	// between scheduling and starting this sidecar. In that case the
 	// orchestrator must not create a model turn or become a stale candidate.
@@ -317,7 +334,10 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			first = false
 			lastFingerprint = fingerprint
 			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "awaiting_human_input")
-			time.Sleep(200 * time.Millisecond)
+			if !waitForOrchestrator(ctx, 200*time.Millisecond) {
+				markCanceled()
+				return
+			}
 			continue
 		}
 		if taskNow.Status != db.TaskStatusInProgress {
@@ -348,7 +368,10 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 				return
 			}
 			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
-			time.Sleep(2 * time.Second)
+			if !waitForOrchestrator(ctx, 2*time.Second) {
+				markCanceled()
+				return
+			}
 			continue
 		}
 		wasFirst := first
@@ -370,7 +393,11 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			message += "\nIncoming routed messages (answer each required message with answer_message and its exact ID):\n" + string(messageJSON)
 		}
 		_, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
-		if runErr != nil && !errors.Is(runErr, context.Canceled) {
+		if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
+			markCanceled()
+			return
+		}
+		if runErr != nil {
 			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, runErr.Error(), "failed")
 			return
 		}
@@ -400,6 +427,17 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			}
 		}
 		_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
+	}
+}
+
+func waitForOrchestrator(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	defer timer.Stop()
+	select {
+	case <-ctx.Done():
+		return false
+	case <-timer.C:
+		return true
 	}
 }
 

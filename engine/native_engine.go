@@ -615,7 +615,7 @@ func (e *NativeEngine) ReconcileQueuedTasks(ctx context.Context) {
 }
 
 // StopRun cancels the context for the given run, interrupting it at the next
-// context check inside the agent loop.
+// context check inside the agent or orchestrator loop.
 func (e *NativeEngine) StopRun(ctx context.Context, runID int32) {
 	if val, loaded := e.runs.cancelFuncs.LoadAndDelete(runID); loaded {
 		if cancel, ok := val.(context.CancelFunc); ok {
