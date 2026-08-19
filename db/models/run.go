@@ -16,6 +16,7 @@ type Run struct {
 	AgentID              int32       `json:"agent_id" gorm:"not null"`
 	Agent                Agent       `json:"agent" gorm:"foreignKey:AgentID;constraint:OnDelete:CASCADE;"`
 	Name                 string      `json:"name" gorm:"index"`
+	Title                string      `json:"title" gorm:"type:text"`
 	Kind                 string      `json:"kind" gorm:"not null;default:'agent_session';index"`
 	ParentRunID          *int32      `json:"parent_run_id" gorm:"index"`
 	RootRunID            *int32      `json:"root_run_id" gorm:"index"`

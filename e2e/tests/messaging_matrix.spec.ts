@@ -51,12 +51,12 @@ test.describe.serial('orchestrator messaging matrix', () => {
         });
 
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-orchestrator-model', entries: [
-            { tool_call: { id: 'launch-a', name: 'run_new_session', arguments: { agent_name: agentA.name, prompt: 'Implement the primary change and ask the owner about any unresolved product decision.' } } },
+            { tool_call: { id: 'launch-a', name: 'run_new_session', arguments: { agent_name: agentA.name, title: 'Implement primary change', prompt: 'Implement the primary change and ask the owner about any unresolved product decision.' } } },
             { tool_call: { id: 'ask-ceo', name: 'ask_ceo', arguments: { task_id: task.id, message: 'Should the result preserve the existing event ordering?' } } },
             { tool_call: { id: 'inspect-ceo', name: 'get_session', arguments: { session_id: 0 } } },
             { text: 'The workers and CEO consultation are now being monitored.' },
             { tool_call: { id: 'send-a', name: 'send_message_to_session', arguments: { session_id: 0, message: 'Confirm the implementation boundary and return your answer.' } } },
-            { tool_call: { id: 'launch-b', name: 'run_new_session', arguments: { agent_name: agentB.name, prompt: 'Verify the primary change independently and report evidence.' } } },
+            { tool_call: { id: 'launch-b', name: 'run_new_session', arguments: { agent_name: agentB.name, title: 'Verify primary change', prompt: 'Verify the primary change independently and report evidence.' } } },
             { text: 'Agent A answered; Agent B is now being started.' },
             { tool_call: { id: 'send-b', name: 'send_message_to_session', arguments: { session_id: 0, message: 'Run an independent verification and return the evidence.' } } },
             { text: 'All routed questions have been answered.' },

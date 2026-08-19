@@ -74,7 +74,7 @@ async function setScenario(request: APIRequestContext, entries: ScenarioEntry[])
                 tool_call: {
                     id: 'orch-run-worker',
                     name: 'run_new_session',
-                    arguments: { agent_name: 'QA', prompt: 'Execute the assigned tool scenario and finish the task for review.' },
+                    arguments: { agent_name: 'QA', title: 'Execute tool scenario', prompt: 'Execute the assigned tool scenario and finish the task for review.' },
                 },
             }, {
                 text: 'The worker completed the assigned scenario successfully.',

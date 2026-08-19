@@ -81,7 +81,6 @@ type sessionOptions struct {
 	// terminal-state cleanup.
 	PrecreatedRun      *db.Run
 	Worker             bool
-	WorkerPrompt       string
 	WorkerWorkspace    string
 	WorkerReadOnlyDirs []string
 	WorkerProvider     db.LLMProvider

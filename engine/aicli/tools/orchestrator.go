@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"sort"
 	"strings"
 
 	"agent-orchestrator/engine/aicli"
@@ -14,9 +15,11 @@ import (
 type ManagedSessionSummary struct {
 	ID                int32  `json:"id"`
 	Name              string `json:"name"`
+	Title             string `json:"title,omitempty"`
 	TaskID            int32  `json:"task_id"`
 	AgentID           int32  `json:"agent_id"`
 	AgentName         string `json:"agent_name"`
+	ParentSessionID   *int32 `json:"parent_session_id,omitempty"`
 	LifecycleStatus   string `json:"status"`
 	LastMessageTime   string `json:"last_message_time,omitempty"`
 	WaitReason        string `json:"wait_reason,omitempty"`
@@ -34,6 +37,7 @@ type ManagedSessionSummary struct {
 type ManagedSessionChildStatus struct {
 	ID                    int32                       `json:"id"`
 	Name                  string                      `json:"name"`
+	Title                 string                      `json:"title,omitempty"`
 	AgentName             string                      `json:"agent_name"`
 	OwnReportedStatus     string                      `json:"own_reported_status,omitempty"`
 	Status                string                      `json:"status,omitempty"`
@@ -109,7 +113,7 @@ type OrchestratorCallbacks struct {
 	GetSessionList func(context.Context) ([]ManagedSessionSummary, error)
 	GetSession     func(context.Context, int32) (ManagedSessionDetails, error)
 	SendMessage    func(context.Context, int32, string) (string, error)
-	RunNewSession  func(context.Context, *int32, string, string) (string, error)
+	RunNewSession  func(context.Context, *int32, string, string, string) (string, error)
 	StopSession    func(context.Context, int32, string) (string, error)
 	ForkSession    func(context.Context, int32, int64) (string, error)
 	AnswerMessage  func(context.Context, int64, string) (string, error)
@@ -145,13 +149,16 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	r := aicli.NewRegistry()
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolGetSessionList,
-		def:  orchestratorDef(OrchestratorToolGetSessionList, "List every worker session in this task execution, including nested sessions. Use get_session for detailed lifecycle and status-report history.", `{"type":"object","properties":{}}`),
+		def:  orchestratorDef(OrchestratorToolGetSessionList, "List every worker session in this task execution, including nested sessions. The response includes agent_name, title, lifecycle state, and an ascii_graph of the session tree. Use get_session for detailed lifecycle and status-report history.", `{"type":"object","properties":{}}`),
 		fn: func(ctx context.Context, _ json.RawMessage) (string, error) {
 			v, err := cb.GetSessionList(ctx)
 			if err != nil {
 				return "", err
 			}
-			b, err := json.Marshal(v)
+			b, err := json.Marshal(struct {
+				Sessions []ManagedSessionSummary `json:"sessions"`
+				ASCII    string                  `json:"ascii_graph,omitempty"`
+			}{Sessions: v, ASCII: managedSessionASCII(v)})
 			return string(b), err
 		},
 	})
@@ -195,23 +202,27 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(&orchestratorManagementTool{
 		name: OrchestratorToolRunNewSession,
-		def:  orchestratorDef(OrchestratorToolRunNewSession, "Start a child worker session for the selected agent. The worker receives the complete task context plus your prompt. Optionally replace a source session when recovering from a failed or unsafe execution.", `{"type":"object","properties":{"source_session_id":{"type":"integer","description":"Existing managed session to replace; omit for a new worker."},"agent_name":{"type":"string","description":"Name or role key from the available-agents list."},"prompt":{"type":"string","description":"Detailed implementation instruction, constraints, and expected handoff for the worker."}},"required":["agent_name","prompt"]}`),
+		def:  orchestratorDef(OrchestratorToolRunNewSession, "Start a child session with a short purpose title. Use a roster agent for task work. Use the reserved agent_name Worker for bounded one-time verification, repository inspection, git, or artifact jobs; Worker uses the helper-worker model, prompt, and tools. Optionally replace a source session when recovering from a failed or unsafe execution.", `{"type":"object","properties":{"source_session_id":{"type":"integer","description":"Existing managed session to replace; omit for a new worker."},"agent_name":{"type":"string","description":"Name or role key from the available-agents list, or the reserved name Worker for one-time jobs."},"title":{"type":"string","description":"Required short human-readable purpose of this session."},"prompt":{"type":"string","description":"Detailed implementation instruction, constraints, and expected handoff for the worker."}},"required":["agent_name","title","prompt"]}`),
 		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
 			var p struct {
 				SourceSessionID *int32 `json:"source_session_id"`
 				AgentName       string `json:"agent_name"`
+				Title           string `json:"title"`
 				Prompt          string `json:"prompt"`
 			}
 			if err := json.Unmarshal(args, &p); err != nil {
 				return "", fmt.Errorf("run_new_session: %w", err)
 			}
-			if strings.TrimSpace(p.AgentName) == "" || strings.TrimSpace(p.Prompt) == "" {
-				return "", fmt.Errorf("agent_name and prompt are required")
+			if strings.TrimSpace(p.AgentName) == "" || strings.TrimSpace(p.Title) == "" || strings.TrimSpace(p.Prompt) == "" {
+				return "", fmt.Errorf("agent_name, title, and prompt are required")
+			}
+			if len([]rune(strings.TrimSpace(p.Title))) > 160 {
+				return "", fmt.Errorf("title must be 160 characters or fewer")
 			}
 			if p.SourceSessionID != nil && *p.SourceSessionID <= 0 {
 				return "", fmt.Errorf("source_session_id must be positive")
 			}
-			return cb.RunNewSession(ctx, p.SourceSessionID, p.AgentName, p.Prompt)
+			return cb.RunNewSession(ctx, p.SourceSessionID, p.AgentName, p.Title, p.Prompt)
 		},
 	})
 	r.Register(&orchestratorManagementTool{
@@ -250,4 +261,69 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 	})
 	r.Register(NewAskCEO(cb.AskCEO))
 	return r
+}
+
+func managedSessionASCII(sessions []ManagedSessionSummary) string {
+	if len(sessions) == 0 {
+		return "(no managed sessions)"
+	}
+	byID := make(map[int32]ManagedSessionSummary, len(sessions))
+	children := make(map[int32][]ManagedSessionSummary)
+	for _, session := range sessions {
+		byID[session.ID] = session
+	}
+	roots := make([]ManagedSessionSummary, 0)
+	for _, session := range sessions {
+		if session.ParentSessionID == nil {
+			roots = append(roots, session)
+			continue
+		}
+		if _, ok := byID[*session.ParentSessionID]; !ok {
+			roots = append(roots, session)
+			continue
+		}
+		children[*session.ParentSessionID] = append(children[*session.ParentSessionID], session)
+	}
+	sort.Slice(roots, func(i, j int) bool { return roots[i].ID < roots[j].ID })
+	for parentID := range children {
+		sort.Slice(children[parentID], func(i, j int) bool { return children[parentID][i].ID < children[parentID][j].ID })
+	}
+	var b strings.Builder
+	visited := make(map[int32]bool, len(sessions))
+	var write func(ManagedSessionSummary, string, bool)
+	write = func(session ManagedSessionSummary, prefix string, last bool) {
+		if visited[session.ID] {
+			return
+		}
+		visited[session.ID] = true
+		branch := "├─ "
+		if last {
+			branch = "└─ "
+		}
+		label := session.AgentName
+		if label == "" {
+			label = "unknown agent"
+		}
+		title := session.Title
+		if title == "" {
+			title = session.Name
+		}
+		fmt.Fprintf(&b, "%s%s#%d %s · %s [%s]\n", prefix, branch, session.ID, label, title, session.LifecycleStatus)
+		childPrefix := prefix + "│  "
+		if last {
+			childPrefix = prefix + "   "
+		}
+		for i, child := range children[session.ID] {
+			write(child, childPrefix, i == len(children[session.ID])-1)
+		}
+	}
+	for i, root := range roots {
+		write(root, "", i == len(roots)-1)
+	}
+	for _, session := range sessions {
+		if !visited[session.ID] {
+			write(session, "", true)
+		}
+	}
+	return strings.TrimRight(b.String(), "\n")
 }

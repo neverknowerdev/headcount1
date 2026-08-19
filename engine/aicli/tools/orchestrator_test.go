@@ -16,7 +16,7 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		SendMessage:   func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
@@ -48,7 +48,7 @@ func TestOrchestratorToolValidation(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		SendMessage:   func(context.Context, int32, string) (string, error) { called = true; return "ok", nil },
-		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
@@ -82,6 +82,8 @@ func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 	list, err := r.Execute(context.Background(), string(OrchestratorToolGetSessionList), json.RawMessage(`{}`))
 	require.NoError(t, err)
 	require.Contains(t, list, `"worker-4"`)
+	require.Contains(t, list, `"sessions"`)
+	require.Contains(t, list, `"ascii_graph"`)
 	detail, err := r.Execute(context.Background(), string(OrchestratorToolGetSession), json.RawMessage(`{"session_id":4}`))
 	require.NoError(t, err)
 	require.Equal(t, int32(4), gotID)
@@ -92,42 +94,59 @@ func TestSessionInspectionToolsReturnListAndHistory(t *testing.T) {
 	require.Contains(t, detail, `Coder status: implementing`)
 }
 
+func TestManagedSessionASCIIIncludesTitlesAndParentTree(t *testing.T) {
+	parent := int32(1)
+	graph := managedSessionASCII([]ManagedSessionSummary{
+		{ID: 2, AgentName: "Worker", Title: "Inspect repository", ParentSessionID: &parent, LifecycleStatus: "completed"},
+		{ID: 1, AgentName: "CTO", Title: "Design solution", LifecycleStatus: "running"},
+	})
+	require.Contains(t, graph, "#1 CTO · Design solution [running]")
+	require.Contains(t, graph, "#2 Worker · Inspect repository [completed]")
+}
+
 func TestRunNewSessionPassesPromptAndAgentName(t *testing.T) {
 	var gotSource *int32
-	var gotAgent, gotPrompt string
+	var gotAgent, gotTitle, gotPrompt string
 	r := NewOrchestratorRegistry(OrchestratorCallbacks{
 		GetSessionList: func(context.Context) ([]ManagedSessionSummary, error) { return nil, nil },
 		GetSession: func(context.Context, int32) (ManagedSessionDetails, error) {
 			return ManagedSessionDetails{}, nil
 		},
 		SendMessage: func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(_ context.Context, source *int32, agent, prompt string) (string, error) {
+		RunNewSession: func(_ context.Context, source *int32, agent, title, prompt string) (string, error) {
 			gotSource, gotAgent, gotPrompt = source, agent, prompt
+			gotTitle = title
 			return "queued", nil
 		},
 		StopSession: func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"source_session_id":4,"agent_name":"Coder","prompt":"Implement the parser and add tests"}`))
+	_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"source_session_id":4,"agent_name":"Coder","title":"Implement parser","prompt":"Implement the parser and add tests"}`))
 	require.NoError(t, err)
 	require.Equal(t, int32(4), *gotSource)
 	require.Equal(t, "Coder", gotAgent)
+	require.Equal(t, "Implement parser", gotTitle)
 	require.Equal(t, "Implement the parser and add tests", gotPrompt)
-	_, err = r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"QA","prompt":"Run the regression suite"}`))
+	_, err = r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"QA","title":"Run regression","prompt":"Run the regression suite"}`))
 	require.NoError(t, err)
 	require.Nil(t, gotSource)
 	require.Equal(t, "QA", gotAgent)
+	require.Equal(t, "Run regression", gotTitle)
 	require.Equal(t, "Run the regression suite", gotPrompt)
 	require.Error(t, func() error {
-		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"","prompt":"x"}`))
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"","title":"x","prompt":"x"}`))
 		return err
 	}())
 	require.Error(t, func() error {
-		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"Coder","prompt":""}`))
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"Coder","title":"x","prompt":""}`))
 		return err
 	}())
 	require.Error(t, func() error {
-		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"  ","prompt":"do work"}`))
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"Coder","prompt":"do work"}`))
+		return err
+	}())
+	require.Error(t, func() error {
+		_, err := r.Execute(context.Background(), string(OrchestratorToolRunNewSession), json.RawMessage(`{"agent_name":"  ","title":"x","prompt":"do work"}`))
 		return err
 	}())
 }
@@ -140,7 +159,7 @@ func TestForkSessionValidatesCanonicalMessageID(t *testing.T) {
 			return ManagedSessionDetails{}, nil
 		},
 		SendMessage:   func(context.Context, int32, string) (string, error) { return "", nil },
-		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession: func(_ context.Context, sessionID int32, messageID int64) (string, error) {
 			called = sessionID == 7 && messageID == 42

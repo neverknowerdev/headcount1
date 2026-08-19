@@ -293,7 +293,7 @@ test.describe.serial('Deploy webhook', () => {
         await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', title: 'Complete task', prompt: 'Complete the task.' } } },
                 { text: 'The worker completed the task.' },
             ] }),
         });

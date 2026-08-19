@@ -70,4 +70,7 @@ func TestToRunResponseUsesControlPlaneIdentityForOrchestrator(t *testing.T) {
 
 	worker := toRunResponse(db.Run{Kind: db.RunKindAgentSession, Agent: ceo})
 	require.Equal(t, "CEO Agent", worker.AgentName)
+	helper := toRunResponse(db.Run{Kind: db.RunKindHelperWorker, Agent: ceo, Title: "Verify repository state"})
+	require.Equal(t, "Worker", helper.AgentName)
+	require.Equal(t, "Verify repository state", helper.Title)
 }

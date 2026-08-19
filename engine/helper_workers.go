@@ -149,7 +149,7 @@ func (e *NativeEngine) runWorker(ctx context.Context, parent db.Run, task db.Tas
 	if parent.RootRunID != nil {
 		rootID = *parent.RootRunID
 	}
-	worker, err := e.q.CreateRun(ctx, db.Run{TaskID: task.ID, AgentID: parent.AgentID, Kind: db.RunKindHelperWorker, ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now()})
+	worker, err := e.q.CreateRun(ctx, db.Run{TaskID: task.ID, AgentID: parent.AgentID, Kind: db.RunKindHelperWorker, Title: "One-time helper job", ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now()})
 	if err != nil {
 		return "", err
 	}
@@ -164,7 +164,7 @@ func (e *NativeEngine) runWorker(ctx context.Context, parent db.Run, task db.Tas
 	workerParent := &parentSession{parentRunID: parent.ID, rootRunID: rootID, rootTaskID: rootTask.ID}
 	go e.executeSession(context.Background(), workerTask, "implement", workerParent, nil, sessionOptions{
 		Instruction: prompt, IncludeTaskContext: true, SkipTaskLock: true, PrecreatedRun: &worker,
-		Worker: true, WorkerPrompt: prompt, WorkerWorkspace: workerDir,
+		Worker: true, WorkerWorkspace: workerDir,
 		WorkerReadOnlyDirs: []string{parentWorkspace, artifactDir}, WorkerProvider: provider, WorkerModel: model,
 	})
 	return fmt.Sprintf("helper worker run %d started with model %s", worker.ID, model), nil

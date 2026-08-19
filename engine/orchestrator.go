@@ -51,7 +51,7 @@ func (e *NativeEngine) createTaskOrchestrator(ctx context.Context, task db.Task,
 	}
 	orchestrator := db.Run{
 		TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "running", StartedAt: time.Now(),
-		Name: fmt.Sprintf("%s-orchestrator", task.RefKey),
+		Name: fmt.Sprintf("%s-orchestrator", task.RefKey), Title: "Task orchestration",
 	}
 	created, err := e.q.CreateRun(ctx, orchestrator)
 	if err != nil {
@@ -147,6 +147,7 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 		}
 	}
 	b.WriteString("\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/orchestrator_start.md")))
+	b.WriteString("\n\nReserved one-time worker: call run_new_session with agent_name=Worker, a short title, and a bounded prompt for repository verification, git commands, artifact work, or other auxiliary jobs. This starts the helper-worker runtime with the helper-worker model and tools; do not assign task implementation or ownership to it.\n")
 	return b.String(), nil
 }
 
@@ -227,8 +228,8 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		SendMessage: func(c context.Context, id int32, message string) (string, error) {
 			return e.orchestratorSendMessage(c, task, orchestrator.ID, id, message)
 		},
-		RunNewSession: func(c context.Context, source *int32, agentName, prompt string) (string, error) {
-			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentName, prompt)
+		RunNewSession: func(c context.Context, source *int32, agentName, title, prompt string) (string, error) {
+			return e.orchestratorRunNew(c, task, orchestrator.ID, source, agentName, title, prompt)
 		},
 		StopSession: func(c context.Context, id int32, reason string) (string, error) {
 			return e.orchestratorStop(c, orchestrator.ID, id, reason)
@@ -427,9 +428,11 @@ func managedSessionSummary(r db.Run) tools.ManagedSessionSummary {
 	return tools.ManagedSessionSummary{
 		ID:                r.ID,
 		Name:              r.Name,
+		Title:             r.Title,
 		TaskID:            r.TaskID,
 		AgentID:           r.AgentID,
-		AgentName:         r.Agent.Name,
+		AgentName:         managedRunAgentName(r),
+		ParentSessionID:   r.ParentRunID,
 		LifecycleStatus:   r.Status,
 		LastMessageTime:   last,
 		WaitReason:        r.Recovery.WaitReason,
@@ -438,6 +441,16 @@ func managedSessionSummary(r db.Run) tools.ManagedSessionSummary {
 		ResultDescription: r.ResultDescription,
 		Error:             r.LogContent,
 	}
+}
+
+func managedRunAgentName(r db.Run) string {
+	if r.Kind == db.RunKindHelperWorker {
+		return "Worker"
+	}
+	if r.Agent.Name != "" {
+		return r.Agent.Name
+	}
+	return r.Name
 }
 
 func (e *NativeEngine) requestWorkerStatus(ctx context.Context, task db.Task, orchestratorRunID, sessionID int32) (bool, error) {
@@ -505,7 +518,7 @@ func (e *NativeEngine) orchestratorMessageTerminalSession(ctx context.Context, t
 	if err != nil {
 		return "", fmt.Errorf("load terminal session agent: %w", err)
 	}
-	replacement, err := e.createOrchestratorChildRun(ctx, task, orchestratorID, agent)
+	replacement, err := e.createOrchestratorChildRun(ctx, task, orchestratorID, agent, "Terminal session replacement")
 	if err != nil {
 		return "", fmt.Errorf("create terminal-session replacement: %w", err)
 	}
@@ -595,6 +608,7 @@ func (e *NativeEngine) askCEO(ctx context.Context, orchestrator db.Run, task db.
 	parentID, rootID := orchestrator.ID, orchestrator.ID
 	consultation, err := e.q.CreateRun(ctx, db.Run{
 		TaskID: task.ID, AgentID: ceo.ID, Kind: db.RunKindCEOConsultation,
+		Title:       "CEO consultation",
 		ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now(),
 	})
 	if err != nil {
@@ -634,7 +648,7 @@ func (e *NativeEngine) orchestratorStop(ctx context.Context, orchestratorRunID, 
 	return fmt.Sprintf("session %d stop requested: %s", sessionID, reason), nil
 }
 
-func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, agentName, prompt string) (string, error) {
+func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orchestratorRunID int32, source *int32, agentName, title, prompt string) (string, error) {
 	var sourceRun db.Run
 	launchTask := task
 	if source != nil {
@@ -671,9 +685,16 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 		}
 	}
 	agentName = strings.TrimSpace(agentName)
+	title = strings.TrimSpace(title)
 	prompt = strings.TrimSpace(prompt)
-	if agentName == "" || prompt == "" {
-		return "", fmt.Errorf("agent_name and prompt are required")
+	if agentName == "" || title == "" || prompt == "" {
+		return "", fmt.Errorf("agent_name, title, and prompt are required")
+	}
+	if len([]rune(title)) > 160 {
+		return "", fmt.Errorf("title must be 160 characters or fewer")
+	}
+	if strings.EqualFold(agentName, "worker") {
+		return e.orchestratorRunNewWorker(ctx, launchTask, orchestratorRunID, title, prompt, source != nil)
 	}
 	selectedAgent, err := e.findAgentForRole(ctx, launchTask.CompanyID, agentName)
 	if err != nil {
@@ -682,7 +703,7 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 	if selectedAgent.CompanyID != launchTask.CompanyID {
 		return "", fmt.Errorf("agent %d does not belong to task company", selectedAgent.ID)
 	}
-	precreated, err := e.createOrchestratorChildRun(ctx, launchTask, orchestratorRunID, selectedAgent)
+	precreated, err := e.createOrchestratorChildRun(ctx, launchTask, orchestratorRunID, selectedAgent, title)
 	if err != nil {
 		return "", fmt.Errorf("create worker session: %w", err)
 	}
@@ -693,10 +714,85 @@ func (e *NativeEngine) orchestratorRunNew(ctx context.Context, task db.Task, orc
 	return fmt.Sprintf("new child session %d queued for task %d with agent %s", precreated.ID, launchTask.ID, selectedAgent.Name), nil
 }
 
-func (e *NativeEngine) createOrchestratorChildRun(ctx context.Context, task db.Task, orchestratorRunID int32, agent db.Agent) (db.Run, error) {
+func (e *NativeEngine) orchestratorRunNewWorker(ctx context.Context, task db.Task, orchestratorRunID int32, title, prompt string, replacement bool) (string, error) {
+	if task.AgentID == nil {
+		return "", fmt.Errorf("worker session requires an assigned task agent")
+	}
+	parent, err := e.q.GetRun(ctx, orchestratorRunID)
+	if err != nil {
+		return "", fmt.Errorf("load orchestrator session: %w", err)
+	}
+	children, err := e.q.ListChildRuns(ctx, orchestratorRunID)
+	if err != nil {
+		return "", err
+	}
+	active := 0
+	for _, child := range children {
+		if child.Kind == db.RunKindHelperWorker && (child.Status == "running" || child.Status == "waiting") {
+			active++
+		}
+	}
+	if active >= maxActiveHelperWorkers {
+		return "", fmt.Errorf("orchestrator session %d already has %d active helper workers", orchestratorRunID, active)
+	}
+	backingAgent, err := e.q.GetAgent(ctx, *task.AgentID)
+	if err != nil {
+		return "", fmt.Errorf("load worker runtime agent: %w", err)
+	}
+	provider, model, err := e.resolveHelperWorkerModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID))
+	if err != nil {
+		return "", fmt.Errorf("helper worker model unavailable: %w", err)
+	}
+	rootTask, err := e.q.GetRootTask(ctx, task.ID)
+	if err != nil {
+		rootTask = task
+	}
+	company, err := e.q.GetCompany(ctx, task.CompanyID)
+	if err != nil {
+		return "", err
+	}
+	manager := filesystem.NewManager(loadSettings().BasePath)
+	parentWorkspace := strings.TrimSpace(parent.WorkspacePath)
+	if parentWorkspace == "" {
+		parentWorkspace = manager.GetTaskWorktreePath(company, rootTask)
+	}
+	artifactDir := manager.Paths().TaskArtifactsDir(company.ShortName, rootTask.ID)
+	parentID, rootID := orchestratorRunID, orchestratorRunID
+	if parent.RootRunID != nil {
+		rootID = *parent.RootRunID
+	}
+	worker, err := e.q.CreateRun(ctx, db.Run{
+		TaskID: task.ID, AgentID: backingAgent.ID, Kind: db.RunKindHelperWorker, Title: title,
+		ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now(),
+	})
+	if err != nil {
+		return "", fmt.Errorf("create worker session: %w", err)
+	}
+	workerDir := manager.Paths().RunWorkspaceDir(company.ShortName, rootTask.ID, worker.ID)
+	if err := e.q.UpdateRunWorkspacePath(ctx, worker.ID, workerDir); err != nil {
+		e.failRun(ctx, worker.ID, fmt.Sprintf("persist worker workspace: %v", err))
+		return "", err
+	}
+	worker.WorkspacePath = workerDir
+	workerTask := task
+	workerTask.AgentID = &backingAgent.ID
+	workerParent := &parentSession{parentRunID: orchestratorRunID, rootRunID: rootID, rootTaskID: rootTask.ID}
+	go e.executeSession(context.Background(), workerTask, sessionModeImplement, workerParent, nil, sessionOptions{
+		Instruction: prompt, IncludeTaskContext: true, SkipTaskLock: true, PrecreatedRun: &worker,
+		Worker: true, WorkerWorkspace: workerDir, WorkerReadOnlyDirs: []string{parentWorkspace, artifactDir},
+		WorkerProvider: provider, WorkerModel: model,
+	})
+	verb := "new"
+	if replacement {
+		verb = "replacement"
+	}
+	return fmt.Sprintf("%s Worker session %d queued for task %d with title %q and model %s", verb, worker.ID, task.ID, title, model), nil
+}
+
+func (e *NativeEngine) createOrchestratorChildRun(ctx context.Context, task db.Task, orchestratorRunID int32, agent db.Agent, title string) (db.Run, error) {
 	parentID, rootID := orchestratorRunID, orchestratorRunID
 	return e.q.CreateRun(ctx, db.Run{
-		TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, Status: "running", StartedAt: time.Now(),
+		TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, Title: title, Status: "running", StartedAt: time.Now(),
 		ParentRunID: &parentID, RootRunID: &rootID,
 	})
 }
@@ -805,8 +901,12 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		sourceWorkspace = manager.GetTaskWorktreePath(company, rootTask)
 	}
 	parentID, rootID := orchestratorRunID, orchestratorRunID
+	title := source.Title
+	if strings.TrimSpace(title) == "" {
+		title = "Forked session"
+	}
 	newRun, err := e.q.CreateRun(ctx, db.Run{
-		TaskID: source.TaskID, AgentID: source.AgentID, Kind: db.RunKindAgentSession, ParentRunID: &parentID, RootRunID: &rootID,
+		TaskID: source.TaskID, AgentID: source.AgentID, Kind: db.RunKindAgentSession, Title: title, ParentRunID: &parentID, RootRunID: &rootID,
 		Status: "running", StartedAt: time.Now(),
 	})
 	if err != nil {

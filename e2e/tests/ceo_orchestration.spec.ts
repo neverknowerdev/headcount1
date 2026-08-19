@@ -59,7 +59,7 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
                     task_id: task.id, message: 'Should the export preserve the existing event ordering?',
                 } } },
                 { tool_call: { id: 'launch', name: 'run_new_session', arguments: {
-                    agent_name: 'Implementation Agent', prompt: 'Implement the audit export using the CEO decision.',
+                    agent_name: 'Implementation Agent', title: 'Implement audit export', prompt: 'Implement the audit export using the CEO decision.',
                 } } },
                 { text: 'The implementation session is complete.' },
             ] }),

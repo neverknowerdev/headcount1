@@ -69,7 +69,7 @@ test.describe.serial('task sidecar orchestrator', () => {
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
                 { tool_call: { id: 'orch-list', name: 'get_session_list', arguments: {} } },
                 { tool_call: { id: 'orch-run', name: 'run_new_session', arguments: {
-                    agent_name: 'Backend Builder', prompt: 'Implement the audit CSV export, preserve event ordering, and run the focused tests.',
+                    agent_name: 'Backend Builder', title: 'Implement audit export', prompt: 'Implement the audit CSV export, preserve event ordering, and run the focused tests.',
                 } } },
                 { text: 'Worker session started with the implementation brief.' },
                 { tool_call: { id: 'orch-status-1', name: 'get_session', arguments: { session_id: 2 } } },

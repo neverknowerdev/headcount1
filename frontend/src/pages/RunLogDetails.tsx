@@ -180,6 +180,11 @@ export const RunLogDetails: React.FC = () => {
                                 {getRunAgentName(run)}
                             </span>
                         )}
+                        {run.title && (
+                            <span className="text-sm font-medium bg-slate-50 text-slate-700 px-2 py-1 rounded-full" data-testid="run-title-badge" title="Session purpose">
+                                {run.title}
+                            </span>
+                        )}
                     </h1>
                 </div>
                 <div className="flex items-center gap-2">
@@ -233,6 +238,12 @@ export const RunLogDetails: React.FC = () => {
                         <p className="text-sm text-gray-500">Agent</p>
                         <p className="font-medium">{getRunAgentName(run) || '—'}</p>
                     </div>
+                    {run.title && (
+                        <div>
+                            <p className="text-sm text-gray-500">Session purpose</p>
+                            <p className="font-medium">{run.title}</p>
+                        </div>
+                    )}
                     {run.parent_run_id && (
                         <div>
                             <p className="text-sm text-gray-500">Parent Session</p>

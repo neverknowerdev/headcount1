@@ -137,7 +137,7 @@ export const RunLogs: React.FC = () => {
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'}{r.title ? ` · ${r.title}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                         {children.length > 0 && (
                                             <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
                                         )}
@@ -160,6 +160,7 @@ export const RunLogs: React.FC = () => {
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <InfoItem label="Status" value={<span className="capitalize">{r.status}</span>} />
                                         <InfoItem label="Agent" value={getRunAgentName(r) || '—'} />
+                                        {r.title && <InfoItem label="Session purpose" value={r.title} />}
                                         <InfoItem label="Started" value={formatDateTime(r.started_at)} />
                                         <InfoItem label="Duration" value={formatDuration(r.started_at, r.ended_at)} />
                                         {r.latest_reported_status && (

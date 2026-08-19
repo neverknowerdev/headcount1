@@ -184,7 +184,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect((await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', title: 'Complete task', prompt: 'Complete the task.' } } },
                 { text: 'The worker completed the task.' },
             ] }),
         })).ok).toBeTruthy();
@@ -302,8 +302,8 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect((await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-a', name: 'run_new_session', arguments: { agent_name: 'Runner A', prompt: 'Complete the task.' } } },
-                { tool_call: { id: 'run-b', name: 'run_new_session', arguments: { agent_name: 'Runner B', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-a', name: 'run_new_session', arguments: { agent_name: 'Runner A', title: 'Complete task A', prompt: 'Complete the task.' } } },
+                { tool_call: { id: 'run-b', name: 'run_new_session', arguments: { agent_name: 'Runner B', title: 'Complete task B', prompt: 'Complete the task.' } } },
                 { text: 'The workers completed the tasks.' },
             ] }),
         })).ok).toBeTruthy();
@@ -474,7 +474,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
         expect((await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-tool', name: 'run_new_session', arguments: { agent_name: 'Tool Runner', prompt: 'Use the requested tools.' } } },
+                { tool_call: { id: 'run-tool', name: 'run_new_session', arguments: { agent_name: 'Tool Runner', title: 'Run tool scenario', prompt: 'Use the requested tools.' } } },
                 { text: 'The worker completed the task.' },
             ] }),
         })).ok).toBeTruthy();

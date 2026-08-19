@@ -176,7 +176,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
                 model: 'e2e-orchestrator-model',
                 entries: [{ tool_call: { id: 'launch-worker', name: 'run_new_session', arguments: {
-                    agent_name: 'Runner', prompt: 'Complete the assigned task and finish it for review.',
+                    agent_name: 'Runner', title: 'Complete assigned task', prompt: 'Complete the assigned task and finish it for review.',
                 } } }],
             }),
         });

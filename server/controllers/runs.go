@@ -67,6 +67,8 @@ func toRunResponse(run db.Run) RunResponse {
 	agentName := run.Agent.Name
 	if run.Kind == db.RunKindTaskOrchestrator {
 		agentName = "Orchestrator"
+	} else if run.Kind == db.RunKindHelperWorker {
+		agentName = "Worker"
 	}
 	resp := RunResponse{Run: run, AgentName: agentName}
 	if run.LogEntries != "" {

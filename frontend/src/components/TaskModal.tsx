@@ -803,6 +803,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                             {getRunAgentName(r)}
                                                                         </span>
                                                                     )}
+                                                                    {r.title && (
+                                                                        <span className="font-normal bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded-full max-w-[18rem] truncate" title={`Session purpose: ${r.title}`}>
+                                                                            {r.title}
+                                                                        </span>
+                                                                    )}
                                                                 </span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
