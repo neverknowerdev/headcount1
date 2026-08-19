@@ -8,6 +8,7 @@ import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 import { getActivityAuthorLabel } from '../utils/activityDisplay';
 import { RunLogViewer } from './RunLogViewer';
+import { getRunAgentName } from '../utils/runDisplay';
 import { TaskRelations } from './TaskRelations';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 
@@ -790,9 +791,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     ) : (
                                                                         <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
                                                                     )}
-                                                                    {(r.agent?.name || r.agent_name) && (
-                                                                        <span className="font-normal bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" title={`Agent: ${r.agent.name}`}>
-                                                                            {r.agent?.name || r.agent_name}
+                                                                    {getRunAgentName(r) && (
+                                                                        <span className="font-normal bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" title={`Agent: ${getRunAgentName(r)}`}>
+                                                                            {getRunAgentName(r)}
                                                                         </span>
                                                                     )}
                                                                 </span>
@@ -837,6 +838,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     compact
                                                                     messages={(r.log_entries || []).map((e: any, i: number) => ({ id: i, entry: e }))}
                                                                     status={r.status}
+                                                                    agentName={getRunAgentName(r)}
                                                                 />
                                                             </div>
                                                         </details>

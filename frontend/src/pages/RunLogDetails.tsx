@@ -6,6 +6,7 @@ import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
 import { parseLogContent } from '../utils/runLogParser';
+import { getRunAgentName } from '../utils/runDisplay';
 
 import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
 
@@ -172,7 +173,14 @@ export const RunLogDetails: React.FC = () => {
                     <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
                         <ArrowLeft size={20} />
                     </Link>
-                    <h1 className="text-2xl font-bold">Run {run.name || `#${run.id}`} Details</h1>
+                    <h1 className="text-2xl font-bold flex items-center gap-2 flex-wrap">
+                        <span>Run {run.name || `#${run.id}`} Details</span>
+                        {getRunAgentName(run) && (
+                            <span className="text-sm font-medium bg-gray-100 text-gray-700 px-2 py-1 rounded-full" data-testid="run-agent-badge">
+                                {getRunAgentName(run)}
+                            </span>
+                        )}
+                    </h1>
                 </div>
                 <div className="flex items-center gap-2">
                     {run.status === 'running' && (
@@ -223,7 +231,7 @@ export const RunLogDetails: React.FC = () => {
                     )}
                     <div>
                         <p className="text-sm text-gray-500">Agent</p>
-                        <p className="font-medium">{run.agent?.name}</p>
+                        <p className="font-medium">{getRunAgentName(run) || '—'}</p>
                     </div>
                     {run.parent_run_id && (
                         <div>
@@ -244,7 +252,7 @@ export const RunLogDetails: React.FC = () => {
                 </div>
 
                 <div className="col-span-2 bg-gray-50 rounded-lg shadow border flex flex-col min-h-0">
-                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} runId={run.id} />
+                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} runId={run.id} agentName={getRunAgentName(run)} />
                 </div>
             </div>
         </div>

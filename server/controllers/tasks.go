@@ -384,7 +384,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	var runs []db.Run
-	if err := api.db.Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Preload("Agent").Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
