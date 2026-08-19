@@ -11,6 +11,9 @@ function normalizeConversationMessage(parsed: Record<string, any>, base: Record<
     if (parsed.role === 'assistant') {
         return { ...shared, type: 'response', content: JSON.stringify(parsed), model: base.model };
     }
+    if (parsed.role === 'system') {
+        return { ...shared, type: 'system', content: JSON.stringify(parsed), model: base.model };
+    }
     if (parsed.role === 'tool') {
         return {
             ...shared,
@@ -98,6 +101,10 @@ export function parseLogContent(logContent: string): ParsedRunLogMessage[] {
                 }
                 if (parsed.role === 'assistant') {
                     messages.push({ id: i++, entry: { type: 'response', content: trimmed, model: parsed.model?.modelID || parsed.model } });
+                    continue;
+                }
+                if (parsed.role === 'system') {
+                    messages.push({ id: i++, entry: { type: 'system', content: trimmed, model: parsed.model?.modelID || parsed.model } });
                     continue;
                 }
                 if (parsed.role === 'tool') {

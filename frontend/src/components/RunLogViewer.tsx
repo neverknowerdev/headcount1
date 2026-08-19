@@ -33,7 +33,7 @@ export interface RunTokenStats {
 }
 
 interface LogEntry {
-  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
+  type: 'info' | 'system' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
   content: string;
   model?: string;
   status_code?: number;
@@ -158,6 +158,11 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
         };
         lastOut = outItem;
         items.push(outItem);
+        break;
+      }
+      case 'system': {
+        lastOut = null;
+        items.push({ kind: 'system', key: key++, content: msg.entry.content, ts: msg.entry.ts });
         break;
       }
       case 'tool_call': {

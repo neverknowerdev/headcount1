@@ -38,13 +38,23 @@ describe('normalizeRunLogEntries', () => {
     expect(rows.every(row => row.entry.content.startsWith('{') ? row.entry.type !== 'info' : true)).toBe(true);
   });
 
-  it('also accepts viewer message wrappers', () => {
+    it('also accepts viewer message wrappers', () => {
     const rows = normalizeRunLogEntries([
       { id: 4, entry: { type: 'message', seq: 4, content: JSON.stringify({ role: 'assistant', content: 'hello' }) } },
     ]);
 
     expect(rows).toHaveLength(1);
     expect(rows[0].entry.type).toBe('response');
-    expect(rows[0].entry.content).toContain('hello');
-  });
+        expect(rows[0].entry.content).toContain('hello');
+    });
+
+    it('normalizes legacy system messages for structured rendering', () => {
+        const rows = normalizeRunLogEntries([
+            { type: 'info', content: JSON.stringify({ role: 'system', content: 'legacy prompt' }) },
+        ]);
+
+        expect(rows).toHaveLength(1);
+        expect(rows[0].entry.type).toBe('system');
+        expect(rows[0].entry.content).toContain('legacy prompt');
+    });
 });

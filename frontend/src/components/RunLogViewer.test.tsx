@@ -52,13 +52,17 @@ describe('RunLogViewer request/response identities', () => {
                         type: 'response',
                         content: JSON.stringify({ content: 'Provider response', tool_calls: [] }),
                     }),
+                    message(3, {
+                        type: 'info',
+                        content: JSON.stringify({ role: 'system', content: 'Legacy system prompt' }),
+                    }),
                 ]}
             />,
         );
 
-        fireEvent.click(screen.getByRole('button', { name: /System/ }));
-        expect(screen.getByTestId('json-block').textContent).toContain('System payload');
-        expect(screen.getByRole('button', { name: 'Copy System payload' })).toBeTruthy();
+        fireEvent.click(screen.getAllByRole('button', { name: /System/ })[0]);
+        expect(screen.getAllByTestId('json-block')[0].textContent).toContain('System payload');
+        expect(screen.getAllByRole('button', { name: 'Copy System payload' }).length).toBeGreaterThanOrEqual(1);
 
         fireEvent.click(screen.getByRole('button', { name: 'Raw JSON' }));
         fireEvent.click(screen.getByRole('button', { name: /LLM Provider/ }));
