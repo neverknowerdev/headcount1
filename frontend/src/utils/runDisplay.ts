@@ -1,13 +1,6 @@
-/** Resolve the human-facing agent name for a run, including legacy payloads. */
+/** Resolve the backend-provided human-facing identity for a run. */
 export function getRunAgentName(run: any): string | undefined {
-    const explicit = run?.agent?.name || run?.agent_name || run?.task?.agent?.name;
+    const explicit = run?.agent_name || run?.agent?.name || run?.task?.agent?.name;
     if (typeof explicit === 'string' && explicit.trim()) return explicit.trim();
-
-    // Older task-run payloads did not preload Agent. The generated run name
-    // still contains the selected role, so keep historical runs readable.
-    const runName = typeof run?.name === 'string' ? run.name : '';
-    const roleMatch = runName.match(/^[^-]+-\d+-(.+?)-\d+(?:-\d+)?$/);
-    if (roleMatch?.[1]) return roleMatch[1];
-    if (run?.kind === 'task_orchestrator' || /-orchestrator$/.test(runName)) return 'Orchestrator';
     return undefined;
 }

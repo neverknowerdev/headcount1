@@ -28,6 +28,10 @@ import (
 // an extra round trip to /runs/{id}/token-stats.
 type RunResponse struct {
 	db.Run
+	// AgentName is the UI identity of this session. An orchestrator is a
+	// control-plane session even when it executes with the CEO agent's model
+	// configuration, so it must not be presented as the CEO.
+	AgentName        string `json:"agent_name"`
 	IsLatest         bool
 	parsedEntries    []interface{}
 	parsedTokenStats interface{}
@@ -60,7 +64,11 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 }
 
 func toRunResponse(run db.Run) RunResponse {
-	resp := RunResponse{Run: run}
+	agentName := run.Agent.Name
+	if run.Kind == db.RunKindTaskOrchestrator {
+		agentName = "Orchestrator"
+	}
+	resp := RunResponse{Run: run, AgentName: agentName}
 	if run.LogEntries != "" {
 		_ = json.Unmarshal([]byte(run.LogEntries), &resp.parsedEntries)
 	}

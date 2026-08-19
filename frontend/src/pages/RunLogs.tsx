@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { TokenStatsBar } from '../components/RunLogViewer';
 import { buildAgentStats } from '../utils/runStats';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+import { getRunAgentName } from '../utils/runDisplay';
 
 const formatTokens = (n: number): string => {
     if (!n || n < 1000) return String(n || 0);
@@ -136,7 +137,7 @@ export const RunLogs: React.FC = () => {
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                         {children.length > 0 && (
                                             <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
                                         )}
@@ -158,7 +159,7 @@ export const RunLogs: React.FC = () => {
                                 <div className="border-t p-4 space-y-4">
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <InfoItem label="Status" value={<span className="capitalize">{r.status}</span>} />
-                                        <InfoItem label="Agent" value={r.agent?.name || '—'} />
+                                        <InfoItem label="Agent" value={getRunAgentName(r) || '—'} />
                                         <InfoItem label="Started" value={formatDateTime(r.started_at)} />
                                         <InfoItem label="Duration" value={formatDuration(r.started_at, r.ended_at)} />
                                         {r.latest_reported_status && (
@@ -191,7 +192,7 @@ export const RunLogs: React.FC = () => {
                                                         data-testid="child-session-link"
                                                         className="text-xs bg-white border rounded px-2 py-1 hover:bg-gray-100 flex items-center justify-between gap-2"
                                                     >
-                                                        <span className="truncate">{c.name || `#${c.id}`} {c.agent?.name ? `· ${c.agent.name}` : ''}</span>
+                                                        <span className="truncate">{c.name || `#${c.id}`} {getRunAgentName(c) ? `· ${getRunAgentName(c)}` : ''}</span>
                                                         <span className="text-gray-500 capitalize shrink-0">{c.status}</span>
                                                     </Link>
                                                 ))}
