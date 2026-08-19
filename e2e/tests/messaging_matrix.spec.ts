@@ -68,7 +68,11 @@ test.describe.serial('orchestrator messaging matrix', () => {
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-b-model', entries: [
             { tool_call: { id: 'b-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'Independent verification passed with the requested evidence.' } } },
-            { tool_call: { id: 'b-ask-owner', name: 'ask_task_owner', arguments: { question: 'What evidence should I prioritize?' } } },
+            // Agent A owns the task-owner question in this matrix. Agent B is
+            // deliberately an independent sibling: once A finishes, the
+            // shared task can leave in-progress and the passive orchestrator
+            // may stop accepting new owner questions, so B must not create a
+            // request after that lifecycle boundary.
             { tool_call: { id: 'b-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Agent B completed verification.', result_details: 'Agent B answered the orchestrator independently.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-ceo-model', entries: [
@@ -84,6 +88,21 @@ test.describe.serial('orchestrator messaging matrix', () => {
             const runs = await response.json();
             return runs.find((run: any) => run.kind === 'task_orchestrator')?.status;
         }, { timeout: 30_000 }).toBe('completed');
+
+        // The first worker may be the one that moves the shared task to
+        // in-review, which legitimately makes the passive orchestrator stop
+        // scheduling. That does not cancel a sibling that is already running;
+        // wait for the complete child tree before asserting its terminal
+        // statuses so teardown cannot race a still-finishing worker.
+        await expect.poll(async () => {
+            const response = await request.get(`/api/tasks/${task.id}/runs`);
+            const runs = await response.json();
+            const workers = runs.filter((run: any) => run.kind === 'agent_session');
+            const consultation = runs.find((run: any) => run.kind === 'ceo_consultation');
+            return workers.length === 2 &&
+                workers.every((run: any) => run.parent_run_id === runs.find((item: any) => item.kind === 'task_orchestrator')?.id && run.status === 'completed') &&
+                consultation?.status === 'completed';
+        }, { timeout: 30_000 }).toBeTruthy();
 
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
         const orchestrator = runs.find((run: any) => run.kind === 'task_orchestrator');
