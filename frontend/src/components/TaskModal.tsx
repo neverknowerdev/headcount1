@@ -564,13 +564,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         });
                                         timeline.sort((a, b) => a.time - b.time);
 
-                                        // Keep a human answer visually attached to the ask_user
-                                        // message that caused it, like a small messenger thread.
+                                        // Keep answers visually attached to the question that caused
+                                        // them, like a small messenger thread. Human questions use
+                                        // ask_user; worker questions routed through the orchestrator
+                                        // use ask_owner and are answered by the next agent update.
                                         const humanReplyByQuestion = new Map<number, any>();
                                         const pairedHumanReplyIds = new Set<number>();
-                                        comments.filter((comment: any) => comment.comment_type === 'ask_user').forEach((question: any) => {
+                                        comments.filter((comment: any) => ['ask_user', 'ask_owner'].includes(comment.comment_type)).forEach((question: any) => {
+                                            const expectedAuthor = question.comment_type === 'ask_user' ? 'human' : 'agent';
                                             const reply = comments
-                                                .filter((comment: any) => comment.author_type === 'human' && comment.id > question.id)
+                                                .filter((comment: any) => {
+                                                    if (comment.id <= question.id || comment.author_type !== expectedAuthor) return false;
+                                                    if (question.comment_type === 'ask_owner' && comment.run_id === question.run_id) return false;
+                                                    return !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(comment.comment_type);
+                                                })
                                                 .sort((a: any, b: any) => a.id - b.id)[0];
                                             if (reply) {
                                                 humanReplyByQuestion.set(question.id, reply);
@@ -591,7 +598,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 const isStatusChange = c.comment_type === 'status_change';
                                                 const isArtifact = c.comment_type === 'artifact_created';
                                                 const isTaskDone = c.comment_type === 'task_done';
-                                                const isAskUser = c.comment_type === 'ask_user';
+                                                const isAskQuestion = ['ask_user', 'ask_owner'].includes(c.comment_type);
                                                 const isAgent = c.author_type === 'agent';
 
                                                 // Artifact entry — compact card with expandable content
@@ -648,7 +655,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     );
                                                 }
 
-                                                if (isAskUser) {
+                                                if (isAskQuestion) {
                                                     const reply = humanReplyByQuestion.get(c.id);
                                                     return (
                                                         <div key={`dialogue-${c.id}`} className="max-w-[92%] space-y-2" data-testid="question-dialogue">
@@ -664,7 +671,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                             {reply ? (
                                                                 <div className="ml-8 rounded-lg border border-gray-200 bg-gray-100 p-3 text-sm text-gray-900">
                                                                     <div className="mb-1 flex items-center gap-2 text-xs font-bold text-gray-500">
-                                                                        <span>👤 You</span>
+                                                                        <span>{getActivityAuthorLabel(reply, runs)}</span>
                                                                         <span className="font-normal ml-auto">{new Date(reply.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
                                                                     </div>
                                                                     <span className="whitespace-pre-wrap">{reply.content}</span>
@@ -692,7 +699,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
                                                 let bubbleClass = 'bg-indigo-50 border border-indigo-100 text-gray-800';
                                                 if (isTaskDone) bubbleClass = 'bg-green-50 border border-green-200 text-gray-800';
-                                                else if (isAskUser) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
+                                                else if (isAskQuestion) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
                                                 else if (!isAgent) bubbleClass = 'bg-gray-200 text-gray-900';
 
                                                 const authorLabel = getActivityAuthorLabel(c, runs);
