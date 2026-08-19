@@ -49,6 +49,16 @@ interface LogEntry {
   status?: string;
 }
 
+// A run log is an explicit request/response exchange. Requests are emitted by
+// the agent/client, while responses are emitted by the configured LLM
+// provider. Keeping these identities separate prevents a provider response
+// from being mistaken for another agent action in the transcript.
+const LLM_PROVIDER_LABEL = 'LLM Provider';
+
+function requestActorName(entry: LogEntry, fallback?: string): string {
+  return entry.agent_name?.trim() || fallback?.trim() || 'Agent';
+}
+
 interface LogMessage {
   id: number;
   entry: LogEntry;
@@ -581,7 +591,7 @@ function InitHumanRow({ content, ts, rawMode }: { content: string; ts?: string; 
 
 // ─── InitAssistantRow: assistant message from initial context (AI comment) ────
 
-function InitAssistantRow({ content, ts, rawMode, agentName }: { content: string; ts?: string; rawMode: boolean; agentName?: string }) {
+function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const time = formatTime(ts);
   const preview = content.split('\n').find(l => l.trim()) || '';
@@ -597,7 +607,7 @@ function InitAssistantRow({ content, ts, rawMode, agentName }: { content: string
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <Bot size={13} className="text-indigo-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-indigo-600">{agentName || 'Agent'}</span>
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">{LLM_PROVIDER_LABEL}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-600">{previewShort}</span>
       </button>
@@ -645,7 +655,7 @@ function InRow({ msg, rawMode, agentName }: { msg: LogMessage; rawMode: boolean;
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <User size={13} className="text-blue-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-blue-600">{agentName || 'Agent'}</span>
+        <span className="shrink-0 text-xs font-semibold text-blue-600">{requestActorName(entry, agentName)}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-400 italic" title={previewText || ''}>
           {previewText || ''}
@@ -727,7 +737,7 @@ function InRow({ msg, rawMode, agentName }: { msg: LogMessage; rawMode: boolean;
 
 // ─── OutRow: collapsed response (OUT) ────────────────────────────────────────
 
-function OutRow({ msg, toolPairs, rawMode, agentName }: { msg: LogMessage; toolPairs: ToolPair[]; rawMode: boolean; agentName?: string }) {
+function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolPair[]; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const entry = msg.entry;
   const time = formatTime(entry.ts);
@@ -763,7 +773,7 @@ function OutRow({ msg, toolPairs, rawMode, agentName }: { msg: LogMessage; toolP
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <Bot size={13} className="text-indigo-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-indigo-600">{agentName || 'Agent'}</span>
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">{LLM_PROVIDER_LABEL}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-600" title={previewText}>
           {previewText}
@@ -1379,11 +1389,11 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           <div>
             {visibleItems.map(item => {
               if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} agentName={agentName} />;
-              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} agentName={agentName} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} />;
               if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
               if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} agentName={agentName} />;
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
-              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} agentName={agentName} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
               if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} agentName={agentName} />;
               return <InfoRow key={item.key} msg={item.msg} />;
@@ -1468,11 +1478,11 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
           <div>
             {grouped.map(item => {
               if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} agentName={agentName} />;
-              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} agentName={agentName} />;
+              if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
               if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
               if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} agentName={agentName} />;
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
-              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} agentName={agentName} />;
+              if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
               if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} agentName={agentName} />;
               return <InfoRow key={item.key} msg={item.msg} />;
