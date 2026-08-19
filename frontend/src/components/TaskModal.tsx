@@ -240,8 +240,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
 
-    const handleAddComment = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleAddComment = async () => {
         if (!newComment.trim() || !taskId) return;
         const content = newComment.trim();
         setIsPostingComment(true);
@@ -814,11 +813,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         </div>
                                     ) : (
                                         <>
-                                        <form onSubmit={handleAddComment} className="flex gap-2">
+                                        <div className="flex gap-2" data-testid="human-reply-form">
                                             <input
                                                 type="text"
                                                 value={newComment}
                                                 onChange={(e) => setNewComment(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleAddComment(); } }}
                                                 placeholder="Add a comment..."
                                                 className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
                                                 disabled={isPostingComment}
@@ -836,10 +836,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
                                                 </div>
                                             )}
-                                            <button type="submit" disabled={isPostingComment || !newComment.trim()} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
+                                            <button type="button" onClick={handleAddComment} disabled={isPostingComment || !newComment.trim()} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
                                                 <Send size={18} />
                                             </button>
-                                        </form>
+                                        </div>
                                         {commentError && <p className="mt-1 text-xs text-red-600">{commentError}</p>}
                                         </>
                                     )}
