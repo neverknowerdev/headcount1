@@ -220,10 +220,13 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 	// between scheduling and starting this sidecar. In that case the
 	// orchestrator must not create a model turn or become a stale candidate.
 	if current, getErr := e.q.GetTask(ctx, task.ID); getErr == nil && current.Status != db.TaskStatusInProgress {
-		if current.Status == db.TaskStatusDone {
-			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is already done", "completed")
+		if current.Status == db.TaskStatusBlocked && e.humanInputPending(ctx, task.ID) {
+			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "awaiting_human_input")
 		} else {
-			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "task is not in progress")
+			// A sidecar that has no executable task is dormant, not active. Keep
+			// the durable row terminal so restarts and E2E resets do not mistake a
+			// goroutine that already exited for a cancelable waiting run.
+			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is not in progress", "completed")
 		}
 		_ = e.q.UnlockTaskRun(ctx, task.ID)
 		return
@@ -343,10 +346,10 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 		if taskNow.Status != db.TaskStatusInProgress {
 			// Terminal/non-executable task state is control-plane truth. Do not
 			// let a late worker event or watchdog wake create more model work.
-			if taskNow.Status == db.TaskStatusDone && allWorkerSessionsTerminal(sessions) {
-				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is already done", "completed")
+			if taskNow.Status == db.TaskStatusBlocked && humanPending {
+				_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "awaiting_human_input")
 			} else {
-				_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "task is not in progress")
+				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is not in progress", "completed")
 			}
 			return
 		}

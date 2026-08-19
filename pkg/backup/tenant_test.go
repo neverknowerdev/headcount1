@@ -527,7 +527,7 @@ func TestTenantImportDedupTaskWithMissingTargetRefKey(t *testing.T) {
 	must(database.Create(&company).Error)
 	sprint := db.Sprint{CompanyID: company.ID, Name: "Sprint"}
 	must(database.Create(&sprint).Error)
-	createdAt := time.Date(2024, 2, 3, 4, 5, 6, 789000000, time.UTC)
+	createdAt := time.Date(2024, 2, 3, 4, 5, 6, 789123456, time.UTC)
 	task := db.Task{CompanyID: company.ID, SprintID: sprint.ID, Title: "same task", RefKey: "MIXED-1", Status: db.TaskStatusBacklog, Priority: "Normal", CreatedAt: createdAt, UpdatedAt: createdAt}
 	must(database.Create(&task).Error)
 
@@ -539,7 +539,12 @@ func TestTenantImportDedupTaskWithMissingTargetRefKey(t *testing.T) {
 	must(os.WriteFile(archivePath, archive.Bytes(), 0644))
 
 	// Simulate a target created before TaskRepository started generating ref_key.
-	must(database.Model(&db.Task{}).Where("id = ?", task.ID).Update("ref_key", "").Error)
+	must(database.Model(&db.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"ref_key": "",
+		// Simulate PostgreSQL's microsecond timestamp precision in a legacy
+		// target while the archive retains nanoseconds.
+		"created_at": createdAt.Truncate(time.Microsecond),
+	}).Error)
 	stats, err := ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
 	if err != nil {
 		t.Fatalf("ImportTenant: %v", err)

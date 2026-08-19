@@ -610,25 +610,48 @@ func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64
 		if err != nil {
 			return 0, false
 		}
-		where := "company_id = ? AND sprint_id = ? AND title = ?"
-		args := []interface{}{r["company_id"], r["sprint_id"], title}
+		parentClause := "parent_id IS NULL"
+		parentArgs := []interface{}{}
 		if parentID := asInt64(r["parent_id"]); parentID != 0 {
-			where += " AND parent_id = ?"
-			args = append(args, parentID)
-		} else {
-			where += " AND parent_id IS NULL"
+			parentClause = "parent_id = ?"
+			parentArgs = append(parentArgs, parentID)
 		}
-		var candidates []struct {
-			ID        int64
-			CreatedAt time.Time
-		}
-		if err := tx.Table("tasks").Select("id, created_at").Where(where, args...).Find(&candidates).Error; err != nil {
+
+		// PostgreSQL persists timestamps at microsecond precision while an
+		// archive can contain nanoseconds. Compare with a one-microsecond
+		// tolerance instead of requiring Go's time.Time values to be byte-for-
+		// byte equal. The sprint-scoped query is preferred; the second query is
+		// for legacy databases where a sprint reference was not preserved, and
+		// remains safe because the creation timestamp and parent scope are still
+		// part of the identity.
+		findTaskCandidate := func(where string, args ...interface{}) (int64, bool) {
+			var candidates []struct {
+				ID        int64
+				CreatedAt time.Time
+			}
+			if err := tx.Table("tasks").Select("id, created_at").Where(where, args...).Find(&candidates).Error; err != nil {
+				return 0, false
+			}
+			for _, candidate := range candidates {
+				if absDuration(candidate.CreatedAt.Sub(createdAtTime)) <= time.Microsecond {
+					return candidate.ID, true
+				}
+			}
 			return 0, false
 		}
-		for _, candidate := range candidates {
-			if candidate.CreatedAt.Equal(createdAtTime) {
-				return candidate.ID, true
-			}
+
+		where := "company_id = ? AND sprint_id = ? AND title = ? AND " + parentClause
+		args := []interface{}{r["company_id"], r["sprint_id"], title}
+		args = append(args, parentArgs...)
+		if existing, found := findTaskCandidate(where, args...); found {
+			return existing, true
+		}
+
+		where = "company_id = ? AND title = ? AND " + parentClause
+		args = []interface{}{r["company_id"], title}
+		args = append(args, parentArgs...)
+		if existing, found := findTaskCandidate(where, args...); found {
+			return existing, true
 		}
 		return 0, false
 	case "runs":
@@ -1171,6 +1194,13 @@ func orNone(ids []int64) []int64 {
 func strVal(v interface{}) string {
 	s, _ := v.(string)
 	return s
+}
+
+func absDuration(d time.Duration) time.Duration {
+	if d < 0 {
+		return -d
+	}
+	return d
 }
 
 func dirExists(p string) bool {
