@@ -245,6 +245,12 @@ function renderAsText(content: string): string {
         .join('\n');
       if (texts) return texts;
     }
+    if (parsed && typeof parsed === 'object') {
+      const entries = Object.entries(parsed)
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
+      if (entries.length > 0) return entries.join('\n');
+    }
   } catch {}
   return content;
 }
@@ -329,6 +335,11 @@ function getAgentMessage(content: string): {
 } {
   try {
     const parsed = JSON.parse(content);
+    if (parsed.role === 'assistant') {
+      const text = stringifyMessageContent(parsed.content);
+      const toolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+      return { text: text || null, reasoning: parsed.reasoning || null, toolCalls, tokens: parsed.tokens || null };
+    }
     if (parsed.parts && Array.isArray(parsed.parts)) {
       const textParts = parsed.parts.filter((p: any) => p.type === 'text' && p.text).map((p: any) => p.text);
       const toolCalls = parsed.parts.filter((p: any) => p.type === 'tool_call' || p.tool_call).map((p: any) => p.tool_call || p);
@@ -415,8 +426,43 @@ function getToolCallPreview(entry: LogEntry): string {
     if (args.question) return String(args.question);
     if (args.filename) return String(args.filename);
     if (args.title) return String(args.title);
+    if (args.agent_name) return String(args.agent_name);
+    if (args.session_id) return `session #${args.session_id}`;
+    if (args.recipient) return String(args.recipient);
+    if (args.message) return String(args.message);
+    if (args.reason) return String(args.reason);
   } catch {}
   return entry.tool_name || 'tool call';
+}
+
+function getArgsPreview(args: any): string {
+  if (!args || typeof args !== 'object') return '';
+  return String(
+    args.filePath || args.command || args.pattern || args.status || args.question ||
+    args.filename || args.title || args.agent_name ||
+    (args.session_id ? `session #${args.session_id}` : '') || args.recipient ||
+    args.message || args.reason || ''
+  );
+}
+
+function ToolArguments({ data }: { data: string }) {
+  let parsed: any;
+  try { parsed = JSON.parse(data); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100">{data}</pre>;
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) return <span className="text-xs text-gray-500">No parameters</span>;
+  return (
+    <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs bg-amber-50/50 rounded p-2 border border-amber-100">
+      {entries.map(([key, value]) => (
+        <React.Fragment key={key}>
+          <dt className="font-mono font-semibold text-amber-700">{key}</dt>
+          <dd className="text-gray-700 whitespace-pre-wrap break-words min-w-0">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</dd>
+        </React.Fragment>
+      ))}
+    </dl>
+  );
 }
 
 // ─── SystemRow: system prompt ─────────────────────────────────────────────────
@@ -826,7 +872,7 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
   const { Icon, color, bg } = getToolIcon(name);
   const callPreview = call ? getToolCallPreview(call.entry) : '';
   const respFirstLine = resp
-    ? (resp.entry.content.split('\n').find(l => l.trim()) || '').slice(0, 60)
+    ? (renderAsText(resp.entry.content).split('\n').find(l => l.trim()) || '').slice(0, 80)
     : '';
   const respTokens = resp?.entry.output_tokens || 0;
 
@@ -851,7 +897,7 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
           {call && (
             <div>
               <div className="text-xs text-amber-600 font-medium mb-0.5 pl-1">Call</div>
-              <JsonBlock data={call.entry.content} />
+              <ToolArguments data={call.entry.content} />
             </div>
           )}
           {resp && (
@@ -995,13 +1041,13 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
         </div>
         <span className={`font-mono font-medium ${color}`}>{name}</span>
         <span className="text-gray-500 truncate flex-1">
-          {(argsObject as any).filePath || (argsObject as any).command || (argsObject as any).pattern || (argsObject as any).status || (argsObject as any).question || (argsObject as any).filename || (argsObject as any).title || ''}
+            {getArgsPreview(argsObject)}
         </span>
       </button>
       {expanded && (
         <div className="px-3 pb-2">
           <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100">
-            {argsStr}
+            <ToolArguments data={argsStr} />
           </pre>
         </div>
       )}
