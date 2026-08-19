@@ -6,6 +6,7 @@ import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { getActivityAuthorLabel } from '../utils/activityDisplay';
 import { RunLogViewer } from './RunLogViewer';
 import { TaskRelations } from './TaskRelations';
 import { useWebSocket, wsUrl } from '../useWebSocket';
@@ -650,7 +651,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 else if (isAskUser) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
                                                 else if (!isAgent) bubbleClass = 'bg-gray-200 text-gray-900';
 
-                                                const authorLabel = isAgent ? '🤖 Agent' : '👤 You';
+                                                const authorLabel = getActivityAuthorLabel(c, runs);
 
                                                 const statusLabel: Record<string, string> = {
                                                     'to-do': 'To Do', 'in-progress': 'In Progress',
@@ -746,9 +747,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     ) : (
                                                                         <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
                                                                     )}
-                                                                    {r.agent?.name && (
+                                                                    {(r.agent?.name || r.agent_name) && (
                                                                         <span className="font-normal bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" title={`Agent: ${r.agent.name}`}>
-                                                                            {r.agent.name}
+                                                                            {r.agent?.name || r.agent_name}
                                                                         </span>
                                                                     )}
                                                                 </span>
