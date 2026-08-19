@@ -15,6 +15,7 @@ const ORCHESTRATOR_TOOL_NAME = 'run_new_session';
 const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
 const ORCHESTRATOR_TOOL_ARGS = {
     agent_name: 'E2E Agent',
+    title: 'Complete E2E task',
     prompt: 'Complete the assigned task and finish the task when the implementation is ready for review.',
 };
 const COMPLETION_TEXT = 'Task is now in review. All done.';
