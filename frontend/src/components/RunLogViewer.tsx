@@ -522,10 +522,18 @@ function ToolArguments({ data }: { data: string }) {
 
 // ─── SystemRow: system prompt ─────────────────────────────────────────────────
 
+function payloadPreview(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed?.content === 'string') return parsed.content;
+  } catch {}
+  return content;
+}
+
 function SystemRow({ content, ts }: { content: string; ts?: string }) {
   const [expanded, setExpanded] = useState(false);
   const time = formatTime(ts);
-  const preview = content.split('\n').find(l => l.trim()) || '';
+  const preview = payloadPreview(content).split('\n').find(l => l.trim()) || '';
   const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
 
   return (
