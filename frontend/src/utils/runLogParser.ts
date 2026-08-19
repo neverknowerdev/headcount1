@@ -33,7 +33,8 @@ export function normalizeRunLogEntries(entries: any[]): ParsedRunLogMessage[] {
     const messages: ParsedRunLogMessage[] = [];
     let id = 0;
     for (const original of entries || []) {
-        const entry = original && typeof original === 'object' ? original : { type: 'info', content: String(original ?? '') };
+        const source = original && typeof original === 'object' && original.entry ? original.entry : original;
+        const entry = source && typeof source === 'object' ? source : { type: 'info', content: String(source ?? '') };
         const content = typeof entry.content === 'string' ? entry.content.trim() : '';
         let parsed: Record<string, any> | null = null;
         if (content.startsWith('{')) {

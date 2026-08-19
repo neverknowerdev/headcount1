@@ -1329,7 +1329,10 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
-  const displayMessages = useMemo(() => normalizeRunLogEntries(messages || []) as LogMessage[], [messages]);
+  const displayMessages = useMemo(
+    () => normalizeRunLogEntries((messages || []).map((message: any) => message?.entry ?? message)) as LogMessage[],
+    [messages],
+  );
   const grouped = useMemo(() => groupMessages(displayMessages), [displayMessages]);
   const visibleItems = compact ? grouped.slice(-10) : grouped;
 
