@@ -216,13 +216,47 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
 
 // ─── Utility functions ────────────────────────────────────────────────────────
 
-function JsonBlock({ data }: { data: string }) {
+function JsonBlock({ data, label = 'JSON' }: { data: string; label?: string }) {
   let formatted = data;
-  try { formatted = JSON.stringify(JSON.parse(data), null, 2); } catch {}
+  let isJson = false;
+  try {
+    formatted = JSON.stringify(JSON.parse(data), null, 2);
+    isJson = true;
+  } catch {}
+
+  const [copied, setCopied] = useState(false);
+  const copy = async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard?.writeText(formatted);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access is optional (for example in a restricted browser
+      // context); the payload remains fully readable without it.
+    }
+  };
+
   return (
-    <pre className="p-2 text-xs font-mono text-gray-800 bg-gray-50 rounded overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto border border-gray-200">
-      {formatted}
-    </pre>
+    <div className="rounded-lg overflow-hidden border border-slate-700 bg-slate-950 shadow-sm" data-testid="json-block">
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-slate-900 text-[11px] text-slate-300">
+        <span className="font-semibold tracking-wide">{label}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-500">{isJson ? 'formatted' : 'text payload'}</span>
+          <button
+            type="button"
+            onClick={copy}
+            className="px-1.5 py-0.5 rounded border border-slate-600 hover:bg-slate-800 text-slate-200"
+            aria-label={`Copy ${label}`}
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+      </div>
+      <pre className="p-3 text-xs leading-5 font-mono text-slate-100 bg-slate-950 overflow-x-auto whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+        {formatted}
+      </pre>
+    </div>
   );
 }
 
@@ -505,9 +539,7 @@ function SystemRow({ content, ts }: { content: string; ts?: string }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 bg-purple-50/10">
-          <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words font-mono bg-white border border-purple-100 rounded-lg p-3 max-h-80 overflow-y-auto">
-            {content}
-          </pre>
+          <div className="pl-7"><JsonBlock data={content} label="System payload" /></div>
         </div>
       )}
     </div>
@@ -545,7 +577,7 @@ function InitUserRow({ content, ts, rawMode, agentName }: { content: string; ts?
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Request payload" /></div>
           )}
         </div>
       )}
@@ -584,7 +616,7 @@ function InitHumanRow({ content, ts, rawMode }: { content: string; ts?: string; 
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Human message" /></div>
           )}
         </div>
       )}
@@ -623,7 +655,7 @@ function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: stri
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Provider message" /></div>
           )}
         </div>
       )}
@@ -723,7 +755,7 @@ function InRow({ msg, rawMode, agentName }: { msg: LogMessage; rawMode: boolean;
               </div>
               <div className="divide-y divide-green-50">
                 {parsed.toolResults.map((tr, i) => (
-                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} />
+                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -848,7 +880,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
               </div>
               <div className="divide-y divide-amber-50">
                 {toolPairs.map((pair, i) => (
-                  <ToolPairRow key={i} pair={pair} />
+                  <ToolPairRow key={i} pair={pair} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -862,7 +894,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
               </div>
               <div className="divide-y divide-amber-50">
                 {parsedToolCalls.map((tc: any, i: number) => (
-                  <ToolCallRow key={i} toolCall={tc} />
+                  <ToolCallRow key={i} toolCall={tc} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -880,7 +912,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
 
 // ─── ToolPairRow: call + response nested inside OutRow ────────────────────────
 
-function ToolPairRow({ pair }: { pair: ToolPair }) {
+function ToolPairRow({ pair, rawMode }: { pair: ToolPair; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const call = pair.call;
   const resp = pair.response;
@@ -913,7 +945,7 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
           {call && (
             <div>
               <div className="text-xs text-amber-600 font-medium mb-0.5 pl-1">Call</div>
-              <ToolArguments data={call.entry.content} />
+              {rawMode ? <JsonBlock data={call.entry.content} label="Tool call arguments" /> : <ToolArguments data={call.entry.content} />}
             </div>
           )}
           {resp && (
@@ -921,9 +953,13 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
               <div className="text-xs text-green-600 font-medium mb-0.5 pl-1">
                 Response{respTokens > 0 ? ` (${formatTokens(respTokens)} tok)` : ''}
               </div>
-              <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
-                {renderAsText(resp.entry.content)}
-              </pre>
+              {rawMode ? (
+                <JsonBlock data={resp.entry.content} label="Tool response" />
+              ) : (
+                <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+                  {renderAsText(resp.entry.content)}
+                </pre>
+              )}
             </div>
           )}
         </div>
@@ -983,9 +1019,7 @@ function ErrorRow({ msg }: { msg: LogMessage }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 pl-10">
-          <pre className="text-xs text-red-800 whitespace-pre-wrap break-words bg-red-100/50 rounded p-2 border border-red-200">
-            {entry.content}
-          </pre>
+          <JsonBlock data={entry.content} label="Error payload" />
         </div>
       )}
     </div>
@@ -1008,7 +1042,7 @@ function InfoRow({ msg }: { msg: LogMessage }) {
 
 // ─── ToolResultRow (inside InRow expanded) ────────────────────────────────────
 
-function ToolResultRow({ name, content, preview }: { name: string; content: string; preview: string }) {
+function ToolResultRow({ name, content, preview, rawMode }: { name: string; content: string; preview: string; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const { Icon, color, bg } = getToolIcon(name);
   return (
@@ -1026,9 +1060,13 @@ function ToolResultRow({ name, content, preview }: { name: string; content: stri
       </button>
       {expanded && (
         <div className="px-3 pb-2">
-          <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
-            {renderAsText(content)}
-          </pre>
+          {rawMode ? (
+            <JsonBlock data={content} label={`${name} result`} />
+          ) : (
+            <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+              {renderAsText(content)}
+            </pre>
+          )}
         </div>
       )}
     </div>
@@ -1037,7 +1075,7 @@ function ToolResultRow({ name, content, preview }: { name: string; content: stri
 
 // ─── ToolCallRow (inside OutRow expanded, parsed from response content) ───────
 
-function ToolCallRow({ toolCall }: { toolCall: any }) {
+function ToolCallRow({ toolCall, rawMode }: { toolCall: any; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const name = toolCall.name || toolCall.function?.name || 'unknown';
   const { Icon, color, bg } = getToolIcon(name);
@@ -1062,9 +1100,7 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
       </button>
       {expanded && (
         <div className="px-3 pb-2">
-          <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100">
-            <ToolArguments data={argsStr} />
-          </pre>
+          {rawMode ? <JsonBlock data={argsStr} label="Tool call arguments" /> : <ToolArguments data={argsStr} />}
         </div>
       )}
     </div>
