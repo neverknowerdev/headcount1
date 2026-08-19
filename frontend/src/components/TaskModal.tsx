@@ -563,6 +563,20 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         });
                                         timeline.sort((a, b) => a.time - b.time);
 
+                                        // Keep a human answer visually attached to the ask_user
+                                        // message that caused it, like a small messenger thread.
+                                        const humanReplyByQuestion = new Map<number, any>();
+                                        const pairedHumanReplyIds = new Set<number>();
+                                        comments.filter((comment: any) => comment.comment_type === 'ask_user').forEach((question: any) => {
+                                            const reply = comments
+                                                .filter((comment: any) => comment.author_type === 'human' && comment.id > question.id)
+                                                .sort((a: any, b: any) => a.id - b.id)[0];
+                                            if (reply) {
+                                                humanReplyByQuestion.set(question.id, reply);
+                                                pairedHumanReplyIds.add(reply.id);
+                                            }
+                                        });
+
                                         if (timeline.length === 0) {
                                             return <p className="text-sm text-gray-500 italic">No activity yet.</p>;
                                         }
@@ -570,6 +584,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         return timeline.map((item) => {
                                             if (item.type === 'comment') {
                                                 const c = item.data;
+                                                if (pairedHumanReplyIds.has(c.id)) return null;
                                                 const ts = new Date(c.created_at);
                                                 const timeStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                                                 const isStatusChange = c.comment_type === 'status_change';
@@ -628,6 +643,34 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                             <span>→</span>
                                                             <span className="px-1.5 py-0.5 rounded bg-indigo-50 text-indigo-600 font-medium">{toLabel}</span>
                                                             <span className="text-gray-300">{timeStr}</span>
+                                                        </div>
+                                                    );
+                                                }
+
+                                                if (isAskUser) {
+                                                    const reply = humanReplyByQuestion.get(c.id);
+                                                    return (
+                                                        <div key={`dialogue-${c.id}`} className="max-w-[92%] space-y-2" data-testid="question-dialogue">
+                                                            <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-gray-800">
+                                                                <div className="mb-1 flex items-center gap-2 text-xs font-bold text-gray-500">
+                                                                    <span>{getActivityAuthorLabel(c, runs)}</span>
+                                                                    <span className="font-normal ml-auto">{timeStr}</span>
+                                                                </div>
+                                                                <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1">
+                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.content}</ReactMarkdown>
+                                                                </div>
+                                                            </div>
+                                                            {reply ? (
+                                                                <div className="ml-8 rounded-lg border border-gray-200 bg-gray-100 p-3 text-sm text-gray-900">
+                                                                    <div className="mb-1 flex items-center gap-2 text-xs font-bold text-gray-500">
+                                                                        <span>👤 You</span>
+                                                                        <span className="font-normal ml-auto">{new Date(reply.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                                                                    </div>
+                                                                    <span className="whitespace-pre-wrap">{reply.content}</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="ml-8 text-xs italic text-amber-700">Waiting for a reply…</div>
+                                                            )}
                                                         </div>
                                                     );
                                                 }
