@@ -246,7 +246,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if (!newComment.trim() || !taskId) return;
         const content = newComment.trim();
         const hasPendingHumanQuestion = comments.some((question: any) =>
-            question.comment_type === 'ask_user' &&
+            ['ask_user', 'ask_owner'].includes(question.comment_type) &&
             question.author_type === 'agent' &&
             !comments.some((answer: any) =>
                 answer.id > question.id && answer.author_type === 'human' &&
@@ -350,7 +350,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     if (taskId && !task) return null;
 
     const hasPendingHumanQuestion = comments.some((question: any) =>
-        question.comment_type === 'ask_user' &&
+        ['ask_user', 'ask_owner'].includes(question.comment_type) &&
         question.author_type === 'agent' &&
         !comments.some((answer: any) =>
             answer.id > question.id && answer.author_type === 'human' &&
