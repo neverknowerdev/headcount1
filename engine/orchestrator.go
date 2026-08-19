@@ -14,6 +14,7 @@ import (
 	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
+	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
@@ -788,6 +789,21 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 	if err != nil {
 		return "", err
 	}
+	rootTask, err := e.q.GetRootTask(ctx, source.TaskID)
+	if err != nil {
+		rootTask = forkTask
+	}
+	company, err := e.q.GetCompany(ctx, rootTask.CompanyID)
+	if err != nil {
+		return "", err
+	}
+	manager := filesystem.NewManager(loadSettings().BasePath)
+	sourceWorkspace := strings.TrimSpace(source.WorkspacePath)
+	if sourceWorkspace == "" {
+		// Runs created before durable workspace persistence use the task's
+		// canonical worktree. Keep this fallback for safe upgrades.
+		sourceWorkspace = manager.GetTaskWorktreePath(company, rootTask)
+	}
 	parentID, rootID := orchestratorRunID, orchestratorRunID
 	newRun, err := e.q.CreateRun(ctx, db.Run{
 		TaskID: source.TaskID, AgentID: source.AgentID, Kind: db.RunKindAgentSession, ParentRunID: &parentID, RootRunID: &rootID,
@@ -796,6 +812,18 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 	if err != nil {
 		return "", fmt.Errorf("create forked session: %w", err)
 	}
+	forkWorkspace := manager.Paths().RunWorkspaceDir(company.ShortName, rootTask.ID, newRun.ID)
+	if err := copyWorkspace(sourceWorkspace, forkWorkspace); err != nil {
+		message := fmt.Sprintf("copy source workspace for fork: %v", err)
+		e.failRun(ctx, newRun.ID, message)
+		return "", fmt.Errorf("fork session %d: %s", newRun.ID, message)
+	}
+	if err := e.q.UpdateRunWorkspacePath(ctx, newRun.ID, forkWorkspace); err != nil {
+		message := fmt.Sprintf("persist fork workspace: %v", err)
+		e.failRun(ctx, newRun.ID, message)
+		return "", fmt.Errorf("fork session %d: %s", newRun.ID, message)
+	}
+	newRun.WorkspacePath = forkWorkspace
 	forkTask.AgentID = &source.AgentID
 	// The orchestrator keeps the task lock for the whole worker tree. A forked
 	// child is therefore an auxiliary session like run_new_session: it must not
@@ -806,32 +834,8 @@ func (e *NativeEngine) orchestratorFork(ctx context.Context, orchestratorRunID, 
 		SkipTaskLock:       true,
 		PrecreatedRun:      &newRun,
 	}
-	if historyContainsToolCalls(history) {
-		options.ReplayHistory = history
-		replayReady := make(chan error, 1)
-		options.ForkReplayReady = replayReady
-		go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, options)
-		select {
-		case replayErr := <-replayReady:
-			if replayErr != nil {
-				return "", fmt.Errorf("fork session %d tool replay: %w", newRun.ID, replayErr)
-			}
-		case <-ctx.Done():
-			return "", ctx.Err()
-		}
-		return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil
-	}
 	go e.executeSession(context.Background(), forkTask, sessionModeImplement, nil, nil, options)
 	return fmt.Sprintf("forked session %d from session %d at safe message %d", newRun.ID, sessionID, safeMessageID), nil
-}
-
-func historyContainsToolCalls(history []aicli.Message) bool {
-	for _, message := range history {
-		if message.Role == "assistant" && len(message.ToolCalls) > 0 {
-			return true
-		}
-	}
-	return false
 }
 
 func orchestratorFingerprint(s []tools.ManagedSessionSummary) string {

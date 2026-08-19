@@ -78,7 +78,10 @@ func (e *NativeEngine) prepareWorkerEnvironment(ctx context.Context, task *db.Ta
 	environment.provider = options.WorkerProvider
 	environment.model = options.WorkerModel
 	environment.groupMode = isModelGroupProxyBaseURL(environment.provider.BaseUrl)
-	environment.workspacePath = options.WorkerWorkspace
+	environment.workspacePath = strings.TrimSpace(run.WorkspacePath)
+	if environment.workspacePath == "" {
+		environment.workspacePath = options.WorkerWorkspace
+	}
 	environment.readOnlyDirs = append([]string(nil), options.WorkerReadOnlyDirs...)
 	settings := loadSettings()
 	manager := filesystem.NewManager(settings.BasePath)
@@ -92,9 +95,13 @@ func (e *NativeEngine) prepareWorkerEnvironment(ctx context.Context, task *db.Ta
 		environment.cleanups = append(environment.cleanups, func() { _ = logger.Close() })
 		_ = e.q.UpdateRunLogFilePath(ctx, run.ID, logger.FilePath())
 	}
-	// Cleanup is registered last so all terminal paths, including recovery
-	// cleanup, remove the unique temporary writable directory.
-	environment.cleanups = append(environment.cleanups, func() { _ = os.RemoveAll(environment.workspacePath) })
+	if run.WorkspacePath != environment.workspacePath {
+		run.WorkspacePath = environment.workspacePath
+		if err := e.q.UpdateRunWorkspacePath(ctx, run.ID, environment.workspacePath); err != nil {
+			environment.close()
+			return environment, run, fmt.Errorf("persist worker workspace: %w", err)
+		}
+	}
 	return environment, run, nil
 }
 
@@ -133,21 +140,25 @@ func (e *NativeEngine) runWorker(ctx context.Context, parent db.Run, task db.Tas
 	}
 	settings := loadSettings()
 	manager := filesystem.NewManager(settings.BasePath)
-	parentWorkspace := manager.GetTaskWorktreePath(company, rootTask)
-	artifactDir := manager.Paths().TaskArtifactsDir(company.ShortName, rootTask.ID)
-	workerDir, err := os.MkdirTemp("", "headcount1-helper-worker-")
-	if err != nil {
-		return "", err
+	parentWorkspace := strings.TrimSpace(parent.WorkspacePath)
+	if parentWorkspace == "" {
+		parentWorkspace = manager.GetTaskWorktreePath(company, rootTask)
 	}
+	artifactDir := manager.Paths().TaskArtifactsDir(company.ShortName, rootTask.ID)
 	parentID, rootID := parent.ID, parent.ID
 	if parent.RootRunID != nil {
 		rootID = *parent.RootRunID
 	}
 	worker, err := e.q.CreateRun(ctx, db.Run{TaskID: task.ID, AgentID: parent.AgentID, Kind: db.RunKindHelperWorker, ParentRunID: &parentID, RootRunID: &rootID, Status: "running", StartedAt: time.Now()})
 	if err != nil {
-		_ = os.RemoveAll(workerDir)
 		return "", err
 	}
+	workerDir := manager.Paths().RunWorkspaceDir(company.ShortName, rootTask.ID, worker.ID)
+	if err := e.q.UpdateRunWorkspacePath(ctx, worker.ID, workerDir); err != nil {
+		e.failRun(ctx, worker.ID, fmt.Sprintf("persist worker workspace: %v", err))
+		return "", err
+	}
+	worker.WorkspacePath = workerDir
 	workerTask := task
 	workerTask.AgentID = &parent.AgentID
 	workerParent := &parentSession{parentRunID: parent.ID, rootRunID: rootID, rootTaskID: rootTask.ID}

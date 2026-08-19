@@ -32,6 +32,7 @@ type TaskQuerier interface {
 	CreateTask(ctx context.Context, t Task) (Task, error)
 	UpdateTask(ctx context.Context, t Task) (Task, error)
 	GetTask(ctx context.Context, id int32) (Task, error)
+	ListAllTasks(ctx context.Context) ([]Task, error)
 }
 
 type TaskRelationQuerier interface {
@@ -66,6 +67,7 @@ type RunQuerier interface {
 	CreateRun(ctx context.Context, r Run) (Run, error)
 	UpdateRunLog(ctx context.Context, id int32, content string, status string) error
 	UpdateRunSession(ctx context.Context, id int32, sessionID string) error
+	UpdateRunWorkspacePath(ctx context.Context, id int32, workspacePath string) error
 	GetRun(ctx context.Context, id int32) (Run, error)
 	GetRunWithTask(ctx context.Context, runID int32) (Run, Task, error)
 	GetRunBySessionID(ctx context.Context, sessionID string) (Run, error)

@@ -68,6 +68,13 @@ func (p Paths) WorktreeDir(companyShortName string, taskID int32) string {
 	return filepath.Join(p.CompanyWorkspaceDir(companyShortName), fmt.Sprintf("task-%d", taskID))
 }
 
+// RunWorkspaceDir is a durable isolated workspace for a forked or helper
+// session. It lives beside the task worktree so copying a task worktree into
+// it never walks into its own destination.
+func (p Paths) RunWorkspaceDir(companyShortName string, taskID, runID int32) string {
+	return filepath.Join(p.CompanyWorkspaceDir(companyShortName), fmt.Sprintf("session-task-%d-run-%d", taskID, runID))
+}
+
 func (p Paths) ArtifactsDir() string { return filepath.Join(p.Base, "artifacts") }
 func (p Paths) CompanyArtifactsDir(companyShortName string) string {
 	return filepath.Join(p.ArtifactsDir(), companyShortName)

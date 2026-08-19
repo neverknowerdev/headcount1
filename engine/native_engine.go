@@ -9,7 +9,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"agent-orchestrator/db"
@@ -27,37 +26,6 @@ import (
 )
 
 const runStatusCompleted = "completed"
-
-// These tools mutate the control plane or wait for a live participant. Their
-// persisted results already describe the source session's completed state;
-// replaying them would create duplicate tasks, messages, workers, or terminal
-// transitions in the fork. Stateful workspace/external tools are still
-// executed through the fork's fresh registry below.
-var forkReplayRecordedOnly = map[string]struct{}{
-	string(aicli.ToolAskTaskOwner):  {},
-	string(aicli.ToolAnswerMessage): {},
-	string(aicli.ToolAskHuman):      {},
-	string(aicli.ToolReportStatus):  {},
-	string(aicli.ToolFinishTask):    {},
-	string(aicli.ToolFinishWork):    {},
-	string(aicli.ToolCreateTask):    {},
-	string(aicli.ToolCreateSubtask): {},
-	string(aicli.ToolGetTask):       {},
-	string(aicli.ToolRunWorker):     {},
-	string(aicli.ToolWorkerList):    {},
-	string(aicli.ToolGetWorkerInfo): {},
-	string(aicli.ToolStopWorker):    {},
-	string(aicli.ToolAskCEO):        {},
-}
-
-func replayForkHistory(ctx context.Context, registry *aicli.Registry, history []aicli.Message) error {
-	return aicli.ReplayCompletedToolCalls(ctx, history, func(replayCtx context.Context, replay aicli.ToolReplay) error {
-		if _, recordedOnly := forkReplayRecordedOnly[replay.Call.Function.Name]; recordedOnly {
-			return nil
-		}
-		return aicli.ReplayRegistryToolCall(replayCtx, replay, registry)
-	})
-}
 
 const (
 	executionModeImplementation = "implementation"
@@ -102,13 +70,9 @@ type ResumeOptions struct {
 // adding persistence-only columns to Run. SeedHistory is used by forks; the
 // task-context flag controls whether a fresh session receives the task prompt.
 type sessionOptions struct {
-	SeedHistory []aicli.Message
-	// ReplayHistory is the safe fork prefix whose completed stateful tool calls
-	// must be re-applied after the new session environment is prepared.
-	ReplayHistory []aicli.Message
-	// ForkReplayReady receives the synchronous replay result so fork_session
-	// can return setup/replay failures to the orchestrator as a tool error.
-	ForkReplayReady    chan<- error
+	// SeedHistory is the source conversation for a fork. The source workspace
+	// is copied before the new session starts, so tool calls are never replayed.
+	SeedHistory        []aicli.Message
 	Instruction        string
 	IncludeTaskContext bool
 	SkipTaskLock       bool
@@ -683,15 +647,6 @@ func (e *NativeEngine) ResumeEligibleSessions(ctx context.Context) {
 // built initial message list, and the existing Run row is reused. Delegated
 // sessions still require durable parent coordination before they can pause.
 func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode string, parent *parentSession, resumeRun *db.Run, options sessionOptions) string {
-	var replayReady sync.Once
-	signalReplayReady := func(err error) {
-		if options.ForkReplayReady == nil {
-			return
-		}
-		replayReady.Do(func() { options.ForkReplayReady <- err })
-	}
-	defer signalReplayReady(fmt.Errorf("fork session ended before tool replay completed"))
-
 	if task.AgentID == nil {
 		return "failed"
 	}
@@ -919,15 +874,6 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	listingCostTotal := integrations.listingCostTotal
 	listingCostByServer := integrations.listingCostByServer
 	defer integrations.close()
-	if options.ReplayHistory != nil {
-		replayErr := replayForkHistory(runCtx, registry, options.ReplayHistory)
-		signalReplayReady(replayErr)
-		if replayErr != nil {
-			e.failRun(ctx, run.ID, replayErr.Error())
-			return "failed"
-		}
-	}
-
 	// Determine agent mode and reasoning level from the database Agent row.
 	agentMode := aicli.ModeMessageHistory
 	reasoningLevel := agent.ReasoningLevel
@@ -1065,7 +1011,8 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	seedHistory := aicli.BuildHistory(systemPrompt, initialMessages)
 	if options.SeedHistory != nil {
 		// Forks already carry the source conversation's system message. Do not
-		// prepend a second system prompt or alter the replay boundary.
+		// prepend a second system prompt; the copied workspace is already at the
+		// same filesystem boundary as this conversation.
 		seedHistory = append([]aicli.Message(nil), options.SeedHistory...)
 	}
 	if resumeRun != nil {
@@ -1078,7 +1025,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 		seedHistory = loaded
 		e.logInfo(proxyLogger, fmt.Sprintf("Resuming session %d (%d saved messages)", run.ID, len(seedHistory)))
 	}
-	if options.ReplayHistory != nil {
+	if options.SeedHistory != nil {
 		// SeedHistory is the source conversation for a fork, so the freshly
 		// built system prompt is intentionally not prepended a second time.
 		// Rebase its runtime-only workdir/session metadata instead.

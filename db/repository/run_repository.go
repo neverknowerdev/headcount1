@@ -140,6 +140,10 @@ func (q *RunRepository) UpdateRunSession(ctx context.Context, id int32, sessionI
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }
 
+func (q *RunRepository) UpdateRunWorkspacePath(ctx context.Context, id int32, workspacePath string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("workspace_path", workspacePath).Error
+}
+
 func (q *RunRepository) UpdateRunLogFilePath(ctx context.Context, id int32, filePath string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("log_file_path", filePath).Error
 }

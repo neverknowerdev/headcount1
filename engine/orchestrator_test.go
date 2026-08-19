@@ -367,6 +367,8 @@ func TestGetSessionNestedStatusDepthIsBounded(t *testing.T) {
 }
 
 func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
+	basePath := t.TempDir()
+	t.Setenv("E2E_HEADCOUNT1_HOME", basePath)
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
@@ -381,13 +383,16 @@ func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	rootID := orchestrator.ID
 	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", orchestrator.ID).Update("root_run_id", rootID).Error)
 	logPath := filepath.Join(t.TempDir(), "source.jsonl")
+	sourceWorkspace := filepath.Join(basePath, "source-workspace")
+	require.NoError(t, os.MkdirAll(sourceWorkspace, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(sourceWorkspace, "tool-state.txt"), []byte("written before fork"), 0o644))
 	writeForkLog(t, logPath, []aicli.Message{
 		{Role: "system", Content: "task"},
 		{Role: "assistant", Content: "before"},
 		{Role: "assistant", ToolCalls: []aicli.ToolCall{{ID: "call-1", Type: "function", Function: aicli.FuncCall{Name: "write"}}}},
 		{Role: "tool", ToolCallID: "call-1", Content: "done"},
 	})
-	source := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed", ParentRunID: &rootID, RootRunID: &rootID, LogFilePath: logPath}
+	source := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed", ParentRunID: &rootID, RootRunID: &rootID, LogFilePath: logPath, WorkspacePath: sourceWorkspace}
 	require.NoError(t, database.Create(&source).Error)
 	// The orchestrator owns the task lock for the complete worker tree. The
 	// forked child must be allowed to run without trying to claim this lock.
@@ -406,6 +411,10 @@ func TestOrchestratorForkUsesNearestSafeMessageAndPreservesTree(t *testing.T) {
 	assert.Equal(t, source.AgentID, fork.AgentID)
 	assert.Equal(t, orchestrator.ID, *fork.ParentRunID)
 	assert.Equal(t, orchestrator.ID, *fork.RootRunID)
+	require.DirExists(t, fork.WorkspacePath)
+	content, err := os.ReadFile(filepath.Join(fork.WorkspacePath, "tool-state.txt"))
+	require.NoError(t, err)
+	assert.Equal(t, "written before fork", string(content))
 	loadedTask, err := db.New(database).GetTask(context.Background(), task.ID)
 	require.NoError(t, err)
 	require.NotNil(t, loadedTask.RunID)

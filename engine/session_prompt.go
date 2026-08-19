@@ -10,8 +10,6 @@ import (
 	"agent-orchestrator/engine/aicli"
 )
 
-const forkReplayNotice = "Fork replay: completed stateful tool calls have been restored before this session continues."
-
 // rebaseForkHistoryRuntimeMetadata keeps the source conversation intact while
 // replacing runtime-only values that must describe the newly-created fork.
 // Without this, a fork would inherit the source workdir and runtime session ID
@@ -23,7 +21,7 @@ func rebaseForkHistoryRuntimeMetadata(history []aicli.Message, runID int32, work
 			continue
 		}
 		lines := strings.Split(message.Content, "\n")
-		hasWorkdir, hasRuntimeID, hasForkNotice := false, false, false
+		hasWorkdir, hasRuntimeID := false, false
 		for lineIndex, line := range lines {
 			switch {
 			case strings.HasPrefix(line, "Workdir: "):
@@ -32,8 +30,6 @@ func rebaseForkHistoryRuntimeMetadata(history []aicli.Message, runID int32, work
 			case strings.HasPrefix(line, "Runtime session ID: "):
 				lines[lineIndex] = fmt.Sprintf("Runtime session ID: %d", runID)
 				hasRuntimeID = true
-			case strings.TrimSpace(line) == forkReplayNotice:
-				hasForkNotice = true
 			}
 		}
 		if !hasWorkdir {
@@ -42,14 +38,11 @@ func rebaseForkHistoryRuntimeMetadata(history []aicli.Message, runID int32, work
 		if !hasRuntimeID {
 			lines = append(lines, fmt.Sprintf("Runtime session ID: %d", runID))
 		}
-		if !hasForkNotice {
-			lines = append(lines, forkReplayNotice)
-		}
 		seeded[index].Content = strings.Join(lines, "\n")
 		return seeded
 	}
 	return append(seeded, aicli.Message{Role: "system", Content: fmt.Sprintf(
-		"Workdir: %s\nRuntime session ID: %d\n%s", workspacePath, runID, forkReplayNotice,
+		"Workdir: %s\nRuntime session ID: %d", workspacePath, runID,
 	)})
 }
 
@@ -76,9 +69,6 @@ func (e *NativeEngine) buildSessionPrompt(
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
 	systemPrompt += fmt.Sprintf("\nRuntime session ID: %d", runID)
-	if options.ReplayHistory != nil {
-		systemPrompt += "\n" + forkReplayNotice
-	}
 	if agentCanUseWorkers(agent) {
 		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))
 	}

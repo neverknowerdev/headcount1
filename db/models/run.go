@@ -31,6 +31,7 @@ type Run struct {
 	StartedAt            time.Time   `json:"started_at"`
 	EndedAt              *time.Time  `json:"ended_at"`
 	LastMessageTime      *time.Time  `json:"last_message_time"`
+	WorkspacePath        string      `json:"workspace_path"`
 	Recovery             RunRecovery `json:"-" gorm:"serializer:json;type:jsonb"`
 }
 

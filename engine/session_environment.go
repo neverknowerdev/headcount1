@@ -82,7 +82,17 @@ func (e *NativeEngine) prepareSessionEnvironment(
 			environment.rootTask = refreshed
 		}
 	}
-	environment.workspacePath = manager.GetTaskWorktreePath(company, environment.rootTask)
+	environment.workspacePath = strings.TrimSpace(run.WorkspacePath)
+	preservedWorkspace := environment.workspacePath != ""
+	if !preservedWorkspace {
+		environment.workspacePath = manager.GetTaskWorktreePath(company, environment.rootTask)
+	}
+	if run.WorkspacePath != environment.workspacePath {
+		run.WorkspacePath = environment.workspacePath
+		if updateErr := e.q.UpdateRunWorkspacePath(ctx, run.ID, environment.workspacePath); updateErr != nil {
+			return environment, run, fmt.Errorf("persist workspace path: %w", updateErr)
+		}
+	}
 
 	logger, logErr := logging.NewSessionLoggerWithHub(settings.BasePath, company.ShortName, environment.rootTaskID, environment.rootRunID, run.ID, e.hub.ForCompany(task.CompanyID), e.q)
 	if logErr != nil {
@@ -112,21 +122,24 @@ func (e *NativeEngine) prepareSessionEnvironment(
 			if pullErr := environment.gitManager.Pull(ctx); pullErr != nil {
 				e.logInfo(environment.logger, "Warning: git pull failed: "+pullErr.Error())
 			}
-			if _, statErr := os.Stat(filepath.Join(environment.workspacePath, ".git")); os.IsNotExist(statErr) {
-				branchName := strings.TrimSpace(environment.rootTask.GitHubBranch)
-				if branchName == "" {
-					branchName = db.TaskGitBranch(environment.rootTask.RefKey, environment.rootTask.ID)
-					environment.rootTask.GitHubBranch = branchName
-					if _, updateErr := e.q.UpdateTask(ctx, environment.rootTask); updateErr != nil {
-						e.logInfo(environment.logger, "Failed to persist task Git branch: "+updateErr.Error())
-						environment.gitProject = false
+			if !preservedWorkspace {
+				_, statErr := os.Stat(filepath.Join(environment.workspacePath, ".git"))
+				if os.IsNotExist(statErr) {
+					branchName := strings.TrimSpace(environment.rootTask.GitHubBranch)
+					if branchName == "" {
+						branchName = db.TaskGitBranch(environment.rootTask.RefKey, environment.rootTask.ID)
+						environment.rootTask.GitHubBranch = branchName
+						if _, updateErr := e.q.UpdateTask(ctx, environment.rootTask); updateErr != nil {
+							e.logInfo(environment.logger, "Failed to persist task Git branch: "+updateErr.Error())
+							environment.gitProject = false
+						}
 					}
-				}
-				_ = os.RemoveAll(environment.workspacePath)
-				if environment.gitProject {
-					if worktreeErr := environment.gitManager.CreateWorktree(ctx, projectRepoDir, environment.workspacePath, branchName, "origin/"+environment.rootTask.EffectiveGitBaseBranch()); worktreeErr != nil {
-						e.logInfo(environment.logger, "Failed to create worktree: "+worktreeErr.Error())
-						environment.gitProject = false
+					_ = os.RemoveAll(environment.workspacePath)
+					if environment.gitProject {
+						if worktreeErr := environment.gitManager.CreateWorktree(ctx, projectRepoDir, environment.workspacePath, branchName, "origin/"+environment.rootTask.EffectiveGitBaseBranch()); worktreeErr != nil {
+							e.logInfo(environment.logger, "Failed to create worktree: "+worktreeErr.Error())
+							environment.gitProject = false
+						}
 					}
 				}
 			}

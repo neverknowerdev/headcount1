@@ -454,25 +454,14 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 				fmt.Printf("Warning: failed to merge branch %s: %v\n", branchName, mergeErr)
 				return
 			}
-			if removeErr := gitMgr.RemoveWorktree(ctx, worktreeDir); removeErr != nil {
-				fmt.Printf("Warning: failed to remove worktree: %v\n", removeErr)
-			}
-			// Clean up the task workspace directory
-			os.RemoveAll(worktreeDir)
-			fmt.Printf("Merged and cleaned up worktree for task %d\n", task.ID)
+			// Keep the worktree and durable session workspaces until the in-binary
+			// retention job removes them ten days after the task became Done.
+			fmt.Printf("Merged worktree for task %d; deferred cleanup is scheduled\n", task.ID)
 		}
 	} else if task.Status == "done" && newStatus != "done" {
-		// Task reopened: remove old worktree and recreate
-		if _, statErr := os.Stat(worktreeDir); statErr == nil {
-			gitMgr.RemoveWorktree(ctx, worktreeDir)
-			os.RemoveAll(worktreeDir)
-		}
-		// Pull latest and recreate worktree
-		gitMgr.Pull(ctx)
-		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
-			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
-		} else {
-			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)
-		}
+		// Reopening within the retention window reuses the preserved worktree;
+		// deleting and recreating it would discard the exact session state a
+		// fork or recovery may need.
+		fmt.Printf("Reopened task %d; preserving its worktree\n", task.ID)
 	}
 }

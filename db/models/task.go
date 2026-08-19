@@ -57,6 +57,7 @@ type Task struct {
 	RelationSummary    *TaskRelationSummary `json:"relation_summary,omitempty" gorm:"-"`
 	CreatedAt          time.Time            `json:"created_at"`
 	UpdatedAt          time.Time            `json:"updated_at"`
+	DoneAt             *time.Time           `json:"done_at,omitempty"`
 }
 
 // Description holds the user's original input, untouched. For delegated

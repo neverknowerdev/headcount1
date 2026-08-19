@@ -275,6 +275,10 @@ func main() {
 	// Reconcile queued tasks after restart so a prerequisite completion or
 	// dependency removal is not stranded in the crash window before launch.
 	go eng.ReconcileQueuedTasks(context.Background())
+	// Session workspaces are durable by design. Remove them only for tasks that
+	// have been Done for the retention period, so forks and recovery remain
+	// possible during the post-completion window.
+	go eng.StartWorkspaceCleanupScheduler(context.Background(), 24*time.Hour)
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
