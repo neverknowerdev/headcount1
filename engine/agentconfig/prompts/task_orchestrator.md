@@ -57,9 +57,12 @@ monitor that consultation, and stop it only when it is genuinely stale or no
 longer useful. When the CEO answers, the answer is a routed message in a later
 activation; use it as evidence for the next decision.
 
-The worker execution owns task results and final task status. End this
-activation after making a justified decision; the engine will return you to
-passive monitoring.
+Worker sessions provide evidence, but the orchestrator owns the final
+coordination decision. When every required session is terminal, there is no
+unanswered human question, and the task is genuinely complete, call
+`finish_task` with a concise verification summary. A prose completion message
+does not change the durable task status. Otherwise end this activation after
+making a justified decision; the engine will return you to passive monitoring.
 
 Harness and sandbox safety is non-negotiable. Never bypass filesystem sandbox
 rules, permission boundaries, tool restrictions, network limits, or any other

@@ -20,7 +20,7 @@ func TestNewOrchestratorRegistryOnlyExposesManagementTools(t *testing.T) {
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})
-	require.Equal(t, []string{"ask_ceo", "fork_session", "get_session", "get_session_list", "run_new_session", "send_message_to_session", "stop_session"}, r.Names())
+	require.Equal(t, []string{"ask_ceo", "finish_task", "fork_session", "get_session", "get_session_list", "run_new_session", "send_message_to_session", "stop_session"}, r.Names())
 	require.Error(t, func() error { _, err := r.Execute(context.Background(), string(aicli.ToolWrite), nil); return err }())
 }
 
@@ -37,6 +37,20 @@ func TestAskCEOCarriesOnlyTaskIDAndMessage(t *testing.T) {
 	require.Equal(t, int32(17), taskID)
 	require.Equal(t, "Should we split this work?", message)
 	_, err = r.Execute(context.Background(), "ask_ceo", json.RawMessage(`{"task_id":17,"message":""}`))
+	require.Error(t, err)
+}
+
+func TestFinishTaskRequiresSummaryAndCallsController(t *testing.T) {
+	var got string
+	r := NewOrchestratorRegistry(OrchestratorCallbacks{FinishTask: func(_ context.Context, summary string) (string, error) {
+		got = summary
+		return "done", nil
+	}})
+	result, err := r.Execute(context.Background(), string(OrchestratorToolFinishTask), json.RawMessage(`{"summary":"all workers verified"}`))
+	require.NoError(t, err)
+	require.Equal(t, "done", result)
+	require.Equal(t, "all workers verified", got)
+	_, err = r.Execute(context.Background(), string(OrchestratorToolFinishTask), json.RawMessage(`{"summary":""}`))
 	require.Error(t, err)
 }
 
@@ -87,9 +101,9 @@ func TestOrchestratorCannotTargetItsOwnSession(t *testing.T) {
 	})
 	for name, args := range map[string]string{
 		string(OrchestratorToolGetSession):    `{"session_id":53}`,
-		string(OrchestratorToolSendMessage):  `{"session_id":53,"message":"hello"}`,
-		string(OrchestratorToolStopSession):  `{"session_id":53,"reason":"recovery"}`,
-		string(OrchestratorToolForkSession):  `{"session_id":53,"fork_message_id":7}`,
+		string(OrchestratorToolSendMessage):   `{"session_id":53,"message":"hello"}`,
+		string(OrchestratorToolStopSession):   `{"session_id":53,"reason":"recovery"}`,
+		string(OrchestratorToolForkSession):   `{"session_id":53,"fork_message_id":7}`,
 		string(OrchestratorToolRunNewSession): `{"source_session_id":53,"agent_name":"Coder","title":"replacement","prompt":"continue"}`,
 	} {
 		_, err := r.Execute(context.Background(), name, json.RawMessage(args))

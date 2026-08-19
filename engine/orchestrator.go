@@ -147,7 +147,7 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 		}
 	}
 	b.WriteString("\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/orchestrator_start.md")))
-	b.WriteString("\n\nReserved one-time worker: call run_new_session with agent_name=Worker, a short title, and a bounded prompt for repository verification, git commands, artifact work, or other auxiliary jobs. This starts the helper-worker runtime with the helper-worker model and tools; do not assign task implementation or ownership to it.\n")
+	b.WriteString("\n\nReserved one-time worker: call run_new_session with agent_name=Worker, a short title, and a bounded prompt for repository verification, git commands, artifact work, or other auxiliary jobs. This starts the helper-worker runtime with the helper-worker model and tools; do not assign task implementation or ownership to it.\nWhen all required worker sessions are terminal, all human questions are answered, and the task is genuinely complete, call finish_task with a concise verification summary. A prose completion message does not finish the task.\n")
 	return b.String(), nil
 }
 
@@ -238,6 +238,9 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		},
 		ForkSession: func(c context.Context, sessionID int32, messageID int64) (string, error) {
 			return e.orchestratorFork(c, orchestrator.ID, sessionID, messageID)
+		},
+		FinishTask: func(c context.Context, summary string) (string, error) {
+			return e.orchestratorFinishTask(c, task, orchestrator.ID, summary)
 		},
 		AnswerMessage: func(c context.Context, messageID int64, answer string) (string, error) {
 			return e.answerRoutedMessage(c, orchestrator, messageID, answer)
@@ -364,6 +367,35 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		}
 		_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
 	}
+}
+
+func (e *NativeEngine) orchestratorFinishTask(ctx context.Context, task db.Task, orchestratorRunID int32, summary string) (string, error) {
+	if strings.TrimSpace(summary) == "" {
+		return "", fmt.Errorf("summary is required")
+	}
+	if e.humanInputPending(ctx, task.ID) {
+		return "", fmt.Errorf("task %d still has an unanswered human question", task.ID)
+	}
+	sessions, err := e.orchestratorSessions(ctx, orchestratorRunID)
+	if err != nil {
+		return "", err
+	}
+	if !allWorkerSessionsTerminal(sessions) {
+		return "", fmt.Errorf("task %d still has active worker sessions", task.ID)
+	}
+	current, err := e.q.GetTask(ctx, task.ID)
+	if err != nil {
+		return "", err
+	}
+	if current.Status != db.TaskStatusDone {
+		previous := current.Status
+		current.Status = db.TaskStatusDone
+		if _, err := e.q.UpdateTask(ctx, current); err != nil {
+			return "", err
+		}
+		e.broadcastTaskStatus(current, previous, current.Status, nil)
+	}
+	return fmt.Sprintf("task %d marked done: %s", task.ID, strings.TrimSpace(summary)), nil
 }
 
 func (e *NativeEngine) orchestratorSessions(ctx context.Context, orchestratorRunID int32) ([]tools.ManagedSessionSummary, error) {

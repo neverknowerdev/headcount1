@@ -106,6 +106,7 @@ const (
 	OrchestratorToolRunNewSession  OrchestratorToolName = "run_new_session"
 	OrchestratorToolStopSession    OrchestratorToolName = "stop_session"
 	OrchestratorToolForkSession    OrchestratorToolName = "fork_session"
+	OrchestratorToolFinishTask     OrchestratorToolName = "finish_task"
 	OrchestratorToolAskCEO         OrchestratorToolName = "ask_ceo"
 )
 
@@ -119,6 +120,7 @@ type OrchestratorCallbacks struct {
 	RunNewSession         func(context.Context, *int32, string, string, string) (string, error)
 	StopSession           func(context.Context, int32, string) (string, error)
 	ForkSession           func(context.Context, int32, int64) (string, error)
+	FinishTask            func(context.Context, string) (string, error)
 	AnswerMessage         func(context.Context, int64, string) (string, error)
 	AskCEO                func(context.Context, int32, string) (string, error)
 }
@@ -278,6 +280,22 @@ func NewOrchestratorRegistry(cb OrchestratorCallbacks) *aicli.Registry {
 		},
 	})
 	r.Register(NewAskCEO(cb.AskCEO))
+	r.Register(&orchestratorManagementTool{
+		name: OrchestratorToolFinishTask,
+		def:  orchestratorDef(OrchestratorToolFinishTask, "Mark the task done after every managed worker session is terminal and all human questions are answered. This is the authoritative completion action; a completion message alone does not finish the task.", `{"type":"object","properties":{"summary":{"type":"string","description":"Concise final verification and handoff summary."}},"required":["summary"]}`),
+		fn: func(ctx context.Context, args json.RawMessage) (string, error) {
+			var p struct {
+				Summary string `json:"summary"`
+			}
+			if err := json.Unmarshal(args, &p); err != nil {
+				return "", fmt.Errorf("finish_task: %w", err)
+			}
+			if strings.TrimSpace(p.Summary) == "" {
+				return "", fmt.Errorf("summary is required")
+			}
+			return cb.FinishTask(ctx, strings.TrimSpace(p.Summary))
+		},
+	})
 	return r
 }
 

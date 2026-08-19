@@ -45,7 +45,7 @@ func workerLifecycleToolNames() []aicli.ToolName {
 func WorkerLifecycleToolNames() []aicli.ToolName { return workerLifecycleToolNames() }
 
 func orchestratorToolNames() []aicli.ToolName {
-	return []aicli.ToolName{"get_session_list", "get_session", "send_message_to_session", "run_new_session", "stop_session", "fork_session", aicli.ToolAskCEO, aicli.ToolAnswerMessage}
+	return []aicli.ToolName{"get_session_list", "get_session", "send_message_to_session", "run_new_session", "stop_session", "fork_session", "finish_task", aicli.ToolAskCEO, aicli.ToolAnswerMessage}
 }
 func OrchestratorToolNames() []aicli.ToolName { return orchestratorToolNames() }
 
