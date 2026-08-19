@@ -245,6 +245,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const handleAddComment = async () => {
         if (!newComment.trim() || !taskId) return;
         const content = newComment.trim();
+        const hasPendingHumanQuestion = comments.some((question: any) =>
+            question.comment_type === 'ask_user' &&
+            question.author_type === 'agent' &&
+            !comments.some((answer: any) =>
+                answer.id > question.id && answer.author_type === 'human' &&
+                !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
+            ),
+        );
         setIsPostingComment(true);
         setCommentError('');
         try {
@@ -252,7 +260,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 task_id: taskId,
                 author_type: 'human',
                 content,
-                run_agent: task?.status === 'blocked' ? false : runAgent
+                run_agent: task?.status === 'blocked' || hasPendingHumanQuestion ? false : runAgent
             });
             setNewComment('');
             setComments(prev => prev.some((c: any) => c.id === response.data?.id) ? prev : [...prev, response.data]);
@@ -340,6 +348,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     };
 
     if (taskId && !task) return null;
+
+    const hasPendingHumanQuestion = comments.some((question: any) =>
+        question.comment_type === 'ask_user' &&
+        question.author_type === 'agent' &&
+        !comments.some((answer: any) =>
+            answer.id > question.id && answer.author_type === 'human' &&
+            !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
+        ),
+    );
 
     const header = (
         <div className="px-6 py-4 border-b flex items-center gap-4 bg-white shrink-0">
@@ -861,7 +878,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     })()}
                                 </div>
                                 <div className="mt-4">
-                                    {task?.run_id && task?.status !== 'blocked' ? (
+                                    {task?.run_id && task?.status !== 'blocked' && !hasPendingHumanQuestion ? (
                                         <div className="group relative">
                                             <input
                                                 type="text"
