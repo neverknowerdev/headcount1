@@ -423,9 +423,17 @@ function handleChatCompletionsRoute(
         const primaryCandidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
         const primaryScenarioExhausted = sc.index >= sc.entries.length;
         const primaryNeedsIncoming = scenarioEntryNeedsIncomingAnswer(primaryCandidate);
+        // A routed message must be answered as soon as it reaches a session,
+        // even when that session still has primary scripted work queued. The
+        // previous condition only switched to inbound entries when the
+        // primary entry explicitly waited for an answer. That left a CTO
+        // unable to answer an orchestrator route while it was still in its
+        // design sequence, so send_message_to_session waited forever for the
+        // correlated answer. The orchestrator's outbound route gate remains
+        // primary: it must forward the question before consuming its answer.
         const inboundMayRun = primaryScenarioExhausted
             || sc.inboundActive === true
-            || (hasIncoming && primaryNeedsIncoming);
+            || (hasIncoming && !scenarioEntryInboundGate(primaryCandidate));
         const usingInboundScenario = !sc.forkActive && !!sc.inboundEntries
             && inboundMayRun && inboundIndex < sc.inboundEntries.length;
         const candidate = usingInboundScenario

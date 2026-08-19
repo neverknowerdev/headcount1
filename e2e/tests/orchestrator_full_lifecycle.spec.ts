@@ -67,6 +67,11 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
             model: 'e2e-ceo-model', entries: [
                 { tool_call: { id: 'ceo-ask-human', name: 'ask_human', arguments: { question: 'Should the task use the event-driven controller boundary?' } } },
                 { tool_call: { id: 'ceo-status-after-human', name: 'report_status', arguments: { status: 'Human direction received; handing the decision to the CTO design stream.' } } },
+                // The consultation request is a separate routed message from
+                // the human-input flow. Once the human answers, the CEO must
+                // explicitly answer that pending consultation message too;
+                // otherwise ask_ceo remains blocked forever.
+                { tool_call: { id: 'ceo-answer-consultation', name: 'answer_message', arguments: { message_id: 0, answer: 'Use the event-driven controller boundary.' } } },
                 { tool_call: { id: 'ceo-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Product direction confirmed.', result_details: 'The human selected the event-driven controller boundary.' } } },
             ],
         });
