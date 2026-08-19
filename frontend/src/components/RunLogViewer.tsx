@@ -56,7 +56,10 @@ interface LogEntry {
 const LLM_PROVIDER_LABEL = 'LLM Provider';
 
 function requestActorName(entry: LogEntry, fallback?: string): string {
-  return entry.agent_name?.trim() || fallback?.trim() || 'Agent';
+  // The run response is the authoritative control-plane identity. The
+  // per-entry value is retained as a compatibility fallback for old logs or
+  // embedded child transcripts that predate the run-level identity field.
+  return fallback?.trim() || entry.agent_name?.trim() || 'Agent';
 }
 
 interface LogMessage {

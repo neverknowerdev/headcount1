@@ -32,7 +32,8 @@ describe('RunLogViewer request/response identities', () => {
         );
 
         expect(screen.getAllByText('LLM Provider')).toHaveLength(1);
-        expect(screen.getAllByText('CEO Agent')).toHaveLength(1);
+        expect(screen.getAllByText('Orchestrator')).toHaveLength(2);
+        expect(screen.queryByText('CEO Agent')).toBeNull();
         expect(screen.queryByText('AI Model')).toBeNull();
     });
 });
