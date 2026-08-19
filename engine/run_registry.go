@@ -11,8 +11,13 @@ import (
 // cancellation handles and drain bookkeeping.
 type runRegistry struct {
 	cancelFuncs sync.Map // runID -> context.CancelFunc
-	draining    atomic.Bool
-	activeRoots sync.WaitGroup
+	// orchestrators contains the process-local ownership of the sidecar loop.
+	// Durable run state is still authoritative; this guard only prevents a
+	// watchdog tick or a restart reconciliation from starting two loops for
+	// the same orchestrator row.
+	orchestrators sync.Map // runID -> struct{}
+	draining      atomic.Bool
+	activeRoots   sync.WaitGroup
 }
 
 func newRunRegistry() *runRegistry { return &runRegistry{} }
@@ -31,4 +36,13 @@ func (registry *runRegistry) waitForActiveRoots(ctx context.Context) {
 	case <-done:
 	case <-ctx.Done():
 	}
+}
+
+func (registry *runRegistry) tryStartOrchestrator(runID int32) bool {
+	_, loaded := registry.orchestrators.LoadOrStore(runID, struct{}{})
+	return !loaded
+}
+
+func (registry *runRegistry) stopOrchestrator(runID int32) {
+	registry.orchestrators.Delete(runID)
 }

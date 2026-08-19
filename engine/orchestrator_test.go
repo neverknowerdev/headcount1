@@ -121,6 +121,161 @@ func TestWakeStalledOrchestratorDoesNotInterruptHumanWait(t *testing.T) {
 	assert.Empty(t, events, "human input is expected silence, not watchdog work")
 }
 
+func TestWatchdogWaitsForStaleGraceAndSkipsWhenLifecycleEventExists(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:watchdog-stale-grace?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Grace Co", ShortName: "GR"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "CTO", RoleKey: "CTO", ShortName: "CTO"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "grace", Status: db.TaskStatusInProgress}
+	require.NoError(t, database.Create(&task).Error)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "waiting", StartedAt: time.Now().Add(-time.Hour)}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	rootID := orchestrator.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", rootID).Updates(map[string]interface{}{"root_run_id": rootID}).Error)
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("orchestrator_run_id", orchestrator.ID).Error)
+	now := time.Now()
+	recentlyStale := now.Add(-10 * time.Second)
+	worker := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, ParentRunID: &rootID, RootRunID: &rootID, Status: db.RunStatusStale, StartedAt: now.Add(-time.Hour), EndedAt: &recentlyStale}
+	require.NoError(t, database.Create(&worker).Error)
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.wakeStalledOrchestratorsAt(context.Background(), []int32{worker.ID}, now))
+	var events []db.RunEvent
+	require.NoError(t, database.Where("task_id = ?", task.ID).Find(&events).Error)
+	assert.Empty(t, events, "a newly stale worker gets a grace period for its lifecycle event")
+
+	old := now.Add(-2 * time.Minute)
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", worker.ID).Update("ended_at", old).Error)
+	// A pending lifecycle event means the orchestrator will observe the worker
+	// without a watchdog duplicate.
+	require.NoError(t, db.New(database).EnqueueRunEvent(context.Background(), db.RunEvent{
+		TaskID: task.ID, RunID: worker.ID, EventType: db.RunEventTypeLifecycleStatus, Payload: db.RunStatusStale,
+	}))
+	require.NoError(t, eng.wakeStalledOrchestratorsAt(context.Background(), nil, now))
+	events = nil
+	require.NoError(t, database.Where("task_id = ?", task.ID).Find(&events).Error)
+	assert.Len(t, events, 1, "the worker lifecycle event is sufficient")
+}
+
+func TestWatchdogWakesOnSilentOrchestratorHistoryAndUsesRunningAsActive(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:watchdog-silent-history?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Silent Co", ShortName: "SL"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", ShortName: "CEO"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "silent", Status: db.TaskStatusInProgress}
+	require.NoError(t, database.Create(&task).Error)
+	old := time.Now().Add(-11 * time.Minute).UTC().Format(time.RFC3339Nano)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "waiting", StartedAt: time.Now().Add(-time.Hour), LastMessageTime: ptrTimeForTest(time.Now()), LogEntries: fmt.Sprintf(`[{"type":"message","ts":%q}]`, old)}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	rootID := orchestrator.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", rootID).Update("root_run_id", rootID).Error)
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("orchestrator_run_id", orchestrator.ID).Error)
+	worker := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindAgentSession, ParentRunID: &rootID, RootRunID: &rootID, Status: "running", StartedAt: time.Now()}
+	require.NoError(t, database.Create(&worker).Error)
+	now := time.Now()
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.wakeStalledOrchestratorsAt(context.Background(), nil, now))
+	got, err := db.New(database).GetRun(context.Background(), orchestrator.ID)
+	require.NoError(t, err)
+	assert.Equal(t, "running", got.Status)
+	var events []db.RunEvent
+	require.NoError(t, database.Where("task_id = ?", task.ID).Find(&events).Error)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0].Payload, "orchestrator_history_silent")
+	assert.Contains(t, events[0].Payload, "ten minutes")
+}
+
+func TestWatchdogIgnoresFinishedWorkersAndTasksOutsideProgress(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:watchdog-terminal-guards?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Terminal Co", ShortName: "TM"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "Coder", RoleKey: "Coder", ShortName: "Coder"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "terminal", Status: db.TaskStatusDone}
+	require.NoError(t, database.Create(&task).Error)
+	old := time.Now().Add(-time.Hour)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "running", StartedAt: old, LastMessageTime: &old}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	rootID := orchestrator.ID
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", rootID).Update("root_run_id", rootID).Error)
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("orchestrator_run_id", orchestrator.ID).Error)
+	worker := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindHelperWorker, ParentRunID: &rootID, RootRunID: &rootID, Status: "completed", StartedAt: old, LastMessageTime: &old}
+	require.NoError(t, database.Create(&worker).Error)
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	stale, err := eng.CheckStaleRuns(context.Background(), time.Minute)
+	require.NoError(t, err)
+	assert.Empty(t, stale, "a done task must not stale its dormant orchestrator")
+	require.NoError(t, eng.WakeStalledOrchestrators(context.Background(), []int32{worker.ID}))
+	var events []db.RunEvent
+	require.NoError(t, database.Where("task_id = ?", task.ID).Find(&events).Error)
+	assert.Empty(t, events, "finish_work/completed workers and non-progress tasks need no watchdog activity")
+}
+
+func TestOrchestratorHeartbeatStopsWhenTaskLeavesProgress(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:orchestrator-heartbeat-guard?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Heartbeat Co", ShortName: "HB"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", ShortName: "CEO"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "heartbeat", Status: db.TaskStatusInProgress}
+	require.NoError(t, database.Create(&task).Error)
+	old := time.Now().Add(-time.Hour)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "running", StartedAt: old, LastMessageTime: &old}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	stop := eng.startOrchestratorHeartbeat(task.ID, orchestrator.ID, 10*time.Millisecond)
+	require.Eventually(t, func() bool {
+		got, getErr := db.New(database).GetRun(context.Background(), orchestrator.ID)
+		return getErr == nil && got.LastMessageTime != nil && got.LastMessageTime.After(old)
+	}, time.Second, 10*time.Millisecond)
+	stop()
+
+	// A task transition is authoritative. Starting the helper after that
+	// transition must not touch the run, even though its row says running.
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("status", db.TaskStatusDone).Error)
+	before := time.Now().Add(-time.Hour)
+	require.NoError(t, database.Model(&db.Run{}).Where("id = ?", orchestrator.ID).Update("last_message_time", before).Error)
+	stop = eng.startOrchestratorHeartbeat(task.ID, orchestrator.ID, 10*time.Millisecond)
+	time.Sleep(50 * time.Millisecond)
+	stop()
+	got, err := db.New(database).GetRun(context.Background(), orchestrator.ID)
+	require.NoError(t, err)
+	require.NotNil(t, got.LastMessageTime)
+	assert.WithinDuration(t, before, *got.LastMessageTime, time.Second)
+}
+
+func TestWatchdogReportsFailedOrchestrator(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open("file:watchdog-orchestrator-failed?mode=memory&cache=shared"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Provider Failure Co", ShortName: "PF"}
+	require.NoError(t, database.Create(&company).Error)
+	agent := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", ShortName: "CEO"}
+	require.NoError(t, database.Create(&agent).Error)
+	task := db.Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "provider failure", Status: db.TaskStatusInProgress}
+	require.NoError(t, database.Create(&task).Error)
+	orchestrator := db.Run{TaskID: task.ID, AgentID: agent.ID, Kind: db.RunKindTaskOrchestrator, Status: "failed", StartedAt: time.Now().Add(-time.Minute)}
+	require.NoError(t, database.Create(&orchestrator).Error)
+	require.NoError(t, database.Model(&db.Task{}).Where("id = ?", task.ID).Update("orchestrator_run_id", orchestrator.ID).Error)
+	eng := NewNativeEngine(database, eventhub.NewHub())
+	require.NoError(t, eng.WakeStalledOrchestrators(context.Background(), nil))
+	var events []db.RunEvent
+	require.NoError(t, database.Where("task_id = ?", task.ID).Find(&events).Error)
+	require.Len(t, events, 1)
+	assert.Contains(t, events[0].Payload, "orchestrator_failed")
+}
+
+func ptrTimeForTest(t time.Time) *time.Time { return &t }
+
 func TestHandleHumanReplyIsIdempotentUnderConcurrentDelivery(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:human-reply-race?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

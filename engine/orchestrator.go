@@ -68,7 +68,13 @@ func (e *NativeEngine) createTaskOrchestrator(ctx context.Context, task db.Task,
 }
 
 func (e *NativeEngine) startTaskOrchestrator(orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
-	go e.runOrchestrator(orchestrator, task, provider, model)
+	if !e.runs.tryStartOrchestrator(orchestrator.ID) {
+		return
+	}
+	go func() {
+		defer e.runs.stopOrchestrator(orchestrator.ID)
+		e.runOrchestrator(orchestrator, task, provider, model)
+	}()
 }
 
 // buildOrchestratorSystemPrompt gives the sidecar the same authoritative
@@ -187,12 +193,30 @@ func (e *NativeEngine) ResumeWaitingOrchestrators(ctx context.Context) {
 		if err != nil || model == "" {
 			continue
 		}
-		go e.runOrchestrator(orch, task, provider, model)
+		e.startTaskOrchestrator(orch, task, provider, model)
 	}
 }
 
 func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provider db.LLMProvider, model string) {
 	ctx := context.Background()
+	// A task may have moved to Done, Canceled, or another non-executable state
+	// between scheduling and starting this sidecar. In that case the
+	// orchestrator must not create a model turn or become a stale candidate.
+	if current, getErr := e.q.GetTask(ctx, task.ID); getErr == nil && current.Status != db.TaskStatusInProgress {
+		if current.Status == db.TaskStatusDone {
+			_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is already done", "completed")
+		} else {
+			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "task is not in progress")
+		}
+		_ = e.q.UnlockTaskRun(ctx, task.ID)
+		return
+	}
+	// The orchestrator is a passive sidecar, but its liveness still needs a
+	// real heartbeat while it is inside a long provider call. A heartbeat does
+	// not count as a conversation turn: silence detection below reads the
+	// latest persisted log entry instead.
+	heartbeatStop := e.startOrchestratorHeartbeat(task.ID, orchestrator.ID, orchestratorHeartbeatInterval)
+	defer heartbeatStop()
 	logger, err := logging.NewSessionLoggerWithHub(loadSettings().BasePath, task.Company.ShortName, task.ID, orchestrator.ID, orchestrator.ID, e.hub.ForCompany(task.CompanyID), e.q)
 	if err != nil {
 		_ = e.q.UpdateRunLog(ctx, orchestrator.ID, err.Error(), "failed")
@@ -296,6 +320,16 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 			time.Sleep(200 * time.Millisecond)
 			continue
 		}
+		if taskNow.Status != db.TaskStatusInProgress {
+			// Terminal/non-executable task state is control-plane truth. Do not
+			// let a late worker event or watchdog wake create more model work.
+			if taskNow.Status == db.TaskStatusDone && allWorkerSessionsTerminal(sessions) {
+				_ = e.q.UpdateRunLog(ctx, orchestrator.ID, "task is already done", "completed")
+			} else {
+				_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "task is not in progress")
+			}
+			return
+		}
 		// Task completion is authoritative. Do not spend another model turn
 		// reacting to the fingerprint change caused by the final worker or
 		// finish_task update. This also prevents a late lifecycle event from
@@ -367,6 +401,36 @@ func (e *NativeEngine) runOrchestrator(orchestrator db.Run, task db.Task, provid
 		}
 		_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
 	}
+}
+
+// startOrchestratorHeartbeat keeps a live sidecar visible to the liveness
+// monitor without turning a heartbeat into a conversation/history entry. The
+// task status check is intentional: once the control plane leaves in-progress,
+// the sidecar is dormant and must not keep itself alive or be recovered.
+func (e *NativeEngine) startOrchestratorHeartbeat(taskID, runID int32, interval time.Duration) func() {
+	if interval <= 0 {
+		interval = orchestratorHeartbeatInterval
+	}
+	done := make(chan struct{})
+	if current, err := e.q.GetTask(context.Background(), taskID); err == nil && current.Status == db.TaskStatusInProgress {
+		_ = e.q.TouchRunLastMessageTime(context.Background(), runID)
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-done:
+				return
+			case <-ticker.C:
+				current, err := e.q.GetTask(context.Background(), taskID)
+				if err == nil && current.Status == db.TaskStatusInProgress {
+					_ = e.q.TouchRunLastMessageTime(context.Background(), runID)
+				}
+			}
+		}
+	}()
+	return func() { close(done) }
 }
 
 func (e *NativeEngine) orchestratorFinishTask(ctx context.Context, task db.Task, orchestratorRunID int32, summary string) (string, error) {

@@ -28,10 +28,13 @@ import (
 const runStatusCompleted = "completed"
 
 const (
-	executionModeImplementation = "implementation"
-	executionModeRefinement     = "refinement" // refinement (planning)
-	sessionModeImplement        = "implement"
-	sessionModePlan             = "plan"
+	orchestratorHeartbeatInterval = time.Minute
+	orchestratorHistorySilence    = 10 * time.Minute
+	orchestratorStaleGrace        = time.Minute
+	executionModeImplementation   = "implementation"
+	executionModeRefinement       = "refinement" // refinement (planning)
+	sessionModeImplement          = "implement"
+	sessionModePlan               = "plan"
 )
 
 // ResumeCause identifies why a persisted session is being continued. The
@@ -152,6 +155,15 @@ func (e *NativeEngine) CheckStaleRuns(ctx context.Context, threshold time.Durati
 	}
 	stale := make([]int32, 0, len(runs))
 	for _, run := range runs {
+		if run.Kind == db.RunKindTaskOrchestrator {
+			task, taskErr := e.q.GetTask(ctx, run.TaskID)
+			// A task outside in-progress is no longer executable. Its
+			// orchestrator is intentionally dormant and must not be retired as
+			// stale merely because no more model turns are expected.
+			if taskErr != nil || task.Status != db.TaskStatusInProgress {
+				continue
+			}
+		}
 		changed, markErr := e.q.MarkRunStale(ctx, run.ID, "session stopped heartbeating")
 		if markErr != nil {
 			return stale, markErr
@@ -165,60 +177,208 @@ func (e *NativeEngine) CheckStaleRuns(ctx context.Context, threshold time.Durati
 	return stale, nil
 }
 
-// WakeStalledOrchestrators emits one durable recovery event when every
-// managed worker is inactive and at least one worker is stale. The monitor
-// performs this reconciliation; the orchestrator model never has to poll or
-// infer that a silent session needs attention. Human-gated tasks are an
-// explicit exception: silence is expected while the user is deciding.
+// WakeStalledOrchestrators performs the ordered control-plane recovery check
+// for every live task orchestrator. It emits a durable event for failed or
+// stale workers, a failed orchestrator, or prolonged orchestrator silence.
+// Human-gated and non-in-progress tasks are explicit exceptions: silence is
+// expected and no model activity should be scheduled.
 func (e *NativeEngine) WakeStalledOrchestrators(ctx context.Context, staleIDs []int32) error {
-	if len(staleIDs) == 0 {
-		return nil
-	}
+	return e.wakeStalledOrchestratorsAt(ctx, staleIDs, time.Now())
+}
+
+// wakeStalledOrchestratorsAt is the control-plane watchdog. It deliberately
+// does not ask the orchestrator to discover silence by polling: one concise,
+// durable event is emitted only for a real recovery condition. The timestamp
+// parameter keeps the ordering and grace-period rules deterministic in tests.
+func (e *NativeEngine) wakeStalledOrchestratorsAt(ctx context.Context, staleIDs []int32, now time.Time) error {
 	staleSet := make(map[int32]struct{}, len(staleIDs))
 	for _, id := range staleIDs {
 		staleSet[id] = struct{}{}
 	}
-	orchestrators, err := e.q.ListWaitingOrchestrators(ctx)
+	orchestrators, err := e.q.ListWatchdogOrchestrators(ctx)
 	if err != nil {
 		return err
 	}
 	for _, orchestrator := range orchestrators {
 		task, taskErr := e.q.GetTask(ctx, orchestrator.TaskID)
-		if taskErr != nil || isTerminalTaskStatus(task.Status) || e.humanInputPending(ctx, task.ID) {
+		if taskErr != nil || task.Status != db.TaskStatusInProgress || e.humanInputPending(ctx, task.ID) {
 			continue
 		}
 		sessions, listErr := e.q.ListOrchestratorSessions(ctx, orchestrator.ID)
 		if listErr != nil {
 			return listErr
 		}
-		allInactive := true
-		hasStale := false
+		pendingEvents, eventsErr := e.q.ListPendingRunEvents(ctx, task.ID)
+		if eventsErr != nil {
+			return eventsErr
+		}
 		var source int32
+		reason := ""
+		staleRunIDs := make([]int32, 0)
+		staleGracePending := false
+		orchestratorNeedsRestart := orchestrator.Status == "failed" || orchestrator.Status == db.RunStatusStale
+		if orchestratorNeedsRestart {
+			reason = "orchestrator_failed"
+			source = orchestrator.ID
+		}
 		for _, session := range sessions {
-			switch session.Status {
-			case "running", "waiting", db.RunStatusResuming:
-				allInactive = false
-			}
-			if _, marked := staleSet[session.ID]; marked || session.Status == db.RunStatusStale {
-				hasStale = true
+			if session.Status == "failed" || session.Status == db.RunStatusRecoverableFailed {
+				if reason == "" {
+					reason = "failed_worker"
+				}
 				if source == 0 {
 					source = session.ID
 				}
+				staleRunIDs = append(staleRunIDs, session.ID)
+				continue
+			}
+			if _, marked := staleSet[session.ID]; marked || session.Status == db.RunStatusStale {
+				staleAt := runStaleAt(session)
+				if !staleAt.IsZero() && now.Sub(staleAt) < orchestratorStaleGrace {
+					staleGracePending = true
+					continue
+				}
+				if runHasLifecycleEventSince(session, pendingEvents, staleAt) || e.hasRunLifecycleEventSince(ctx, session.ID, staleAt) {
+					continue
+				}
+				if reason == "" {
+					reason = "stale_worker_event_missing"
+				}
+				if source == 0 {
+					source = session.ID
+				}
+				staleRunIDs = append(staleRunIDs, session.ID)
 			}
 		}
-		if !allInactive || !hasStale || source == 0 {
+		if reason == "" && !staleGracePending && orchestratorHistoryAt(orchestrator).Add(orchestratorHistorySilence).Before(now) && len(pendingEvents) == 0 {
+			reason = "orchestrator_history_silent"
+		}
+		if reason == "" {
 			continue
 		}
+		if source == 0 {
+			source = orchestrator.ID
+		}
+		message := watchdogMessage(reason, staleRunIDs)
 		payload, _ := json.Marshal(map[string]interface{}{
-			"kind": "watchdog_recovery", "task_id": task.ID, "stale_run_ids": staleIDs,
-			"message": "All managed sessions are inactive and at least one session is stale; reconcile the worker tree.",
+			"kind": "watchdog_recovery", "task_id": task.ID, "reason": reason,
+			"stale_run_ids": staleRunIDs, "message": message,
 		})
-		if _, enqueueErr := e.q.EnqueueRoutedEvent(ctx, task.ID, source, orchestrator.ID,
-			db.RunEventTypeLifecycleStatus, string(payload), fmt.Sprintf("watchdog:%d:%d", orchestrator.ID, source)); enqueueErr != nil {
+		dedupeKey := fmt.Sprintf("watchdog:%d:%s:%d", orchestrator.ID, reason, watchdogDedupeTimestamp(orchestrator, sessions, reason))
+		var enqueueErr error
+		if source == orchestrator.ID {
+			enqueueErr = e.q.EnqueueRunEvent(ctx, db.RunEvent{TaskID: task.ID, RunID: orchestrator.ID, EventType: db.RunEventTypeLifecycleStatus, Payload: string(payload), DedupeKey: dedupeKey})
+		} else {
+			_, enqueueErr = e.q.EnqueueRoutedEvent(ctx, task.ID, source, orchestrator.ID,
+				db.RunEventTypeLifecycleStatus, string(payload), dedupeKey)
+		}
+		if enqueueErr != nil {
 			return enqueueErr
+		}
+		// "Active" is represented by the existing running state. A waiting
+		// orchestrator can be nudged without creating another loop; the
+		// process-local registry handles terminal-run recovery separately.
+		if orchestrator.Status == "waiting" {
+			if err := e.q.SetRunActive(ctx, orchestrator.ID); err != nil {
+				return err
+			}
+		} else if orchestratorNeedsRestart {
+			provider, model, resolveErr := e.resolveRequiredPurposeModel(ctx, e.ownerUserIDForCompany(ctx, task.CompanyID), db.PurposeTaskOrchestrator)
+			if resolveErr == nil && model != "" {
+				if err := e.q.SetRunActive(ctx, orchestrator.ID); err != nil {
+					return err
+				}
+				e.startTaskOrchestrator(orchestrator, task, provider, model)
+			}
 		}
 	}
 	return nil
+}
+
+func runStaleAt(run db.Run) time.Time {
+	if run.EndedAt != nil {
+		return *run.EndedAt
+	}
+	return orchestratorHistoryAt(run)
+}
+
+// orchestratorHistoryAt returns the last persisted conversation/log entry.
+// LastMessageTime is only a fallback for old rows: active sessions update it
+// as a heartbeat, which must not hide ten minutes of conversation silence.
+func orchestratorHistoryAt(run db.Run) time.Time {
+	var entries []map[string]interface{}
+	if strings.TrimSpace(run.LogEntries) != "" && json.Unmarshal([]byte(run.LogEntries), &entries) == nil {
+		var latest time.Time
+		for _, entry := range entries {
+			ts, _ := entry["ts"].(string)
+			parsed, err := time.Parse(time.RFC3339Nano, ts)
+			if err == nil && parsed.After(latest) {
+				latest = parsed
+			}
+		}
+		if !latest.IsZero() {
+			return latest
+		}
+	}
+	// A row with no history has been silent since it started. Do not use the
+	// heartbeat here: doing so would make an otherwise inert sidecar look
+	// conversationally healthy forever.
+	if !run.StartedAt.IsZero() {
+		return run.StartedAt
+	}
+	if run.LastMessageTime != nil {
+		return *run.LastMessageTime
+	}
+	return time.Time{}
+}
+
+func runHasLifecycleEventSince(run db.Run, pending []db.RunEvent, since time.Time) bool {
+	for _, event := range pending {
+		if event.EventType != db.RunEventTypeLifecycleStatus || event.RunID != run.ID {
+			continue
+		}
+		if since.IsZero() || !event.CreatedAt.Before(since) {
+			return true
+		}
+	}
+	return false
+}
+
+func (e *NativeEngine) hasRunLifecycleEventSince(ctx context.Context, runID int32, since time.Time) bool {
+	if since.IsZero() {
+		return false
+	}
+	found, err := e.q.HasRecentRunEvent(ctx, runID, db.RunEventTypeLifecycleStatus, since)
+	return err == nil && found
+}
+
+func watchdogMessage(reason string, runIDs []int32) string {
+	switch reason {
+	case "orchestrator_failed":
+		return "The orchestrator session failed; retry the orchestration model and reconcile the worker tree."
+	case "failed_worker":
+		return fmt.Sprintf("A managed worker failed (run %v); inspect the worker tree and recover or replace it.", runIDs)
+	case "stale_worker_event_missing":
+		return fmt.Sprintf("Managed worker run %v is stale and no lifecycle event reached the orchestrator; inspect it and recover or replace it.", runIDs)
+	case "all_sessions_stale":
+		return fmt.Sprintf("All managed sessions are stale (runs %v); reconcile the worker tree.", runIDs)
+	case "orchestrator_history_silent":
+		return "No orchestrator history was produced for over ten minutes; verify every worker/session and continue only with a justified action."
+	default:
+		return "A managed session needs reconciliation; inspect the worker tree before taking action."
+	}
+}
+
+func watchdogDedupeTimestamp(orchestrator db.Run, sessions []db.Run, reason string) int64 {
+	if reason == "orchestrator_history_silent" {
+		return orchestratorHistoryAt(orchestrator).UnixNano()
+	}
+	for _, session := range sessions {
+		if session.Status == db.RunStatusStale || session.Status == "failed" || session.Status == db.RunStatusRecoverableFailed {
+			return runStaleAt(session).UnixNano()
+		}
+	}
+	return int64(orchestrator.ID)
 }
 
 // StartLivenessMonitor runs the stale-session check on a bounded cadence. The

@@ -297,6 +297,18 @@ func (q *RunRepository) ListWaitingOrchestrators(ctx context.Context) ([]Run, er
 	return runs, err
 }
 
+// ListWatchdogOrchestrators includes terminal orchestrator rows so the
+// control-plane heartbeat can report a provider failure. Startup resume keeps
+// using ListWaitingOrchestrators and therefore remains limited to live rows.
+func (q *RunRepository) ListWatchdogOrchestrators(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("parent_run_id IS NULL AND status IN ? AND id IN (?)", []string{"running", "waiting", "failed", RunStatusStale},
+			q.db.Model(&Task{}).Select("orchestrator_run_id").Where("orchestrator_run_id IS NOT NULL")).
+		Find(&runs).Error
+	return runs, err
+}
+
 func (q *RunRepository) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
 	return q.SetRunWaitStateForComment(ctx, runID, reason, 0)
 }
@@ -319,18 +331,25 @@ func (q *RunRepository) SetRunWaitStateForComment(ctx context.Context, runID int
 // satisfied. It is intentionally conditional so a concurrent recovery worker
 // cannot accidentally revive a terminal run.
 func (q *RunRepository) SetRunRunning(ctx context.Context, runID int32) error {
+	return q.SetRunActive(ctx, runID)
+}
+
+// SetRunActive is the watchdog/resume transition to the canonical active
+// state. It can revive only a dormant sidecar state; ordinary worker recovery
+// still uses the explicit resume lease path.
+func (q *RunRepository) SetRunActive(ctx context.Context, runID int32) error {
 	var run Run
 	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
 		return err
 	}
-	if run.Status != "waiting" {
+	if run.Status != "waiting" && run.Status != "failed" && run.Status != RunStatusStale && run.Status != RunStatusResuming {
 		return nil
 	}
 	run.Recovery.WaitReason = ""
 	run.Recovery.WaitCommentID = 0
 	now := time.Now()
-	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status = ?", runID, "waiting").Updates(map[string]interface{}{
-		"status": "running", "last_message_time": &now, "recovery": recoveryJSON(run.Recovery),
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status IN ?", runID, []string{"waiting", "failed", RunStatusStale, RunStatusResuming}).Updates(map[string]interface{}{
+		"status": "running", "ended_at": nil, "last_message_time": &now, "recovery": recoveryJSON(run.Recovery),
 	})
 	return result.Error
 }
