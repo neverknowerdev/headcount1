@@ -80,12 +80,12 @@ func LoadMessageHistoryWithCursor(path string, maxSequence int64) ([]Message, in
 	return history, highestSequence, nil
 }
 
-// LoadSafeMessageHistoryAtOrBefore returns the longest replayable conversation
+// LoadSafeMessageHistoryAtOrBefore returns the longest forkable conversation
 // prefix whose canonical message sequence is at or before requestedSequence.
 // A boundary is safe only between complete assistant-tool-call turns: an
-// assistant message that requests tools is not replayable until every matching
-// tool result has been persisted. This prevents fork_session from replaying a
-// tool call without its result (or duplicating a side effect).
+// assistant message that requests tools is not forkable until every matching
+// tool result has been persisted. This prevents a fork from starting from a
+// partial turn whose tool result is not part of the copied workspace state.
 func LoadSafeMessageHistoryAtOrBefore(path string, requestedSequence int64) ([]Message, int64, error) {
 	if requestedSequence <= 0 {
 		return nil, 0, fmt.Errorf("fork message ID must be positive")

@@ -18,7 +18,6 @@ func TestRebaseForkHistoryRuntimeMetadata(t *testing.T) {
 	require.Len(t, rebased, 2)
 	require.Contains(t, rebased[0].Content, "Workdir: /new/workdir")
 	require.Contains(t, rebased[0].Content, "Runtime session ID: 11")
-	require.NotContains(t, rebased[0].Content, "replay")
 	require.NotContains(t, rebased[0].Content, "/old/workdir")
 	assert.Equal(t, "continue", rebased[1].Content)
 	assert.Equal(t, history[0].Content, "task context\nWorkdir: /old/workdir\nRuntime session ID: 7")

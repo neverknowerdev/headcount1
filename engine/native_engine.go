@@ -1012,7 +1012,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if options.SeedHistory != nil {
 		// Forks already carry the source conversation's system message. Do not
 		// prepend a second system prompt; the copied workspace is already at the
-		// same filesystem boundary as this conversation.
+		// same filesystem state as this conversation.
 		seedHistory = append([]aicli.Message(nil), options.SeedHistory...)
 	}
 	if resumeRun != nil {

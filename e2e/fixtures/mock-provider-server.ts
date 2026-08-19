@@ -380,7 +380,7 @@ function handleChatCompletionsRoute(
                 && !!sessionID
                 && state.forkRequested
                 && sessionID !== state.sourceCoderSessionID;
-            const forkActive = !!template.forkEntries && (content.includes('Fork replay') || isForkedCoder);
+            const forkActive = !!template.forkEntries && isForkedCoder;
             if (model === 'e2e-coder-model' && !state.sourceCoderSessionID) {
                 state.sourceCoderSessionID = sessionID;
             }
