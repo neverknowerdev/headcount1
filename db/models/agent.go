@@ -21,7 +21,12 @@ type Agent struct {
 	CanUseWorkers  bool         `json:"can_use_workers" gorm:"not null;default:false"`
 	AllowedMCPs    string       `json:"allowed_mcps" gorm:"type:text;default:''"`
 	Permissions    string       `json:"permissions"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	Skills         []Skill      `json:"skills" gorm:"many2many:agent_skills;"`
+	// WorkerPermissions and WorkerAllowedMCPs configure the tool/MCP policy
+	// applied when this agent delegates work to a child session. Empty values
+	// mean inherit the parent's effective access.
+	WorkerPermissions string    `json:"worker_permissions" gorm:"type:text;default:''"`
+	WorkerAllowedMCPs string    `json:"worker_allowed_mcps" gorm:"type:text;default:''"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Skills            []Skill   `json:"skills" gorm:"many2many:agent_skills;"`
 }
