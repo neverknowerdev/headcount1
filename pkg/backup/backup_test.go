@@ -132,6 +132,48 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	}
 }
 
+func TestBackupRestoreInterruptsSnapshotActiveRuns(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+
+	company := db.Company{Name: "Active Snapshot Co", ShortName: "active-snapshot"}
+	if err := database.Create(&company).Error; err != nil {
+		t.Fatal(err)
+	}
+	agent := db.Agent{CompanyID: company.ID, Name: "worker"}
+	if err := database.Create(&agent).Error; err != nil {
+		t.Fatal(err)
+	}
+	agentID := agent.ID
+	task := db.Task{CompanyID: company.ID, AgentID: &agentID, Title: "active task", Status: db.TaskStatusInProgress}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "waiting"}
+	if err := database.Create(&run).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	archivePath, err := CreateBackup(basePath, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreBackup(archivePath, t.TempDir(), database); err != nil {
+		t.Fatal(err)
+	}
+
+	var restored db.Run
+	if err := database.First(&restored, run.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != "interrupted" {
+		t.Fatalf("restored active run status = %q, want interrupted", restored.Status)
+	}
+	if restored.EndedAt == nil {
+		t.Fatal("restored interrupted run should have ended_at")
+	}
+}
+
 // TestBackupRestorePreservesIdentityAndSecrets verifies the multi-tenant
 // alignment: the identity graph (users, teams, memberships, per-user wrapped
 // keys), the tenancy columns on companies/providers, and the encrypted secret
