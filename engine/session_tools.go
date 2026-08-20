@@ -57,6 +57,10 @@ func (e *NativeEngine) buildSessionTools(
 		registry:    tools.DefaultRegistry(workspacePath, readOnlyDirs...),
 		gatewayAuth: runGatewayAuth{runID: run.ID},
 	}
+	// Forked orchestrator sessions are started from a pre-created Run and may
+	// not carry an in-memory parentSession pointer. The persisted parent link
+	// is the authoritative worker-tree boundary for finish_task semantics.
+	delegated := parent != nil || run.ParentRunID != nil
 	answerMessage := tools.NewAnswerMessage(func(ctx context.Context, messageID int64, answer string) (string, error) {
 		return e.answerRoutedMessage(ctx, run, messageID, answer)
 	})
@@ -64,7 +68,7 @@ func (e *NativeEngine) buildSessionTools(
 		state.registry.Register(answerMessage)
 	}
 
-	state.registry.Register(tools.NewFinishTask(parent != nil, func(ctx context.Context, result tools.FinishTaskResult) error {
+	state.registry.Register(tools.NewFinishTask(delegated, func(ctx context.Context, result tools.FinishTaskResult) error {
 		if state.consultation {
 			state.taskFinished = true
 			state.finishResult = result
@@ -83,6 +87,17 @@ func (e *NativeEngine) buildSessionTools(
 		}
 		if result.Status != db.TaskStatusDone && result.Status != db.TaskStatusInReview && result.Status != db.TaskStatusBlocked {
 			return fmt.Errorf("unsupported task status %q", result.Status)
+		}
+		// A delegated session reports the outcome of its own work; it does not
+		// own the shared task lifecycle. Updating the task here would move the
+		// task to in-review/blocked as soon as the first child hands off, which
+		// makes the passive orchestrator stop before it can schedule the next
+		// stage. The task orchestrator is the only delegated boundary allowed to
+		// make the final task transition through its own finish_task tool.
+		if delegated {
+			state.taskFinished = true
+			state.finishResult = result
+			return e.q.UpdateRunResult(ctx, run.ID, result.FinishStatus, result.ResultDetails)
 		}
 		if mode == "plan" {
 			if result.Status == db.TaskStatusBlocked {

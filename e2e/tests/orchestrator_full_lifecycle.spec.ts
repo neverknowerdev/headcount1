@@ -67,11 +67,6 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
             model: 'e2e-ceo-model', entries: [
                 { tool_call: { id: 'ceo-ask-human', name: 'ask_human', arguments: { question: 'Should the task use the event-driven controller boundary?' } } },
                 { tool_call: { id: 'ceo-status-after-human', name: 'report_status', arguments: { status: 'Human direction received; handing the decision to the CTO design stream.' } } },
-                // The consultation request is a separate routed message from
-                // the human-input flow. Once the human answers, the CEO must
-                // explicitly answer that pending consultation message too;
-                // otherwise ask_ceo remains blocked forever.
-                { tool_call: { id: 'ceo-answer-consultation', name: 'answer_message', arguments: { message_id: 0, answer: 'Use the event-driven controller boundary.' } } },
                 { tool_call: { id: 'ceo-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Product direction confirmed.', result_details: 'The human selected the event-driven controller boundary.' } } },
             ],
         });
@@ -113,7 +108,7 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
                 { tool_call: { id: 'launch-qa-retry', name: 'run_new_session', arguments: { agent_name: qa.name, title: 'Verify repaired implementation', prompt: 'Re-verify the repaired implementation from the fork; all regression checks must pass.' } } },
                 { tool_call: { id: 'inspect-qa-retry', name: 'get_session', arguments: { session_id: 0 } } },
                 { text: 'Final verification is complete; the repaired implementation is ready.' },
-                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { task_status: 'done', finish_status: 'Task execution completed after final verification.', result_details: 'The CTO design, routed architecture answer, copied-workspace Coder repair, and final QA verification all completed successfully.' } } },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The CTO design, routed architecture answer, copied-workspace Coder repair, and final QA verification all completed successfully.' } } },
             ],
         });
 

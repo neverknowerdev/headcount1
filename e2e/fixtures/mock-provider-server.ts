@@ -482,8 +482,18 @@ function handleChatCompletionsRoute(
         const waitingForForkedCoder = candidate?.tool_call?.id === 'launch-qa-retry'
             && (state.forkRequested || state.forkedCoderStarted)
             && !forkedCoderIsTerminal(request);
+        // The final completion call is only valid once the last QA run has
+        // emitted its terminal lifecycle event. A status-report event can
+        // wake the orchestrator in the small window before that event, so
+        // keep the scripted finish call queued and let the real session
+        // snapshot provide the next activation. This keeps the fixture
+        // deterministic without making the production orchestrator poll.
+        const waitingForFinalWorkers = candidate?.tool_call?.id === 'orchestrator-finish'
+            && !managedWorkersAreTerminal(request);
         const entry = waitingForForkedCoder
             ? { tool_call: { id: 'wait-for-forked-coder', name: 'get_session', arguments: { session_id: 0 } } }
+            : waitingForFinalWorkers
+            ? { tool_call: { id: 'wait-for-final-workers', name: 'get_session_list', arguments: {} } }
             : waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
             ? waitingForWorkerRefresh
                 ? { tool_call: { id: 'wait-for-helper-status', name: 'worker_list', arguments: {} } }
@@ -503,7 +513,7 @@ function handleChatCompletionsRoute(
                     text: 'Waiting for the next routed message.',
                 }
             : candidate;
-        if (!waitingForForkedCoder && !waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
+        if (!waitingForForkedCoder && !waitingForFinalWorkers && !waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
             if (usingInboundScenario) {
                 sc.inboundIndex = inboundIndex + 1;
                 sc.inboundActive = true;
@@ -653,6 +663,20 @@ function forkedCoderIsTerminal(request: ChatCompletionRequest): boolean {
         .map((match) => match[1]);
     const latest = statuses.at(-1);
     return latest === 'completed' || latest === 'canceled' || latest === 'failed';
+}
+
+function managedWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .filter((message) => message.role === 'tool')
+        .map((message) => String(message.content ?? ''))
+        .filter((value) => value.includes('"sessions"') && value.includes('"agent_name"'))
+        .at(-1) ?? '';
+    const statuses = [...content.matchAll(/\"agent_name\"\s*:\s*\"([^\"]+)\"[\s\S]*?\"status\"\s*:\s*\"([^\"]+)\"/g)]
+        .map((match) => ({ agentName: match[1], status: match[2] }));
+    const workers = statuses.filter(({ agentName }) =>
+        !agentName.toLowerCase().includes('orchestrator'));
+    return workers.length > 0 && workers.every(({ status }) =>
+        status !== 'running' && status !== 'waiting' && status !== 'active');
 }
 
 function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {

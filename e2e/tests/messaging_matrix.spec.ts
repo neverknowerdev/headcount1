@@ -60,6 +60,7 @@ test.describe.serial('orchestrator messaging matrix', () => {
             { text: 'Agent A answered; Agent B is now being started.' },
             { tool_call: { id: 'send-b', name: 'send_message_to_session', arguments: { session_id: 0, message: 'Run an independent verification and return the evidence.' } } },
             { text: 'All routed questions have been answered.' },
+            { tool_call: { id: 'matrix-finish', name: 'finish_task', arguments: { summary: 'Both workers completed their routed implementation and verification work, and the CEO consultation was answered.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-a-model', entries: [
             { tool_call: { id: 'a-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'The implementation boundary is clear and safe.' } } },
@@ -69,10 +70,9 @@ test.describe.serial('orchestrator messaging matrix', () => {
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-b-model', entries: [
             { tool_call: { id: 'b-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'Independent verification passed with the requested evidence.' } } },
             // Agent A owns the task-owner question in this matrix. Agent B is
-            // deliberately an independent sibling: once A finishes, the
-            // shared task can leave in-progress and the passive orchestrator
-            // may stop accepting new owner questions, so B must not create a
-            // request after that lifecycle boundary.
+            // deliberately an independent sibling and does not mutate the
+            // shared task lifecycle; the root orchestrator completes the task
+            // after both delegated sessions are terminal.
             { tool_call: { id: 'b-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Agent B completed verification.', result_details: 'Agent B answered the orchestrator independently.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-ceo-model', entries: [
@@ -82,18 +82,16 @@ test.describe.serial('orchestrator messaging matrix', () => {
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok(), await kick.text()).toBeTruthy();
-        await waitForTaskStatus(request, task.id, 'in-review', 120_000);
+        await waitForTaskStatus(request, task.id, 'done', 120_000);
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${task.id}/runs`);
             const runs = await response.json();
             return runs.find((run: any) => run.kind === 'task_orchestrator')?.status;
         }, { timeout: 30_000 }).toBe('completed');
 
-        // The first worker may be the one that moves the shared task to
-        // in-review, which legitimately makes the passive orchestrator stop
-        // scheduling. That does not cancel a sibling that is already running;
-        // wait for the complete child tree before asserting its terminal
-        // statuses so teardown cannot race a still-finishing worker.
+        // Delegated finish_task calls report child outcomes only. The root
+        // orchestrator owns the shared task transition and must wait for the
+        // complete child tree before finalizing it.
         await expect.poll(async () => {
             const response = await request.get(`/api/tasks/${task.id}/runs`);
             const runs = await response.json();
