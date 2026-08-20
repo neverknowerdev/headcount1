@@ -249,7 +249,10 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
             .toBe('completed');
 
         const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
-        expect(finalTask.status).toBe('in-review');
+        // This low-level recovery case exercises the worker checkpoint. The
+        // passive orchestrator remains waiting for a separate lifecycle
+        // activation; root-task finalization is covered by orchestration E2Es.
+        expect(finalTask.status).toBe('in-progress');
 
         // The report_status tool call that was pending at pause time must have
         // run on resume — its side effect is the run's latest_reported_status.
@@ -541,7 +544,7 @@ test.describe.serial('Auto-update: drain and resume in-flight runs', () => {
 
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
         expect(finalRun.latest_reported_status).toBe(marker);
-        expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-review');
+        expect((await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status).toBe('in-progress');
 
         let finalRequests: any;
         await expect

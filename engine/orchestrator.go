@@ -75,7 +75,7 @@ func (e *NativeEngine) startTaskOrchestrator(orchestrator db.Run, task db.Task, 
 	// session, but it still owns a cancellable goroutine. Register it in the
 	// same process-local lifecycle registry as regular runs so E2E resets,
 	// shutdowns, and explicit stop requests can drain it deterministically.
-	runCtx, cancel := context.WithCancel(context.Background())
+	runCtx, cancel := e.runs.contextWithDrain(context.Background())
 	e.runs.cancelFuncs.Store(orchestrator.ID, cancel)
 	e.runs.activeRoots.Add(1)
 	go func() {
@@ -212,8 +212,18 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 		_ = e.q.UpdateRunLog(context.Background(), orchestrator.ID, "orchestrator canceled", "canceled")
 		e.hub.BroadcastEventForCompany(task.CompanyID, "run_ended", map[string]interface{}{"run_id": orchestrator.ID, "status": "canceled"})
 	}
+	markDrained := func() {
+		// The sidecar has no resumable turn checkpoint. Waiting is the durable
+		// restart marker; ResumeWaitingOrchestrators reattaches it on the next
+		// process boot without manufacturing a terminal cancellation.
+		_ = e.q.SetRunWaitState(context.Background(), orchestrator.ID, "paused for process restart")
+	}
 	if ctx.Err() != nil {
-		markCanceled()
+		if e.runs.draining.Load() {
+			markDrained()
+		} else {
+			markCanceled()
+		}
 		return
 	}
 	// A task may have moved to Done, Canceled, or another non-executable state
@@ -338,7 +348,11 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 			lastFingerprint = fingerprint
 			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "awaiting_human_input")
 			if !waitForOrchestrator(ctx, 200*time.Millisecond) {
-				markCanceled()
+				if e.runs.draining.Load() {
+					markDrained()
+				} else {
+					markCanceled()
+				}
 				return
 			}
 			continue
@@ -372,7 +386,11 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 			}
 			_ = e.q.SetRunWaitState(ctx, orchestrator.ID, "waiting for worker lifecycle event")
 			if !waitForOrchestrator(ctx, 2*time.Second) {
-				markCanceled()
+				if e.runs.draining.Load() {
+					markDrained()
+				} else {
+					markCanceled()
+				}
 				return
 			}
 			continue
@@ -397,7 +415,11 @@ func (e *NativeEngine) runOrchestrator(ctx context.Context, orchestrator db.Run,
 		}
 		_, runErr := ai.RunWithMessages(ctx, systemPrompt, []aicli.Message{{Role: "user", Content: message}})
 		if errors.Is(runErr, context.Canceled) || ctx.Err() != nil {
-			markCanceled()
+			if e.runs.draining.Load() {
+				markDrained()
+			} else {
+				markCanceled()
+			}
 			return
 		}
 		if runErr != nil {
