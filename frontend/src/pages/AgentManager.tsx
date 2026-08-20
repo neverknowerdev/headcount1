@@ -4,12 +4,22 @@ import axios from 'axios';
 import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
 
+type AgentTemplate = {
+    name: string;
+    description: string;
+    prompt: string;
+    allowed_tools?: string[];
+    permissions?: string;
+};
+
 export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
+    const [templates, setTemplates] = useState<AgentTemplate[]>([]);
     const [showModal, setShowModal] = useState(false);
-    const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
+    const [selectedTemplate, setSelectedTemplate] = useState('');
+    const [form, setForm] = useState({ name: '', description: '', system_prompt: '', permissions: '{}' });
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState('');
 
@@ -23,15 +33,44 @@ export const AgentManager: React.FC = () => {
         }
     }, [selectedCompanyId]);
 
+    const fetchTemplates = useCallback(async () => {
+        try {
+            const res = await axios.get('/api/agent-configs');
+            setTemplates(res.data || []);
+        } catch (e) {
+            console.error(e);
+        }
+    }, []);
+
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         fetchAgents();
     }, [fetchAgents]);
 
+    useEffect(() => {
+        // eslint-disable-next-line react-hooks/set-state-in-effect
+        fetchTemplates();
+    }, [fetchTemplates]);
+
     const openModal = () => {
-        setForm({ name: '', description: '', system_prompt: '' });
+        setForm({ name: '', description: '', system_prompt: '', permissions: '{}' });
+        setSelectedTemplate('');
         setError('');
         setShowModal(true);
+    };
+
+    const selectTemplate = (name: string) => {
+        setSelectedTemplate(name);
+        const template = templates.find(item => item.name === name);
+        if (!template) {
+            setForm(current => ({ ...current, system_prompt: '', permissions: '{}' }));
+            return;
+        }
+        setForm(current => ({
+            ...current,
+            system_prompt: template.prompt || '',
+            permissions: template.permissions || '{}',
+        }));
     };
 
     const handleCreate = async () => {
@@ -44,6 +83,7 @@ export const AgentManager: React.FC = () => {
                 name: form.name.trim(),
                 description: form.description.trim(),
                 system_prompt: form.system_prompt.trim(),
+                permissions: form.permissions,
             });
             setShowModal(false);
             window.location.href = `/companies/${shortName}/agents/${res.data.id}`;
@@ -140,6 +180,27 @@ export const AgentManager: React.FC = () => {
                 <div className="fixed inset-0 bg-black/40 flex items-center justify-center z-50 p-4">
                     <div className="bg-white rounded-xl shadow-xl w-full max-w-md p-6 space-y-4">
                         <h2 className="text-lg font-semibold text-gray-900">New agent</h2>
+
+                        <div>
+                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-template">Template</label>
+                            <select
+                                id="agent-template"
+                                data-testid="agent-template"
+                                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                                value={selectedTemplate}
+                                onChange={e => selectTemplate(e.target.value)}
+                            >
+                                <option value="">Blank agent</option>
+                                {templates.map(template => (
+                                    <option key={template.name} value={template.name}>{template.name}</option>
+                                ))}
+                            </select>
+                            {selectedTemplate && (
+                                <p className="mt-1 text-xs text-gray-500">
+                                    Copied the template prompt and {templates.find(template => template.name === selectedTemplate)?.allowed_tools?.length || 0} tool settings. You can edit the prompt below.
+                                </p>
+                            )}
+                        </div>
 
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>

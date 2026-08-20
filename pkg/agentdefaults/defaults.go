@@ -18,7 +18,7 @@ func Rows(companyID int32) []db.Agent {
 	for _, cfg := range configs {
 		subagents, _ := json.Marshal(cfg.Subagents)
 		allowedMCPs, _ := json.Marshal(cfg.AllowedMCPs)
-		permissions, _ := json.Marshal(initialPermissions(cfg))
+		permissions := PermissionsForConfig(cfg)
 		rows = append(rows, db.Agent{
 			CompanyID:      companyID,
 			Name:           cfg.Name,
@@ -33,10 +33,18 @@ func Rows(companyID int32) []db.Agent {
 			ReasoningLevel: string(cfg.ReasoningLevel),
 			Subagents:      string(subagents),
 			AllowedMCPs:    string(allowedMCPs),
-			Permissions:    string(permissions),
+			Permissions:    permissions,
 		})
 	}
 	return rows
+}
+
+// PermissionsForConfig returns the JSON-encoded deny map used to persist a
+// built-in config's tool policy on an agent row. Templates use the same value
+// so a newly created custom agent can inherit a built-in tool policy exactly.
+func PermissionsForConfig(cfg *agentconfig.AgentConfig) string {
+	permissions, _ := json.Marshal(initialPermissions(cfg))
+	return string(permissions)
 }
 
 // initialPermissions stores only denials. This gives each built-in role a

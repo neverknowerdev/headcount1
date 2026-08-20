@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"agent-orchestrator/engine/agentconfig"
+	"agent-orchestrator/pkg/agentdefaults"
 )
 
 // AgentConfigResponse is the wire shape for a built-in role template. These
@@ -18,6 +19,7 @@ type AgentConfigResponse struct {
 	Subagents      []string `json:"subagents"`
 	ParentAgent    string   `json:"parent_agent,omitempty"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
+	Permissions    string   `json:"permissions"`
 }
 
 // ListAgentConfigs returns built-in role templates (CEO, CTO, CMO, Coder, …)
@@ -36,6 +38,7 @@ func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 			Subagents:      cfg.Subagents,
 			ParentAgent:    cfg.ParentAgent,
 			AllowedTools:   cfg.AllowedTools,
+			Permissions:    agentdefaults.PermissionsForConfig(cfg),
 		})
 	}
 	api.respondJSON(w, http.StatusOK, out)
