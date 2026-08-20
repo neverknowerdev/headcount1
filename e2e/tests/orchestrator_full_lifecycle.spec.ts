@@ -241,11 +241,22 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
         expect(joined).toContain('worker_list');
         expect(joined).toContain('ask_task_owner');
         expect(joined).toContain('ask_human');
-        expect(joined).toContain('technical-spec.md');
         expect(joined).toContain('controller-state.txt');
         expect(joined).toContain('qa-fix.txt');
         expect(joined).toContain('copied-workspace Coder repair');
         expect(joined).not.toContain('ask_agent');
+
+        // Artifacts are persisted separately from run transcripts.  On the
+        // PostgreSQL backend the task can become terminal before the final
+        // runs response includes the artifact write, so use the durable
+        // artifact endpoint as the source of truth and allow the write to
+        // settle before asserting it.
+        await expect.poll(async () => {
+            const response = await request.get(`/api/tasks/${task.id}/artifacts`);
+            if (!response.ok()) return [];
+            const artifacts = await response.json();
+            return (artifacts as any[]).map((artifact) => artifact.filename);
+        }, { timeout: 45_000 }).toContain('technical-spec.md');
 
         const orchestratorRequests = completions.filter((entry) => entry.body?.model === 'e2e-orchestrator-model');
         const ceoRequests = completions.filter((entry) => entry.body?.model === 'e2e-ceo-model');
