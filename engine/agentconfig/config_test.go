@@ -139,6 +139,15 @@ func TestDefaultFactory_BuiltinAgents(t *testing.T) {
 	}
 }
 
+func TestBuiltinConfigs_PreserveFilenameOrder(t *testing.T) {
+	expected := []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"}
+	configs := agentconfig.BuiltinConfigs()
+	require.Len(t, configs, len(expected))
+	for i, cfg := range configs {
+		assert.Equal(t, expected[i], cfg.Name, "built-in config order at index %d", i)
+	}
+}
+
 func TestDefaultFactory_GetConfig(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 

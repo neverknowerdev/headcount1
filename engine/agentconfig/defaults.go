@@ -1,11 +1,10 @@
 package agentconfig
 
 import (
-	_ "embed"
+	"embed"
 	"fmt"
+	"io/fs"
 	"sync"
-
-	"gopkg.in/yaml.v3"
 )
 
 // The built-in catalog is deliberately data-driven. It is embedded into the
@@ -14,25 +13,36 @@ import (
 // These values are copied into database Agent rows when a company is created
 // or when a new built-in role is added in a later release.
 //
-//go:embed builtin_agents.yaml
-var builtinAgentsYAML []byte
+//go:embed agent_configs/*.yaml
+var builtinAgentFiles embed.FS
 
 var (
 	builtinOnce    sync.Once
 	builtinCatalog []*AgentConfig
 )
 
-// BuiltinConfigs returns the predefined agent configurations in their
-// canonical YAML order.
+// BuiltinConfigs returns the predefined agent configurations in lexicographic
+// filename order. The numeric filename prefixes define the canonical order.
 func BuiltinConfigs() []*AgentConfig {
 	builtinOnce.Do(func() {
-		var catalog struct {
-			Agents []*AgentConfig `yaml:"agents"`
+		paths, err := fs.Glob(builtinAgentFiles, "agent_configs/*.yaml")
+		if err != nil {
+			panic(fmt.Sprintf("invalid embedded built-in agent config pattern: %v", err))
 		}
-		if err := yaml.Unmarshal(builtinAgentsYAML, &catalog); err != nil {
-			panic(fmt.Sprintf("invalid embedded built-in agent catalog: %v", err))
+
+		catalog := make([]*AgentConfig, 0, len(paths))
+		for _, path := range paths {
+			data, err := builtinAgentFiles.ReadFile(path)
+			if err != nil {
+				panic(fmt.Sprintf("read embedded built-in agent config %s: %v", path, err))
+			}
+			cfg, err := LoadYAMLFromBytes(data, "")
+			if err != nil {
+				panic(fmt.Sprintf("invalid embedded built-in agent config %s: %v", path, err))
+			}
+			catalog = append(catalog, cfg)
 		}
-		builtinCatalog = catalog.Agents
+		builtinCatalog = catalog
 	})
 	return builtinCatalog
 }
