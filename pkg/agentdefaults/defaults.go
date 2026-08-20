@@ -16,9 +16,7 @@ func Rows(companyID int32) []db.Agent {
 	configs := agentconfig.BuiltinConfigs()
 	rows := make([]db.Agent, 0, len(configs))
 	for _, cfg := range configs {
-		subagents, _ := json.Marshal(cfg.Subagents)
 		allowedMCPs, _ := json.Marshal(cfg.AllowedMCPs)
-		permissions := PermissionsForConfig(cfg)
 		rows = append(rows, db.Agent{
 			CompanyID:      companyID,
 			Name:           cfg.Name,
@@ -28,12 +26,11 @@ func Rows(companyID int32) []db.Agent {
 			ShortName:      cfg.EffectiveShortName(),
 			Description:    cfg.Description,
 			SystemPrompt:   cfg.Prompt,
-			Mode:           "primary",
 			ChatType:       string(cfg.ChatType),
 			ReasoningLevel: string(cfg.ReasoningLevel),
-			Subagents:      string(subagents),
+			CanUseWorkers:  cfg.CanUseWorkers,
 			AllowedMCPs:    string(allowedMCPs),
-			Permissions:    permissions,
+			Permissions:    PermissionsForConfig(cfg),
 		})
 	}
 	return rows
@@ -49,7 +46,7 @@ func PermissionsForConfig(cfg *agentconfig.AgentConfig) string {
 
 // initialPermissions stores only denials. This gives each built-in role a
 // concrete, DB-owned tool policy while retaining the runtime's lifecycle tools
-// (finish_task/report_status) and any future tools unless explicitly denied.
+// and any future tools unless explicitly denied.
 func initialPermissions(cfg *agentconfig.AgentConfig) map[string]string {
 	permissions := make(map[string]string)
 	toolNames := append([]string(nil), aicli.ConfigurableToolNames()...)

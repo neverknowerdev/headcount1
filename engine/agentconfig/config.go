@@ -56,6 +56,9 @@ type AgentConfig struct {
 	ParentAgent string `toml:"parent_agent" yaml:"parent_agent"`
 	// AllowedTools lists tool names the agent may invoke. Empty = all tools.
 	AllowedTools []string `toml:"allowed_tools" yaml:"allowed_tools"`
+	// CanUseWorkers permits bounded ephemeral helper-worker runs. It is an
+	// persisted capability and is intentionally independent of the display name.
+	CanUseWorkers bool `toml:"can_use_workers" yaml:"can_use_workers"`
 	// AllowedMCPs lists MCP server names the agent may use. Empty = all enabled MCPs.
 	AllowedMCPs []string `toml:"allowed_mcps" yaml:"allowed_mcps"`
 }

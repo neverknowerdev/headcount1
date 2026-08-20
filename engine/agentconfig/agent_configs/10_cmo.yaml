@@ -3,6 +3,7 @@ short_name: CMO
 description: Owns marketing strategy, KPIs, channels, analysis, long-term planning, and delegation.
 chat_type: compact_thinking
 reasoning_level: max
+can_use_workers: true
 parent_agent: CEO
 subagents: [SMM, Writer, Ads manager]
 allowed_tools: [read, web_fetch, write_artifact, list_artifacts, read_artifact, ask_artifact, create_subtask, answer_subtask_question, ask_task_owner, ask_human, report_status, finish_task]

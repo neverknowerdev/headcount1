@@ -3,9 +3,23 @@ import * as net from 'net';
 import { AddressInfo } from 'net';
 
 const MOCK_MODEL_ID = 'e2e-mock-model';
+const CEO_MODEL_ID = 'e2e-ceo-model';
+const AGENT_A_MODEL_ID = 'e2e-agent-a-model';
+const AGENT_B_MODEL_ID = 'e2e-agent-b-model';
+const RESUME_A_MODEL_ID = 'e2e-resume-a-model';
+const RESUME_B_MODEL_ID = 'e2e-resume-b-model';
 const TOOL_NAME = 'finish_task';
 const TOOL_CALL_ID = 'call_e2e_1';
 const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
+const ORCHESTRATOR_TOOL_NAME = 'run_new_session';
+const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
+const ORCHESTRATOR_FINISH_TOOL_NAME = 'finish_task';
+const ORCHESTRATOR_FINISH_TOOL_CALL_ID = 'call_e2e_orchestrator_finish';
+const ORCHESTRATOR_TOOL_ARGS = {
+    agent_name: 'E2E Agent',
+    title: 'Complete E2E task',
+    prompt: 'Complete the assigned task and finish the task when the implementation is ready for review.',
+};
 const COMPLETION_TEXT = 'Task is now in review. All done.';
 
 interface ReceivedRequest {
@@ -39,6 +53,20 @@ export interface ScenarioEntry {
 interface ScenarioState {
     entries: ScenarioEntry[];
     index: number;
+    inboundEntries?: ScenarioEntry[];
+    inboundIndex?: number;
+    inboundActive?: boolean;
+    forkActive?: boolean;
+    inboundReadyFor?: Set<string>;
+}
+
+const GENERIC_FORWARDING_INBOUND = '__forwarding-inbound__';
+
+interface ScenarioTemplate {
+    entries: ScenarioEntry[];
+    inboundEntries?: ScenarioEntry[];
+    forkEntries?: ScenarioEntry[];
+    retryEntries?: ScenarioEntry[];
 }
 
 interface ChatCompletionRequest {
@@ -93,14 +121,21 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         requestCount: 0,
         scenario: null as ScenarioState | null,
         scenarios: new Map<string, ScenarioState>(),
+        scenarioTemplates: new Map<string, ScenarioTemplate>(),
         // Hold support (used by the auto-update drain/resume test): while active,
         // every /chat/completions request blocks after being logged and before
         // responding, until POST /__test/release resolves it. This lets a test
         // catch an agent run provably mid-turn (blocked on its LLM call) so it
         // can SIGTERM the server and exercise graceful drain deterministically.
         holdActive: false,
+        holdModelFilter: null as Set<string> | null,
         holdWaiters: [] as Array<() => void>,
         completionsReceived: 0,
+        orchestratorStartedTasks: new Set<string>(),
+        forkRequested: false,
+        forkedCoderStarted: false,
+        forkedCoderSessionID: null as string | null,
+        sourceCoderSessionID: null as string | null,
         shutdown: null as (() => Promise<void>) | null,
     };
 
@@ -121,7 +156,8 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         const isCompletions = (req.url?.includes('/chat/completions') ?? false) && req.method === 'POST';
         if (isCompletions) {
             state.completionsReceived++;
-            if (state.holdActive) {
+            const model = String((body as ChatCompletionRequest | null)?.model || '');
+            if (state.holdActive && (!state.holdModelFilter || state.holdModelFilter.has(model))) {
                 await new Promise<void>((resolve) => state.holdWaiters.push(resolve));
             }
         }
@@ -149,6 +185,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
     const stop = async (): Promise<void> => {
         // Release requests held by the drain/resume scenario before closing.
         state.holdActive = false;
+        state.holdModelFilter = null;
         for (const resolve of state.holdWaiters.splice(0)) resolve();
         if (typeof server.closeAllConnections === 'function') server.closeAllConnections();
         for (const socket of sockets) socket.destroy();
@@ -186,9 +223,16 @@ interface MockState {
     requestCount: number;
     scenario: ScenarioState | null;
     scenarios: Map<string, ScenarioState>;
+    scenarioTemplates: Map<string, ScenarioTemplate>;
     holdActive: boolean;
+    holdModelFilter: Set<string> | null;
     holdWaiters: Array<() => void>;
     completionsReceived: number;
+    orchestratorStartedTasks: Set<string>;
+    forkRequested: boolean;
+    forkedCoderStarted: boolean;
+    forkedCoderSessionID: string | null;
+    sourceCoderSessionID: string | null;
     shutdown: (() => Promise<void>) | null;
 }
 
@@ -210,13 +254,22 @@ function handleTestRoutes(
     // Activate hold: subsequent chat-completions calls block until released.
     if (req.url === '/__test/hold' && req.method === 'POST') {
         state.holdActive = true;
+        state.holdModelFilter = null;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', hold: true }));
+        return true;
+    }
+    if (req.url === '/__test/hold-worker' && req.method === 'POST') {
+        state.holdActive = true;
+        state.holdModelFilter = new Set([MOCK_MODEL_ID, RESUME_A_MODEL_ID, RESUME_B_MODEL_ID]);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ status: 'ok', hold: true, model: MOCK_MODEL_ID }));
         return true;
     }
     // Release: deactivate hold and unblock every currently-waiting call.
     if (req.url === '/__test/release' && req.method === 'POST') {
         state.holdActive = false;
+        state.holdModelFilter = null;
         const waiters = state.holdWaiters.splice(0);
         for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -227,9 +280,16 @@ function handleTestRoutes(
         state.received.length = 0;
         state.requestCount = 0;
         state.completionsReceived = 0;
+        state.orchestratorStartedTasks.clear();
+        state.forkRequested = false;
+        state.forkedCoderStarted = false;
+        state.forkedCoderSessionID = null;
+        state.sourceCoderSessionID = null;
         state.scenario = null;
         state.scenarios.clear();
+        state.scenarioTemplates.clear();
         state.holdActive = false;
+        state.holdModelFilter = null;
         const waiters = state.holdWaiters.splice(0);
         for (const resolve of waiters) resolve();
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -243,9 +303,15 @@ function handleTestRoutes(
         return true;
     }
     if (req.url === '/__test/set-scenario' && req.method === 'POST') {
-        const data = body as { entries: ScenarioEntry[]; model?: string };
-        const next = { entries: data.entries ?? [], index: 0 };
-        if (data.model) state.scenarios.set(data.model, next);
+        const data = body as { entries: ScenarioEntry[]; inbound_entries?: ScenarioEntry[]; fork_entries?: ScenarioEntry[]; retry_entries?: ScenarioEntry[]; model?: string };
+        const next = { entries: data.entries ?? [], index: 0, inboundReadyFor: new Set<string>() };
+        if (data.model) {
+            state.scenarios.set(data.model, next);
+            state.scenarioTemplates.set(data.model, {
+                entries: data.entries ?? [], inboundEntries: data.inbound_entries,
+                forkEntries: data.fork_entries, retryEntries: data.retry_entries,
+            });
+        }
         else state.scenario = next;
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ status: 'ok', count: next.entries.length, model: data.model || null }));
@@ -267,6 +333,15 @@ function handleModelsRoute(req: http.IncomingMessage, res: http.ServerResponse):
             data: [
                 { id: MOCK_MODEL_ID, object: 'model', owned_by: 'e2e' },
                 { id: 'e2e-orchestrator-model', object: 'model', owned_by: 'e2e' },
+                { id: CEO_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: AGENT_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: AGENT_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: RESUME_A_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: RESUME_B_MODEL_ID, object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-cto-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-coder-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-qa-model', object: 'model', owned_by: 'e2e' },
+                { id: 'e2e-helper-model', object: 'model', owned_by: 'e2e' },
             ],
         }));
         return true;
@@ -286,38 +361,217 @@ function handleChatCompletionsRoute(
 
     const request = body as ChatCompletionRequest;
     const wantsStream = request.stream === true;
+    const requestTools = Array.isArray((request as any).tools) ? (request as any).tools : [];
+    const answerTool = requestTools.find((tool: any) => tool?.function?.name === 'answer_message');
+    const requestContent = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? '')).join('\n');
+    if (request.model === 'e2e-orchestrator-model' && requestContent.includes('forked session ')) {
+        state.forkRequested = true;
+    }
 
     // Scenario mode: consume entries in order, fall back to "Done." after exhaustion.
-    const modelScenario = state.scenarios.get(String(request.model || ''));
+    const model = String(request.model || '');
+    const sessionID = runtimeSessionID(request);
+    let modelScenario = state.scenarios.get(model);
+    const template = state.scenarioTemplates.get(model);
+    if (template && sessionID) {
+        const sessionKey = `${model}#${sessionID}`;
+        modelScenario = state.scenarios.get(sessionKey);
+        if (!modelScenario) {
+            const content = requestContent;
+            const isForkedCoder = model === 'e2e-coder-model'
+                && !!sessionID
+                && state.forkRequested
+                && sessionID !== state.sourceCoderSessionID;
+            const forkActive = !!template.forkEntries && isForkedCoder;
+            if (model === 'e2e-coder-model' && !state.sourceCoderSessionID) {
+                state.sourceCoderSessionID = sessionID;
+            }
+            if (forkActive && model === 'e2e-coder-model') {
+                state.forkedCoderStarted = true;
+                state.forkedCoderSessionID = sessionID;
+                state.forkRequested = false;
+            }
+            const terminalReplacement = content.includes("Answer the task owner's routed question");
+            const entries = forkActive ? template.forkEntries!
+                : terminalReplacement && template.inboundEntries ? template.inboundEntries
+                : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
+                    : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
+            modelScenario = {
+                entries,
+                index: 0,
+                inboundEntries: template.inboundEntries,
+                inboundIndex: 0,
+                inboundActive: terminalReplacement,
+                forkActive,
+                inboundReadyFor: new Set<string>(),
+            };
+            state.scenarios.set(sessionKey, modelScenario);
+        }
+    }
     const scenario = modelScenario || state.scenario;
     if (scenario) {
         const sc = scenario;
-        const entry = sc.index < sc.entries.length ? sc.entries[sc.index++] : null;
+        const hasIncoming = requestHasIncoming(request);
+        const inboundIndex = sc.inboundIndex ?? 0;
+        // Keep a session's primary scenario contiguous.  An unrelated routed
+        // event can arrive while the session is still doing its own work
+        // (for example, the Coder can ask the orchestrator about architecture
+        // while the CTO is still waiting for helper workers).  Switching to
+        // inbound_entries at that point would silently skip the primary
+        // scenario's remaining tool calls and make the fixture timing
+        // dependent.  Inbound entries become eligible once the primary
+        // scenario is exhausted, or when the primary scenario itself is
+        // explicitly blocked on answer_message.
+        const primaryCandidate = sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        const primaryScenarioExhausted = sc.index >= sc.entries.length;
+        const primaryNeedsIncoming = scenarioEntryNeedsIncomingAnswer(primaryCandidate);
+        // A routed message must be answered as soon as it reaches a session,
+        // even when that session still has primary scripted work queued. The
+        // previous condition only switched to inbound entries when the
+        // primary entry explicitly waited for an answer. That left a CTO
+        // unable to answer an orchestrator route while it was still in its
+        // design sequence, so send_message_to_session waited forever for the
+        // correlated answer. The orchestrator's outbound route gate remains
+        // primary: it must forward the question before consuming its answer.
+        const inboundMayRun = primaryScenarioExhausted
+            || sc.inboundActive === true
+            || (hasIncoming && !scenarioEntryInboundGate(primaryCandidate));
+        const usingInboundScenario = !sc.forkActive && !!sc.inboundEntries
+            && inboundMayRun && inboundIndex < sc.inboundEntries.length;
+        const candidate = usingInboundScenario
+            ? sc.inboundEntries![inboundIndex]
+            : sc.index < sc.entries.length ? sc.entries[sc.index] : null;
+        const hasIncomingAnswer = answerTool && requestHasIncoming(request);
+        const inboundGate = scenarioEntryInboundGate(candidate);
+        // An inbound event can arrive while a long orchestration turn is
+        // already consuming scripted management actions. Answer it at the
+        // next request that includes the event instead of relying on the
+        // scripted action index to line up with delivery timing.
+        if (hasIncomingAnswer && !scenarioEntryCanProcessIncoming(candidate) && !inboundGate) {
+            // The owner may receive a worker question before the scripted
+            // inspection turn that precedes its forwarding action. Remember
+            // that the question was answered so the later route cannot wait
+            // forever for an event that was already consumed durably.
+            sc.inboundReadyFor?.add(inboundGate ?? GENERIC_FORWARDING_INBOUND);
+            const message = latestIncomingContent(request) ?? '';
+            const messageID = pendingIncomingMessageID(request);
+            const answer: ScenarioEntry = { tool_call: { id: 'auto-answer-inbound', name: 'answer_message', arguments: {
+                message_id: messageID ?? 1,
+                answer: 'Use the existing event ordering and preserve the current API contract.',
+            } } };
+            if (wantsStream) writeStreamingScenarioEntry(res, answer, request);
+            else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(buildScenarioResponse(answer, request))); }
+            return true;
+        }
+        // Keep the orchestrator from entering a blocking outbound route before
+        // the worker question it is meant to forward has reached its inbox.
+        // This removes scheduler timing from the E2E scenario while still
+        // exercising the real durable answer and routing paths.
+        const waitingForForwardedQuestion = inboundGate
+            && !sc.inboundReadyFor?.has(inboundGate)
+            && !sc.inboundReadyFor?.has(GENERIC_FORWARDING_INBOUND)
+            && !requestHasIncoming(request);
+        // A worker may finish its owner-wait at the same moment the
+        // orchestrator sends the next message. Keep an answer entry queued if
+        // that message has not reached this turn yet; the engine's forced
+        // follow-up will re-enter BeforeTurn and receive it without consuming
+        // the scripted answer prematurely.
+        const waitingForIncoming = candidate && scenarioEntryNeedsIncomingAnswer(candidate) && !requestHasIncoming(request);
+        const waitingForHelpers = candidate?.tool_call?.id === 'cto-spec'
+            && !helperWorkersAreTerminal(request);
+        const waitingForWorkerRefresh = waitingForHelpers && requestTools.some((tool: any) => tool?.function?.name === 'worker_list');
+        const waitingForForkedCoder = candidate?.tool_call?.id === 'launch-qa-retry'
+            && (state.forkRequested || state.forkedCoderStarted)
+            && !forkedCoderIsTerminal(request);
+        // The final completion call is only valid once the last QA run has
+        // emitted its terminal lifecycle event. A status-report event can
+        // wake the orchestrator in the small window before that event, so
+        // keep the scripted finish call queued and let the real session
+        // snapshot provide the next activation. This keeps the fixture
+        // deterministic without making the production orchestrator poll.
+        const waitingForFinalWorkers = candidate?.tool_call?.id === 'orchestrator-finish'
+            && !managedWorkersAreTerminal(request);
+        const entry = waitingForForkedCoder
+            ? { tool_call: { id: 'wait-for-forked-coder', name: 'get_session', arguments: { session_id: 0 } } }
+            : waitingForFinalWorkers
+            ? { tool_call: { id: 'wait-for-final-workers', name: 'get_session_list', arguments: {} } }
+            : waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers
+            ? waitingForWorkerRefresh
+                ? { tool_call: { id: 'wait-for-helper-status', name: 'worker_list', arguments: {} } }
+                : requestTools.some((tool: any) => tool?.function?.name === 'report_status')
+                ? {
+                    // Keep the session inside the agent loop while the sender
+                    // queues the message. A plain text response would end the
+                    // run before BeforeTurn can observe the routed event.
+                    tool_call: { id: 'wait-for-routed-message', name: 'report_status', arguments: { status: 'Waiting for the next routed message.' } },
+                }
+                : {
+                    // Orchestrator activations are bounded: a text completion
+                    // returns control to the outer durable-event poller, which
+                    // can observe a question that arrives after this turn.
+                    // Keeping get_session_list here would trap the model in
+                    // one activation until its 300-turn limit.
+                    text: 'Waiting for the next routed message.',
+                }
+            : candidate;
+        if (!waitingForForkedCoder && !waitingForFinalWorkers && !waitingForIncoming && !waitingForForwardedQuestion && !waitingForHelpers && candidate) {
+            if (usingInboundScenario) {
+                sc.inboundIndex = inboundIndex + 1;
+                sc.inboundActive = true;
+            } else {
+                sc.index++;
+            }
+            if (inboundGate) {
+                sc.inboundReadyFor?.delete(inboundGate);
+                sc.inboundReadyFor?.delete(GENERIC_FORWARDING_INBOUND);
+            }
+        }
 
         if (wantsStream) {
-            writeStreamingScenarioEntry(res, entry);
+            writeStreamingScenarioEntry(res, entry, request, state);
         } else {
             res.writeHead(200, { 'Content-Type': 'application/json' });
-            res.end(JSON.stringify(buildScenarioResponse(entry)));
+            res.end(JSON.stringify(buildScenarioResponse(entry, request, state)));
         }
         return true;
     }
 
-    // Default mode: first call returns finish_task, subsequent calls return text.
+    // Default mode: task orchestrators launch the configured worker first;
+    // ordinary agent sessions finish the task directly. This keeps the basic
+    // onboarding flow representative of the mandatory orchestrator runtime.
     const messages = Array.isArray((request as any).messages) ? (request as any).messages : [];
     const hasToolResult = messages.some((m: any) => m.role === 'tool');
-    const isFirstCall = !hasToolResult;
+    const isOrchestrator = requestTools.some((tool: any) => tool?.function?.name === ORCHESTRATOR_TOOL_NAME);
+    if (answerTool && !isOrchestrator) {
+        const match = String(latestIncomingContent(request) ?? '').match(/(?:message_id|"id")\s*[=:]\s*(\d+)/);
+        const answer = { tool_call: { id: 'call-e2e-answer', name: 'answer_message', arguments: {
+            message_id: match ? Number(match[1]) : 1,
+            answer: 'Use the existing event ordering and preserve the current API contract.',
+        } } };
+        if (wantsStream) writeStreamingScenarioEntry(res, answer, request);
+        else { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(buildScenarioResponse(answer, request))); }
+        return true;
+    }
+    const systemContext = messages.find((message: any) => message.role === 'system')?.content ?? '';
+    const taskMatch = String(systemContext).match(/Task:.*?\(id:\s*(\d+)\)/);
+    const taskKey = taskMatch?.[1] ?? 'unknown-task';
+    const isFirstCall = !hasToolResult && (!isOrchestrator || !state.orchestratorStartedTasks.has(taskKey));
+    if (isOrchestrator && isFirstCall) state.orchestratorStartedTasks.add(taskKey);
+    const finishOrchestrator = isOrchestrator
+        && !isFirstCall
+        && defaultOrchestratorWorkersAreTerminal(request);
 
     if (wantsStream) {
-        writeStreamingChatCompletion(res, isFirstCall);
+        writeStreamingChatCompletion(res, isFirstCall || finishOrchestrator, isOrchestrator, finishOrchestrator);
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall)));
+        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall || finishOrchestrator, isOrchestrator, finishOrchestrator)));
     }
     return true;
 }
 
-function buildScenarioResponse(entry: ScenarioEntry | null): object {
+function buildScenarioResponse(entry: ScenarioEntry | null, request?: ChatCompletionRequest, state?: MockState): object {
     if (!entry || entry.text !== undefined) {
         const text = entry?.text ?? 'Done.';
         return {
@@ -333,7 +587,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
             usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 },
         };
     }
-    const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
+    const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request, state));
     return {
         id: `chatcmpl-sc-${Date.now()}`,
         object: 'chat.completion',
@@ -356,7 +610,7 @@ function buildScenarioResponse(entry: ScenarioEntry | null): object {
     };
 }
 
-function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null): void {
+function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEntry | null, request?: ChatCompletionRequest, state?: MockState): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -371,7 +625,7 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
         res.write(formatSSE(chunk({ content: text }, null)));
         res.write(formatSSE(chunk({}, 'stop')));
     } else {
-        const toolCalls = entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : []);
+        const toolCalls = (entry.tool_calls ?? (entry.tool_call ? [entry.tool_call] : [])).map((toolCall) => resolveScenarioToolCall(toolCall, request, state));
         for (const [index, tc] of toolCalls.entries()) {
             res.write(formatSSE(chunk({
                 tool_calls: [{ index, id: tc.id, function: { name: tc.name, arguments: '' } }],
@@ -387,17 +641,202 @@ function writeStreamingScenarioEntry(res: http.ServerResponse, entry: ScenarioEn
     res.end();
 }
 
-function buildChatCompletionResponse(withToolCall: boolean): object {
+function scenarioEntryNeedsIncomingAnswer(entry: ScenarioEntry | null): boolean {
+    return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) => toolCall.name === 'answer_message' && Number(toolCall.arguments.message_id) === 0);
+}
+
+function helperWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const workerLists = (Array.isArray(request.messages) ? request.messages : [])
+        .filter((message: any) => message.role === 'tool')
+        .map((message: any) => String(message.content ?? ''))
+        .filter((content: string) => content.startsWith('[{') && content.includes('"status"'));
+    const latest = workerLists.at(-1);
+    if (!latest) return false;
+    try {
+        const workers = JSON.parse(latest) as Array<{ status?: string }>;
+        return workers.length >= 4 && workers.every((worker) =>
+            worker.status !== 'running' && worker.status !== 'waiting');
+    } catch {
+        return false;
+    }
+}
+
+function forkedCoderIsTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? '')).join('\n');
+    const statuses = [...content.matchAll(/"agent_name"\s*:\s*"[^"]*Coder"[\s\S]*?"status"\s*:\s*"([^"]+)"/g)]
+        .map((match) => match[1]);
+    const latest = statuses.at(-1);
+    return latest === 'completed' || latest === 'canceled' || latest === 'failed';
+}
+
+function managedWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .filter((message) => message.role === 'tool')
+        .map((message) => String(message.content ?? ''))
+        .filter((value) => value.includes('"sessions"') && value.includes('"agent_name"'))
+        .at(-1) ?? '';
+    const statuses = [...content.matchAll(/\"agent_name\"\s*:\s*\"([^\"]+)\"[\s\S]*?\"status\"\s*:\s*\"([^\"]+)\"/g)]
+        .map((match) => ({ agentName: match[1], status: match[2] }));
+    const workers = statuses.filter(({ agentName }) =>
+        !agentName.toLowerCase().includes('orchestrator'));
+    return workers.length > 0 && workers.every(({ status }) =>
+        status !== 'running' && status !== 'waiting' && status !== 'active');
+}
+
+function defaultOrchestratorWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? ''))
+        .join('\n');
+    const latestByAgent = new Map<string, string>();
+    for (const match of content.matchAll(/\"agent_name\"\s*:\s*\"([^\"]+)\"[\s\S]*?\"status\"\s*:\s*\"([^\"]+)\"/g)) {
+        latestByAgent.set(match[1], match[2]);
+    }
+    const workers = [...latestByAgent.entries()]
+        .filter(([agentName]) => !agentName.toLowerCase().includes('orchestrator'))
+        .map(([, status]) => status);
+    return workers.length > 0 && workers.every((status) =>
+        status !== 'running' && status !== 'waiting' && status !== 'active');
+}
+
+function scenarioEntryCanProcessIncoming(entry: ScenarioEntry | null): boolean {
+    // Outbound routing is not an answer to the event currently delivered to
+    // this session. Treating send_message_to_session as an inbound handler can
+    // deadlock the deterministic scenario: the orchestrator sends another
+    // message while a worker's ask_task_owner call is still waiting for its
+    // correlated answer. Only answer_message consumes the pending event.
+    return (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : [])).some((toolCall) =>
+        toolCall.name === 'answer_message');
+}
+
+function scenarioEntryInboundGate(entry: ScenarioEntry | null): string | null {
+    const id = (entry?.tool_calls ?? (entry?.tool_call ? [entry.tool_call] : []))[0]?.id;
+    if (id === 'route-coder-to-cto' || id === 'route-qa-issue-to-coder') return id;
+    return null;
+}
+
+function requestHasIncoming(request: ChatCompletionRequest): boolean {
+    return latestIncomingContent(request) !== null;
+}
+
+function latestIncomingContent(request: ChatCompletionRequest): string | null {
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    for (let index = messages.length - 1; index >= 0; index--) {
+        const message = messages[index];
+        // Only the trailing user block can represent the event injected for
+        // this provider turn. Once an answer/tool result is appended, older
+        // Incoming text is conversation history, not a newly pending event.
+        if (message.role !== 'user') break;
+        if (String(message.content).includes('Incoming')) {
+            return String(message.content);
+        }
+    }
+    return null;
+}
+
+function runtimeSessionID(request: ChatCompletionRequest): string | null {
+    const system = (Array.isArray(request.messages) ? request.messages : [])
+        .find((message) => message.role === 'system')?.content ?? '';
+    return String(system).match(/Runtime session ID:\s*(\d+)/)?.[1] ?? null;
+}
+
+function pendingIncomingMessageID(request: ChatCompletionRequest): number | null {
+    const incoming = latestIncomingContent(request);
+    if (!incoming) return null;
+    // Lifecycle completions and routed messages share the same inbound block.
+    // Only a session_message can be answered with answer_message; selecting
+    // the first message_id would incorrectly pick a preceding worker_finished
+    // event and make the deterministic fixture loop on "not a session
+    // message" forever.
+    const direct = incoming.match(/message_id=(\d+)\s+type=session_message\b/);
+    if (direct) return Number(direct[1]);
+    const routedMessage = incoming.match(/\{"id":(\d+)[^{}]*"event_type":"session_message"/);
+    return routedMessage ? Number(routedMessage[1]) : null;
+}
+
+/** Resolve IDs that are assigned by the database during an E2E run. A zero in
+ * a scenario means "the relevant ID from this conversation", so the test
+ * describes message direction without hard-coding database sequence values. */
+function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompletionRequest, state?: MockState): ScenarioToolCall {
+    if (!request) return toolCall;
+    const messages = Array.isArray(request.messages) ? request.messages : [];
+    const messageID = pendingIncomingMessageID(request);
+    const toolResults = messages
+        .filter((item) => item.role === 'tool')
+        .map((item) => String(item.content))
+        .join('\n');
+    const consultationID = toolResults.match(/consultation_run_id["=:]+(\d+)/)?.[1];
+    const toolResultSessionIDs = [...toolResults.matchAll(/(?:new|replacement) child session (\d+)/g)].map((match) => match[1]);
+    // Orchestrator activations intentionally start with a fresh model history.
+    // Later turns therefore no longer contain the earlier run_new_session tool
+    // result; recover child IDs from the authoritative session snapshot too.
+    const snapshotSessionIDs = [...String(messages.map((item) => item.content).join('\n')).matchAll(/\{\s*"id"\s*:\s*(\d+)\s*,\s*"name"\s*:/g)].map((match) => match[1]);
+    const sessionIDs = [...new Set([...toolResultSessionIDs, ...snapshotSessionIDs])];
+    const snapshot = String(messages.map((item) => item.content).join('\n'));
+    const sessionMatches = [...snapshot.matchAll(/\{"id":(\d+),.*?"agent_name":"([^"]+)"/g)];
+    const wantedRole = toolCall.id.includes('cto') ? 'cto'
+        : toolCall.id.includes('coder') ? 'coder'
+            : toolCall.id.includes('qa') ? 'qa'
+                : '';
+    const matchingSessions = wantedRole
+        ? sessionMatches.filter((match) => match[2].toLowerCase().includes(wantedRole))
+        : [];
+    // Nested helper workers inherit their parent agent's name. For a CTO
+    // route, select the first (parent) CTO session rather than the most recent
+    // nested helper; Coder/QA recovery routes intentionally select the latest
+    // matching agent session.
+    const matchingSession = wantedRole === 'cto'
+        ? matchingSessions[0]?.[1]
+        : matchingSessions.at(-1)?.[1];
+    const sessionID = matchingSession ?? (toolCall.id.includes('-b') ? sessionIDs.at(-1) : sessionIDs[0]);
+    const args = { ...toolCall.arguments };
+    if (toolCall.name === 'answer_message' && Number(args.message_id) === 0) {
+        args.message_id = messageID ?? 1;
+    }
+    if (toolCall.name === 'get_session' && Number(args.session_id) === 0) {
+        const forkedCoderSessionID = toolCall.id === 'wait-for-forked-coder' ? state?.forkedCoderSessionID : null;
+        args.session_id = forkedCoderSessionID ? Number(forkedCoderSessionID)
+            : consultationID ? Number(consultationID) : (sessionID ? Number(sessionID) : 1);
+    }
+    if (toolCall.name === 'send_message_to_session' && Number(args.session_id) === 0) {
+        args.session_id = sessionID ? Number(sessionID) : 1;
+    }
+    if (toolCall.name === 'fork_session' && Number(args.session_id) === 0) {
+        args.session_id = sessionID ? Number(sessionID) : 1;
+    }
+    if (toolCall.name === 'fork_session' && Number(args.fork_message_id) === 0) {
+        // The real API accepts a canonical conversation sequence, not a
+        // routed-event ID. Use a deliberately late sequence so the engine
+        // selects the nearest safe boundary that includes the Coder's prior
+        // stateful write, independent of PostgreSQL scheduling.
+        args.fork_message_id = 1_000_000_000;
+    }
+    return { ...toolCall, arguments: args };
+}
+
+function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: boolean, finishOrchestrator = false): object {
+    const useOrchestratorTool = withToolCall && isOrchestrator;
+    const toolName = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_NAME
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
+    const toolCallID = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_CALL_ID
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
+    const toolArguments = finishOrchestrator
+        ? { summary: 'The delegated worker completed successfully and its result was verified.' }
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
     const message = withToolCall
         ? {
             role: 'assistant' as const,
-            content: 'I have analyzed the E2E task and completed it successfully.',
+            content: useOrchestratorTool
+                ? finishOrchestrator
+                    ? 'The delegated worker completed successfully; I am closing the task.'
+                    : 'I have selected the implementation worker for this task.'
+                : 'I have analyzed the E2E task and completed it successfully.',
             tool_calls: [{
-                id: TOOL_CALL_ID,
+                id: toolCallID,
                 type: 'function',
                 function: {
-                    name: TOOL_NAME,
-                    arguments: JSON.stringify(TOOL_ARGS),
+                    name: toolName,
+                    arguments: JSON.stringify(toolArguments),
                 },
             }],
         }
@@ -420,7 +859,7 @@ function buildChatCompletionResponse(withToolCall: boolean): object {
     };
 }
 
-function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean): void {
+function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean, isOrchestrator: boolean, finishOrchestrator = false): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -432,18 +871,26 @@ function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: bo
     res.write(formatSSE(chunk({ role: 'assistant' }, null)));
 
     if (withToolCall) {
+        const useOrchestratorTool = isOrchestrator;
+        const toolName = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_NAME
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
+        const toolCallID = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_CALL_ID
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
+        const toolArgs = finishOrchestrator
+            ? { summary: 'The delegated worker completed successfully and its result was verified.' }
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
         res.write(formatSSE(chunk({
             tool_calls: [{
                 index: 0,
-                id: TOOL_CALL_ID,
-                function: { name: TOOL_NAME, arguments: '' },
+                id: toolCallID,
+                function: { name: toolName, arguments: '' },
             }],
         }, null)));
 
         res.write(formatSSE(chunk({
             tool_calls: [{
                 index: 0,
-                function: { arguments: JSON.stringify(TOOL_ARGS) },
+                function: { arguments: JSON.stringify(toolArgs) },
             }],
         }, null)));
 

@@ -1,0 +1,1 @@
+Initial worker execution snapshot:

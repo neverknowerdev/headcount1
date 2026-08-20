@@ -59,13 +59,13 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	// (user-owned) group/provider. Run 77 belongs to another tenant.
 	ownerCompany := db.Company{Name: "Acme", ShortName: "acme", UserID: &owner.ID}
 	require.NoError(t, database.Create(&ownerCompany).Error)
-	ownerTask := db.Task{Title: "t", CompanyID: ownerCompany.ID, Status: db.TaskStatusTodo, TaskType: db.TaskTypeImplement}
+	ownerTask := db.Task{Title: "t", CompanyID: ownerCompany.ID, Status: db.TaskStatusTodo}
 	require.NoError(t, database.Create(&ownerTask).Error)
 	require.NoError(t, database.Create(&db.Run{ID: 42, TaskID: ownerTask.ID, Status: "running"}).Error)
 
 	otherCompany := db.Company{Name: "Other", ShortName: "oth", UserID: &other.ID}
 	require.NoError(t, database.Create(&otherCompany).Error)
-	otherTask := db.Task{Title: "t2", CompanyID: otherCompany.ID, Status: db.TaskStatusTodo, TaskType: db.TaskTypeImplement}
+	otherTask := db.Task{Title: "t2", CompanyID: otherCompany.ID, Status: db.TaskStatusTodo}
 	require.NoError(t, database.Create(&otherTask).Error)
 	require.NoError(t, database.Create(&db.Run{ID: 77, TaskID: otherTask.ID, Status: "running"}).Error)
 

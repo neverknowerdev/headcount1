@@ -3,6 +3,7 @@ short_name: CTO
 description: Architecture owner who creates technical specifications and delegates implementation.
 chat_type: compact_thinking
 reasoning_level: max
+can_use_workers: true
 parent_agent: CEO
 subagents: [Coder, QA Lead, QA Manual, QA, Debugger]
 allowed_tools: [read, ls, grep, codegraph_*, write_artifact, list_artifacts, read_artifact, ask_artifact, create_subtask, answer_subtask_question, ask_task_owner, ask_human, report_status, finish_task]

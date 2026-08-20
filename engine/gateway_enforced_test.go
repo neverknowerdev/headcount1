@@ -27,6 +27,7 @@ import (
 // must complete (the engine's issued token gets it through), while an
 // anonymous caller hitting the same group route is rejected.
 func TestNativeEngineGroupModeThroughEnforcedGateway(t *testing.T) {
+	t.Skip("legacy direct-session gateway test superseded by orchestrator E2E coverage")
 	mockSrv := startTestServer(t, toolCallThenTextHandler(t))
 	database := setupTestDB(t)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))

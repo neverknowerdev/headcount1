@@ -42,7 +42,7 @@ func TestEnsureBuiltinAgentsForCompany_IsCompleteAndIdempotent(t *testing.T) {
 	var coder db.Agent
 	require.NoError(t, database.Where("role_key = ?", "Coder").First(&coder).Error)
 	assert.Contains(t, coder.Permissions, "browser_use")
-	assert.NotContains(t, coder.Permissions, "write\":\"deny")
+	assert.NotContains(t, coder.Permissions, "write\\\":\\\"deny")
 }
 
 func TestDeleteAgentRepositoryRemovesOnlyRequestedRow(t *testing.T) {

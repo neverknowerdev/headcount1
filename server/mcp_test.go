@@ -154,7 +154,7 @@ func TestAgentMCPAssignments(t *testing.T) {
 
 	// Create agent.
 	agent, err := q.CreateAgent(context.Background(), db.Agent{
-		CompanyID: company.ID, Name: "TestAgent", SystemPrompt: "...", Mode: "primary",
+		CompanyID: company.ID, Name: "TestAgent", SystemPrompt: "...",
 	})
 	require.NoError(t, err)
 

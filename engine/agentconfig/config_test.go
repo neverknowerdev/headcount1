@@ -50,8 +50,6 @@ chat_type = "message_history"
 allowed_models = ["model-x", "model-y"]
 reasoning_level = "medium"
 allowed_tools = ["read", "grep"]
-subagents = ["Other"]
-parent_agent = "Boss"
 `
 
 func TestLoadFromBytes_ValidTOML(t *testing.T) {
@@ -63,8 +61,6 @@ func TestLoadFromBytes_ValidTOML(t *testing.T) {
 	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
 	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
 	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
-	assert.Equal(t, []string{"Other"}, cfg.Subagents)
-	assert.Equal(t, "Boss", cfg.ParentAgent)
 }
 
 func TestLoadFromBytes_InvalidTOML(t *testing.T) {
@@ -212,16 +208,18 @@ func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	}
 }
 
-func TestDefaultFactory_SubagentHierarchy(t *testing.T) {
+func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 
 	ceo, _ := f.GetConfig("CEO")
+	assert.True(t, ceo.CanUseWorkers)
 	assert.Contains(t, ceo.Subagents, "CTO")
 	assert.Contains(t, ceo.Subagents, "CMO")
 	assert.Contains(t, ceo.Subagents, "UX Designer")
 	assert.Contains(t, ceo.Subagents, "Graphic Designer")
 
 	cto, _ := f.GetConfig("CTO")
+	assert.True(t, cto.CanUseWorkers)
 	assert.Equal(t, "CEO", cto.ParentAgent)
 	assert.Contains(t, cto.Subagents, "Coder")
 	assert.Contains(t, cto.Subagents, "Debugger")
@@ -231,11 +229,21 @@ func TestDefaultFactory_SubagentHierarchy(t *testing.T) {
 	assert.Contains(t, cto.Subagents, "Debugger")
 
 	cmo, _ := f.GetConfig("CMO")
+	assert.True(t, cmo.CanUseWorkers)
 	assert.Equal(t, "CEO", cmo.ParentAgent)
 	assert.Contains(t, cmo.Subagents, "SMM")
 	assert.Contains(t, cmo.Subagents, "Ads manager")
 	assert.Contains(t, cmo.Subagents, "Writer")
-
 	coder, _ := f.GetConfig("Coder")
-	assert.Equal(t, "CTO", coder.ParentAgent)
+	assert.False(t, coder.CanUseWorkers)
+}
+
+func TestDefaultFactoryPromptsMatchToolCapabilities(t *testing.T) {
+	f := agentconfig.NewDefaultFactory()
+	ceo, _ := f.GetConfig("CEO")
+	cto, _ := f.GetConfig("CTO")
+	qaManual, _ := f.GetConfig("QA Manual")
+	assert.Contains(t, ceo.Prompt, "product owner")
+	assert.Contains(t, cto.Prompt, "never do manual implementation")
+	assert.Contains(t, qaManual.Prompt, "browser-based UI tester")
 }

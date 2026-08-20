@@ -7,7 +7,6 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/engine/aicli"
-	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/pkg/runtokens"
 )
 
@@ -27,17 +26,6 @@ func (a runGatewayAuth) configure(client *aicli.Client, provider db.LLMProvider)
 		return fmt.Errorf("model-group gateway token is unavailable")
 	}
 	client.ExtraHeaders = modelGroupGatewayHeaders(a.runID, a.token)
-	return nil
-}
-
-func (a runGatewayAuth) configureClientTarget(target *tools.ArtifactReaderTarget, provider db.LLMProvider) error {
-	if !isModelGroupProxyBaseURL(provider.BaseUrl) {
-		return nil
-	}
-	if a.token == "" {
-		return fmt.Errorf("model-group gateway token is unavailable")
-	}
-	target.ExtraHeaders = modelGroupGatewayHeaders(a.runID, a.token)
 	return nil
 }
 

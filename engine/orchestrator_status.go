@@ -24,7 +24,7 @@ func (e *NativeEngine) orchestratorSessionLastRunStatus(ctx context.Context, tas
 		return tools.ManagedSessionStatusReport{}, reportErr
 	}
 	now := time.Now()
-	result := tools.ManagedSessionStatusReport{ID: run.ID, Name: run.Name, TaskID: run.TaskID, AgentID: run.AgentID, AgentName: run.Agent.Name}
+	result := tools.ManagedSessionStatusReport{ID: run.ID, Name: run.Name, TaskID: run.TaskID, AgentID: run.AgentID, AgentName: managedRunAgentName(run)}
 	if reportErr == nil {
 		result.OwnReportedStatus = report.Status
 		result.LastReportedAt = report.ReportedAt.Format(time.RFC3339Nano)
@@ -75,7 +75,7 @@ func (e *NativeEngine) nestedSessionStatus(ctx context.Context, run db.Run, now 
 		return tools.ManagedSessionChildStatus{}, false, reportErr
 	}
 	hasReport := reportErr == nil
-	node := tools.ManagedSessionChildStatus{ID: run.ID, Name: run.Name, AgentName: run.Agent.Name, StatusReportStale: isStatusReportStale(report, hasReport, now)}
+	node := tools.ManagedSessionChildStatus{ID: run.ID, Name: run.Name, Title: run.Title, AgentName: managedRunAgentName(run), StatusReportStale: isStatusReportStale(report, hasReport, now)}
 	if node.AgentName == "" {
 		node.AgentName = run.Name
 	}

@@ -5,6 +5,16 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
 import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
 
+function parseAllowedMCPs(raw: string): string[] | null {
+    if (!raw.trim()) return null;
+    try {
+        const parsed = JSON.parse(raw);
+        return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : [];
+    } catch {
+        return [];
+    }
+}
+
 export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{id: string, shortName: string}>();
     const [agent, setAgent] = useState<any>(null);
@@ -27,7 +37,7 @@ export const AgentDetails: React.FC = () => {
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
     const [modelGroups, setModelGroups] = useState<any[]>([]);
-    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', mode: 'primary', chat_type: 'message_history', reasoning_level: '', subagents: '', allowed_mcps: '', permissions: '{}' });
+    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', chat_type: 'message_history', reasoning_level: '', allowed_mcps: '', permissions: '{}', can_use_workers: false });
 
     const fetchData = useCallback(async () => {
         try {
@@ -52,12 +62,11 @@ export const AgentDetails: React.FC = () => {
                 model: agentRes.data.model || '',
                 provider_id: agentRes.data.provider_id?.toString() || '',
                 model_group_id: agentRes.data.model_group_id?.toString() || '',
-                mode: agentRes.data.mode || 'primary',
                 chat_type: agentRes.data.chat_type || 'message_history',
                 reasoning_level: agentRes.data.reasoning_level || '',
-                subagents: agentRes.data.subagents || '',
                 allowed_mcps: agentRes.data.allowed_mcps || '',
-                permissions: agentRes.data.permissions || '{}'
+                permissions: agentRes.data.permissions || '{}',
+                can_use_workers: !!agentRes.data.can_use_workers
             });
         } catch (e) {
             console.error(e);
@@ -130,9 +139,15 @@ export const AgentDetails: React.FC = () => {
                     toolFilterPayload.push({ mcp_server_id: serverId, tool_name: toolName, enabled });
                 }
             }
+            const agentPayload = {
+                ...formData,
+                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+            };
             await Promise.all([
                 axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph }),
                 axios.put(`/api/agents/${id}/mcp-tool-filters`, toolFilterPayload),
+                axios.put(`/api/agents/${id}`, agentPayload),
             ]);
             setMcpSaveState('saved');
             setTimeout(() => setMcpSaveState('idle'), 2000);
@@ -268,15 +283,12 @@ export const AgentDetails: React.FC = () => {
                     <div className="max-w-2xl space-y-6">
                         <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-4">
                             <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Agent Mode</label>
-                                <select value={formData.mode} onChange={e => setFormData({...formData, mode: e.target.value})} className="w-full border rounded p-2">
-                                    <option value="primary">Primary</option>
-                                    <option value="subagent">Subagent</option>
-                                </select>
-                            </div>
+                            <label className="flex items-start gap-3 rounded border bg-indigo-50 p-3">
+                                <input type="checkbox" checked={formData.can_use_workers} onChange={e => setFormData({...formData, can_use_workers: e.target.checked})} className="mt-0.5 h-4 w-4 text-indigo-600" />
+                                <span><span className="block text-sm font-medium text-gray-900">Can use helper workers</span><span className="block text-xs text-gray-600 mt-1">Allows bounded ephemeral research and verification workers. Workers cannot create tasks, change task state, or write artifacts.</span></span>
+                            </label>
                             <div className="pt-4">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Available Tools</label>
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Basic tools</label>
                                 <div className="space-y-2">
                                     {toolNames.map(tool => {
                                         const perms = JSON.parse(formData.permissions || '{}');
@@ -304,6 +316,15 @@ export const AgentDetails: React.FC = () => {
                                             </div>
                                         );
                                     })}
+                                </div>
+                            </div>
+                            <div className="pt-4 border-t">
+                                <label className="block text-sm font-medium text-gray-700 mb-2">Effective capabilities</label>
+                                <div className="space-y-2 text-sm">
+                                    {['finish_task', 'report_status', 'ask_task_owner', 'artifact tools', 'session lifecycle'].map(capability => (
+                                        <label key={capability} className="flex items-center gap-2 text-gray-600"><input type="checkbox" checked readOnly disabled className="h-4 w-4" />{capability}<span className="text-xs text-gray-400">derived / read-only</span></label>
+                                    ))}
+                                    <p className="text-xs text-gray-500 pt-1">Connected MCP access is editable below.</p>
                                 </div>
                             </div>
                             <div className="pt-4 border-t mt-6 flex items-center gap-3">
@@ -345,8 +366,35 @@ export const AgentDetails: React.FC = () => {
                                 if (allExternal.length === 0) return (
                                     <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
                                 );
+                                const allowed = parseAllowedMCPs(formData.allowed_mcps);
+                                const allNames = allExternal.map((srv: any) => srv.name);
+                                const isAllowed = (name: string) => allowed === null || allowed.includes(name);
+                                const toggleAllowed = (name: string, enabled: boolean) => {
+                                    const next = new Set(allowed === null ? allNames : allowed);
+                                    if (enabled) next.add(name); else next.delete(name);
+                                    const values = allNames.every((candidate: string) => next.has(candidate)) ? '' : JSON.stringify(allNames.filter((candidate: string) => next.has(candidate)));
+                                    setFormData(prev => ({ ...prev, allowed_mcps: values }));
+                                };
                                 return (
                                     <div className="space-y-3">
+                                        <div className="border border-indigo-100 rounded-lg bg-indigo-50 p-3" data-testid="connected-mcp-access">
+                                            <p className="text-sm font-semibold text-indigo-900">Connected MCP access</p>
+                                            <p className="text-xs text-indigo-700 mt-1">Choose which connected MCP servers this agent may use. No checked servers disables MCP access; selecting every server stores the default all-enabled policy.</p>
+                                            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                {allExternal.map((srv: any) => (
+                                                    <label key={`allowed-${srv.id}`} className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
+                                                        <input
+                                                            type="checkbox"
+                                                            aria-label={`Allow ${srv.display_name || srv.name}`}
+                                                            checked={isAllowed(srv.name)}
+                                                            onChange={e => toggleAllowed(srv.name, e.target.checked)}
+                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                                                        />
+                                                        {srv.display_name || srv.name}
+                                                    </label>
+                                                ))}
+                                            </div>
+                                        </div>
                                         {allExternal.map((srv: any) => {
                                             const accounts: any[] = srv.accounts || [];
                                             const hasEnabledAccount = accounts.some((acc: any) => !!mcpAccountAssignments[acc.id]);
@@ -571,10 +619,6 @@ export const AgentDetails: React.FC = () => {
                             </div>
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Can delegate to (JSON array)</label>
-                                <textarea rows={2} value={formData.subagents} onChange={e => setFormData({...formData, subagents: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["CTO", "CMO"]' />
-                            </div>
                             <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-1">Allowed MCPs (JSON array)</label>
                                 <textarea rows={2} value={formData.allowed_mcps} onChange={e => setFormData({...formData, allowed_mcps: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["github"]' />

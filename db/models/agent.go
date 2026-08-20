@@ -18,10 +18,9 @@ type Agent struct {
 	ModelGroupID   *int32       `json:"model_group_id"`
 	ModelGroup     *ModelGroup  `json:"model_group,omitempty" gorm:"foreignKey:ModelGroupID;constraint:OnDelete:SET NULL;"`
 	Model          string       `json:"model"`
-	Mode           string       `json:"mode" gorm:"not null;default:'primary'"`
 	ChatType       string       `json:"chat_type" gorm:"not null;default:'message_history'"`
 	ReasoningLevel string       `json:"reasoning_level" gorm:"default:''"`
-	Subagents      string       `json:"subagents" gorm:"type:text;default:''"`
+	CanUseWorkers  bool         `json:"can_use_workers" gorm:"not null;default:false"`
 	AllowedMCPs    string       `json:"allowed_mcps" gorm:"type:text;default:''"`
 	Permissions    string       `json:"permissions"`
 	CreatedAt      time.Time    `json:"created_at"`

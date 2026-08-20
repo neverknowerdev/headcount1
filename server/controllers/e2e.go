@@ -34,7 +34,10 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// handler deletes them. Serialize resets and stop active runs first.
 	e2eResetMu.Lock()
 	defer e2eResetMu.Unlock()
-	resetCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	// PostgreSQL can take longer to flush the final run-log/bookkeeping writes
+	// after a large orchestration scenario; keep the wait bounded but allow that
+	// legitimate drain to finish before deleting shared E2E state.
+	resetCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	if err := api.stopE2ERuns(resetCtx); err != nil {
 		api.respondError(w, http.StatusConflict, "cannot reset E2E database while runs are active: "+err.Error())
@@ -156,20 +159,28 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// stopE2ERuns cancels every process-local running session and waits until the
-// database observes that all of them have reached a terminal state. It is
-// intentionally bounded so a broken engine cannot turn a test reset into a
-// CI-job-sized hang.
+// stopE2ERuns cancels every process-local running session and waits for both
+// the database terminal transition and the engine goroutines to drain. The
+// latter matters because a session can finish its control-plane update before
+// its final bookkeeping writes have returned. It is intentionally bounded so
+// a broken engine cannot turn a test reset into a CI-job-sized hang.
 func (api *API) stopE2ERuns(ctx context.Context) error {
 	activeStatuses := []string{"running", "resuming", "waiting"}
-	var runs []db.Run
-	if err := api.db.WithContext(ctx).Where("status IN ?", activeStatuses).Find(&runs).Error; err != nil {
-		return fmt.Errorf("list active runs: %w", err)
+	type runQuiescer interface {
+		WaitForActiveRuns(context.Context)
 	}
-	for _, run := range runs {
-		api.engine.StopRun(ctx, run.ID)
-	}
+	quiescer, canWaitForGoroutines := api.engine.(runQuiescer)
 	for {
+		var runs []db.Run
+		if err := api.db.WithContext(ctx).Where("status IN ?", activeStatuses).Find(&runs).Error; err != nil {
+			return fmt.Errorf("list active runs: %w", err)
+		}
+		for _, run := range runs {
+			api.engine.StopRun(ctx, run.ID)
+		}
+		if canWaitForGoroutines {
+			quiescer.WaitForActiveRuns(ctx)
+		}
 		var active int64
 		if err := api.db.WithContext(ctx).Model(&db.Run{}).Where("status IN ?", activeStatuses).Count(&active).Error; err != nil {
 			return fmt.Errorf("check active runs: %w", err)

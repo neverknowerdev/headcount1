@@ -3,6 +3,7 @@ short_name: CEO
 description: Product owner who owns product design, priorities, task quality, and delegation.
 chat_type: compact_thinking
 reasoning_level: max
+can_use_workers: true
 subagents: [CTO, CMO, UX Designer, Graphic Designer]
 allowed_tools: [create_subtask, answer_subtask_question, create_task, ask_human, report_status, finish_task, list_artifacts, ask_artifact]
 prompt: |

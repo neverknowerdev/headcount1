@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"gorm.io/gorm"
 	"strings"
+	"time"
 )
 
 type TaskRepository struct{ db *gorm.DB }
@@ -125,14 +126,55 @@ func (q *TaskRepository) computeTaskRefKey(ctx context.Context, t Task) (string,
 }
 
 func (q *TaskRepository) UpdateTask(ctx context.Context, t Task) (Task, error) {
+	var previous Task
+	if err := q.db.WithContext(ctx).Select("id", "status", "done_at").First(&previous, t.ID).Error; err == nil {
+		if t.Status == TaskStatusDone {
+			if t.DoneAt == nil {
+				if previous.Status != TaskStatusDone || previous.DoneAt == nil {
+					now := time.Now()
+					t.DoneAt = &now
+				} else {
+					t.DoneAt = previous.DoneAt
+				}
+			}
+		} else {
+			t.DoneAt = nil
+		}
+	}
 	err := q.db.WithContext(ctx).Save(&t).Error
 	return t, err
+}
+
+// SetTaskStatusIf changes only the task status when it still has the expected
+// value. Lifecycle signals such as a human reply must not Save a stale full
+// task row: that could overwrite an archive flag or another concurrent edit.
+func (q *TaskRepository) SetTaskStatusIf(ctx context.Context, taskID int32, from, to string) (bool, error) {
+	updates := map[string]interface{}{"status": to}
+	if to == TaskStatusDone && from != TaskStatusDone {
+		updates["done_at"] = time.Now()
+	} else if to != TaskStatusDone {
+		updates["done_at"] = nil
+	}
+	result := q.db.WithContext(ctx).Model(&Task{}).
+		Where("id = ? AND status = ?", taskID, from).
+		Updates(updates)
+	return result.RowsAffected == 1, result.Error
 }
 
 func (q *TaskRepository) GetTask(ctx context.Context, id int32) (Task, error) {
 	var t Task
 	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
 	return t, err
+}
+
+func (q *TaskRepository) GetTaskByRefKey(ctx context.Context, refKey string) (Task, error) {
+	var t Task
+	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").Where("ref_key = ?", refKey).First(&t).Error
+	return t, err
+}
+
+func (q *TaskRepository) DeleteTask(ctx context.Context, id int32) error {
+	return q.db.WithContext(ctx).Delete(&Task{}, id).Error
 }
 
 func (q *TaskRepository) LockTaskRun(ctx context.Context, taskID int32, runID int32) error {
