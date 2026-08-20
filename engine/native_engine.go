@@ -698,7 +698,7 @@ func (e *NativeEngine) run(ctx context.Context, task db.Task, mode string) {
 	// used to resolve the company's default provider when creating the sidecar.
 	if task.AgentID != nil {
 		agent, agentErr := e.q.GetAgent(ctx, *task.AgentID)
-		if agentErr == nil {
+		if agentErr == nil && agent.Enabled {
 			orchestrator, provider, model, enabled, shouldStart := e.createTaskOrchestrator(ctx, task, agent)
 			if enabled {
 				claimed, claimErr := e.q.ClaimTaskRun(ctx, task.ID, orchestrator.ID)
@@ -868,6 +868,9 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 
 	agent, err := e.q.GetAgent(ctx, *task.AgentID)
 	if err != nil {
+		return "failed"
+	}
+	if !agent.Enabled {
 		return "failed"
 	}
 

@@ -509,17 +509,15 @@ test.describe.serial('CEO orchestration flow', () => {
         await expect(page.getByText('sub-session').first()).toBeVisible();
     });
 
-    test('agents page lists built-in agents, minimized by default', async ({ page }) => {
+    test('agents page lists all built-in agents with enable controls', async ({ page }) => {
         await page.goto('/companies/ceo-co/agents');
         const builtin = page.getByTestId('builtin-agents');
         await expect(builtin).toBeVisible();
         await expect(builtin).toContainText('Built-in agents');
-        // Minimized by default: the cards are not rendered until expanded.
-        await expect(builtin.getByText('Chief Executive Officer — owns overall project execution and business decisions, works exclusively through delegation')).toBeHidden();
-        await builtin.getByRole('button').first().click();
-        await expect(builtin.getByText('Chief Executive Officer — owns overall project execution and business decisions, works exclusively through delegation')).toBeVisible();
-        await expect(builtin.getByText('Chief Marketing Officer — owns marketing strategy and metrics, delegates execution to SMM, PPC Specialist and Post Writer')).toBeVisible();
-        await expect(builtin.getByText('Coder — implements features from tech specs with high-quality, pattern-following code')).toBeVisible();
+        await expect(builtin.getByText('CEO')).toBeVisible();
+        await expect(builtin.getByText('CMO')).toBeVisible();
+        await expect(builtin.getByText('QA Manual')).toBeVisible();
+        await expect(builtin.getByRole('button', { name: 'Disable agent' }).first()).toBeVisible();
     });
 });
 

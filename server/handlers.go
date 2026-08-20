@@ -265,6 +265,7 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadAgent)
 			r.Get("/", api.GetAgent)
 			r.Put("/", api.UpdateAgent)
+			r.Delete("/", api.DeleteAgent)
 			r.Get("/stats", api.GetAgentStats)
 			r.Get("/runs", api.ListAgentRuns)
 		})

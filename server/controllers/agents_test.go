@@ -7,7 +7,7 @@ import (
 )
 
 func TestDefaultSubagentsForRole(t *testing.T) {
-	require.Equal(t, `["CTO","CMO","Designer"]`, defaultSubagentsForRole("CEO", "Custom CEO"))
-	require.Equal(t, `["Coder","Debugger","QA"]`, defaultSubagentsForRole("", "CTO"))
+	require.Equal(t, `["CTO","CMO","UX Designer","Graphic Designer"]`, defaultSubagentsForRole("CEO", "Custom CEO"))
+	require.Equal(t, `["Coder","QA Lead","QA Manual","QA","Debugger"]`, defaultSubagentsForRole("", "CTO"))
 	require.Empty(t, defaultSubagentsForRole("Researcher", "Researcher"))
 }

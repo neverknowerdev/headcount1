@@ -7,6 +7,7 @@ import (
 	"os"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/pkg/agentdefaults"
 	"agent-orchestrator/pkg/filesystem"
 )
 
@@ -26,6 +27,8 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		ShortName   string `json:"short_name"`
 		Description string `json:"description"`
 		Color       string `json:"color"`
+		ProviderID  *int32 `json:"provider_id"`
+		Model       string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -43,9 +46,35 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	if membership, err := api.requireMembership(r); err == nil {
 		comp.TeamID = &membership.TeamID
 	}
+	if req.ProviderID != nil {
+		if err := api.authorizeAgentBindings(r, req.ProviderID, nil); err != nil {
+			api.respondError(w, http.StatusNotFound, "provider not found")
+			return
+		}
+	} else {
+		// API clients often create the provider immediately before the company
+		// and omit the optional binding. Use the user's first enabled provider so
+		// the newly seeded built-ins are runnable from the first task.
+		if providers, err := api.q.ListLLMProvidersForUser(r.Context(), api.currentUserID(r)); err == nil {
+			for _, provider := range providers {
+				if provider.Enabled {
+					providerID := provider.ID
+					req.ProviderID = &providerID
+					if req.Model == "" {
+						req.Model = provider.DefaultModel
+					}
+					break
+				}
+			}
+		}
+	}
 
 	if err := api.db.Create(&comp).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if err := api.q.EnsureBuiltinAgentsForCompany(r.Context(), comp.ID, agentdefaults.Rows(comp.ID), req.ProviderID, req.Model); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to seed built-in agents: "+err.Error())
 		return
 	}
 

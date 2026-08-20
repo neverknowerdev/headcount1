@@ -895,7 +895,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             <label htmlFor="task-assignee" className="block text-sm font-medium text-gray-700 mb-1">Assignee</label>
                             <select id="task-assignee" value={formData.agent_id} onChange={e => setFormData({...formData, agent_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">
                                 <option value="">Unassigned</option>
-                                {agents.map(a => <option key={a.id} value={a.id}>{a.name}</option>)}
+                                {agents.map(a => <option key={a.id} value={a.id} disabled={a.enabled === false}>{a.name}{a.enabled === false ? ' (disabled)' : ''}</option>)}
                             </select>
                         </div>
                         <div>

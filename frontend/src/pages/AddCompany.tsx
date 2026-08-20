@@ -353,24 +353,13 @@ export const AddCompany: React.FC = () => {
             }
 
             // 2. Create Company
-            const companyRes = await axios.post('/api/companies', { name, short_name: shortName, color });
-            const finalCompanyId = companyRes.data.id;
-
-            // 3. Create CEO Agent
-            await axios.post('/api/agents', {
-                company_id: finalCompanyId,
-                name: ceoName,
-                role_key: 'CEO',
-                short_name: 'CEO',
-                description: 'Company CEO',
-                system_prompt: ceoPrompt,
-                model: finalProviderModel,
+            const companyRes = await axios.post('/api/companies', {
+                name,
+                short_name: shortName,
+                color,
                 provider_id: finalProviderId,
-                mode: 'primary',
-                chat_type: 'compact_thinking',
-                reasoning_level: 'max'
+                model: finalProviderModel,
             });
-
             // Success! Clear localstorage and redirect
             localStorage.removeItem(LS_KEY);
             window.location.href = `/companies/${companyRes.data.short_name}`;
@@ -387,7 +376,7 @@ export const AddCompany: React.FC = () => {
                     <h2 className="mt-6 text-center text-3xl font-extrabold text-gray-900">
                         {step === 1 && (isInitialOnboarding ? "Create a Workspace" : "Add Workspace")}
                         {step === 2 && "Setup LLM Provider"}
-                        {step === 3 && "Hire your CEO"}
+                        {step === 3 && "Launch workspace"}
                     </h2>
                 </div>
 
@@ -615,18 +604,11 @@ export const AddCompany: React.FC = () => {
 
                 {step === 3 && (
                     <form className="mt-8 space-y-6" onSubmit={handleFinish}>
-                        <div className="flex flex-col gap-4">
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">Agent Name</label>
-                                <input required type="text" value={ceoName} onChange={e => setCeoName(e.target.value)} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                            <div>
-                                <label className="text-sm font-medium text-gray-700">System Prompt</label>
-                                <textarea required rows={5} value={ceoPrompt} onChange={e => { setCeoPrompt(e.target.value); setHasManuallyEditedPrompt(true); }} className="mt-1 appearance-none rounded-md relative block w-full px-3 py-2 border border-gray-300" />
-                            </div>
-                        </div>
+                        <p className="text-sm text-gray-600">
+                            Your workspace will start with all built-in agents available: product, architecture, coding, QA, design, and marketing roles. You can enable or disable protected built-in agents later from the Agents page.
+                        </p>
                         <button type="submit" className="group relative w-full flex justify-center py-2 px-4 border border-transparent text-sm font-medium rounded-md text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none">
-                            Finish & Launch
+                            Create workspace
                         </button>
                     </form>
                 )}

@@ -121,6 +121,9 @@ func (e *NativeEngine) buildOrchestratorSystemPrompt(ctx context.Context, task d
 		b.WriteString("- No agents are currently available; report the blocker instead of guessing.\n")
 	} else {
 		for _, agent := range agents {
+			if !agent.Enabled {
+				continue
+			}
 			name := agent.Name
 			if strings.TrimSpace(name) == "" {
 				name = agent.RoleKey
