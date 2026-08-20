@@ -6,8 +6,45 @@ import (
 	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/agentconfig"
 	"agent-orchestrator/engine/aicli"
 )
+
+// rebaseForkHistoryRuntimeMetadata keeps the source conversation intact while
+// replacing runtime-only values that must describe the newly-created fork.
+// Without this, a fork would inherit the source workdir and runtime session ID
+// from its persisted system message, making routing and isolation ambiguous.
+func rebaseForkHistoryRuntimeMetadata(history []aicli.Message, runID int32, workspacePath string) []aicli.Message {
+	seeded := append([]aicli.Message(nil), history...)
+	for index, message := range seeded {
+		if message.Role != "system" {
+			continue
+		}
+		lines := strings.Split(message.Content, "\n")
+		hasWorkdir, hasRuntimeID := false, false
+		for lineIndex, line := range lines {
+			switch {
+			case strings.HasPrefix(line, "Workdir: "):
+				lines[lineIndex] = fmt.Sprintf("Workdir: %s", workspacePath)
+				hasWorkdir = true
+			case strings.HasPrefix(line, "Runtime session ID: "):
+				lines[lineIndex] = fmt.Sprintf("Runtime session ID: %d", runID)
+				hasRuntimeID = true
+			}
+		}
+		if !hasWorkdir {
+			lines = append(lines, fmt.Sprintf("Workdir: %s", workspacePath))
+		}
+		if !hasRuntimeID {
+			lines = append(lines, fmt.Sprintf("Runtime session ID: %d", runID))
+		}
+		seeded[index].Content = strings.Join(lines, "\n")
+		return seeded
+	}
+	return append(seeded, aicli.Message{Role: "system", Content: fmt.Sprintf(
+		"Workdir: %s\nRuntime session ID: %d", workspacePath, runID,
+	)})
+}
 
 func (e *NativeEngine) buildSessionPrompt(
 	ctx context.Context,
@@ -20,6 +57,7 @@ func (e *NativeEngine) buildSessionPrompt(
 	readOnlyDirs []string,
 	artifactDir string,
 	rootTaskID int32,
+	runID int32,
 ) (string, []aicli.Message) {
 	systemPrompt := strings.TrimSpace(agent.SystemPrompt)
 	if options.IncludeTaskContext {
@@ -30,6 +68,10 @@ func (e *NativeEngine) buildSessionPrompt(
 		systemPrompt += taskContext
 	}
 	systemPrompt += fmt.Sprintf("\nWorkdir: %s", workspacePath)
+	systemPrompt += fmt.Sprintf("\nRuntime session ID: %d", runID)
+	if agentCanUseWorkers(agent) {
+		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_capability.md"))
+	}
 	if branch := strings.TrimSpace(rootTask.GitHubBranch); branch != "" {
 		systemPrompt += fmt.Sprintf("\nTask Git branch: %s (shared by every run and sub-run in this task)", branch)
 	}
@@ -52,7 +94,7 @@ func (e *NativeEngine) buildSessionPrompt(
 		}
 	}
 	if options.Instruction != "" && options.IncludeTaskContext && options.SeedHistory == nil {
-		initialMessages = append(initialMessages, aicli.Message{Role: "user", Content: "Orchestrator instruction for this session: " + options.Instruction})
+		initialMessages = append(initialMessages, aicli.Message{Role: "user", Content: strings.TrimSpace(agentconfig.MustPrompt("utils/orchestrator_instruction.md")) + "\n" + options.Instruction})
 	}
 	return systemPrompt, initialMessages
 }

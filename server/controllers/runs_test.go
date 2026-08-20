@@ -61,3 +61,16 @@ func TestDownloadRunLogsArchivesNestedSessions(t *testing.T) {
 	require.Equal(t, "root log\n", contents["root.jsonl"])
 	require.Equal(t, "child log\n", contents["nested/child.jsonl"])
 }
+
+func TestToRunResponseUsesControlPlaneIdentityForOrchestrator(t *testing.T) {
+	ceo := db.Agent{Name: "CEO Agent"}
+
+	orchestrator := toRunResponse(db.Run{Kind: db.RunKindTaskOrchestrator, Agent: ceo})
+	require.Equal(t, "Orchestrator", orchestrator.AgentName)
+
+	worker := toRunResponse(db.Run{Kind: db.RunKindAgentSession, Agent: ceo})
+	require.Equal(t, "CEO Agent", worker.AgentName)
+	helper := toRunResponse(db.Run{Kind: db.RunKindHelperWorker, Agent: ceo, Title: "Verify repository state"})
+	require.Equal(t, "Worker", helper.AgentName)
+	require.Equal(t, "Verify repository state", helper.Title)
+}

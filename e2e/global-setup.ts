@@ -79,7 +79,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
 
         await waitForServer(baseURL, child);
         await waitForSetup(baseURL, child);
-        await requireFetchOK(`${baseURL}/api/e2e/wipe-db`, { method: 'POST' }, 10_000);
+        // Wipe also reseeds built-in integrations and can take longer than
+        // the lightweight health/setup probes, especially on a cold E2E
+        // workspace. Keep this aligned with the reset helper's budget so a
+        // healthy server is not torn down while the database is initializing.
+        await requireFetchOK(`${baseURL}/api/e2e/wipe-db`, { method: 'POST' }, 65_000);
         console.log('[globalSetup] wiped database via /api/e2e/wipe-db');
     } catch (err) {
         await cleanupSetup(e2eHome);

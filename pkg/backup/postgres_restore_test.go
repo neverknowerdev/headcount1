@@ -72,7 +72,7 @@ func TestPostgresRestoreRealignsSequences(t *testing.T) {
 	agent := db.Agent{CompanyID: comp.ID, Name: "dev"}
 	database.Create(&agent)
 	agentID := agent.ID
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "t", Status: "backlog", TaskType: "implement", Priority: "Normal"}
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "t", Status: "backlog", Priority: "Normal"}
 	database.Create(&task)
 
 	archivePath, err := CreateBackup(basePath, database)

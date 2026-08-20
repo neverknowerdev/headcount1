@@ -68,12 +68,12 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	assert.Equal(t, "my-model", updated.Model)
 	assert.Nil(t, updated.ModelGroupID)
 
-	// Point ask_artifact at a model group instead.
+	// Point helper_worker at a model group instead.
 	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &uid}
 	require.NoError(t, database.Create(&group).Error)
 	payload = map[string]interface{}{"model_group_id": group.ID}
 	b, _ = json.Marshal(payload)
-	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/default-model-settings/%s", db.PurposeAskArtifact), bytes.NewReader(b))
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/default-model-settings/%s", db.PurposeHelperWorker), bytes.NewReader(b))
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)

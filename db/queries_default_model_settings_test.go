@@ -27,7 +27,7 @@ func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) 
 
 	require.NoError(t, q.EnsureDefaultModelSettingsForUser(ctx, uid))
 
-	for _, purpose := range []string{db.PurposeCommitMessages, db.PurposeAskArtifact} {
+	for _, purpose := range []string{db.PurposeCommitMessages, db.PurposeTaskOrchestrator, db.PurposeHelperWorker} {
 		s, err := q.GetDefaultModelSetting(ctx, uid, purpose)
 		require.NoError(t, err, "purpose %q should exist", purpose)
 		assert.Nil(t, s.ProviderID)

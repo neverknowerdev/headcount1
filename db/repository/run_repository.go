@@ -20,6 +20,12 @@ func (q *RunRepository) ListAllRuns(ctx context.Context) ([]Run, error) {
 	return runs, err
 }
 
+func (q *RunRepository) ListRunsByTask(ctx context.Context, taskID int32) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).Preload("Agent").Where("task_id = ?", taskID).Order("started_at asc, id asc").Find(&runs).Error
+	return runs, err
+}
+
 const (
 	RunStatusPaused            = "paused"
 	RunStatusRecoverableFailed = "recoverable_failed"
@@ -134,11 +140,37 @@ func (q *RunRepository) UpdateRunSession(ctx context.Context, id int32, sessionI
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("session_id", sessionID).Error
 }
 
+func (q *RunRepository) UpdateRunWorkspacePath(ctx context.Context, id int32, workspacePath string) error {
+	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("workspace_path", workspacePath).Error
+}
+
 func (q *RunRepository) UpdateRunLogFilePath(ctx context.Context, id int32, filePath string) error {
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update("log_file_path", filePath).Error
 }
 
 func (q *RunRepository) AppendRunLogEntry(ctx context.Context, id int32, entry map[string]interface{}) error {
+	entryJSON, err := json.Marshal(entry)
+	if err != nil {
+		return err
+	}
+	// PostgreSQL sessions can have the agent logger and proxy logger append to
+	// the same run concurrently. An application-side read/append/write loses
+	// entries and holds a transaction while copying an ever-growing JSON blob.
+	// Let PostgreSQL serialize the row update and append the object atomically;
+	// keep the stored value as text and avoid reparsing the entire growing JSON
+	// array on every log line. The existing transaction path remains the
+	// portable SQLite implementation.
+	if q.db.Dialector.Name() == "postgres" {
+		result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", id).Update(
+			"log_entries",
+			gorm.Expr(`CASE
+				WHEN NULLIF(btrim(log_entries), '') IS NULL OR btrim(log_entries) = '[]'
+					THEN '[' || ? || ']'
+				ELSE left(rtrim(log_entries), length(rtrim(log_entries)) - 1) || ',' || ? || ']'
+			END`, string(entryJSON), string(entryJSON)),
+		)
+		return result.Error
+	}
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
 		var r Run
 		err := tx.First(&r, id).Error
@@ -265,14 +297,61 @@ func (q *RunRepository) ListWaitingOrchestrators(ctx context.Context) ([]Run, er
 	return runs, err
 }
 
+// ListWatchdogOrchestrators includes terminal orchestrator rows so the
+// control-plane heartbeat can report a provider failure. Startup resume keeps
+// using ListWaitingOrchestrators and therefore remains limited to live rows.
+func (q *RunRepository) ListWatchdogOrchestrators(ctx context.Context) ([]Run, error) {
+	var runs []Run
+	err := q.db.WithContext(ctx).
+		Where("parent_run_id IS NULL AND status IN ? AND id IN (?)", []string{"running", "waiting", "failed", RunStatusStale},
+			q.db.Model(&Task{}).Select("orchestrator_run_id").Where("orchestrator_run_id IS NOT NULL")).
+		Find(&runs).Error
+	return runs, err
+}
+
 func (q *RunRepository) SetRunWaitState(ctx context.Context, runID int32, reason string) error {
+	return q.SetRunWaitStateForComment(ctx, runID, reason, 0)
+}
+
+// SetRunWaitStateForComment persists both the reason and the durable comment
+// that is waiting for an external answer. The comment ID lets recovery and UI
+// code explain exactly which human request is blocking a run.
+func (q *RunRepository) SetRunWaitStateForComment(ctx context.Context, runID int32, reason string, commentID int32) error {
 	var run Run
 	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
 		return err
 	}
 	run.Status = "waiting"
 	run.Recovery.WaitReason = reason
+	run.Recovery.WaitCommentID = commentID
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{"status": run.Status, "recovery": recoveryJSON(run.Recovery)}).Error
+}
+
+// SetRunRunning clears a wait state after its external condition has been
+// satisfied. It is intentionally conditional so a concurrent recovery worker
+// cannot accidentally revive a terminal run.
+func (q *RunRepository) SetRunRunning(ctx context.Context, runID int32) error {
+	return q.SetRunActive(ctx, runID)
+}
+
+// SetRunActive is the watchdog/resume transition to the canonical active
+// state. It can revive only a dormant sidecar state; ordinary worker recovery
+// still uses the explicit resume lease path.
+func (q *RunRepository) SetRunActive(ctx context.Context, runID int32) error {
+	var run Run
+	if err := q.db.WithContext(ctx).First(&run, runID).Error; err != nil {
+		return err
+	}
+	if run.Status != "waiting" && run.Status != "failed" && run.Status != RunStatusStale && run.Status != RunStatusResuming {
+		return nil
+	}
+	run.Recovery.WaitReason = ""
+	run.Recovery.WaitCommentID = 0
+	now := time.Now()
+	result := q.db.WithContext(ctx).Model(&Run{}).Where("id = ? AND status IN ?", runID, []string{"waiting", "failed", RunStatusStale, RunStatusResuming}).Updates(map[string]interface{}{
+		"status": "running", "ended_at": nil, "last_message_time": &now, "recovery": recoveryJSON(run.Recovery),
+	})
+	return result.Error
 }
 
 func (q *RunRepository) SetRunStopCause(ctx context.Context, runID int32, cause string) error {
@@ -461,6 +540,7 @@ func (q *RunRepository) PauseRunWithMetadata(ctx context.Context, runID int32, s
 		CheckpointPhase: CheckpointPhase(phase), RecoveryReason: reason,
 		RecoveryInitiator: initiator, RecoveryTarget: target,
 		ResumeAttempts: run.Recovery.ResumeAttempts,
+		WaitReason:     run.Recovery.WaitReason, WaitCommentID: run.Recovery.WaitCommentID,
 	}
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).Updates(map[string]interface{}{
 		"status": RunStatusPaused, "recovery": recoveryJSON(recovery),

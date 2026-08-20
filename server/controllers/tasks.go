@@ -122,7 +122,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID      int32   `json:"sprint_id"`
 		ParentID      *int32  `json:"parent_id"`
 		Title         string  `json:"title"`
-		TaskType      string  `json:"task_type"`
 		Description   string  `json:"description"`
 		Priority      string  `json:"priority"`
 		GitBaseBranch string  `json:"git_base_branch"`
@@ -143,10 +142,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		priority = "Normal"
 	}
 
-	taskType := req.TaskType
-	if taskType == "" {
-		taskType = db.TaskTypePlanAndImplement
-	}
 	gitBaseBranch := strings.TrimSpace(req.GitBaseBranch)
 	if gitBaseBranch == "" {
 		gitBaseBranch = db.DefaultTaskGitBaseBranch
@@ -174,7 +169,6 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		CompanyID:     req.CompanyID,
 		ProjectID:     req.ProjectID,
 		Title:         req.Title,
-		TaskType:      taskType,
 		Status:        db.TaskStatusBacklog,
 		AgentID:       req.AgentID,
 		SprintID:      req.SprintID,
@@ -213,7 +207,7 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 func isTaskStatus(status string) bool {
 	switch status {
 	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInProgress,
-		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone:
+		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone, db.TaskStatusRefinement:
 		return true
 	default:
 		return false
@@ -266,7 +260,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		SprintID      *int32  `json:"sprint_id"`
 		ParentID      *int32  `json:"parent_id"`
 		Title         string  `json:"title"`
-		TaskType      string  `json:"task_type"`
 		Description   string  `json:"description"`
 		Priority      string  `json:"priority"`
 		GitBaseBranch string  `json:"git_base_branch"`
@@ -301,9 +294,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if req.Status != "" && req.Status != task.Status {
 		task.Status = req.Status
 		statusChanged = true
-	}
-	if req.TaskType != "" {
-		task.TaskType = req.TaskType
 	}
 
 	if req.Title != "" {
@@ -394,7 +384,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	var runs []db.Run
-	if err := api.db.Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Preload("Agent").Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -464,25 +454,14 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 				fmt.Printf("Warning: failed to merge branch %s: %v\n", branchName, mergeErr)
 				return
 			}
-			if removeErr := gitMgr.RemoveWorktree(ctx, worktreeDir); removeErr != nil {
-				fmt.Printf("Warning: failed to remove worktree: %v\n", removeErr)
-			}
-			// Clean up the task workspace directory
-			os.RemoveAll(worktreeDir)
-			fmt.Printf("Merged and cleaned up worktree for task %d\n", task.ID)
+			// Keep the worktree and durable session workspaces until the in-binary
+			// retention job removes them ten days after the task became Done.
+			fmt.Printf("Merged worktree for task %d; deferred cleanup is scheduled\n", task.ID)
 		}
 	} else if task.Status == "done" && newStatus != "done" {
-		// Task reopened: remove old worktree and recreate
-		if _, statErr := os.Stat(worktreeDir); statErr == nil {
-			gitMgr.RemoveWorktree(ctx, worktreeDir)
-			os.RemoveAll(worktreeDir)
-		}
-		// Pull latest and recreate worktree
-		gitMgr.Pull(ctx)
-		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/"+task.EffectiveGitBaseBranch()); wtErr != nil {
-			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
-		} else {
-			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)
-		}
+		// Reopening within the retention window reuses the preserved worktree;
+		// deleting and recreating it would discard the exact session state a
+		// fork or recovery may need.
+		fmt.Printf("Reopened task %d; preserving its worktree\n", task.ID)
 	}
 }

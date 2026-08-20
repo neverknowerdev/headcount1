@@ -194,7 +194,6 @@ test.describe.serial('Git Project Scenarios', () => {
                 project_id: gitProject.id,
                 sprint_id: sprint.id,
                 title: 'Git Task',
-                task_type: 'implement',
                 description: 'A task under a git project'
             }
         });

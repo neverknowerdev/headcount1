@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
@@ -49,7 +50,7 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	sealed := fmt.Sprintf("enc:u1:%d:%s", srcUser.ID, cipherBody)
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
 
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, Priority: "Normal"}
 	database.Create(&task)
 	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed"}
 	database.Create(&run)
@@ -101,7 +102,7 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	targetDB.Create(&otherComp)
 	otherSprint := db.Sprint{CompanyID: otherComp.ID, Name: "OS"}
 	targetDB.Create(&otherSprint)
-	otherTask := db.Task{CompanyID: otherComp.ID, SprintID: otherSprint.ID, Title: "other task", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	otherTask := db.Task{CompanyID: otherComp.ID, SprintID: otherSprint.ID, Title: "other task", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	targetDB.Create(&otherTask)
 
 	impUser := db.User{Email: "importer@new.io"}
@@ -362,7 +363,7 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 	// Give it a slug like the app's BeforeCreate hook would.
 	prov.Slug = db.ProviderSlug(prov)
 	database.Create(&prov)
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, Title: "root", RefKey: "ACME-1", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, Title: "root", RefKey: "ACME-1", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&task)
 
 	countAll := func() (companies, projects, tasks, providers, sprints int64) {
@@ -410,7 +411,7 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 
 	// Now add a genuinely new task, re-import, and confirm ONLY it is added
 	// (merge of new children onto the existing, deduped subtree).
-	newTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "second", RefKey: "ACME-2", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"}
+	newTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "second", RefKey: "ACME-2", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&newTask)
 	stats = exportAndImport()
 	if stats.Tasks != 0 {
@@ -422,6 +423,139 @@ func TestTenantImportDedupNoDuplication(t *testing.T) {
 	database.Model(&db.Task{}).Where("company_id = ?", comp.ID).Count(&taskCount)
 	if taskCount != 2 {
 		t.Errorf("task count = %d, want 2 (no duplication)", taskCount)
+	}
+}
+
+// TestTenantImportDedupLegacyTaskWithoutRefKey verifies that archives made from
+// legacy/directly-created tasks remain idempotent even when ref_key is empty.
+// The fallback must include creation metadata so two same-title tasks are not
+// incorrectly merged.
+func TestTenantImportDedupLegacyTaskWithoutRefKey(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("database setup: %v", err)
+		}
+	}
+
+	user := db.User{Email: "legacy-dedup@dedup.io"}
+	must(database.Create(&user).Error)
+	team := db.Team{Name: "Legacy dedup"}
+	must(database.Create(&team).Error)
+	must(database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner}).Error)
+	company := db.Company{Name: "Legacy", ShortName: "legacy", TeamID: &team.ID, UserID: &user.ID}
+	must(database.Create(&company).Error)
+	sprint := db.Sprint{CompanyID: company.ID, Name: "Legacy sprint"}
+	must(database.Create(&sprint).Error)
+
+	createdAt := time.Date(2024, 1, 2, 3, 4, 5, 678000000, time.UTC)
+	legacy := db.Task{
+		CompanyID: company.ID,
+		SprintID:  sprint.ID,
+		Title:     "same title",
+		Status:    db.TaskStatusBacklog,
+		Priority:  "Normal",
+		CreatedAt: createdAt,
+		UpdatedAt: createdAt,
+	}
+	must(database.Create(&legacy).Error)
+
+	var archive bytes.Buffer
+	if err := ExportTenant(ctx, &archive, basePath, database, user.ID); err != nil {
+		t.Fatalf("ExportTenant: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "legacy.tar.gz")
+	if err := os.WriteFile(archivePath, archive.Bytes(), 0644); err != nil {
+		t.Fatalf("write archive: %v", err)
+	}
+
+	stats, err := ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("legacy task was duplicated: %+v", stats)
+	}
+
+	var count int64
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("task count = %d, want 1", count)
+	}
+
+	// A same-title task with a different creation timestamp is a separate task.
+	second := legacy
+	second.ID = 0
+	second.CreatedAt = createdAt.Add(time.Minute)
+	second.UpdatedAt = second.CreatedAt
+	must(database.Create(&second).Error)
+	stats, err = ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant after second task: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("same-title task was unexpectedly imported: %+v", stats)
+	}
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 2 {
+		t.Fatalf("task count after distinct same-title task = %d, want 2", count)
+	}
+}
+
+// TestTenantImportDedupTaskWithMissingTargetRefKey verifies that a newer
+// archive still deduplicates against a legacy target row whose ref_key is
+// empty. The exact key is preferred, while the title/creation-time identity is
+// the compatibility fallback when the target cannot match it.
+func TestTenantImportDedupTaskWithMissingTargetRefKey(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+	ctx := context.Background()
+	must := func(err error) {
+		if err != nil {
+			t.Fatalf("database setup: %v", err)
+		}
+	}
+
+	user := db.User{Email: "mixed-version@dedup.io"}
+	must(database.Create(&user).Error)
+	team := db.Team{Name: "Mixed version"}
+	must(database.Create(&team).Error)
+	must(database.Create(&db.TeamMember{TeamID: team.ID, UserID: user.ID, Role: db.TeamRoleOwner}).Error)
+	company := db.Company{Name: "Mixed", ShortName: "mixed", TeamID: &team.ID, UserID: &user.ID}
+	must(database.Create(&company).Error)
+	sprint := db.Sprint{CompanyID: company.ID, Name: "Sprint"}
+	must(database.Create(&sprint).Error)
+	createdAt := time.Date(2024, 2, 3, 4, 5, 6, 789123456, time.UTC)
+	task := db.Task{CompanyID: company.ID, SprintID: sprint.ID, Title: "same task", RefKey: "MIXED-1", Status: db.TaskStatusBacklog, Priority: "Normal", CreatedAt: createdAt, UpdatedAt: createdAt}
+	must(database.Create(&task).Error)
+
+	var archive bytes.Buffer
+	if err := ExportTenant(ctx, &archive, basePath, database, user.ID); err != nil {
+		t.Fatalf("ExportTenant: %v", err)
+	}
+	archivePath := filepath.Join(t.TempDir(), "mixed-version.tar.gz")
+	must(os.WriteFile(archivePath, archive.Bytes(), 0644))
+
+	// Simulate a target created before TaskRepository started generating ref_key.
+	must(database.Model(&db.Task{}).Where("id = ?", task.ID).Updates(map[string]interface{}{
+		"ref_key": "",
+		// Simulate PostgreSQL's microsecond timestamp precision in a legacy
+		// target while the archive retains nanoseconds.
+		"created_at": createdAt.Truncate(time.Microsecond),
+	}).Error)
+	stats, err := ImportTenant(ctx, archivePath, basePath, database, user.ID, team.ID)
+	if err != nil {
+		t.Fatalf("ImportTenant: %v", err)
+	}
+	if stats.Tasks != 0 {
+		t.Fatalf("task with a missing target ref_key was duplicated: %+v", stats)
+	}
+	var count int64
+	database.Model(&db.Task{}).Where("company_id = ?", company.ID).Count(&count)
+	if count != 1 {
+		t.Fatalf("task count = %d, want 1", count)
 	}
 }
 
@@ -443,8 +577,8 @@ func TestTenantImportMergeChildren(t *testing.T) {
 	srcDB.Create(&sComp)
 	sSprint := db.Sprint{CompanyID: sComp.ID, Name: "S1"}
 	srcDB.Create(&sSprint)
-	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "shared", RefKey: "ACME-1", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"})
-	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "only-in-source", RefKey: "ACME-2", Status: db.TaskStatusBacklog, TaskType: db.TaskTypeImplement, Priority: "Normal"})
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "shared", RefKey: "ACME-1", Status: db.TaskStatusBacklog, Priority: "Normal"})
+	srcDB.Create(&db.Task{CompanyID: sComp.ID, SprintID: sSprint.ID, Title: "only-in-source", RefKey: "ACME-2", Status: db.TaskStatusBacklog, Priority: "Normal"})
 
 	var buf bytes.Buffer
 	if err := ExportTenant(ctx, &buf, srcBase, srcDB, sUser.ID); err != nil {
@@ -465,7 +599,7 @@ func TestTenantImportMergeChildren(t *testing.T) {
 	tgtDB.Create(&tComp)
 	tSprint := db.Sprint{CompanyID: tComp.ID, Name: "S1"}
 	tgtDB.Create(&tSprint)
-	tgtDB.Create(&db.Task{CompanyID: tComp.ID, SprintID: tSprint.ID, Title: "shared (target copy)", RefKey: "ACME-1", Status: db.TaskStatusDone, TaskType: db.TaskTypeImplement, Priority: "Normal"})
+	tgtDB.Create(&db.Task{CompanyID: tComp.ID, SprintID: tSprint.ID, Title: "shared (target copy)", RefKey: "ACME-1", Status: db.TaskStatusDone, Priority: "Normal"})
 
 	stats, err := ImportTenant(ctx, archivePath, t.TempDir(), tgtDB, tUser.ID, tTeam.ID)
 	if err != nil {

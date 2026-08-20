@@ -15,9 +15,8 @@ type AgentConfigResponse struct {
 	Prompt         string   `json:"prompt"`
 	ChatType       string   `json:"chat_type"`
 	ReasoningLevel string   `json:"reasoning_level"`
-	Subagents      []string `json:"subagents"`
-	ParentAgent    string   `json:"parent_agent,omitempty"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
+	CanUseWorkers  bool     `json:"can_use_workers"`
 }
 
 // ListAgentConfigs returns built-in role templates (CEO, CTO, CMO, Coder, …)
@@ -33,9 +32,8 @@ func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 			Prompt:         cfg.Prompt,
 			ChatType:       string(cfg.ChatType),
 			ReasoningLevel: string(cfg.ReasoningLevel),
-			Subagents:      cfg.Subagents,
-			ParentAgent:    cfg.ParentAgent,
 			AllowedTools:   cfg.AllowedTools,
+			CanUseWorkers:  cfg.CanUseWorkers,
 		})
 	}
 	api.respondJSON(w, http.StatusOK, out)

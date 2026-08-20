@@ -12,8 +12,8 @@ type TeamMemberInfo = repository.TeamMemberInfo
 
 const (
 	PurposeCommitMessages   = repository.PurposeCommitMessages
-	PurposeAskArtifact      = repository.PurposeAskArtifact
 	PurposeTaskOrchestrator = repository.PurposeTaskOrchestrator
+	PurposeHelperWorker     = repository.PurposeHelperWorker
 
 	ProviderNameOpenRouter     = repository.ProviderNameOpenRouter
 	ProviderNameOpenCodeZen    = repository.ProviderNameOpenCodeZen

@@ -6,7 +6,9 @@ import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { getActivityAuthorLabel } from '../utils/activityDisplay';
 import { RunLogViewer } from './RunLogViewer';
+import { getRunAgentName } from '../utils/runDisplay';
 import { TaskRelations } from './TaskRelations';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 
@@ -37,6 +39,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [task, setTask] = useState<any>(null);
     const [comments, setComments] = useState<any[]>([]);
     const [newComment, setNewComment] = useState('');
+    const [commentError, setCommentError] = useState('');
+    const [isPostingComment, setIsPostingComment] = useState(false);
 
     const [isSaving, setIsSaving] = useState(false);
     const [runs, setRuns] = useState<any[]>([]);
@@ -238,19 +242,44 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
 
-    const handleAddComment = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const handleAddComment = async () => {
         if (!newComment.trim() || !taskId) return;
+        const content = newComment.trim();
+        const hasPendingHumanQuestion = comments.some((question: any) =>
+            ['ask_user', 'ask_owner'].includes(question.comment_type) &&
+            question.author_type === 'agent' &&
+            !comments.some((answer: any) =>
+                answer.id > question.id && answer.author_type === 'human' &&
+                !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
+            ),
+        );
+        setIsPostingComment(true);
+        setCommentError('');
         try {
-            await axios.post('/api/comments', {
+            const response = await axios.post('/api/comments', {
                 task_id: taskId,
                 author_type: 'human',
-                content: newComment,
-                run_agent: task?.status === 'blocked' ? false : runAgent
+                content,
+                run_agent: task?.status === 'blocked' || hasPendingHumanQuestion ? false : runAgent
             });
             setNewComment('');
-        } catch (e) {
+            setComments(prev => prev.some((c: any) => c.id === response.data?.id) ? prev : [...prev, response.data]);
+            // The reply changes task/run state asynchronously. Re-read both
+            // streams so the modal immediately leaves the human-wait state,
+            // even when the websocket event was missed during the transition.
+            await fetchActivity();
+            const taskRes = await axios.get(`/api/tasks/${taskId}`);
+            setTask((prev: any) => prev ? { ...prev, ...taskRes.data } : taskRes.data);
+            setFormData(prev => ({
+                ...prev,
+                status: taskRes.data.status,
+                is_archived: taskRes.data.is_archived,
+            }));
+        } catch (e: any) {
             console.error(e);
+            setCommentError(e.response?.data?.error || 'Could not submit the reply. Please try again.');
+        } finally {
+            setIsPostingComment(false);
         }
     };
 
@@ -275,7 +304,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
             if (taskId) {
                 payload.status = formData.status;
-                payload.is_archived = formData.is_archived;
                 await axios.put(`/api/tasks/${taskId}`, payload);
             } else {
                 await axios.post('/api/tasks', payload);
@@ -320,6 +348,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     };
 
     if (taskId && !task) return null;
+
+    const hasPendingHumanQuestion = comments.some((question: any) =>
+        ['ask_user', 'ask_owner'].includes(question.comment_type) &&
+        question.author_type === 'agent' &&
+        !comments.some((answer: any) =>
+            answer.id > question.id && answer.author_type === 'human' &&
+            !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
+        ),
+    );
 
     const header = (
         <div className="px-6 py-4 border-b flex items-center gap-4 bg-white shrink-0">
@@ -544,6 +581,27 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         });
                                         timeline.sort((a, b) => a.time - b.time);
 
+                                        // Keep answers visually attached to the question that caused
+                                        // them, like a small messenger thread. Human questions use
+                                        // ask_user; worker questions routed through the orchestrator
+                                        // use ask_owner and are answered by the next agent update.
+                                        const humanReplyByQuestion = new Map<number, any>();
+                                        const pairedHumanReplyIds = new Set<number>();
+                                        comments.filter((comment: any) => ['ask_user', 'ask_owner'].includes(comment.comment_type)).forEach((question: any) => {
+                                            const expectedAuthor = question.comment_type === 'ask_user' ? 'human' : 'agent';
+                                            const reply = comments
+                                                .filter((comment: any) => {
+                                                    if (comment.id <= question.id || comment.author_type !== expectedAuthor) return false;
+                                                    if (question.comment_type === 'ask_owner' && comment.run_id === question.run_id) return false;
+                                                    return !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(comment.comment_type);
+                                                })
+                                                .sort((a: any, b: any) => a.id - b.id)[0];
+                                            if (reply) {
+                                                humanReplyByQuestion.set(question.id, reply);
+                                                pairedHumanReplyIds.add(reply.id);
+                                            }
+                                        });
+
                                         if (timeline.length === 0) {
                                             return <p className="text-sm text-gray-500 italic">No activity yet.</p>;
                                         }
@@ -551,12 +609,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         return timeline.map((item) => {
                                             if (item.type === 'comment') {
                                                 const c = item.data;
+                                                if (pairedHumanReplyIds.has(c.id)) return null;
                                                 const ts = new Date(c.created_at);
                                                 const timeStr = ts.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
                                                 const isStatusChange = c.comment_type === 'status_change';
                                                 const isArtifact = c.comment_type === 'artifact_created';
                                                 const isTaskDone = c.comment_type === 'task_done';
-                                                const isAskUser = c.comment_type === 'ask_user';
+                                                const isAskQuestion = ['ask_user', 'ask_owner'].includes(c.comment_type);
                                                 const isAgent = c.author_type === 'agent';
 
                                                 // Artifact entry — compact card with expandable content
@@ -613,6 +672,34 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     );
                                                 }
 
+                                                if (isAskQuestion) {
+                                                    const reply = humanReplyByQuestion.get(c.id);
+                                                    return (
+                                                        <div key={`dialogue-${c.id}`} className="max-w-[92%] space-y-2" data-testid="question-dialogue">
+                                                            <div className="rounded-lg border border-indigo-200 bg-indigo-50 p-3 text-sm text-gray-800">
+                                                                <div className="mb-1 flex items-center gap-2 text-xs font-bold text-gray-500">
+                                                                    <span>{getActivityAuthorLabel(c, runs)}</span>
+                                                                    <span className="font-normal ml-auto">{timeStr}</span>
+                                                                </div>
+                                                                <div className="prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1">
+                                                                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{c.content}</ReactMarkdown>
+                                                                </div>
+                                                            </div>
+                                                            {reply ? (
+                                                                <div className="ml-8 rounded-lg border border-gray-200 bg-gray-100 p-3 text-sm text-gray-900">
+                                                                    <div className="mb-1 flex items-center gap-2 text-xs font-bold text-gray-500">
+                                                                        <span>{getActivityAuthorLabel(reply, runs)}</span>
+                                                                        <span className="font-normal ml-auto">{new Date(reply.created_at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
+                                                                    </div>
+                                                                    <span className="whitespace-pre-wrap">{reply.content}</span>
+                                                                </div>
+                                                            ) : (
+                                                                <div className="ml-8 text-xs italic text-amber-700">Waiting for a reply…</div>
+                                                            )}
+                                                        </div>
+                                                    );
+                                                }
+
                                                 // Parse task_done content (JSON with msg/from/to, or legacy plain string)
                                                 let taskDoneMeta: {msg?: string; from?: string; to?: string} | null = null;
                                                 if (isTaskDone) {
@@ -629,10 +716,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
                                                 let bubbleClass = 'bg-indigo-50 border border-indigo-100 text-gray-800';
                                                 if (isTaskDone) bubbleClass = 'bg-green-50 border border-green-200 text-gray-800';
-                                                else if (isAskUser) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
+                                                else if (isAskQuestion) bubbleClass = 'bg-amber-50 border border-amber-200 text-gray-800';
                                                 else if (!isAgent) bubbleClass = 'bg-gray-200 text-gray-900';
 
-                                                const authorLabel = isAgent ? '🤖 Agent' : '👤 You';
+                                                const authorLabel = getActivityAuthorLabel(c, runs);
 
                                                 const statusLabel: Record<string, string> = {
                                                     'to-do': 'To Do', 'in-progress': 'In Progress',
@@ -728,6 +815,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     ) : (
                                                                         <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
                                                                     )}
+                                                                    {getRunAgentName(r) && (
+                                                                        <span className="font-normal bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" title={`Agent: ${getRunAgentName(r)}`}>
+                                                                            {getRunAgentName(r)}
+                                                                        </span>
+                                                                    )}
+                                                                    {r.title && (
+                                                                        <span className="font-normal bg-slate-50 text-slate-600 px-1.5 py-0.5 rounded-full max-w-[18rem] truncate" title={`Session purpose: ${r.title}`}>
+                                                                            {r.title}
+                                                                        </span>
+                                                                    )}
                                                                 </span>
                                                                 <div className="flex items-center gap-2">
                                                                     <span className={`px-2 py-0.5 rounded-full border text-xs font-medium ${statusClass}`}>{r.status}</span>
@@ -770,6 +867,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     compact
                                                                     messages={(r.log_entries || []).map((e: any, i: number) => ({ id: i, entry: e }))}
                                                                     status={r.status}
+                                                                    agentName={getRunAgentName(r)}
                                                                 />
                                                             </div>
                                                         </details>
@@ -780,7 +878,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     })()}
                                 </div>
                                 <div className="mt-4">
-                                    {task?.run_id && task?.status !== 'blocked' ? (
+                                    {task?.run_id && task?.status !== 'blocked' && !hasPendingHumanQuestion ? (
                                         <div className="group relative">
                                             <input
                                                 type="text"
@@ -794,13 +892,16 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                             </div>
                                         </div>
                                     ) : (
-                                        <form onSubmit={handleAddComment} className="flex gap-2">
+                                        <>
+                                        <div className="flex gap-2" data-testid="human-reply-form">
                                             <input
                                                 type="text"
                                                 value={newComment}
                                                 onChange={(e) => setNewComment(e.target.value)}
+                                                onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleAddComment(); } }}
                                                 placeholder="Add a comment..."
                                                 className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
+                                                disabled={isPostingComment}
                                             />
                                             {task?.status === 'blocked' ? (
                                                 <span className="flex items-center px-2 text-xs text-amber-700">Answer pending question</span>
@@ -815,10 +916,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
                                                 </div>
                                             )}
-                                            <button type="submit" className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700">
+                                            <button type="button" onClick={handleAddComment} disabled={isPostingComment || !newComment.trim()} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
                                                 <Send size={18} />
                                             </button>
-                                        </form>
+                                        </div>
+                                        {commentError && <p className="mt-1 text-xs text-red-600">{commentError}</p>}
+                                        </>
                                     )}
                                 </div>
 

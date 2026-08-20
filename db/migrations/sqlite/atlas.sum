@@ -1,4 +1,4 @@
-h1:xrhsOw0EACKA8oPz3rak8xMHCW8a4jP/2on89jfDgKQ=
+h1:M45LASNS6En6Lx6mqSoN1SWAZKqw01zPabsJi+NnUfg=
 20260816000001_users.up.sql h1:jBhcs/9Wd51UU/AKincyLRhGKQQTp6TOW6dG23BR/us=
 20260816000002_teams.up.sql h1:pvBKvsdpLFCUMcbP0vNok9xYBC7d1oylm0+u9DT3lBA=
 20260816000003_companies.up.sql h1:TwBvGoR1K1so/7c+Rnz3rbfFPdSeCbLQHSaq2Fheagc=
@@ -54,3 +54,9 @@ h1:xrhsOw0EACKA8oPz3rak8xMHCW8a4jP/2on89jfDgKQ=
 20260816000053_github_webhook_target_wake_status_enum.up.sql h1:bqS7A0qPybglbdyEXjz5ZAsSoY72mh1t0GqpzrpYQwI=
 20260816000054_task_status_refinement_enum.up.sql h1:yg0/4grS91LFYXwtCDJZL8MZitishTpq+XbLJKK68mg=
 20260816000055_github_connection_account_installation_unique.up.sql h1:bRqUUPAeMyfnhtYjzZ1fY6RTCEtjBbHyqzVJhQK5+ps=
+20260816000056_orchestrator_messaging_workers.up.sql h1:xl3WJeMWxCynToEPXwdq2e6P/E0mNOeOWFjMIyyh3eM=
+20260816000057_remove_ask_artifact_setting.up.sql h1:urndMOAC/pyJWTt1qQzP7FDiONSgy9py0uv+maVYfVQ=
+20260816000058_remove_legacy_execution_fields.up.sql h1:hWH6w02/VtA6N9bM7P161hzr0sARhFjMLSqsVTN57jg=
+20260816000059_human_input_events.up.sql h1:hY8AAuNTmhihzM+at8jlUzzMhIWqJwRvpqReNYispBI=
+20260816000060_session_workspaces_and_task_done_at.up.sql h1:TlZog69qRKuP3Z7uQl09slhlMnT31gy3kHIqHmWlDjI=
+20260816000061_session_titles.up.sql h1:OLckl+tSg/sunAdeJCB+loZLtOsBrz1ymYdvTU9hgSA=

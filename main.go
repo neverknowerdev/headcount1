@@ -275,6 +275,10 @@ func main() {
 	// Reconcile queued tasks after restart so a prerequisite completion or
 	// dependency removal is not stranded in the crash window before launch.
 	go eng.ReconcileQueuedTasks(context.Background())
+	// Session workspaces are durable by design. Remove them only for tasks that
+	// have been Done for the retention period, so forks and recovery remain
+	// possible during the post-completion window.
+	go eng.StartWorkspaceCleanupScheduler(context.Background(), 24*time.Hour)
 
 	// Deploys are pushed to this server by CI via the authenticated
 	// /api/deploy/webhook (see the deploy controller); the updater just applies
@@ -420,7 +424,7 @@ func main() {
 	defer stop()
 	// The startup sweep handles runs abandoned before this process started;
 	// the monitor covers stalls that happen while the server remains up.
-	eng.StartLivenessMonitor(ctx, time.Minute, 2*time.Minute)
+	eng.StartLivenessMonitor(ctx, configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", time.Minute), configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute))
 
 	go func() {
 		log.Printf("Starting server on port %s", port)
@@ -505,6 +509,19 @@ func main() {
 			log.Fatalf("deploy: exec into new binary failed: %v", err)
 		}
 	}
+}
+
+func configuredDuration(name string, fallback time.Duration) time.Duration {
+	value := strings.TrimSpace(os.Getenv(name))
+	if value == "" {
+		return fallback
+	}
+	duration, err := time.ParseDuration(value)
+	if err != nil || duration <= 0 {
+		log.Printf("invalid %s=%q; using %s", name, value, fallback)
+		return fallback
+	}
+	return duration
 }
 
 // listenWithRetry binds addr, retrying on "address already in use" until

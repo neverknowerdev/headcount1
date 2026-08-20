@@ -117,7 +117,7 @@ func TestAgentBeforeTurnInterruptionRunsAfterToolResults(t *testing.T) {
 
 func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 	transport := &queuedCompletionTransport{responses: [][]byte{
-		toolCallWithArgumentsBody(t, "ask-1", "ask_agent", `{"session_id":7,"question":"status?"}`),
+		toolCallWithArgumentsBody(t, "ask-1", "send_message_to_session", `{"session_id":7,"message":"status?"}`),
 		completionBody(t, "I saw the question error and can continue."),
 	}}
 	client := aicli.NewClient("http://unused", "", "test-model")
@@ -128,10 +128,10 @@ func TestOrchestratorQuestionErrorBecomesToolResult(t *testing.T) {
 		GetSession: func(context.Context, int32) (orchestratorTools.ManagedSessionDetails, error) {
 			return orchestratorTools.ManagedSessionDetails{}, nil
 		},
-		AskAgent: func(context.Context, int32, string) (string, error) {
+		SendMessage: func(context.Context, int32, string) (string, error) {
 			return "", context.DeadlineExceeded
 		},
-		RunNewSession: func(context.Context, *int32, string, string) (string, error) { return "", nil },
+		RunNewSession: func(context.Context, *int32, string, string, string) (string, error) { return "", nil },
 		StopSession:   func(context.Context, int32, string) (string, error) { return "", nil },
 		ForkSession:   func(context.Context, int32, int64) (string, error) { return "", nil },
 	})

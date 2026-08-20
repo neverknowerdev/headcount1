@@ -19,7 +19,6 @@ type sessionEnvironment struct {
 	rootTask      db.Task
 	rootRunID     int32
 	rootTaskID    int32
-	depth         int
 	groupMode     bool
 	provider      db.LLMProvider
 	model         string
@@ -57,13 +56,15 @@ func (e *NativeEngine) prepareSessionEnvironment(
 	if parent != nil {
 		environment.rootRunID = parent.rootRunID
 		environment.rootTaskID = parent.rootTaskID
-		environment.depth = parent.depth
 	}
-	environment.groupMode = agent.ModelGroupID != nil
 	environment.provider, environment.model, err = resolveProvider(ctx, e.q, agent)
 	if err != nil {
 		return environment, run, err
 	}
+	// Internal-purpose runs use the same synthetic proxy provider as agents
+	// bound to a model group. Detect it from the resolved target so helper
+	// workers cannot accidentally call the first (usually free) member directly.
+	environment.groupMode = agent.ModelGroupID != nil || isModelGroupProxyBaseURL(environment.provider.BaseUrl)
 	if !resumed {
 		run = assignRunName(ctx, e.q, *task, agent, run, parent, environment.rootTaskID, environment.rootRunID)
 	}
@@ -81,7 +82,17 @@ func (e *NativeEngine) prepareSessionEnvironment(
 			environment.rootTask = refreshed
 		}
 	}
-	environment.workspacePath = manager.GetTaskWorktreePath(company, environment.rootTask)
+	environment.workspacePath = strings.TrimSpace(run.WorkspacePath)
+	preservedWorkspace := environment.workspacePath != ""
+	if !preservedWorkspace {
+		environment.workspacePath = manager.GetTaskWorktreePath(company, environment.rootTask)
+	}
+	if run.WorkspacePath != environment.workspacePath {
+		run.WorkspacePath = environment.workspacePath
+		if updateErr := e.q.UpdateRunWorkspacePath(ctx, run.ID, environment.workspacePath); updateErr != nil {
+			return environment, run, fmt.Errorf("persist workspace path: %w", updateErr)
+		}
+	}
 
 	logger, logErr := logging.NewSessionLoggerWithHub(settings.BasePath, company.ShortName, environment.rootTaskID, environment.rootRunID, run.ID, e.hub.ForCompany(task.CompanyID), e.q)
 	if logErr != nil {
@@ -111,21 +122,24 @@ func (e *NativeEngine) prepareSessionEnvironment(
 			if pullErr := environment.gitManager.Pull(ctx); pullErr != nil {
 				e.logInfo(environment.logger, "Warning: git pull failed: "+pullErr.Error())
 			}
-			if _, statErr := os.Stat(filepath.Join(environment.workspacePath, ".git")); os.IsNotExist(statErr) {
-				branchName := strings.TrimSpace(environment.rootTask.GitHubBranch)
-				if branchName == "" {
-					branchName = db.TaskGitBranch(environment.rootTask.RefKey, environment.rootTask.ID)
-					environment.rootTask.GitHubBranch = branchName
-					if _, updateErr := e.q.UpdateTask(ctx, environment.rootTask); updateErr != nil {
-						e.logInfo(environment.logger, "Failed to persist task Git branch: "+updateErr.Error())
-						environment.gitProject = false
+			if !preservedWorkspace {
+				_, statErr := os.Stat(filepath.Join(environment.workspacePath, ".git"))
+				if os.IsNotExist(statErr) {
+					branchName := strings.TrimSpace(environment.rootTask.GitHubBranch)
+					if branchName == "" {
+						branchName = db.TaskGitBranch(environment.rootTask.RefKey, environment.rootTask.ID)
+						environment.rootTask.GitHubBranch = branchName
+						if _, updateErr := e.q.UpdateTask(ctx, environment.rootTask); updateErr != nil {
+							e.logInfo(environment.logger, "Failed to persist task Git branch: "+updateErr.Error())
+							environment.gitProject = false
+						}
 					}
-				}
-				_ = os.RemoveAll(environment.workspacePath)
-				if environment.gitProject {
-					if worktreeErr := environment.gitManager.CreateWorktree(ctx, projectRepoDir, environment.workspacePath, branchName, "origin/"+environment.rootTask.EffectiveGitBaseBranch()); worktreeErr != nil {
-						e.logInfo(environment.logger, "Failed to create worktree: "+worktreeErr.Error())
-						environment.gitProject = false
+					_ = os.RemoveAll(environment.workspacePath)
+					if environment.gitProject {
+						if worktreeErr := environment.gitManager.CreateWorktree(ctx, projectRepoDir, environment.workspacePath, branchName, "origin/"+environment.rootTask.EffectiveGitBaseBranch()); worktreeErr != nil {
+							e.logInfo(environment.logger, "Failed to create worktree: "+worktreeErr.Error())
+							environment.gitProject = false
+						}
 					}
 				}
 			}

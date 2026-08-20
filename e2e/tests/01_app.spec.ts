@@ -138,10 +138,11 @@ test.describe.serial('Headcount1 App', () => {
         await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
-        // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to finish_task, moving the task
-        // to "in-review". Wait for that real outcome.
-        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        // The native engine + mock provider will run the delegated worker and
+        // then have the root orchestrator close the task through its own
+        // management finish_task tool. Child completion alone must not mutate
+        // the shared task lifecycle.
+        await waitForTaskStatus(request, taskId, 'done', 90_000);
 
         // Wait for the comment created by the agent run
         await waitForComment(process.env.E2E_BASE_URL || 'http://localhost:8080', taskId, 60_000);
@@ -151,7 +152,11 @@ test.describe.serial('Headcount1 App', () => {
         expect(runsRes.ok()).toBeTruthy();
         const runs = await runsRes.json();
         expect(runs.length).toBeGreaterThan(0);
-        const run = runs[0];
+        // The mandatory orchestration flow creates a root orchestrator plus
+        // one or more child agent sessions. Logs are grouped by the root run,
+        // so select that root rather than assuming the newest row is the log
+        // directory owner.
+        const run = runs.find((candidate: any) => candidate.kind === 'task_orchestrator') ?? runs[runs.length - 1];
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         // Session-based JSONL layout: logs are grouped per main run in
         // logs/{company}/{taskId}/run-{id}/, the root session writing
@@ -244,6 +249,12 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page.getByText('Hire your CEO')).toBeVisible();
         await page.fill('input[type="text"]', 'Second CEO');
         await page.click('button:has-text("Finish & Launch")');
+
+        // AddCompany performs a full-page redirect after creating the CEO.
+        // Wait for that redirect to settle before navigating back to the
+        // original workspace; otherwise the two navigations race and Layout
+        // can render the switcher from the previous company list.
+        await page.waitForURL(/\/companies\/second-co(?:\/)?$/, { timeout: 10000 });
 
         // Main App View
         await page.goto('/companies/nw');

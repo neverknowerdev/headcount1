@@ -42,15 +42,7 @@ func resolveProvider(ctx context.Context, q *db.Queries, agent db.Agent) (db.LLM
 		if err != nil {
 			return db.LLMProvider{}, "", fmt.Errorf("failed to get model group: %w", err)
 		}
-		if len(group.Members) == 0 {
-			return db.LLMProvider{}, "", fmt.Errorf("model group %q has no members", group.Name)
-		}
-		provider := db.LLMProvider{
-			Name:         group.Name + " (model group)",
-			BaseUrl:      modelGroupProxyBaseURL(group.Slug),
-			ProviderType: "openai",
-		}
-		return provider, group.Slug, nil
+		return resolveModelGroupTarget(group)
 	}
 
 	if agent.ProviderID == nil {
@@ -65,6 +57,22 @@ func resolveProvider(ctx context.Context, q *db.Queries, agent db.Agent) (db.LLM
 		return db.LLMProvider{}, "", fmt.Errorf("model resolution failed: %w", err)
 	}
 	return provider, model, nil
+}
+
+// resolveModelGroupTarget returns the synthetic provider used to address the
+// in-process model-group gateway. The concrete provider and model are chosen
+// by the gateway for every request; selecting a member here would bypass
+// free-first ordering, cooldowns, failover, and request statistics.
+func resolveModelGroupTarget(group db.ModelGroup) (db.LLMProvider, string, error) {
+	if len(db.ExpandModelGroupMembers(group.Members)) == 0 {
+		return db.LLMProvider{}, "", fmt.Errorf("model group %q has no members", group.Name)
+	}
+	provider := db.LLMProvider{
+		Name:         group.Name + " (model group)",
+		BaseUrl:      modelGroupProxyBaseURL(group.Slug),
+		ProviderType: "openai",
+	}
+	return provider, group.Slug, nil
 }
 
 // modelGroupProxyBaseURL returns the local gateway base URL for a model

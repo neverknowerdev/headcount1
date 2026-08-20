@@ -1,0 +1,1 @@
+-- Down migrations are retained for operators and are intentionally not embedded by the runtime.
