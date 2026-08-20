@@ -295,6 +295,7 @@ test.describe.serial('Deploy webhook', () => {
             body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
                 { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', title: 'Complete task', prompt: 'Complete the task.' } } },
                 { text: 'The worker completed the task.' },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The resumed worker completed successfully and the result was verified.' } } },
             ] }),
         });
         // Hold the LLM response so the run is provably blocked mid-turn.
@@ -366,7 +367,7 @@ test.describe.serial('Deploy webhook', () => {
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
         expect(finalRun.latest_reported_status).toBe(statusMarker);
         const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
-        expect(finalTask.status).toBe('in-review');
+        expect(finalTask.status).toBe('done');
     });
 
     // Configuration delivery: CI reads its GitHub Environment's vars/secrets and

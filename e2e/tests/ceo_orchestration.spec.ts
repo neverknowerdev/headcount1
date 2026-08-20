@@ -62,6 +62,7 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
                     agent_name: 'Implementation Agent', title: 'Implement audit export', prompt: 'Implement the audit export using the CEO decision.',
                 } } },
                 { text: 'The implementation session is complete.' },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The CEO decision was applied and the implementation result was verified.' } } },
             ] }),
         });
         await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
@@ -76,7 +77,7 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok(), await kick.text()).toBeTruthy();
-        await waitForTaskStatus(request, task.id, 'in-review', 90_000);
+        await waitForTaskStatus(request, task.id, 'done', 90_000);
 
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
         const orchestrator = runs.find((run: any) => run.kind === 'task_orchestrator');

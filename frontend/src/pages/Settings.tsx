@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
 import { ExternalLink, GitBranch, KeyRound } from 'lucide-react';
 
 interface BuildVersion {
@@ -38,6 +38,7 @@ interface DeployStatus {
 
 export const Settings: React.FC = () => {
     const navigate = useNavigate();
+    const location = useLocation();
     const { selectedCompanyId, companies, setCompanies, user } = useStore();
     const isOwner = useIsOwner();
     const isAdmin = user?.is_admin === true;
@@ -48,11 +49,13 @@ export const Settings: React.FC = () => {
     const [deleting, setDeleting] = useState(false);
 
     useEffect(() => {
-        const comp = companies.find(c => c.id === selectedCompanyId);
+        const routeShortName = location.pathname.match(/\/companies\/([^/]+)/)?.[1];
+        const comp = companies.find(c => c.id === selectedCompanyId)
+            ?? companies.find(c => c.short_name === routeShortName);
         if (comp) {
             setCompanyShortName(comp.short_name);
         }
-    }, [selectedCompanyId, companies]);
+    }, [selectedCompanyId, companies, location.pathname]);
 
     const [basePath, setBasePath] = useState('');
     const [deploySource, setDeploySource] = useState<'releases' | 'main'>('releases');
@@ -117,7 +120,9 @@ export const Settings: React.FC = () => {
                 });
             }
 
-            const currentCompany = companies.find(c => c.id === selectedCompanyId);
+            const routeShortName = location.pathname.match(/\/companies\/([^/]+)/)?.[1];
+            const currentCompany = companies.find(c => c.id === selectedCompanyId)
+                ?? companies.find(c => c.short_name === routeShortName);
             if (currentCompany && companyShortName !== currentCompany.short_name) {
                 await axios.put(`/api/companies/${currentCompany.id}`, { short_name: companyShortName });
                 const updatedCompanies = companies.map(c =>

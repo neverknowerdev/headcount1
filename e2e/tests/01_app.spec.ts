@@ -138,10 +138,11 @@ test.describe.serial('Headcount1 App', () => {
         await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
-        // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to finish_task, moving the task
-        // to "in-review". Wait for that real outcome.
-        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        // The native engine + mock provider will run the delegated worker and
+        // then have the root orchestrator close the task through its own
+        // management finish_task tool. Child completion alone must not mutate
+        // the shared task lifecycle.
+        await waitForTaskStatus(request, taskId, 'done', 90_000);
 
         // Wait for the comment created by the agent run
         await waitForComment(process.env.E2E_BASE_URL || 'http://localhost:8080', taskId, 60_000);

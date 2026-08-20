@@ -177,6 +177,8 @@ test.describe.serial('SQLite export/import round-trip', () => {
                 model: 'e2e-orchestrator-model',
                 entries: [{ tool_call: { id: 'launch-worker', name: 'run_new_session', arguments: {
                     agent_name: 'Runner', title: 'Complete assigned task', prompt: 'Complete the assigned task and finish it for review.',
+                } } }, { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: {
+                    summary: 'The assigned worker completed successfully and the result was verified.',
                 } } }],
             }),
         });
@@ -184,7 +186,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok()).toBeTruthy();
-        await waitForTaskStatus(request, task.id, 'in-review', 90_000);
+        await waitForTaskStatus(request, task.id, 'done', 90_000);
         await expect.poll(async () => {
             const rs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
             const worker = (rs as any[]).find((run) => run.kind === 'agent_session');

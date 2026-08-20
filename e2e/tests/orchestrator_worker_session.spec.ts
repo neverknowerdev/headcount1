@@ -55,6 +55,7 @@ test.describe.serial('orchestrator reserved Worker sessions', () => {
                 { tool_call: { id: 'launch-reserved-worker', name: 'run_new_session', arguments: { agent_name: 'Worker', title: 'Verify repository state', prompt: 'Run one bounded repository verification and return evidence without changing implementation.' } } },
                 { tool_call: { id: 'launch-coder', name: 'run_new_session', arguments: { agent_name: coder.name, title: 'Implement task', prompt: 'Implement the task after the auxiliary verification and finish it for review.' } } },
                 { text: 'The auxiliary verification and implementation delegation are complete.' },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The helper verification and delegated implementation both completed successfully.' } } },
             ],
         });
 

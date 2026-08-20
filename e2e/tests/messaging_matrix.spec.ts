@@ -60,7 +60,7 @@ test.describe.serial('orchestrator messaging matrix', () => {
             { text: 'Agent A answered; Agent B is now being started.' },
             { tool_call: { id: 'send-b', name: 'send_message_to_session', arguments: { session_id: 0, message: 'Run an independent verification and return the evidence.' } } },
             { text: 'All routed questions have been answered.' },
-            { tool_call: { id: 'matrix-finish', name: 'finish_task', arguments: { summary: 'Both workers completed their routed implementation and verification work, and the CEO consultation was answered.' } } },
+            { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'Both workers completed their routed implementation and verification work, and the CEO consultation was answered.' } } },
         ] });
         await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-agent-a-model', entries: [
             { tool_call: { id: 'a-answer', name: 'answer_message', arguments: { message_id: 0, answer: 'The implementation boundary is clear and safe.' } } },

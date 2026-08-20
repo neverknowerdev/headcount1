@@ -13,6 +13,8 @@ const TOOL_CALL_ID = 'call_e2e_1';
 const TOOL_ARGS = { task_status: 'in-review', finish_status: 'E2E task completed and ready for review.' };
 const ORCHESTRATOR_TOOL_NAME = 'run_new_session';
 const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
+const ORCHESTRATOR_FINISH_TOOL_NAME = 'finish_task';
+const ORCHESTRATOR_FINISH_TOOL_CALL_ID = 'call_e2e_orchestrator_finish';
 const ORCHESTRATOR_TOOL_ARGS = {
     agent_name: 'E2E Agent',
     title: 'Complete E2E task',
@@ -556,12 +558,15 @@ function handleChatCompletionsRoute(
     const taskKey = taskMatch?.[1] ?? 'unknown-task';
     const isFirstCall = !hasToolResult && (!isOrchestrator || !state.orchestratorStartedTasks.has(taskKey));
     if (isOrchestrator && isFirstCall) state.orchestratorStartedTasks.add(taskKey);
+    const finishOrchestrator = isOrchestrator
+        && !isFirstCall
+        && defaultOrchestratorWorkersAreTerminal(request);
 
     if (wantsStream) {
-        writeStreamingChatCompletion(res, isFirstCall, isOrchestrator);
+        writeStreamingChatCompletion(res, isFirstCall || finishOrchestrator, isOrchestrator, finishOrchestrator);
     } else {
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall, isOrchestrator)));
+        res.end(JSON.stringify(buildChatCompletionResponse(isFirstCall || finishOrchestrator, isOrchestrator, finishOrchestrator)));
     }
     return true;
 }
@@ -676,6 +681,21 @@ function managedWorkersAreTerminal(request: ChatCompletionRequest): boolean {
     const workers = statuses.filter(({ agentName }) =>
         !agentName.toLowerCase().includes('orchestrator'));
     return workers.length > 0 && workers.every(({ status }) =>
+        status !== 'running' && status !== 'waiting' && status !== 'active');
+}
+
+function defaultOrchestratorWorkersAreTerminal(request: ChatCompletionRequest): boolean {
+    const content = (Array.isArray(request.messages) ? request.messages : [])
+        .map((message) => String(message.content ?? ''))
+        .join('\n');
+    const latestByAgent = new Map<string, string>();
+    for (const match of content.matchAll(/\"agent_name\"\s*:\s*\"([^\"]+)\"[\s\S]*?\"status\"\s*:\s*\"([^\"]+)\"/g)) {
+        latestByAgent.set(match[1], match[2]);
+    }
+    const workers = [...latestByAgent.entries()]
+        .filter(([agentName]) => !agentName.toLowerCase().includes('orchestrator'))
+        .map(([, status]) => status);
+    return workers.length > 0 && workers.every((status) =>
         status !== 'running' && status !== 'waiting' && status !== 'active');
 }
 
@@ -794,20 +814,29 @@ function resolveScenarioToolCall(toolCall: ScenarioToolCall, request?: ChatCompl
     return { ...toolCall, arguments: args };
 }
 
-function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: boolean): object {
+function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: boolean, finishOrchestrator = false): object {
     const useOrchestratorTool = withToolCall && isOrchestrator;
+    const toolName = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_NAME
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
+    const toolCallID = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_CALL_ID
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
+    const toolArguments = finishOrchestrator
+        ? { summary: 'The delegated worker completed successfully and its result was verified.' }
+        : useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
     const message = withToolCall
         ? {
             role: 'assistant' as const,
             content: useOrchestratorTool
-                ? 'I have selected the implementation worker for this task.'
+                ? finishOrchestrator
+                    ? 'The delegated worker completed successfully; I am closing the task.'
+                    : 'I have selected the implementation worker for this task.'
                 : 'I have analyzed the E2E task and completed it successfully.',
             tool_calls: [{
-                id: useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID,
+                id: toolCallID,
                 type: 'function',
                 function: {
-                    name: useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME,
-                    arguments: JSON.stringify(useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS),
+                    name: toolName,
+                    arguments: JSON.stringify(toolArguments),
                 },
             }],
         }
@@ -830,7 +859,7 @@ function buildChatCompletionResponse(withToolCall: boolean, isOrchestrator: bool
     };
 }
 
-function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean, isOrchestrator: boolean): void {
+function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: boolean, isOrchestrator: boolean, finishOrchestrator = false): void {
     res.writeHead(200, {
         'Content-Type': 'text/event-stream',
         'Cache-Control': 'no-cache',
@@ -843,9 +872,13 @@ function writeStreamingChatCompletion(res: http.ServerResponse, withToolCall: bo
 
     if (withToolCall) {
         const useOrchestratorTool = isOrchestrator;
-        const toolName = useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
-        const toolCallID = useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
-        const toolArgs = useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
+        const toolName = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_NAME
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_NAME : TOOL_NAME;
+        const toolCallID = finishOrchestrator ? ORCHESTRATOR_FINISH_TOOL_CALL_ID
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_CALL_ID : TOOL_CALL_ID;
+        const toolArgs = finishOrchestrator
+            ? { summary: 'The delegated worker completed successfully and its result was verified.' }
+            : useOrchestratorTool ? ORCHESTRATOR_TOOL_ARGS : TOOL_ARGS;
         res.write(formatSSE(chunk({
             tool_calls: [{
                 index: 0,

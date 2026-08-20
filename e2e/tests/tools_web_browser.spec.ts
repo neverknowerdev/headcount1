@@ -78,6 +78,11 @@ async function setScenario(request: APIRequestContext, entries: ScenarioEntry[])
                 },
             }, {
                 text: 'The worker completed the assigned scenario successfully.',
+            }, {
+                tool_call: {
+                    id: 'orchestrator-finish', name: 'finish_task',
+                    arguments: { summary: 'The delegated tool scenario completed and its evidence was verified.' },
+                },
             }],
         },
     });
@@ -283,7 +288,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: fetch test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -326,7 +331,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         ]);
 
         const taskId = await runTask(request, companyId, agentId, 'web_fetch: connection error', sprintId);
-        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        await waitForTaskStatus(request, taskId, 'done', 90_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -361,7 +366,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: large body truncation', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -409,7 +414,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: navigate to test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -464,7 +469,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: get_text from selector', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -510,7 +515,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: execute_js', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -561,7 +566,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: get_html', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -632,7 +637,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: click and type', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -679,7 +684,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: screenshot', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -719,7 +724,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         ]);
 
         const taskId = await runTask(request, companyId, agentId, 'browser_use: unknown host error', sprintId);
-        await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+        await waitForTaskStatus(request, taskId, 'done', 120_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -765,7 +770,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'dual tool: web_fetch + browser_use', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -825,7 +830,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -873,7 +878,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -916,7 +921,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -955,7 +960,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);

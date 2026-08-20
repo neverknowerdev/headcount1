@@ -75,6 +75,7 @@ test.describe.serial('task sidecar orchestrator', () => {
                 { tool_call: { id: 'orch-status-1', name: 'get_session', arguments: { session_id: 2 } } },
                 { tool_call: { id: 'orch-status-2', name: 'get_session', arguments: { session_id: 2 } } },
                 { text: 'Worker execution is complete.' },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The worker completed the audit export and the result was verified.' } } },
             ] }),
         });
         const task = await postJSON(request, '/api/tasks', {
