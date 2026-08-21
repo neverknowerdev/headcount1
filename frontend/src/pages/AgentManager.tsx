@@ -203,8 +203,9 @@ export const AgentManager: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Name <span className="text-red-500">*</span></label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-name">Name <span className="text-red-500">*</span></label>
                             <input
+                                id="agent-name"
                                 autoFocus
                                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                 placeholder="e.g. Research Assistant"
@@ -215,8 +216,9 @@ export const AgentManager: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-description">Description</label>
                             <input
+                                id="agent-description"
                                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
                                 placeholder="What does this agent do?"
                                 value={form.description}
@@ -225,8 +227,9 @@ export const AgentManager: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">System prompt</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-system-prompt">System prompt</label>
                             <textarea
+                                id="agent-system-prompt"
                                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
                                 rows={4}
                                 placeholder="Optional — you can set this later in agent settings."

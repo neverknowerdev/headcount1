@@ -48,7 +48,7 @@ describe('AgentManager templates', () => {
         const templateSelect = await screen.findByTestId('agent-template');
         fireEvent.change(templateSelect, { target: { value: 'Coder' } });
 
-        expect(screen.getByLabelText('System prompt')).toHaveValue(coderTemplate.prompt);
+        expect((screen.getByLabelText('System prompt') as HTMLTextAreaElement).value).toBe(coderTemplate.prompt);
         expect(screen.getByText('Copied the template prompt and 2 tool settings. You can edit the prompt below.')).toBeTruthy();
 
         fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Implementation assistant' } });
