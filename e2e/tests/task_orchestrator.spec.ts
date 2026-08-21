@@ -136,8 +136,6 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(allOrchestratorJSON).toContain('child_statuses');
         expect(allOrchestratorJSON).toContain('up to five');
         expect(JSON.stringify(statusRequests)).toContain('implementing the audit export');
-        expect(JSON.stringify(statusRequests)).toContain('last_reported_at');
-        expect(JSON.stringify(statusRequests)).toContain('run_status_history');
         const reportEventRequests = orchestratorRequests.filter((r: any) =>
             (r.body?.messages || []).some((m: any) =>
                 typeof m.content === 'string' && m.content.includes('"event_type":"status_report"')));
@@ -149,6 +147,8 @@ test.describe.serial('task sidecar orchestrator', () => {
             })
             .filter((p: any) => p?.last_run_status?.last_reported_status?.includes('implementing the audit export')));
         expect(statusPayloads.length).toBeGreaterThanOrEqual(1);
+        expect(statusPayloads.some((p: any) => p.last_run_status.last_reported_at)).toBeTruthy();
+        expect(statusPayloads.some((p: any) => Array.isArray(p.run_status_history) && p.run_status_history.length > 0)).toBeTruthy();
         expect(statusPayloads[0].last_run_status.last_reported_message_id).toBeGreaterThan(0);
 
     });
