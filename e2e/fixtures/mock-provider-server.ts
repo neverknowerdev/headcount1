@@ -16,7 +16,7 @@ const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
 const ORCHESTRATOR_FINISH_TOOL_NAME = 'finish_task';
 const ORCHESTRATOR_FINISH_TOOL_CALL_ID = 'call_e2e_orchestrator_finish';
 const ORCHESTRATOR_TOOL_ARGS = {
-    agent_name: 'E2E Agent',
+    agent_name: 'Coder',
     title: 'Complete E2E task',
     prompt: 'Complete the assigned task and finish the task when the implementation is ready for review.',
 };

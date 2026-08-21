@@ -132,7 +132,7 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
         await expect(page.getByText('PW-INC-1')).toBeVisible();
         await expect(page.getByLabel('Assignee')).toBeVisible();
-        await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
+        await page.getByLabel('Assignee').selectOption({ label: 'CEO' });
         await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
