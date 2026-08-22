@@ -5,6 +5,34 @@ import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
 import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
 
+type WorkerPolicyMode = 'inherit' | 'deny' | 'custom';
+
+const WORKER_UNAVAILABLE_TOOLS = [
+    'create_task', 'create_subtask', 'get_task', 'ask_human',
+    'run_worker', 'worker_list', 'get_worker_info', 'stop_worker',
+    'ask_task_owner', 'answer_message',
+];
+
+function parseWorkerPolicy(raw: string) {
+    try {
+        const parsed = JSON.parse(raw || '{}');
+        const mode: WorkerPolicyMode = parsed.mode === 'deny' || parsed.mode === 'custom' ? parsed.mode : 'inherit';
+        const values = parsed[mode === 'deny' ? 'denied' : 'allowed'];
+        return { mode, values: Array.isArray(values) ? values.filter((value: unknown): value is string => typeof value === 'string') : [] };
+    } catch {
+        return { mode: 'inherit' as WorkerPolicyMode, values: [] as string[] };
+    }
+}
+
+function parsePermissions(raw: string): Record<string, string> {
+    try {
+        const parsed = JSON.parse(raw || '{}');
+        return parsed && typeof parsed === 'object' ? parsed : {};
+    } catch {
+        return {};
+    }
+}
+
 function parseAllowedMCPs(raw: string): string[] | null {
     if (!raw.trim()) return null;
     try {
@@ -35,6 +63,10 @@ export const AgentDetails: React.FC = () => {
     const [saveError, setSaveError] = useState<string | null>(null);
     const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
+    const [workerToolMode, setWorkerToolMode] = useState<WorkerPolicyMode>('inherit');
+    const [workerToolValues, setWorkerToolValues] = useState<string[]>([]);
+    const [workerMcpMode, setWorkerMcpMode] = useState<WorkerPolicyMode>('inherit');
+    const [workerMcpValues, setWorkerMcpValues] = useState<string[]>([]);
 
     const [modelGroups, setModelGroups] = useState<any[]>([]);
     const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', chat_type: 'message_history', reasoning_level: '', allowed_mcps: '', permissions: '{}', can_use_workers: false });
@@ -68,6 +100,12 @@ export const AgentDetails: React.FC = () => {
                 permissions: agentRes.data.permissions || '{}',
                 can_use_workers: !!agentRes.data.can_use_workers
             });
+            const workerTools = parseWorkerPolicy(agentRes.data.worker_permissions || '');
+            setWorkerToolMode(workerTools.mode);
+            setWorkerToolValues(workerTools.values);
+            const workerMcps = parseWorkerPolicy(agentRes.data.worker_allowed_mcps || '');
+            setWorkerMcpMode(workerMcps.mode);
+            setWorkerMcpValues(workerMcps.values);
         } catch (e) {
             console.error(e);
         }
@@ -143,6 +181,8 @@ export const AgentDetails: React.FC = () => {
                 ...formData,
                 provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
                 model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+                worker_permissions: JSON.stringify({ mode: workerToolMode, [workerToolMode === 'deny' ? 'denied' : 'allowed']: workerToolValues }),
+                worker_allowed_mcps: JSON.stringify({ mode: workerMcpMode, [workerMcpMode === 'deny' ? 'denied' : 'allowed']: workerMcpValues }),
             };
             await Promise.all([
                 axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph }),
@@ -166,7 +206,9 @@ export const AgentDetails: React.FC = () => {
             const payload = {
                 ...formData,
                 provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
-                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+                worker_permissions: JSON.stringify({ mode: workerToolMode, [workerToolMode === 'deny' ? 'denied' : 'allowed']: workerToolValues }),
+                worker_allowed_mcps: JSON.stringify({ mode: workerMcpMode, [workerMcpMode === 'deny' ? 'denied' : 'allowed']: workerMcpValues }),
             };
             await axios.put(`/api/agents/${id}`, payload);
             fetchData();
@@ -179,6 +221,33 @@ export const AgentDetails: React.FC = () => {
     };
 
     if (!agent) return <div>Loading...</div>;
+
+    const mainPermissions = parsePermissions(formData.permissions);
+    const workerToolOptions = [...new Set([...toolNames, ...WORKER_UNAVAILABLE_TOOLS])];
+    const workerMcpOptions = mcpServers
+        .filter((server: any) => server.name !== 'headcount1' && !server.project_id)
+        .filter((server: any, index: number, all: any[]) => all.findIndex(candidate => candidate.name === server.name) === index);
+    const toggleWorkerTool = (name: string, checked: boolean) => {
+        setWorkerToolValues(previous => checked ? [...new Set([...previous, name])] : previous.filter(item => item !== name));
+    };
+    const toggleWorkerMcp = (name: string, checked: boolean) => {
+        setWorkerMcpValues(previous => checked ? [...new Set([...previous, name])] : previous.filter(item => item !== name));
+    };
+    const WorkerModeSelector = ({ name, value, onChange }: { name: string; value: WorkerPolicyMode; onChange: (mode: WorkerPolicyMode) => void }) => (
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
+            {[
+                { mode: 'inherit' as const, title: 'Inherit from parent', description: 'Use the parent agent’s effective access.' },
+                { mode: 'deny' as const, title: 'Deny selected', description: 'Block only selected items; inherit everything else.' },
+                { mode: 'custom' as const, title: 'Custom allowlist', description: 'Allow only the selected items.' },
+            ].map(option => (
+                <label key={option.mode} className={`border rounded-lg p-3 cursor-pointer ${value === option.mode ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-200' : 'border-gray-200 hover:border-gray-300'}`}>
+                    <input type="radio" name={`worker-policy-${name}`} checked={value === option.mode} onChange={() => onChange(option.mode)} className="sr-only" />
+                    <span className="block text-sm font-semibold text-gray-900">{option.title}</span>
+                    <span className="block text-xs text-gray-500 mt-1">{option.description}</span>
+                </label>
+            ))}
+        </div>
+    );
 
     return (
         <div className="h-full flex flex-col">
@@ -291,8 +360,7 @@ export const AgentDetails: React.FC = () => {
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Basic tools</label>
                                 <div className="space-y-2">
                                     {toolNames.map(tool => {
-                                        const perms = JSON.parse(formData.permissions || '{}');
-                                        const isEnabled = perms[tool] !== 'deny';
+                                        const isEnabled = mainPermissions[tool] !== 'deny';
                                         return (
                                             <div key={tool} className="flex items-center">
                                                 <input
@@ -300,7 +368,7 @@ export const AgentDetails: React.FC = () => {
                                                     id={`tool-${tool}`}
                                                     checked={isEnabled}
                                                     onChange={(e) => {
-                                                        const newPerms = { ...perms };
+                                                        const newPerms = { ...mainPermissions };
                                                         if (e.target.checked) {
                                                             newPerms[tool] = 'allow';
                                                         } else {
@@ -335,6 +403,77 @@ export const AgentDetails: React.FC = () => {
                                 {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                             </div>
                         </form>
+
+                        {formData.can_use_workers && (
+                            <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-5">
+                                <div className="flex items-start justify-between gap-4">
+                                    <div>
+                                        <h3 className="font-bold text-lg">Worker settings</h3>
+                                        <p className="text-sm text-gray-500 mt-1">Controls the tools and MCPs available to helper workers launched by {agent.name}.</p>
+                                    </div>
+                                    <span className="text-xs font-medium text-indigo-700 bg-indigo-100 rounded-full px-2.5 py-1 whitespace-nowrap">Worker enabled</span>
+                                </div>
+                                <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
+                                    Workers use a separate, bounded runtime. They cannot manage tasks, change task state, or write artifacts; lifecycle and status tools remain available.
+                                </div>
+
+                                <div className="space-y-2">
+                                    <div>
+                                        <h4 className="text-sm font-semibold text-gray-900">Tools</h4>
+                                        <p className="text-xs text-gray-500">Choose how the worker tool set is derived from the parent.</p>
+                                    </div>
+                                    <WorkerModeSelector name="tools" value={workerToolMode} onChange={setWorkerToolMode} />
+                                    {workerToolMode !== 'inherit' && <p className="text-xs text-gray-500">{workerToolMode === 'deny' ? 'Checked tools are blocked for workers.' : 'Checked tools are the only configurable tools workers may use.'}</p>}
+                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2">
+                                        {workerToolOptions.map(tool => {
+                                            const unavailable = WORKER_UNAVAILABLE_TOOLS.includes(tool);
+                                            const disabled = workerToolMode === 'inherit' || unavailable;
+                                            return (
+                                                <label key={tool} className={`flex items-center gap-3 rounded-md border px-3 py-2 ${disabled ? 'bg-gray-50 text-gray-400' : 'hover:bg-gray-50 cursor-pointer'}`}>
+                                                    <input
+                                                        type="checkbox"
+                                                        checked={workerToolMode !== 'inherit' && workerToolValues.includes(tool)}
+                                                        disabled={disabled}
+                                                        onChange={event => toggleWorkerTool(tool, event.target.checked)}
+                                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
+                                                    />
+                                                    <span className="text-sm font-mono flex-1">{tool}</span>
+                                                    {unavailable && <span className="text-[10px] uppercase tracking-wide font-semibold text-gray-400">Unavailable</span>}
+                                                </label>
+                                            );
+                                        })}
+                                    </div>
+                                </div>
+
+                                <div className="space-y-2 pt-2 border-t">
+                                    <div>
+                                        <h4 className="text-sm font-semibold text-gray-900">MCP servers</h4>
+                                        <p className="text-xs text-gray-500">Apply the same inheritance rule to connected MCP servers. Per-tool filters remain available below.</p>
+                                    </div>
+                                    <WorkerModeSelector name="mcps" value={workerMcpMode} onChange={setWorkerMcpMode} />
+                                    {workerMcpMode !== 'inherit' && <p className="text-xs text-gray-500">{workerMcpMode === 'deny' ? 'Checked MCP servers are blocked for workers.' : 'Checked MCP servers are the only MCPs workers may use.'}</p>}
+                                    <div className="space-y-2 pt-2">
+                                        {workerMcpOptions.length === 0 ? (
+                                            <p className="text-sm text-gray-500 italic">No connected MCP servers yet.</p>
+                                        ) : workerMcpOptions.map((server: any) => (
+                                            <label key={server.id} className={`flex items-center gap-3 rounded-md border px-3 py-2 ${workerMcpMode === 'inherit' ? 'bg-gray-50 text-gray-400' : 'hover:bg-gray-50 cursor-pointer'}`}>
+                                                <input type="checkbox" checked={workerMcpMode !== 'inherit' && workerMcpValues.includes(server.name)} disabled={workerMcpMode === 'inherit'} onChange={event => toggleWorkerMcp(server.name, event.target.checked)} className="h-4 w-4 text-indigo-600 border-gray-300 rounded" />
+                                                <span className="text-sm font-medium flex-1">{server.display_name || server.name}</span>
+                                                <span className="text-xs text-gray-400 font-mono">{server.name}</span>
+                                            </label>
+                                        ))}
+                                    </div>
+                                </div>
+
+                                <div className="pt-3 border-t flex items-center gap-3">
+                                    <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
+                                        <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Worker Settings'}
+                                    </button>
+                                    {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
+                                    {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
+                                </div>
+                            </form>
+                        )}
 
                         <div className="bg-white p-6 rounded-lg shadow border space-y-4">
                             <div className="flex items-center justify-between mb-2">

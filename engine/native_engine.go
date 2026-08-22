@@ -1027,7 +1027,7 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	gatewayAuth := &toolState.gatewayAuth
 
 	allCompanyMCP := options.Worker
-	integrations := e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, allCompanyMCP)
+	integrations := e.configureSessionIntegrations(ctx, task, agent, registry, systemPrompt, proxyLogger, allCompanyMCP, options.Worker)
 	registry = integrations.registry
 	systemPrompt = integrations.systemPrompt
 	listingCostTotal := integrations.listingCostTotal
