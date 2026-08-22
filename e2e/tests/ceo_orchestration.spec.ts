@@ -36,6 +36,15 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
             name: 'Consultation Co', short_name: 'consult-co', color: '#4f46e5',
             description: 'A company shipping durable workflow tooling.',
         });
+        // Company creation now seeds the protected built-in catalog. This
+        // scenario uses a custom CEO with a dedicated mock model, so disable
+        // only the seeded CEO to make role resolution unambiguous; the
+        // built-in-agent UI coverage below still verifies the catalog itself.
+        const seededAgents = await (await request.get(`/api/agents?company_id=${company.id}`)).json();
+        const seededCEO = (seededAgents as any[]).find((agent) => agent.builtin && agent.role_key === 'CEO');
+        expect(seededCEO).toBeTruthy();
+        const disableSeededCEO = await request.put(`/api/agents/${seededCEO.id}`, { data: { enabled: false } });
+        expect(disableSeededCEO.ok(), await disableSeededCEO.text()).toBeTruthy();
         const ceo = await postJSON(request, '/api/agents', {
             company_id: company.id, name: 'Chief Executive Officer', role_key: 'CEO', short_name: 'CEO',
             system_prompt: 'You own the product decision.', model: 'e2e-ceo-model', provider_id: provider.id,
@@ -52,28 +61,34 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
             title: 'Add audit export', description: 'Export a patient audit trail as CSV.',
         });
 
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'consult', name: 'ask_ceo', arguments: {
-                    task_id: task.id, message: 'Should the export preserve the existing event ordering?',
-                } } },
-                { tool_call: { id: 'launch', name: 'run_new_session', arguments: {
-                    agent_name: 'Implementation Agent', title: 'Implement audit export', prompt: 'Implement the audit export using the CEO decision.',
-                } } },
-                { text: 'The implementation session is complete.' },
-                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The CEO decision was applied and the implementation result was verified.' } } },
-            ] }),
-        });
-        await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'content-type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-mock-model', entries: [
-                { tool_call: { id: 'finish', name: 'finish_task', arguments: {
-                    task_status: 'in-review', finish_status: 'Audit export is ready for review.',
-                    result_details: 'Implemented with stable event ordering.',
-                } } },
-            ] }),
-        });
+        await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-orchestrator-model', entries: [
+            { tool_call: { id: 'consult', name: 'ask_ceo', arguments: {
+                task_id: task.id, message: 'Should the export preserve the existing event ordering?',
+            } } },
+            { tool_call: { id: 'launch', name: 'run_new_session', arguments: {
+                agent_name: 'Implementation Agent', title: 'Implement audit export', prompt: 'Implement the audit export using the CEO decision.',
+            } } },
+            { text: 'The implementation session is complete.' },
+            { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The CEO decision was applied and the implementation result was verified.' } } },
+        ] });
+        // Consultation runs use a separate CEO model. Script both sides of
+        // that exchange so the test exercises the durable routed message and
+        // the consultation's terminal lifecycle, rather than generic fallback.
+        await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-ceo-model', entries: [
+            { tool_call: { id: 'ceo-answer', name: 'answer_message', arguments: {
+                message_id: 0, answer: 'Preserve the existing event ordering.',
+            } } },
+            { tool_call: { id: 'ceo-finish', name: 'finish_task', arguments: {
+                task_status: 'done', finish_status: 'CEO consultation completed.',
+                result_details: 'The product decision is to preserve event ordering.',
+            } } },
+        ] });
+        await postJSON(request, `${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, { model: 'e2e-mock-model', entries: [
+            { tool_call: { id: 'finish', name: 'finish_task', arguments: {
+                task_status: 'in-review', finish_status: 'Audit export is ready for review.',
+                result_details: 'Implemented with stable event ordering.',
+            } } },
+        ] });
 
         const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
         expect(kick.ok(), await kick.text()).toBeTruthy();
@@ -108,7 +123,18 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
         expect(JSON.stringify(orchestrationRequests)).toContain('run_new_session');
         expect(JSON.stringify(orchestrationRequests)).not.toContain('ask_agent');
         const consultationRequests = (log.requests as any[]).filter((entry) => entry.body?.model === 'e2e-ceo-model');
-        expect(consultationRequests.some((entry) => JSON.stringify(entry.body?.tools).includes('answer_message'))).toBeTruthy();
-        expect(JSON.stringify(consultationRequests)).toContain('Use the existing event ordering');
+        expect(consultationRequests.some((entry) => JSON.stringify(entry.body?.tools ?? []).includes('answer_message'))).toBeTruthy();
+        expect(JSON.stringify(consultationRequests)).toContain('Preserve the existing event ordering');
+    });
+
+    test('agents page lists all built-in agents with enable controls', async ({ page }) => {
+        await page.goto('/companies/consult-co/agents');
+        const builtin = page.getByTestId('builtin-agents');
+        await expect(builtin).toBeVisible();
+        await expect(builtin).toContainText('Built-in agents');
+        await expect(builtin.getByRole('heading', { name: 'CEO', exact: true })).toBeVisible();
+        await expect(builtin.getByRole('heading', { name: 'CMO', exact: true })).toBeVisible();
+        await expect(builtin.getByRole('heading', { name: 'QA Manual', exact: true })).toBeVisible();
+        await expect(builtin.getByRole('button', { name: 'Disable agent' }).first()).toBeVisible();
     });
 });

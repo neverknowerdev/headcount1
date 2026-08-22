@@ -1,6 +1,6 @@
 // Package agentconfig defines agent configuration types and a factory for
 // creating and managing named agent configurations. Configs can be loaded from
-// TOML files or constructed programmatically.
+// TOML or YAML files, or constructed programmatically.
 package agentconfig
 
 import "strings"
@@ -31,32 +31,36 @@ const (
 // It can be loaded from a TOML file or built in code.
 type AgentConfig struct {
 	// Name is the unique identifier used to look up this config.
-	Name string `toml:"name"`
+	Name string `toml:"name" yaml:"name"`
 	// ShortName is a compact (≤7 chars) label used in run keys, e.g.
 	// "DEC-50-CEO". Falls back to a name-derived abbreviation when empty.
-	ShortName string `toml:"short_name"`
+	ShortName string `toml:"short_name" yaml:"short_name"`
 	// Description is a human-readable summary of the agent's role.
-	Description string `toml:"description"`
+	Description string `toml:"description" yaml:"description"`
 	// Prompt is the system prompt text. Takes precedence over PromptFile.
-	Prompt string `toml:"prompt"`
+	Prompt string `toml:"prompt" yaml:"prompt"`
 	// PromptFile is a path to a .md file containing the system prompt.
 	// Relative paths are resolved from the config file's directory.
-	PromptFile string `toml:"prompt_file"`
+	PromptFile string `toml:"prompt_file" yaml:"prompt_file"`
 	// ChatType controls conversation management strategy.
-	ChatType ChatType `toml:"chat_type"`
+	ChatType ChatType `toml:"chat_type" yaml:"chat_type"`
 	// AllowedModels lists accepted model identifiers. First entry is default.
-	AllowedModels []string `toml:"allowed_models"`
+	AllowedModels []string `toml:"allowed_models" yaml:"allowed_models"`
 	// ReasoningLevel controls how much reasoning the model applies.
-	ReasoningLevel ReasoningLevel `toml:"reasoning_level"`
+	ReasoningLevel ReasoningLevel `toml:"reasoning_level" yaml:"reasoning_level"`
 	// MemoryTags are labels used by the memory bank (future feature).
-	MemoryTags []string `toml:"memory_tags"`
+	MemoryTags []string `toml:"memory_tags" yaml:"memory_tags"`
+	// Subagents lists config names that this agent may delegate to.
+	Subagents []string `toml:"subagents" yaml:"subagents"`
+	// ParentAgent is the config name of this agent's parent, if any.
+	ParentAgent string `toml:"parent_agent" yaml:"parent_agent"`
 	// AllowedTools lists tool names the agent may invoke. Empty = all tools.
-	AllowedTools []string `toml:"allowed_tools"`
-	// CanUseWorkers permits bounded ephemeral helper-worker runs. It is a
+	AllowedTools []string `toml:"allowed_tools" yaml:"allowed_tools"`
+	// CanUseWorkers permits bounded ephemeral helper-worker runs. It is an
 	// persisted capability and is intentionally independent of the display name.
-	CanUseWorkers bool `toml:"can_use_workers"`
+	CanUseWorkers bool `toml:"can_use_workers" yaml:"can_use_workers"`
 	// AllowedMCPs lists MCP server names the agent may use. Empty = all enabled MCPs.
-	AllowedMCPs []string `toml:"allowed_mcps"`
+	AllowedMCPs []string `toml:"allowed_mcps" yaml:"allowed_mcps"`
 }
 
 // EffectiveShortName returns ShortName, or a compact abbreviation derived

@@ -30,6 +30,14 @@ test.describe.serial('orchestrator messaging matrix', () => {
             name: 'Messaging Matrix Co', short_name: 'msg-matrix', color: '#059669',
             description: 'A company used to verify every routed agent conversation.',
         });
+        // The company bootstrap now includes a protected built-in CEO. This
+        // matrix deliberately uses a custom CEO/model, so disable only the
+        // seeded CEO to keep role resolution deterministic for the fixture.
+        const seededAgents = await (await request.get(`/api/agents?company_id=${company.id}`)).json();
+        const seededCEO = (seededAgents as any[]).find((agent) => agent.builtin && agent.role_key === 'CEO');
+        expect(seededCEO).toBeTruthy();
+        const disableSeededCEO = await request.put(`/api/agents/${seededCEO.id}`, { data: { enabled: false } });
+        expect(disableSeededCEO.ok(), await disableSeededCEO.text()).toBeTruthy();
         const ceo = await postJSON(request, '/api/agents', {
             company_id: company.id, name: 'Matrix CEO', role_key: 'CEO', short_name: 'CEO',
             system_prompt: 'Make the product decision and report the decision.', model: 'e2e-ceo-model', provider_id: provider.id,

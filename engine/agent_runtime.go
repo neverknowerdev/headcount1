@@ -34,6 +34,9 @@ func (e *NativeEngine) findAgentForRole(ctx context.Context, companyID int32, ro
 		return db.Agent{}, fmt.Errorf("list agents for %q: %w", requested, err)
 	}
 	for _, agent := range agents {
+		if !agent.Enabled {
+			continue
+		}
 		if agentconfig.RoleMatches(agent.RoleKey, agent.Name, requested) {
 			return agent, nil
 		}

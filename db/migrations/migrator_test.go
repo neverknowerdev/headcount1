@@ -17,7 +17,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 61)
+			require.Len(t, manifest.Migrations, 62)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
@@ -143,7 +143,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 61, revisions)
+	require.Equal(t, 62, revisions)
 	for _, column := range []string{"mode", "subagents"} {
 		var present int
 		require.NoError(t, database.QueryRow(`SELECT count(*) FROM pragma_table_info('agents') WHERE name = ?`, column).Scan(&present))
@@ -173,7 +173,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 61, revisions)
+	require.Equal(t, 62, revisions)
 
 	_ = database.Close()
 }

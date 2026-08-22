@@ -68,6 +68,23 @@ func TestLoadFromBytes_InvalidTOML(t *testing.T) {
 	require.Error(t, err)
 }
 
+func TestLoadYAMLFromBytes_Valid(t *testing.T) {
+	cfg, err := agentconfig.LoadYAMLFromBytes([]byte(`
+name: YAML Agent
+short_name: YAML
+description: yaml description
+chat_type: message_history
+reasoning_level: medium
+allowed_tools: [read, grep]
+subagents: [QA]
+`), "")
+	require.NoError(t, err)
+	assert.Equal(t, "YAML Agent", cfg.Name)
+	assert.Equal(t, "YAML", cfg.ShortName)
+	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
+	assert.Equal(t, []string{"QA"}, cfg.Subagents)
+}
+
 func TestLoadFromFile_WithPromptFile(t *testing.T) {
 	dir := t.TempDir()
 	promptPath := filepath.Join(dir, "agent.md")
@@ -112,9 +129,18 @@ func TestLoadFromFile_NonExistentFile(t *testing.T) {
 func TestDefaultFactory_BuiltinAgents(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 	names := f.ListNames()
-	expected := []string{"CEO", "CTO", "CMO", "Coder", "Debugger", "QA", "Designer", "SMM", "PPC Specialist", "Post Writer"}
+	expected := []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"}
 	for _, name := range expected {
 		assert.Contains(t, names, name, "builtin agent %q should be registered", name)
+	}
+}
+
+func TestBuiltinConfigs_PreserveFilenameOrder(t *testing.T) {
+	expected := []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"}
+	configs := agentconfig.BuiltinConfigs()
+	require.Len(t, configs, len(expected))
+	for i, cfg := range configs {
+		assert.Equal(t, expected[i], cfg.Name, "built-in config order at index %d", i)
 	}
 }
 
@@ -175,7 +201,7 @@ func TestEmptyFactory_Register(t *testing.T) {
 
 func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
-	for _, name := range []string{"CEO", "CTO", "CMO", "Coder", "Debugger", "QA", "Designer", "SMM", "PPC Specialist", "Post Writer"} {
+	for _, name := range []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"} {
 		cfg, err := f.GetConfig(name)
 		require.NoError(t, err)
 		assert.NotEmpty(t, cfg.Prompt, "agent %q should have a non-empty prompt", name)
@@ -187,13 +213,27 @@ func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
 
 	ceo, _ := f.GetConfig("CEO")
 	assert.True(t, ceo.CanUseWorkers)
+	assert.Contains(t, ceo.Subagents, "CTO")
+	assert.Contains(t, ceo.Subagents, "CMO")
+	assert.Contains(t, ceo.Subagents, "UX Designer")
+	assert.Contains(t, ceo.Subagents, "Graphic Designer")
 
 	cto, _ := f.GetConfig("CTO")
 	assert.True(t, cto.CanUseWorkers)
+	assert.Equal(t, "CEO", cto.ParentAgent)
+	assert.Contains(t, cto.Subagents, "Coder")
+	assert.Contains(t, cto.Subagents, "Debugger")
+	assert.Contains(t, cto.Subagents, "QA Lead")
+	assert.Contains(t, cto.Subagents, "QA Manual")
+	assert.Contains(t, cto.Subagents, "QA")
+	assert.Contains(t, cto.Subagents, "Debugger")
 
 	cmo, _ := f.GetConfig("CMO")
 	assert.True(t, cmo.CanUseWorkers)
-
+	assert.Equal(t, "CEO", cmo.ParentAgent)
+	assert.Contains(t, cmo.Subagents, "SMM")
+	assert.Contains(t, cmo.Subagents, "Ads manager")
+	assert.Contains(t, cmo.Subagents, "Writer")
 	coder, _ := f.GetConfig("Coder")
 	assert.False(t, coder.CanUseWorkers)
 }
@@ -202,8 +242,8 @@ func TestDefaultFactoryPromptsMatchToolCapabilities(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 	ceo, _ := f.GetConfig("CEO")
 	cto, _ := f.GetConfig("CTO")
-	cmo, _ := f.GetConfig("CMO")
-	assert.Contains(t, ceo.Prompt, "helper worker")
-	assert.NotContains(t, cto.Prompt, "ask_human")
-	assert.NotContains(t, cmo.Prompt, "ask_human")
+	qaManual, _ := f.GetConfig("QA Manual")
+	assert.Contains(t, ceo.Prompt, "product owner")
+	assert.Contains(t, cto.Prompt, "never do manual implementation")
+	assert.Contains(t, qaManual.Prompt, "browser-based UI tester")
 }

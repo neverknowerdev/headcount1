@@ -26,6 +26,7 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/agentdefaults"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/bootkey"
@@ -190,6 +191,18 @@ func run() error {
 			}
 			if err := db.New(database).EnsureDefaultModelSettingsForUser(context.Background(), u.ID); err != nil {
 				log.Printf("Warning: failed to seed default model settings for %s: %v", u.Email, err)
+			}
+		}
+	}
+	// Built-in agents are company-scoped database rows. Re-run this on startup
+	// so upgrades add newly introduced roles to existing companies without
+	// overwriting any row the user has already configured.
+	if companies, err := db.New(database).ListCompanies(context.Background()); err != nil {
+		log.Printf("Warning: failed to list companies for built-in agent seeding: %v", err)
+	} else {
+		for _, company := range companies {
+			if err := db.New(database).EnsureBuiltinAgentsForCompany(context.Background(), company.ID, agentdefaults.Rows(company.ID), nil, ""); err != nil {
+				log.Printf("Warning: failed to seed built-in agents for %s: %v", company.Name, err)
 			}
 		}
 	}

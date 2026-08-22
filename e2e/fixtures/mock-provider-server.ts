@@ -16,7 +16,7 @@ const ORCHESTRATOR_TOOL_CALL_ID = 'call_e2e_orchestrator_1';
 const ORCHESTRATOR_FINISH_TOOL_NAME = 'finish_task';
 const ORCHESTRATOR_FINISH_TOOL_CALL_ID = 'call_e2e_orchestrator_finish';
 const ORCHESTRATOR_TOOL_ARGS = {
-    agent_name: 'E2E Agent',
+    agent_name: 'Coder',
     title: 'Complete E2E task',
     prompt: 'Complete the assigned task and finish the task when the implementation is ready for review.',
 };
@@ -392,17 +392,15 @@ function handleChatCompletionsRoute(
                 state.forkedCoderSessionID = sessionID;
                 state.forkRequested = false;
             }
-            const terminalReplacement = content.includes("Answer the task owner's routed question");
             const entries = forkActive ? template.forkEntries!
-                : terminalReplacement && template.inboundEntries ? template.inboundEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
-                    : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
+                    : template.entries;
             modelScenario = {
                 entries,
                 index: 0,
                 inboundEntries: template.inboundEntries,
                 inboundIndex: 0,
-                inboundActive: terminalReplacement,
+                inboundActive: false,
                 forkActive,
                 inboundReadyFor: new Set<string>(),
             };
@@ -492,8 +490,12 @@ function handleChatCompletionsRoute(
         // deterministic without making the production orchestrator poll.
         const waitingForFinalWorkers = candidate?.tool_call?.id === 'orchestrator-finish'
             && !managedWorkersAreTerminal(request);
+        const taskAlreadyFinished = (Array.isArray(request.messages) ? request.messages : [])
+            .some((message: any) => message.role === 'tool' && String(message.content ?? '').includes('marked done:'));
         const entry = waitingForForkedCoder
             ? { tool_call: { id: 'wait-for-forked-coder', name: 'get_session', arguments: { session_id: 0 } } }
+            : taskAlreadyFinished
+            ? { text: 'Task is complete.' }
             : waitingForFinalWorkers
             ? { tool_call: { id: 'wait-for-final-workers', name: 'get_session_list', arguments: {} } }
             : waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers

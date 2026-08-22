@@ -4,6 +4,7 @@ import (
 	"net/http"
 
 	"agent-orchestrator/engine/agentconfig"
+	"agent-orchestrator/pkg/agentdefaults"
 )
 
 // AgentConfigResponse is the wire shape for a built-in role template. These
@@ -16,6 +17,7 @@ type AgentConfigResponse struct {
 	ChatType       string   `json:"chat_type"`
 	ReasoningLevel string   `json:"reasoning_level"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
+	Permissions    string   `json:"permissions"`
 	CanUseWorkers  bool     `json:"can_use_workers"`
 }
 
@@ -33,6 +35,7 @@ func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 			ChatType:       string(cfg.ChatType),
 			ReasoningLevel: string(cfg.ReasoningLevel),
 			AllowedTools:   cfg.AllowedTools,
+			Permissions:    agentdefaults.PermissionsForConfig(cfg),
 			CanUseWorkers:  cfg.CanUseWorkers,
 		})
 	}
