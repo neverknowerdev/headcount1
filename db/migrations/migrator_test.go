@@ -17,7 +17,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 61)
+			require.Len(t, manifest.Migrations, 62)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
