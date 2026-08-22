@@ -111,6 +111,12 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		st := api.updater.GetStatus()
 		resp["current"] = st.Current
 		resp["deploying"] = st.Deploying
+		if st.Phase != "" {
+			resp["phase"] = st.Phase
+		}
+		if st.DeploymentID != "" {
+			resp["deployment_id"] = st.DeploymentID
+		}
 		if st.Deploying && st.LastDeploy != nil {
 			resp["deploy_target"] = st.LastDeploy
 		}
@@ -140,6 +146,35 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		bootKeyMu.RUnlock()
 	}
 	api.respondJSON(w, http.StatusOK, resp)
+}
+
+// GetDeployAttemptStatus is the CI-facing status endpoint. It uses the same
+// deploy key as the webhook and reads the durable journal, so it remains
+// useful after the candidate process failed and the previous binary came back.
+func (api *API) GetDeployAttemptStatus(w http.ResponseWriter, r *http.Request) {
+	key := utils.DeployAPIKey()
+	if key == "" {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Deploy-Key")), []byte(key)) != 1 {
+		api.respondError(w, http.StatusUnauthorized, "invalid deploy key")
+		return
+	}
+	if api.updater == nil {
+		api.respondError(w, http.StatusServiceUnavailable, "updater not available")
+		return
+	}
+	state, found, err := api.updater.DeploymentState(r.URL.Query().Get("deployment_id"))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		api.respondError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, state)
 }
 
 // DeployWebhook is the PUBLIC endpoint CI calls to trigger a deploy. It is not
@@ -256,7 +291,7 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deploy runs SYNCHRONOUSLY so a failure (bad download, digest mismatch,
-	// swap error) comes back as this request's status code and shows up in the
+	// staging error) comes back as this request's status code and shows up in the
 	// CI job log, instead of only in the server's own log. That is safe because
 	// a successful Deploy does not kill the process from under the response: it
 	// arms a restart and requests a graceful shutdown after a grace delay, and
@@ -276,8 +311,9 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(http.StatusAccepted, map[string]interface{}{
-		"status": "deploying",
-		"target": target.DisplayString(),
+		"status":        "deploying",
+		"target":        target.DisplayString(),
+		"deployment_id": api.updater.GetStatus().DeploymentID,
 	})
 }
 

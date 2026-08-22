@@ -233,9 +233,9 @@ jobs:
             echo "::warning::Server did not apply some delivered env vars:"
             echo "$skipped" | while read -r line; do echo "  - $line"; done
           fi
-          # The server handles the deploy synchronously: a download/digest/swap
+          # The server handles the deploy synchronously: a download/digest/staging
           # failure comes back as an HTTP error with the reason, and fails this
-          # job right here. A 202 means the binary is swapped and the server is
+          # job right here. A 202 means the candidate is staged and the server is
           # restarting into it — confirm that completed by re-posting the same
           # event until the NEW binary answers "already running this commit"
           # (200). While the old process is still draining, the re-post gets 409
@@ -248,20 +248,34 @@ jobs:
               ;;
             202)
               echo "Deploy started; waiting for the server to come back on the new build..."
+              deployment_id=$(jq -r '.deployment_id // empty' /tmp/resp)
+              if [ -z "$deployment_id" ]; then
+                echo "::error::Server accepted the deploy without returning a deployment id."
+                exit 1
+              fi
               deadline=$(( $(date +%s) + 600 ))
               confirmed=""
               while [ "$(date +%s)" -lt "$deadline" ]; do
                 sleep 10
-                code2=$(curl -sS -o /tmp/resp -w '%{http_code}' -X POST "$BASE/api/deploy/webhook" \
+                code2=$(curl -sS -o /tmp/resp -w '%{http_code}' "$BASE/api/deploy/webhook/status?deployment_id=$deployment_id" \
                   -H "Content-Type: application/json" \
-                  -H "X-Deploy-Key: $DEPLOY_KEY" \
-                  --data-binary "@$payload_file" || echo 000)
-                if [ "$code2" = "200" ]; then
+                  -H "X-Deploy-Key: $DEPLOY_KEY" || echo 000)
+                phase=$(jq -r '.phase // empty' /tmp/resp 2>/dev/null || true)
+                if [ "$phase" = "promoted" ]; then
                   confirmed=1
                   echo "Server is up on the new build:"; cat /tmp/resp; echo
                   break
                 fi
-                echo "  still deploying (HTTP $code2)"
+                if [ "$phase" = "failed" ] || [ "$phase" = "needs_manual_recovery" ]; then
+                  error=$(jq -r '.last_error // "deployment failed without details"' /tmp/resp)
+                  echo "::error::Deployment failed during startup: $error"
+                  echo "### Deployment failure" >> "$GITHUB_STEP_SUMMARY"
+                  echo '```text' >> "$GITHUB_STEP_SUMMARY"
+                  echo "$error" >> "$GITHUB_STEP_SUMMARY"
+                  echo '```' >> "$GITHUB_STEP_SUMMARY"
+                  exit 1
+                fi
+                echo "  still deploying (HTTP $code2, phase=${phase:-unknown})"
               done
               if [ -z "$confirmed" ]; then
                 echo "::error::Deploy started but the server did not confirm the new build within 10 minutes."

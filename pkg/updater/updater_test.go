@@ -3,21 +3,145 @@ package updater
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
 )
 
-// NOTE: these tests deliberately only exercise Deploy paths that fail BEFORE it
-// swaps the executable — a successful Deploy replaces os.Executable() (the test
-// binary) and signals SIGTERM to its own process, which would kill the test run.
-// The success path is covered end-to-end in e2e/tests/deploy_webhook.spec.ts
-// against a real server process, where the exec-on-shutdown is the point.
+func TestDeploymentStateRoundTripAndStartupFallback(t *testing.T) {
+	basePath := t.TempDir()
+	previous := filepath.Join(basePath, "releases", "previous", "agent-orchestrator")
+	state := DeploymentState{
+		ID: "abc-123", Phase: DeployPhaseMigrating,
+		Target:        VersionInfo{Version: "v2", Branch: "main", CommitHash: "new"},
+		CandidatePath: filepath.Join(basePath, "releases", "new", "agent-orchestrator"),
+		PreviousPath:  previous, ArtifactSHA256: "digest", StartedAt: time.Now().UTC(),
+	}
+	require.NoError(t, SaveState(basePath, state))
+	loaded, err := LoadState(basePath)
+	require.NoError(t, err)
+	require.Equal(t, state.ID, loaded.ID)
+	require.Equal(t, state.CandidatePath, loaded.CandidatePath)
+
+	u := NewWithBasePath("v2", "main", "new", "today", nil, basePath)
+	fallback, err := u.RecordStartupFailure(VersionInfo{CommitHash: "new"}, errors.New("migration 2 failed: bad sql"))
+	require.NoError(t, err)
+	require.Equal(t, previous, fallback)
+	failed, found, err := u.DeploymentState(state.ID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, DeployPhaseFailed, failed.Phase)
+	require.Contains(t, failed.LastError, "bad sql")
+
+	reloaded := NewWithBasePath("v1", "main", "old", "today", nil, basePath)
+	require.NoError(t, reloaded.MarkMigrating())
+	require.NoError(t, reloaded.MarkStarting())
+	require.NoError(t, reloaded.MarkPromoted())
+	preserved, found, err := reloaded.DeploymentState(state.ID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, DeployPhaseFailed, preserved.Phase, "fallback binary must preserve the failed candidate journal")
+	require.Equal(t, string(DeployPhaseFailed), reloaded.GetStatus().Phase)
+	require.Contains(t, reloaded.GetStatus().LastError, "bad sql")
+}
+
+func TestDeploymentStateDistinguishesStartingAndManualRecovery(t *testing.T) {
+	basePath := t.TempDir()
+	state := DeploymentState{
+		ID: "manual-1", Phase: DeployPhaseStaged,
+		Target:        VersionInfo{CommitHash: "new"},
+		CandidatePath: filepath.Join(basePath, "candidate"),
+		PreviousPath:  filepath.Join(basePath, "previous"),
+	}
+	require.NoError(t, SaveState(basePath, state))
+
+	u := NewWithBasePath("v2", "main", "new", "today", nil, basePath)
+	require.NoError(t, u.MarkStarting())
+	starting, found, err := u.DeploymentState(state.ID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, DeployPhaseStarting, starting.Phase)
+	require.True(t, u.GetStatus().Deploying)
+
+	require.NoError(t, u.MarkNeedsManualRecovery(VersionInfo{CommitHash: "new"}, errors.New("rollback failed")))
+	manual, found, err := u.DeploymentState(state.ID)
+	require.NoError(t, err)
+	require.True(t, found)
+	require.Equal(t, DeployPhaseNeedsManualRecovery, manual.Phase)
+	require.Contains(t, manual.LastError, "rollback failed")
+	require.False(t, u.GetStatus().Deploying)
+}
+
+func TestMarkPromotedRetainsCurrentAndTenPreviousBinaries(t *testing.T) {
+	basePath := t.TempDir()
+	releasesRoot := filepath.Join(basePath, "releases")
+	var previous []ReleaseRecord
+	for i := 0; i < 13; i++ {
+		id := fmt.Sprintf("release-%02d", i)
+		path := filepath.Join(releasesRoot, id, "agent-orchestrator")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(id), 0755))
+		previous = append(previous, ReleaseRecord{
+			ID: id, Target: VersionInfo{CommitHash: id}, Path: path,
+			PromotedAt: time.Now().UTC(),
+		})
+	}
+	currentPath := filepath.Join(releasesRoot, "release-current", "agent-orchestrator")
+	require.NoError(t, os.MkdirAll(filepath.Dir(currentPath), 0755))
+	require.NoError(t, os.WriteFile(currentPath, []byte("current"), 0755))
+
+	state := DeploymentState{
+		ID: "release-current", Phase: DeployPhaseStarting,
+		Target: VersionInfo{CommitHash: "release-current"}, CandidatePath: currentPath,
+		PreviousPath: previous[len(previous)-1].Path, SuccessfulReleases: previous,
+	}
+	require.NoError(t, SaveState(basePath, state))
+
+	u := NewWithBasePath("v-current", "main", "release-current", "today", nil, basePath)
+	require.NoError(t, u.MarkPromoted())
+
+	for i := 0; i < 2; i++ {
+		_, err := os.Stat(previous[i].Path)
+		require.ErrorIs(t, err, os.ErrNotExist, "release %s should be pruned", previous[i].ID)
+	}
+	for i := 2; i < len(previous); i++ {
+		_, err := os.Stat(previous[i].Path)
+		require.NoError(t, err, "release %s should be retained", previous[i].ID)
+	}
+	_, err := os.Stat(currentPath)
+	require.NoError(t, err, "current binary should be retained")
+
+	saved, err := LoadState(basePath)
+	require.NoError(t, err)
+	require.Len(t, saved.SuccessfulReleases, successfulReleaseRetention)
+	require.Equal(t, "release-current", saved.SuccessfulReleases[len(saved.SuccessfulReleases)-1].ID)
+
+	failedPath := filepath.Join(releasesRoot, "release-failed", "agent-orchestrator")
+	require.NoError(t, os.MkdirAll(filepath.Dir(failedPath), 0755))
+	require.NoError(t, os.WriteFile(failedPath, []byte("failed"), 0755))
+	saved.ID = "release-failed"
+	saved.Phase = DeployPhaseFailed
+	saved.Target = VersionInfo{CommitHash: "release-failed"}
+	saved.CandidatePath = failedPath
+	saved.PreviousPath = currentPath
+	require.NoError(t, SaveState(basePath, saved))
+	_ = NewWithBasePath("v-failed", "main", "release-failed", "today", nil, basePath)
+	_, err = os.Stat(failedPath)
+	require.ErrorIs(t, err, os.ErrNotExist, "failed candidate should be pruned when fallback boots")
+}
+
+// NOTE: these unit tests avoid the final SIGTERM/exec path. Candidate staging,
+// durable state, and the full restart are covered by the deployment E2E suite.
 
 func TestIsCurrent(t *testing.T) {
-	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
+	u := NewWithBasePath("v1.2.3", "main", "abc1234", "2026-01-01", nil, t.TempDir())
 
 	// Same commit → already current (a deploy event for it is a no-op).
 	require.True(t, u.IsCurrent(VersionInfo{CommitHash: "abc1234"}))
@@ -81,8 +205,8 @@ func TestValidateDownloadURL(t *testing.T) {
 		// out our repo name mid-path. Only a prefix-anchored pin refuses these.
 		"repo name in tag":     "https://github.com/attacker/evil/releases/download/" + repo + "/bin",
 		"repo name in api tag": "https://api.github.com/repos/attacker/evil/releases/tags/" + repo + "/x",
-		"host lookalike": "https://api.github.com.evil.example.com/repos/" + repo + "/x",
-		"bad host chars": "https://exa mple.com/x",
+		"host lookalike":       "https://api.github.com.evil.example.com/repos/" + repo + "/x",
+		"bad host chars":       "https://exa mple.com/x",
 	}
 	for name, u := range invalid {
 		require.Error(t, ValidateDownloadURL(u), "should reject %s (%s)", name, u)
@@ -143,7 +267,7 @@ func TestDeployRejectsDigestMismatch(t *testing.T) {
 
 	t.Setenv("HEADCOUNT1_DEPLOY_ALLOWED_HOSTS", "127.0.0.1")
 
-	u := New("v1.2.3", "main", "abc1234", "2026-01-01", nil)
+	u := NewWithBasePath("v1.2.3", "main", "abc1234", "2026-01-01", nil, t.TempDir())
 	emptySum := sha256.Sum256(nil) // a digest the served body cannot match
 	err := u.Deploy(srv.URL+"/server", hex.EncodeToString(emptySum[:]), VersionInfo{CommitHash: "def5678"})
 

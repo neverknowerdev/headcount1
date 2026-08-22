@@ -128,6 +128,7 @@ func (s *Server) MountPublic(r chi.Router) {
 	// here. It authenticates with the shared HEADCOUNT1_DEPLOY_API_KEY, and is
 	// a no-op unless that key is configured — see DeployWebhook.
 	r.Post("/deploy/webhook", api.DeployWebhook)
+	r.Get("/deploy/webhook/status", api.GetDeployAttemptStatus)
 	// GitHub App deliveries cannot carry a Headcount1 browser session. Their
 	// HMAC signature is verified by GitHubWebhook before any processing.
 	r.Post("/github/webhook", api.GitHubWebhook)
