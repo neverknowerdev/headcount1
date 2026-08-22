@@ -2,7 +2,9 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"embed"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -68,6 +70,13 @@ func main() {
 	// child (Linux Landlock, see engine/aicli/tools), this applies the
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
+	if err := run(); err != nil {
+		log.Printf("fatal startup error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 
 	// Apply the configuration the last deploy delivered from its GitHub
 	// Environment, before anything reads a setting or opens a connection. These
@@ -92,6 +101,8 @@ func main() {
 
 	settings := appsettings.Load()
 	basePath := settings.BasePath
+	currentBuild := updater.VersionInfo{Version: Version, Branch: Branch, CommitHash: CommitHash, BuildDate: BuildDate}
+	upd := updater.NewWithBasePath(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken, basePath)
 
 	// Create the base directory tree (db/, ssh/, uploads/, repos/, ...) so
 	// every subsystem can rely on its root existing.
@@ -126,7 +137,7 @@ func main() {
 			}
 			dbDir := filepath.Join(basePath, "db")
 			if err := os.MkdirAll(dbDir, 0755); err != nil {
-				log.Fatalf("Failed to create database directory %s: %v", dbDir, err)
+				return handleStartupFailure(upd, basePath, nil, "sqlite", dbmigrations.Manifest{}, currentBuild, fmt.Errorf("failed to create database directory %s: %w", dbDir, err))
 			}
 			dbConnStr = filepath.Join(dbDir, fileName)
 		}
@@ -135,7 +146,7 @@ func main() {
 	}
 
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		return handleStartupFailure(upd, basePath, nil, "", dbmigrations.Manifest{}, currentBuild, fmt.Errorf("failed to connect to database: %w", err))
 	}
 
 	// Single in-process connection avoids GORM+SQLite lock churn; WAL covers
@@ -143,9 +154,17 @@ func main() {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 
-	log.Printf("Running embedded Atlas migrations (%s)...", database.Dialector.Name())
-	if err := dbmigrations.Apply(context.Background(), sqlDB, database.Dialector.Name(), Version); err != nil {
-		log.Fatalf("database migration failed: %v", err)
+	dialect := database.Dialector.Name()
+	candidateManifest, err := dbmigrations.BuildManifest(dialect)
+	if err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, dbmigrations.Manifest{}, currentBuild, err)
+	}
+	log.Printf("Reconciling embedded Atlas migrations (%s)...", dialect)
+	if err := upd.MarkMigrating(); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
+	if err := dbmigrations.Reconcile(context.Background(), sqlDB, dialect, Version, basePath, candidateManifest); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
 
 	recoverStaleRuns(database)
@@ -281,12 +300,14 @@ func main() {
 	go eng.StartWorkspaceCleanupScheduler(context.Background(), 24*time.Hour)
 
 	// Deploys are pushed to this server by CI via the authenticated
-	// /api/deploy/webhook (see the deploy controller); the updater just applies
-	// them (download the release-asset binary, self-replace, graceful restart).
+	// /api/deploy/webhook (see the deploy controller); the updater stages an
+	// immutable release candidate and asks this process to restart into it.
 	// The download token is only needed if the releases repo is private.
-	upd := updater.New(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
 	log.Printf("Deploy target: env=%s, version=%s, build=%s",
 		utils.CurrentEnv(), Version, upd.Current().DisplayString())
+	if err := upd.MarkStarting(); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
@@ -426,6 +447,7 @@ func main() {
 	// the monitor covers stalls that happen while the server remains up.
 	eng.StartLivenessMonitor(ctx, configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", time.Minute), configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute))
 
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Starting server on port %s", port)
 		// Tolerate a briefly-busy port (see listenWithRetry) instead of dying on
@@ -433,14 +455,24 @@ func main() {
 		// deadline passes.
 		listener, err := listenWithRetry(httpServer.Addr, 10*time.Second)
 		if err != nil {
-			log.Fatalf("server error: %v", err)
+			serverErr <- fmt.Errorf("server listen failed: %w", err)
+			return
+		}
+		if err := upd.MarkPromoted(); err != nil {
+			serverErr <- fmt.Errorf("persist promoted deployment state: %w", err)
+			_ = listener.Close()
+			return
 		}
 		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			serverErr <- fmt.Errorf("server error: %w", err)
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-serverErr:
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
 	log.Println("Shutting down…")
 
 	// Stop accepting new agent runs and let every run still in flight reach
@@ -494,8 +526,8 @@ func main() {
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 
-	// A deploy replaced our executable on disk (see updater.Deploy): exec it
-	// now, as the very last thing this process does. Everything the new build
+	// A deploy staged a candidate on disk (see updater.Deploy): exec it now, as
+	// the very last thing this process does. Everything the new build
 	// depends on has already happened — in-flight agent runs are drained and
 	// persisted (so its resume scan finds them), the keyring is sealed, and the
 	// listener is closed (so it can bind the port immediately). syscall.Exec
@@ -506,9 +538,37 @@ func main() {
 		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
 			// Exec only returns on failure; the old image is still running but
 			// has already shut down its listener, so there is nothing to serve.
-			log.Fatalf("deploy: exec into new binary failed: %v", err)
+			return fmt.Errorf("deploy: exec into new binary failed: %w", err)
 		}
 	}
+	return nil
+}
+
+func handleStartupFailure(upd *updater.Updater, basePath string, database *sql.DB, dialect string, candidate dbmigrations.Manifest, current updater.VersionInfo, startupErr error) error {
+	var rollbackErr error
+	if database != nil && dialect != "" && len(candidate.Migrations) > 0 {
+		rollbackErr = dbmigrations.RollbackCandidate(context.Background(), database, dialect, basePath, candidate)
+		if rollbackErr != nil {
+			startupErr = fmt.Errorf("%w; candidate migration rollback failed: %v", startupErr, rollbackErr)
+		}
+	}
+	previous, recordErr := upd.RecordStartupFailure(current, startupErr)
+	if recordErr != nil {
+		return fmt.Errorf("%w; could not persist deployment failure: %v", startupErr, recordErr)
+	}
+	if rollbackErr != nil {
+		if err := upd.MarkNeedsManualRecovery(current, startupErr); err != nil {
+			return fmt.Errorf("%w; could not persist manual-recovery state: %v", startupErr, err)
+		}
+	}
+	if previous == "" {
+		return startupErr
+	}
+	log.Printf("Deploy candidate failed; returning to previous binary %s", previous)
+	if err := syscall.Exec(previous, os.Args, os.Environ()); err != nil {
+		return fmt.Errorf("%w; fallback exec failed: %v", startupErr, err)
+	}
+	return startupErr
 }
 
 func configuredDuration(name string, fallback time.Duration) time.Duration {

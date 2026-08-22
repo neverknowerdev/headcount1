@@ -1,6 +1,6 @@
 // Package updater applies a server-side deploy: it downloads a prebuilt binary
 // for a given git ref (published by CI as a GitHub release asset), verifies it,
-// and swaps the running executable for it, then asks the process to shut down
+// and stages it as an immutable candidate, then asks the process to shut down
 // gracefully so it can exec into the new build. The trigger is an authenticated
 // deploy webhook (see the deploy controller), not client-side polling — the
 // server is the source of truth for what it runs, and CI pushes deploy events
@@ -57,9 +57,11 @@ func (v VersionInfo) DisplayString() string {
 // Status is the deploy state exposed to the UI: the build currently running,
 // and whether a deploy is in progress / last failed.
 type Status struct {
-	Current   VersionInfo `json:"current"`
-	Deploying bool        `json:"deploying"`
-	LastError string      `json:"last_error,omitempty"`
+	Current      VersionInfo `json:"current"`
+	Deploying    bool        `json:"deploying"`
+	LastError    string      `json:"last_error,omitempty"`
+	DeploymentID string      `json:"deployment_id,omitempty"`
+	Phase        string      `json:"phase,omitempty"`
 	// LastDeploy is the version the in-progress (or most recent) deploy is
 	// switching to — what this server will report as Current once it has
 	// exec'd into the new binary.
@@ -72,26 +74,42 @@ type Updater struct {
 	status    Status
 	deploying bool
 	// restartPending/pendingExecPath are set once a deploy has successfully
-	// replaced the executable on disk. main's shutdown sequence reads them via
+	// staged a candidate on disk. main's shutdown sequence reads them via
 	// RestartPending and execs the new binary as its final act.
 	restartPending  bool
 	pendingExecPath string
 	// downloadTokenFn returns a bearer token for fetching the binary from a
 	// private release asset, or "" for a public download.
 	downloadTokenFn func() string
+	basePath        string
 }
 
 // New creates an Updater for the running build. downloadTokenFn may be nil.
 func New(version, branch, commitHash, buildDate string, downloadTokenFn func() string) *Updater {
+	return NewWithBasePath(version, branch, commitHash, buildDate, downloadTokenFn, "")
+}
+
+// NewWithBasePath is the durable form of New. basePath stores the deployment
+// journal and immutable candidate binaries without replacing the last-known
+// good executable.
+func NewWithBasePath(version, branch, commitHash, buildDate string, downloadTokenFn func() string, basePath string) *Updater {
 	if downloadTokenFn == nil {
 		downloadTokenFn = func() string { return "" }
 	}
 	current := VersionInfo{Version: version, Branch: branch, CommitHash: commitHash, BuildDate: buildDate}
-	return &Updater{
+	u := &Updater{
 		current:         current,
 		status:          Status{Current: current},
 		downloadTokenFn: downloadTokenFn,
+		basePath:        basePath,
 	}
+	if state, err := LoadState(basePath); err == nil {
+		u.status = state.Status(current)
+		if err := pruneReleases(basePath, state); err != nil {
+			log.Printf("Warning: could not prune old deploy binaries: %v", err)
+		}
+	}
+	return u
 }
 
 // Current returns the running build's version.
@@ -116,9 +134,9 @@ func (u *Updater) IsCurrent(target VersionInfo) bool {
 	return target.CommitHash != "" && target.CommitHash == u.current.CommitHash
 }
 
-// RestartPending reports whether a deploy has already replaced this process's
-// executable on disk, and the absolute path to exec. main calls it at the end
-// of its shutdown sequence.
+// RestartPending reports whether a deploy has already staged a candidate for
+// this process, and the absolute path to exec. main calls it at the end of its
+// shutdown sequence.
 func (u *Updater) RestartPending() (string, bool) {
 	u.mu.RLock()
 	defer u.mu.RUnlock()
@@ -126,7 +144,7 @@ func (u *Updater) RestartPending() (string, bool) {
 }
 
 // Deploy downloads the binary at downloadURL, verifies it against sha256Hex,
-// replaces the running executable with it, and requests a graceful shutdown by
+// stages it as an immutable candidate, and requests a graceful shutdown by
 // signalling SIGTERM to this process. target is used for status and logging.
 //
 // It deliberately does NOT start the successor process. main's shutdown handler
@@ -186,13 +204,23 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 		return fail(fmt.Errorf("deploy: eval symlinks: %w", err))
 	}
 
-	// The download lands NEXT TO the executable, not in os.TempDir(): the swap
-	// below must be a rename, and a rename only works within one filesystem.
-	// /tmp is typically tmpfs while the binary lives on disk — and the obvious
-	// fallback, copying over the live executable, can never work: Linux refuses
-	// to open a running binary for write (ETXTBSY).
+	// The download lands under the durable release directory, not in os.TempDir:
+	// the candidate must survive the graceful restart and a possible fallback.
+	if u.basePath == "" {
+		return fail(errors.New("deploy: durable deployment path is not configured"))
+	}
+	previousState, err := LoadState(u.basePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fail(fmt.Errorf("deploy: read durable deployment state: %w", err))
+	}
+	releaseID := deploymentID(target, expected)
+	releaseDir := filepath.Join(u.basePath, "releases", releaseID)
+	if err := os.MkdirAll(releaseDir, 0755); err != nil {
+		return fail(fmt.Errorf("deploy: create release directory: %w", err))
+	}
+	candidatePath := filepath.Join(releaseDir, "agent-orchestrator")
 	log.Printf("Deploy: downloading %s (%s)...", target.DisplayString(), downloadURL)
-	tmpFile, gotSum, err := downloadBinary(downloadURL, u.downloadTokenFn(), filepath.Dir(execPath))
+	tmpFile, gotSum, err := downloadBinary(downloadURL, u.downloadTokenFn(), releaseDir)
 	if err != nil {
 		return fail(fmt.Errorf("deploy: download binary: %w", err))
 	}
@@ -201,19 +229,42 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 		return fail(fmt.Errorf("deploy: sha256 mismatch: expected %s, got %s", expected, gotSum))
 	}
 
-	if err := os.Rename(tmpFile, execPath); err != nil {
+	if err := os.Rename(tmpFile, candidatePath); err != nil {
 		os.Remove(tmpFile)
-		return fail(fmt.Errorf("deploy: replace binary: %w", err))
+		return fail(fmt.Errorf("deploy: store candidate binary: %w", err))
+	}
+
+	state := DeploymentState{
+		ID:                 releaseID,
+		Phase:              DeployPhaseStaged,
+		Target:             target,
+		CandidatePath:      candidatePath,
+		PreviousPath:       execPath,
+		ArtifactSHA256:     expected,
+		StartedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+		SuccessfulReleases: append([]ReleaseRecord(nil), previousState.SuccessfulReleases...),
+	}
+	if previousState.Phase == DeployPhasePromoted {
+		appendSuccessfulRelease(&state, ReleaseRecord{
+			ID: previousState.ID, Target: previousState.Target, Path: previousState.CandidatePath,
+			ArtifactSHA256: previousState.ArtifactSHA256, PromotedAt: previousState.UpdatedAt,
+		})
+	}
+	if err := SaveState(u.basePath, state); err != nil {
+		return fail(fmt.Errorf("deploy: persist state: %w", err))
 	}
 
 	u.mu.Lock()
 	t := target
 	u.status.LastDeploy = &t
 	u.restartPending = true
-	u.pendingExecPath = execPath
+	u.pendingExecPath = candidatePath
+	u.status.DeploymentID = releaseID
+	u.status.Phase = string(DeployPhaseStaged)
 	u.mu.Unlock()
 
-	log.Printf("Deploy: binary replaced; draining and restarting into %s...", target.DisplayString())
+	log.Printf("Deploy: candidate staged; draining and restarting into %s...", target.DisplayString())
 	u.requestShutdown()
 	return nil
 }
@@ -401,4 +452,3 @@ func downloadBinary(url, token, destDir string) (path string, sha256Hex string, 
 	}
 	return tmpFile.Name(), hex.EncodeToString(hasher.Sum(nil)), nil
 }
-

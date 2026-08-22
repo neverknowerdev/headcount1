@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path"
 	"sort"
 	"strings"
@@ -54,10 +55,73 @@ func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion strin
 	if err != nil {
 		return fmt.Errorf("create Atlas migration executor: %w", err)
 	}
-	if err := executor.ExecuteN(ctx, 0); err != nil && !errors.Is(err, migrate.ErrNoPendingFiles) {
-		return fmt.Errorf("apply Atlas migrations: %w", err)
+	pending, err := executor.Pending(ctx)
+	if errors.Is(err, migrate.ErrNoPendingFiles) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect pending migrations: %w", err)
+	}
+	for _, file := range pending {
+		if err := executeFileTransaction(ctx, database, dialect, dir, file, options...); err != nil {
+			return wrapMigrationError("up", err)
+		}
 	}
 	return nil
+}
+
+// Reconcile applies the candidate migration branch. A normal forward
+// deployment simply delegates to Atlas. If the database history diverged from
+// the candidate, it first rolls back to the common prefix using the candidate
+// or last-known-good manifest, then applies the candidate branch.
+func Reconcile(ctx context.Context, database *sql.DB, dialect, operatorVersion, basePath string, candidate Manifest) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+	store := &revisionStore{db: database, dialect: dialect}
+	if err := store.ensure(ctx); err != nil {
+		return fmt.Errorf("initialize Atlas revision store: %w", err)
+	}
+	applied, err := ReadApplied(ctx, database, dialect)
+	if err != nil {
+		return fmt.Errorf("read applied migrations: %w", err)
+	}
+	previous, err := LoadManifest(basePath, dialect)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	plan, err := PlanReconciliation(applied, candidate, previous)
+	if err != nil {
+		return err
+	}
+	if len(plan.Rollback) > 0 {
+		if err := ApplyDown(ctx, database, dialect, plan.Rollback); err != nil {
+			return err
+		}
+	}
+	if err := Apply(ctx, database, dialect, operatorVersion); err != nil {
+		return err
+	}
+	if err := SaveManifest(basePath, candidate); err != nil {
+		return fmt.Errorf("save migration manifest: %w", err)
+	}
+	return nil
+}
+
+func wrapMigrationError(phase string, err error) error {
+	var stmtErr *migrate.StmtExecError
+	if errors.As(err, &stmtErr) {
+		statementPosition := 0
+		if stmtErr.Stmt != nil {
+			statementPosition = stmtErr.Stmt.Pos
+		}
+		statement := ""
+		if stmtErr.Stmt != nil {
+			statement = stmtErr.Stmt.Text
+		}
+		return &MigrationError{Phase: phase, Version: stmtErr.Version, StatementPosition: statementPosition, Statement: statement, Cause: stmtErr.Err}
+	}
+	return fmt.Errorf("apply Atlas migrations: %w", err)
 }
 
 // ApplyGORM adapts a GORM database handle to the embedded migration runner.
@@ -74,7 +138,38 @@ func ApplyGORM(database *gorm.DB, dialect, operatorVersion string) error {
 	return Apply(context.Background(), sqlDB, dialect, operatorVersion)
 }
 
-func openDriver(database *sql.DB, dialect string) (migrate.Driver, error) {
+// executeFileTransaction makes the transaction boundary explicit instead of
+// relying on the behavior of the pinned Atlas executor. The revision row and
+// every statement in one migration are committed together, so a failed
+// migration cannot leave a candidate schema half-applied on PostgreSQL or
+// SQLite when the dialect supports transactional DDL.
+func executeFileTransaction(ctx context.Context, database *sql.DB, dialect string, dir *migrate.MemDir, file migrate.File, options ...migrate.ExecutorOption) error {
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txDriver, err := openDriver(tx, dialect)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	txStore := &revisionStore{db: tx, dialect: dialect}
+	txExecutor, err := migrate.NewExecutor(txDriver, dir, txStore, options...)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := txExecutor.Execute(ctx, file); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func openDriver(database schema.ExecQuerier, dialect string) (migrate.Driver, error) {
 	switch dialect {
 	case "postgres":
 		driver, err := postgres.Open(database)
@@ -128,8 +223,14 @@ func embeddedDir(dialect string) (*migrate.MemDir, error) {
 }
 
 type revisionStore struct {
-	db      *sql.DB
+	db      revisionDB
 	dialect string
+}
+
+type revisionDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
 }
 
 func (s *revisionStore) Ident() *migrate.TableIdent {
