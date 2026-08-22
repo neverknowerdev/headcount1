@@ -490,8 +490,12 @@ function handleChatCompletionsRoute(
         // deterministic without making the production orchestrator poll.
         const waitingForFinalWorkers = candidate?.tool_call?.id === 'orchestrator-finish'
             && !managedWorkersAreTerminal(request);
+        const taskAlreadyFinished = (Array.isArray(request.messages) ? request.messages : [])
+            .some((message: any) => message.role === 'tool' && String(message.content ?? '').includes('marked done:'));
         const entry = waitingForForkedCoder
             ? { tool_call: { id: 'wait-for-forked-coder', name: 'get_session', arguments: { session_id: 0 } } }
+            : taskAlreadyFinished
+            ? { text: 'Task is complete.' }
             : waitingForFinalWorkers
             ? { tool_call: { id: 'wait-for-final-workers', name: 'get_session_list', arguments: {} } }
             : waitingForIncoming || waitingForForwardedQuestion || waitingForHelpers

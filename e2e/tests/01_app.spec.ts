@@ -213,7 +213,12 @@ test.describe.serial('Headcount1 App', () => {
         // Edit short name
         const input = page.locator('input').first(); // the shortname input
         await input.fill('nw');
+        await expect(input).toHaveValue('nw');
+        const updateCompany = page.waitForResponse(response =>
+            response.request().method() === 'PUT' && /\/api\/companies\/\d+$/.test(response.url())
+        );
         await page.click('button:has-text("Save Settings")');
+        await expect((await updateCompany).ok()).toBeTruthy();
 
         // Ensure URL changed
         await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);

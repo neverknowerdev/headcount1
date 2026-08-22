@@ -113,8 +113,8 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(taskResponse.ok()).toBeTruthy();
         expect((await taskResponse.json()).orchestrator_run_id).toBe(orchestrator.id);
 
-        const mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
-        const orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
+        let mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
+        let orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
         expect(orchestratorRequests.length).toBeGreaterThanOrEqual(1);
         const toolNameSets = orchestratorRequests.map((r: any) =>
             ((r.body?.tools || []) as any[]).map((t: any) => t.function?.name).sort());
@@ -122,9 +122,6 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(toolNameSets.some((names: string[]) => names.includes('run_new_session'))).toBeTruthy();
         expect(JSON.stringify(toolNameSets)).not.toContain('ask_agent');
 
-        const statusRequests = orchestratorRequests.filter((r: any) =>
-            JSON.stringify(r.body?.messages || []).includes('last_reported_status'));
-        expect(statusRequests.length).toBeGreaterThanOrEqual(1);
         const allOrchestratorJSON = JSON.stringify(orchestratorRequests);
         expect(allOrchestratorJSON).toContain('A company shipping privacy-first clinical analytics.');
         expect(allOrchestratorJSON).toContain('Patient-facing audit reporting portal');
@@ -135,18 +132,27 @@ test.describe.serial('task sidecar orchestrator', () => {
         expect(allOrchestratorJSON).toContain('agent_name');
         expect(allOrchestratorJSON).toContain('child_statuses');
         expect(allOrchestratorJSON).toContain('up to five');
+        let statusRequests: any[] = [];
+        let statusPayloads: any[] = [];
+        await expect.poll(async () => {
+            mockLog = await (await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/requests`)).json();
+            orchestratorRequests = (mockLog.requests as any[]).filter(r => r.body?.model === 'e2e-orchestrator-model');
+            statusRequests = orchestratorRequests.filter((r: any) =>
+                JSON.stringify(r.body?.messages || []).includes('last_reported_status'));
+            statusPayloads = statusRequests.flatMap((r: any) => (r.body?.messages || [])
+                .filter((m: any) => m.role === 'tool' && typeof m.content === 'string')
+                .map((m: any) => {
+                    try { return JSON.parse(m.content); } catch { return null; }
+                })
+                .filter((p: any) => p?.last_run_status?.last_reported_status?.includes('implementing the audit export')));
+            return statusPayloads.length;
+        }, { timeout: 20_000 }).toBeGreaterThanOrEqual(1);
+        expect(statusRequests.length).toBeGreaterThanOrEqual(1);
         expect(JSON.stringify(statusRequests)).toContain('implementing the audit export');
         const reportEventRequests = orchestratorRequests.filter((r: any) =>
             (r.body?.messages || []).some((m: any) =>
                 typeof m.content === 'string' && m.content.includes('"event_type":"status_report"')));
         expect(reportEventRequests.length).toBeGreaterThanOrEqual(1);
-        const statusPayloads = statusRequests.flatMap((r: any) => (r.body?.messages || [])
-            .filter((m: any) => m.role === 'tool' && typeof m.content === 'string')
-            .map((m: any) => {
-                try { return JSON.parse(m.content); } catch { return null; }
-            })
-            .filter((p: any) => p?.last_run_status?.last_reported_status?.includes('implementing the audit export')));
-        expect(statusPayloads.length).toBeGreaterThanOrEqual(1);
         expect(statusPayloads.some((p: any) => p.last_run_status.last_reported_at)).toBeTruthy();
         expect(statusPayloads.some((p: any) => Array.isArray(p.run_status_history) && p.run_status_history.length > 0)).toBeTruthy();
         expect(statusPayloads[0].last_run_status.last_reported_message_id).toBeGreaterThan(0);
