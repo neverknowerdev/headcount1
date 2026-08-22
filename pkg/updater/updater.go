@@ -105,6 +105,9 @@ func NewWithBasePath(version, branch, commitHash, buildDate string, downloadToke
 	}
 	if state, err := LoadState(basePath); err == nil {
 		u.status = state.Status(current)
+		if err := pruneReleases(basePath, state); err != nil {
+			log.Printf("Warning: could not prune old deploy binaries: %v", err)
+		}
 	}
 	return u
 }
@@ -206,6 +209,10 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 	if u.basePath == "" {
 		return fail(errors.New("deploy: durable deployment path is not configured"))
 	}
+	previousState, err := LoadState(u.basePath)
+	if err != nil && !os.IsNotExist(err) {
+		return fail(fmt.Errorf("deploy: read durable deployment state: %w", err))
+	}
 	releaseID := deploymentID(target, expected)
 	releaseDir := filepath.Join(u.basePath, "releases", releaseID)
 	if err := os.MkdirAll(releaseDir, 0755); err != nil {
@@ -228,9 +235,21 @@ func (u *Updater) Deploy(downloadURL, sha256Hex string, target VersionInfo) erro
 	}
 
 	state := DeploymentState{
-		ID: releaseID, Phase: DeployPhaseStaged, Target: target,
-		CandidatePath: candidatePath, PreviousPath: execPath,
-		ArtifactSHA256: expected, StartedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC(),
+		ID:                 releaseID,
+		Phase:              DeployPhaseStaged,
+		Target:             target,
+		CandidatePath:      candidatePath,
+		PreviousPath:       execPath,
+		ArtifactSHA256:     expected,
+		StartedAt:          time.Now().UTC(),
+		UpdatedAt:          time.Now().UTC(),
+		SuccessfulReleases: append([]ReleaseRecord(nil), previousState.SuccessfulReleases...),
+	}
+	if previousState.Phase == DeployPhasePromoted {
+		appendSuccessfulRelease(&state, ReleaseRecord{
+			ID: previousState.ID, Target: previousState.Target, Path: previousState.CandidatePath,
+			ArtifactSHA256: previousState.ArtifactSHA256, PromotedAt: previousState.UpdatedAt,
+		})
 	}
 	if err := SaveState(u.basePath, state); err != nil {
 		return fail(fmt.Errorf("deploy: persist state: %w", err))

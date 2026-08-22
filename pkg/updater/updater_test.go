@@ -4,8 +4,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -75,6 +77,64 @@ func TestDeploymentStateDistinguishesStartingAndManualRecovery(t *testing.T) {
 	require.Equal(t, DeployPhaseNeedsManualRecovery, manual.Phase)
 	require.Contains(t, manual.LastError, "rollback failed")
 	require.False(t, u.GetStatus().Deploying)
+}
+
+func TestMarkPromotedRetainsCurrentAndTenPreviousBinaries(t *testing.T) {
+	basePath := t.TempDir()
+	releasesRoot := filepath.Join(basePath, "releases")
+	var previous []ReleaseRecord
+	for i := 0; i < 13; i++ {
+		id := fmt.Sprintf("release-%02d", i)
+		path := filepath.Join(releasesRoot, id, "agent-orchestrator")
+		require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
+		require.NoError(t, os.WriteFile(path, []byte(id), 0755))
+		previous = append(previous, ReleaseRecord{
+			ID: id, Target: VersionInfo{CommitHash: id}, Path: path,
+			PromotedAt: time.Now().UTC(),
+		})
+	}
+	currentPath := filepath.Join(releasesRoot, "release-current", "agent-orchestrator")
+	require.NoError(t, os.MkdirAll(filepath.Dir(currentPath), 0755))
+	require.NoError(t, os.WriteFile(currentPath, []byte("current"), 0755))
+
+	state := DeploymentState{
+		ID: "release-current", Phase: DeployPhaseStarting,
+		Target: VersionInfo{CommitHash: "release-current"}, CandidatePath: currentPath,
+		PreviousPath: previous[len(previous)-1].Path, SuccessfulReleases: previous,
+	}
+	require.NoError(t, SaveState(basePath, state))
+
+	u := NewWithBasePath("v-current", "main", "release-current", "today", nil, basePath)
+	require.NoError(t, u.MarkPromoted())
+
+	for i := 0; i < 2; i++ {
+		_, err := os.Stat(previous[i].Path)
+		require.ErrorIs(t, err, os.ErrNotExist, "release %s should be pruned", previous[i].ID)
+	}
+	for i := 2; i < len(previous); i++ {
+		_, err := os.Stat(previous[i].Path)
+		require.NoError(t, err, "release %s should be retained", previous[i].ID)
+	}
+	_, err := os.Stat(currentPath)
+	require.NoError(t, err, "current binary should be retained")
+
+	saved, err := LoadState(basePath)
+	require.NoError(t, err)
+	require.Len(t, saved.SuccessfulReleases, successfulReleaseRetention)
+	require.Equal(t, "release-current", saved.SuccessfulReleases[len(saved.SuccessfulReleases)-1].ID)
+
+	failedPath := filepath.Join(releasesRoot, "release-failed", "agent-orchestrator")
+	require.NoError(t, os.MkdirAll(filepath.Dir(failedPath), 0755))
+	require.NoError(t, os.WriteFile(failedPath, []byte("failed"), 0755))
+	saved.ID = "release-failed"
+	saved.Phase = DeployPhaseFailed
+	saved.Target = VersionInfo{CommitHash: "release-failed"}
+	saved.CandidatePath = failedPath
+	saved.PreviousPath = currentPath
+	require.NoError(t, SaveState(basePath, saved))
+	_ = NewWithBasePath("v-failed", "main", "release-failed", "today", nil, basePath)
+	_, err = os.Stat(failedPath)
+	require.ErrorIs(t, err, os.ErrNotExist, "failed candidate should be pruned when fallback boots")
 }
 
 // NOTE: these unit tests avoid the final SIGTERM/exec path. Candidate staging,

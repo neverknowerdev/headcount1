@@ -6,11 +6,18 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"time"
 )
+
+// successfulReleaseRetention includes the current binary, its latest
+// successful fallback, and ten older successful binaries. The currently
+// running binary may live outside this directory on an older installation, so
+// it is never counted here.
+const successfulReleaseRetention = 12
 
 type DeployPhase string
 
@@ -24,15 +31,24 @@ const (
 )
 
 type DeploymentState struct {
+	ID                 string          `json:"id"`
+	Phase              DeployPhase     `json:"phase"`
+	Target             VersionInfo     `json:"target"`
+	CandidatePath      string          `json:"candidate_path"`
+	PreviousPath       string          `json:"previous_path"`
+	ArtifactSHA256     string          `json:"artifact_sha256"`
+	StartedAt          time.Time       `json:"started_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
+	LastError          string          `json:"last_error,omitempty"`
+	SuccessfulReleases []ReleaseRecord `json:"successful_releases,omitempty"`
+}
+
+type ReleaseRecord struct {
 	ID             string      `json:"id"`
-	Phase          DeployPhase `json:"phase"`
 	Target         VersionInfo `json:"target"`
-	CandidatePath  string      `json:"candidate_path"`
-	PreviousPath   string      `json:"previous_path"`
+	Path           string      `json:"path"`
 	ArtifactSHA256 string      `json:"artifact_sha256"`
-	StartedAt      time.Time   `json:"started_at"`
-	UpdatedAt      time.Time   `json:"updated_at"`
-	LastError      string      `json:"last_error,omitempty"`
+	PromotedAt     time.Time   `json:"promoted_at"`
 }
 
 func statePath(basePath string) string {
@@ -106,6 +122,92 @@ func (s DeploymentState) Status(current VersionInfo) Status {
 	return status
 }
 
+func appendSuccessfulRelease(state *DeploymentState, record ReleaseRecord) {
+	if record.ID == "" || record.Path == "" {
+		return
+	}
+	for i := range state.SuccessfulReleases {
+		if state.SuccessfulReleases[i].ID == record.ID {
+			state.SuccessfulReleases[i] = record
+			if len(state.SuccessfulReleases) > successfulReleaseRetention {
+				state.SuccessfulReleases = append([]ReleaseRecord(nil), state.SuccessfulReleases[len(state.SuccessfulReleases)-successfulReleaseRetention:]...)
+			}
+			return
+		}
+	}
+	state.SuccessfulReleases = append(state.SuccessfulReleases, record)
+	if len(state.SuccessfulReleases) > successfulReleaseRetention {
+		state.SuccessfulReleases = append([]ReleaseRecord(nil), state.SuccessfulReleases[len(state.SuccessfulReleases)-successfulReleaseRetention:]...)
+	}
+}
+
+func releaseIDForPath(root, candidatePath string) (string, bool) {
+	root, err := filepath.Abs(root)
+	if err != nil {
+		return "", false
+	}
+	candidatePath, err = filepath.Abs(candidatePath)
+	if err != nil {
+		return "", false
+	}
+	rel, err := filepath.Rel(root, candidatePath)
+	if err != nil || rel == "." || rel == ".." || strings.HasPrefix(rel, ".."+string(os.PathSeparator)) {
+		return "", false
+	}
+	parts := strings.Split(rel, string(os.PathSeparator))
+	if len(parts) != 2 || parts[1] != "agent-orchestrator" {
+		return "", false
+	}
+	return parts[0], true
+}
+
+// pruneReleases removes only candidate directories created by this updater.
+// It deliberately keeps the previous path while a deployment is in flight or
+// failed, because that binary is the fallback currently being served.
+func pruneReleases(basePath string, state DeploymentState) error {
+	root := filepath.Join(basePath, "releases")
+	entries, err := os.ReadDir(root)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return err
+	}
+
+	keep := make(map[string]struct{}, successfulReleaseRetention+2)
+	for _, release := range state.SuccessfulReleases {
+		if id, ok := releaseIDForPath(root, release.Path); ok {
+			keep[id] = struct{}{}
+		}
+	}
+	if state.Phase == DeployPhaseStaged || state.Phase == DeployPhaseMigrating || state.Phase == DeployPhaseStarting || state.Phase == DeployPhasePromoted {
+		if id, ok := releaseIDForPath(root, state.CandidatePath); ok {
+			keep[id] = struct{}{}
+		}
+	}
+	if id, ok := releaseIDForPath(root, state.PreviousPath); ok {
+		keep[id] = struct{}{}
+	}
+
+	var removeErr error
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		candidate := filepath.Join(root, entry.Name(), "agent-orchestrator")
+		if _, err := os.Stat(candidate); err != nil {
+			continue
+		}
+		if _, ok := keep[entry.Name()]; ok {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, entry.Name())); err != nil && removeErr == nil {
+			removeErr = err
+		}
+	}
+	return removeErr
+}
+
 func (u *Updater) activeCandidate(state DeploymentState) bool {
 	return state.CandidatePath != "" && state.Target.CommitHash == u.current.CommitHash &&
 		(state.Phase == DeployPhaseStaged || state.Phase == DeployPhaseMigrating || state.Phase == DeployPhaseStarting)
@@ -158,8 +260,15 @@ func (u *Updater) MarkPromoted() error {
 	}
 	state.Phase = DeployPhasePromoted
 	state.LastError = ""
+	appendSuccessfulRelease(&state, ReleaseRecord{
+		ID: state.ID, Target: state.Target, Path: state.CandidatePath,
+		ArtifactSHA256: state.ArtifactSHA256, PromotedAt: time.Now().UTC(),
+	})
 	if err := SaveState(u.basePath, state); err != nil {
 		return err
+	}
+	if err := pruneReleases(u.basePath, state); err != nil {
+		log.Printf("Warning: could not prune old deploy binaries: %v", err)
 	}
 	u.mu.Lock()
 	u.status.Deploying = false
