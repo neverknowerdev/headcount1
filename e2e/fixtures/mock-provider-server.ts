@@ -392,17 +392,15 @@ function handleChatCompletionsRoute(
                 state.forkedCoderSessionID = sessionID;
                 state.forkRequested = false;
             }
-            const terminalReplacement = content.includes("Answer the task owner's routed question");
             const entries = forkActive ? template.forkEntries!
-                : terminalReplacement && template.inboundEntries ? template.inboundEntries
                 : content.toLowerCase().includes('re-verify') && template.retryEntries ? template.retryEntries
-                    : requestHasIncoming(request) && template.inboundEntries ? template.inboundEntries : template.entries;
+                    : template.entries;
             modelScenario = {
                 entries,
                 index: 0,
                 inboundEntries: template.inboundEntries,
                 inboundIndex: 0,
-                inboundActive: terminalReplacement,
+                inboundActive: false,
                 forkActive,
                 inboundReadyFor: new Set<string>(),
             };
