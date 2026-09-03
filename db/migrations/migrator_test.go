@@ -75,6 +75,26 @@ func TestPlanReconciliationFindsCommonPrefix(t *testing.T) {
 	require.Equal(t, []string{"4"}, migrationVersions(plan.Apply))
 }
 
+func TestPlanReconciliationAcceptsLegacyBaselineMarker(t *testing.T) {
+	candidate := Manifest{Dialect: "postgres", Migrations: []Migration{
+		{Version: "1", AtlasHash: "h1"},
+		{Version: "2", AtlasHash: "h2"},
+		{Version: "3", AtlasHash: "h3"},
+		{Version: "4", AtlasHash: "h4"},
+		{Version: "5", AtlasHash: "h5"},
+	}}
+	applied := []AppliedRevision{
+		{Version: "3", Applied: 0, Total: 0},
+		{Version: "4", Hash: "h4", Applied: 1, Total: 1},
+	}
+
+	plan, err := PlanReconciliation(applied, candidate, Manifest{})
+	require.NoError(t, err)
+	require.Equal(t, "4", plan.CommonVersion)
+	require.Empty(t, plan.Rollback)
+	require.Equal(t, []string{"5"}, migrationVersions(plan.Apply))
+}
+
 func TestPlanReconciliationRejectsChangedHistoryAndIrreversibleRollback(t *testing.T) {
 	candidate := Manifest{Dialect: "sqlite", Migrations: []Migration{{Version: "1", AtlasHash: "new", Reversible: true, DownSQL: "DROP TABLE a"}}}
 	_, err := PlanReconciliation([]AppliedRevision{{Version: "1", Hash: "old", Applied: 1, Total: 1}}, candidate, Manifest{})
