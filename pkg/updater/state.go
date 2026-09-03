@@ -37,6 +37,8 @@ type DeploymentState struct {
 	CandidatePath      string          `json:"candidate_path"`
 	PreviousPath       string          `json:"previous_path"`
 	ArtifactSHA256     string          `json:"artifact_sha256"`
+	DatabaseSnapshot   string          `json:"database_snapshot,omitempty"`
+	DatabaseSchema     string          `json:"database_schema,omitempty"`
 	StartedAt          time.Time       `json:"started_at"`
 	UpdatedAt          time.Time       `json:"updated_at"`
 	LastError          string          `json:"last_error,omitempty"`
@@ -305,6 +307,20 @@ func (u *Updater) MarkStarting() error {
 	u.status.Phase = string(DeployPhaseStarting)
 	u.mu.Unlock()
 	return nil
+}
+
+// AttachSQLiteSnapshot records the checkpoint created after the old child has
+// closed its database and before a candidate is started.
+func (u *Updater) AttachSQLiteSnapshot(snapshot SQLiteSnapshot) error {
+	if u.basePath == "" || snapshot.Path == "" {
+		return nil
+	}
+	state, err := LoadState(u.basePath)
+	if err != nil {
+		return err
+	}
+	state.DatabaseSnapshot = snapshot.Path
+	return SaveState(u.basePath, state)
 }
 
 // RecordStartupFailure persists a candidate boot failure and returns the old

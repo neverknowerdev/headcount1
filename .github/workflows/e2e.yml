@@ -157,6 +157,10 @@ jobs:
       env:
         E2E_MODE: true
 
+    - name: Run self-updater process E2E
+      timeout-minutes: 5
+      run: go test -tags=selfupdate_e2e ./test/selfupdate_e2e -count=1
+
     - name: Upload SQLite report
       if: always()
       uses: actions/upload-artifact@v4

@@ -40,6 +40,7 @@ type Migration struct {
 
 type Manifest struct {
 	Dialect    string      `json:"dialect"`
+	Schema     string      `json:"schema,omitempty"`
 	Generated  time.Time   `json:"generated_at"`
 	Migrations []Migration `json:"migrations"`
 }
@@ -112,6 +113,13 @@ func (e *MigrationError) Unwrap() error { return e.Cause }
 // retained in the manifest so a previous release can be restored even after a
 // candidate branch has removed one of its migration files.
 func BuildManifest(dialect string) (Manifest, error) {
+	return BuildManifestForSchema(dialect, "")
+}
+
+// BuildManifestForSchema renders PostgreSQL migrations for an isolated schema.
+// Public-schema manifests retain the original bytes and hashes for backwards
+// compatibility; shadow manifests hash the rendered SQL that will actually run.
+func BuildManifestForSchema(dialect, schemaName string) (Manifest, error) {
 	fsEntries, err := Files.ReadDir(dialect)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("read embedded %s migrations: %w", dialect, err)
@@ -135,15 +143,18 @@ func BuildManifest(dialect string) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("read embedded migration %s: %w", name, err)
 		}
 		atlasName := strings.TrimSuffix(name, ".up.sql") + ".sql"
-		files = append(files, migrate.NewLocalFile(atlasName, b))
-		contents[name] = b
+		contents[name], err = rewriteSchema(b, dialect, schemaName)
+		if err != nil {
+			return Manifest{}, err
+		}
+		files = append(files, migrate.NewLocalFile(atlasName, contents[name]))
 	}
 	hashes, err := migrate.NewHashFile(files)
 	if err != nil {
 		return Manifest{}, fmt.Errorf("hash embedded migrations: %w", err)
 	}
 
-	manifest := Manifest{Dialect: dialect, Generated: time.Now().UTC(), Migrations: make([]Migration, 0, len(upNames))}
+	manifest := Manifest{Dialect: dialect, Schema: schemaName, Generated: time.Now().UTC(), Migrations: make([]Migration, 0, len(upNames))}
 	for _, name := range upNames {
 		base := strings.TrimSuffix(name, ".up.sql")
 		parts := strings.SplitN(base, "_", 2)
@@ -157,6 +168,10 @@ func BuildManifest(dialect string) (Manifest, error) {
 			return Manifest{}, fmt.Errorf("read embedded migration %s: %w", downName, err)
 		}
 		up := contents[name]
+		down, err = rewriteSchema(down, dialect, schemaName)
+		if err != nil {
+			return Manifest{}, err
+		}
 		atlasHash, err := hashes.SumByName(base + ".sql")
 		if err != nil {
 			return Manifest{}, fmt.Errorf("hash migration %s: %w", name, err)
@@ -202,8 +217,15 @@ func ManifestPath(basePath, dialect string) string {
 	return filepath.Join(basePath, manifestDir, dialect+".json")
 }
 
+func ManifestPathForSchema(basePath, dialect, schema string) string {
+	if schema == "" {
+		return ManifestPath(basePath, dialect)
+	}
+	return filepath.Join(basePath, manifestDir, dialect+"-"+schema+".json")
+}
+
 func SaveManifest(basePath string, manifest Manifest) error {
-	path := ManifestPath(basePath, manifest.Dialect)
+	path := ManifestPathForSchema(basePath, manifest.Dialect, manifest.Schema)
 	if err := os.MkdirAll(filepath.Dir(path), 0700); err != nil {
 		return err
 	}
@@ -236,7 +258,11 @@ func SaveManifest(basePath string, manifest Manifest) error {
 }
 
 func LoadManifest(basePath, dialect string) (Manifest, error) {
-	b, err := os.ReadFile(ManifestPath(basePath, dialect))
+	return LoadManifestForSchema(basePath, dialect, "")
+}
+
+func LoadManifestForSchema(basePath, dialect, schema string) (Manifest, error) {
+	b, err := os.ReadFile(ManifestPathForSchema(basePath, dialect, schema))
 	if err != nil {
 		return Manifest{}, err
 	}
@@ -248,7 +274,11 @@ func LoadManifest(basePath, dialect string) (Manifest, error) {
 }
 
 func ReadApplied(ctx context.Context, database *sql.DB, dialect string) ([]AppliedRevision, error) {
-	store := &revisionStore{db: database, dialect: dialect}
+	return readAppliedWithSchema(ctx, database, dialect, "")
+}
+
+func readAppliedWithSchema(ctx context.Context, database *sql.DB, dialect, schemaName string) ([]AppliedRevision, error) {
+	store := &revisionStore{db: database, dialect: dialect, schema: schemaName}
 	revisions, err := store.ReadRevisions(ctx)
 	if err != nil {
 		return nil, err
@@ -319,6 +349,10 @@ func PlanReconciliation(applied []AppliedRevision, candidate, rollbackManifest M
 }
 
 func ApplyDown(ctx context.Context, database *sql.DB, dialect string, rollback []Migration) error {
+	return ApplyDownWithSchema(ctx, database, dialect, rollback, "")
+}
+
+func ApplyDownWithSchema(ctx context.Context, database *sql.DB, dialect string, rollback []Migration, schemaName string) error {
 	for _, migration := range rollback {
 		if !migration.Reversible {
 			return &IrreversibleMigrationError{Version: migration.Version}
@@ -343,7 +377,7 @@ func ApplyDown(ctx context.Context, database *sql.DB, dialect string, rollback [
 		table := revisionTable
 		placeholder := "?"
 		if dialect == "postgres" {
-			table = "public." + table
+			table = quoteIdent(schemaOrPublic(schemaName)) + "." + quoteIdent(table)
 			placeholder = "$1"
 		}
 		if _, err := tx.ExecContext(ctx, "DELETE FROM "+table+" WHERE version = "+placeholder, migration.Version); err != nil {
@@ -361,14 +395,14 @@ func ApplyDown(ctx context.Context, database *sql.DB, dialect string, rollback [
 // transactional, so this is primarily for a candidate that completed some
 // down/up work before a later phase failed or for legacy dirty histories.
 func RollbackCandidate(ctx context.Context, database *sql.DB, dialect, basePath string, candidate Manifest) error {
-	previous, err := LoadManifest(basePath, dialect)
+	previous, err := LoadManifestForSchema(basePath, dialect, candidate.Schema)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil
 		}
 		return err
 	}
-	applied, err := ReadApplied(ctx, database, dialect)
+	applied, err := readAppliedWithSchema(ctx, database, dialect, candidate.Schema)
 	if err != nil {
 		return err
 	}
@@ -376,8 +410,50 @@ func RollbackCandidate(ctx context.Context, database *sql.DB, dialect, basePath 
 	if err != nil {
 		return err
 	}
-	if err := ApplyDown(ctx, database, dialect, plan.Rollback); err != nil {
+	if err := ApplyDownWithSchema(ctx, database, dialect, plan.Rollback, candidate.Schema); err != nil {
 		return err
 	}
 	return SaveManifest(basePath, previous)
+}
+
+func schemaOrPublic(schema string) string {
+	if schema == "" {
+		return "public"
+	}
+	return schema
+}
+
+func validSchemaName(schema string) bool {
+	if schema == "" || len(schema) > 63 {
+		return false
+	}
+	for i, r := range schema {
+		if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || r == '_' || (i > 0 && r >= '0' && r <= '9') {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func quoteIdent(value string) string {
+	return `"` + strings.ReplaceAll(value, `"`, `""`) + `"`
+}
+
+// rewriteSchema only rewrites explicit PostgreSQL public-schema references.
+// It deliberately fails closed if a non-empty schema is requested for another
+// dialect, avoiding a false sense of isolation.
+func rewriteSchema(sqlBytes []byte, dialect, schema string) ([]byte, error) {
+	if schema == "" || dialect != "postgres" {
+		return sqlBytes, nil
+	}
+	if !validSchemaName(schema) {
+		return nil, fmt.Errorf("invalid PostgreSQL schema %q", schema)
+	}
+	s := string(sqlBytes)
+	s = strings.ReplaceAll(s, `"public".`, quoteIdent(schema)+".")
+	// The replacement above preserves the object quote: "public"."users" ->
+	// "shadow"."users". Handle unquoted references used by the revision table.
+	s = strings.ReplaceAll(s, `public.`, schema+`.`)
+	return []byte(s), nil
 }

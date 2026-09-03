@@ -1,7 +1,9 @@
 package updater
 
 import (
+	"crypto/ed25519"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -14,6 +16,16 @@ import (
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestVerifyArtifactSignatureBindsEnvelope(t *testing.T) {
+	publicKey, privateKey, err := ed25519.GenerateKey(nil)
+	require.NoError(t, err)
+	target := VersionInfo{Version: "v2", Branch: "main", CommitHash: "abc", BuildDate: "today"}
+	message := ArtifactSigningMessage("https://github.com/neverknowerdev/headcount1/releases/x", "deadbeef", target)
+	signature := base64.StdEncoding.EncodeToString(ed25519.Sign(privateKey, []byte(message)))
+	require.NoError(t, VerifyArtifactSignature("https://github.com/neverknowerdev/headcount1/releases/x", "deadbeef", target, signature, base64.StdEncoding.EncodeToString(publicKey)))
+	require.Error(t, VerifyArtifactSignature("https://github.com/neverknowerdev/headcount1/releases/y", "deadbeef", target, signature, base64.StdEncoding.EncodeToString(publicKey)))
+}
 
 func TestDeploymentStateRoundTripAndStartupFallback(t *testing.T) {
 	basePath := t.TempDir()
