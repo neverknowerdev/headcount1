@@ -136,7 +136,6 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
             ],
             inbound_entries: [
                 { tool_call: { id: 'cto-answer-architecture', name: 'answer_message', arguments: { message_id: 0, answer: 'Use the event-driven repository boundary and keep the controller as the source of truth.' } } },
-                { tool_call: { id: 'cto-replacement-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Architecture clarification delivered.', result_details: 'The completed CTO design was rehydrated to answer the Coder.' } } },
             ],
         });
 

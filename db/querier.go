@@ -22,10 +22,12 @@ type ProjectQuerier interface {
 
 type AgentQuerier interface {
 	CreateAgent(ctx context.Context, a Agent) (Agent, error)
+	DeleteAgent(ctx context.Context, id int32) error
 	ListAgentsByCompany(ctx context.Context, companyID int32) ([]Agent, error)
 	GetAgent(ctx context.Context, id int32) (Agent, error)
 	GetAgentWithCompany(ctx context.Context, id int32) (Agent, Company, error)
 	UpdateAgent(ctx context.Context, a Agent) (Agent, error)
+	EnsureBuiltinAgentsForCompany(ctx context.Context, companyID int32, defaults []Agent, providerID *int32, model string) error
 }
 
 type TaskQuerier interface {
