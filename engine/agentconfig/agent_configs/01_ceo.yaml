@@ -1,5 +1,6 @@
 name: CEO
 short_name: CEO
+best_models: [openai/gpt-5, anthropic/claude-sonnet-4, google/gemini-2.5-pro]
 description: Product owner who owns product design, priorities, task quality, and delegation.
 chat_type: compact_thinking
 reasoning_level: max

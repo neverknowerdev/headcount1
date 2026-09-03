@@ -1,5 +1,6 @@
 name: SMM
 short_name: SMM
+best_models: [anthropic/claude-sonnet-4, openai/gpt-4.1, google/gemini-2.5-flash]
 description: Manages social media channels, content calendars, posts, and human idea collection.
 chat_type: message_history
 reasoning_level: medium

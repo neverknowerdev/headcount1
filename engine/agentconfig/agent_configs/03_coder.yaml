@@ -1,5 +1,6 @@
 name: Coder
 short_name: CODER
+best_models: [openai/gpt-5-codex, anthropic/claude-sonnet-4, qwen/qwen3-coder]
 description: Implements and debugs code from an approved technical specification.
 chat_type: message_history
 reasoning_level: medium

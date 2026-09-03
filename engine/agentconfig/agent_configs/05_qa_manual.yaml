@@ -1,5 +1,6 @@
 name: QA Manual
 short_name: QA-MAN
+best_models: [openai/computer-use-preview, google/gemini-2.5-pro, anthropic/claude-sonnet-4]
 description: Performs manual UI and browser testing against exact scenarios.
 chat_type: message_history
 reasoning_level: medium

@@ -46,6 +46,9 @@ type AgentConfig struct {
 	ChatType ChatType `toml:"chat_type" yaml:"chat_type"`
 	// AllowedModels lists accepted model identifiers. First entry is default.
 	AllowedModels []string `toml:"allowed_models" yaml:"allowed_models"`
+	// BestModels lists model identifiers recommended for this role. These are
+	// catalog guidance only; the active model remains company-owned state.
+	BestModels []string `toml:"best_models" yaml:"best_models"`
 	// ReasoningLevel controls how much reasoning the model applies.
 	ReasoningLevel ReasoningLevel `toml:"reasoning_level" yaml:"reasoning_level"`
 	// MemoryTags are labels used by the memory bank (future feature).

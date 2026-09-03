@@ -3,11 +3,15 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
+import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 
 type AgentTemplate = {
     name: string;
+    canonical_name?: string;
+    slug?: string;
     description: string;
     prompt: string;
+    best_models?: string[];
     allowed_tools?: string[];
     permissions?: string;
 };
@@ -21,6 +25,8 @@ export const AgentManager: React.FC = () => {
     const [selectedTemplate, setSelectedTemplate] = useState('');
     const [form, setForm] = useState({ name: '', description: '', system_prompt: '', permissions: '{}' });
     const [saving, setSaving] = useState(false);
+    const [expandedBuiltins, setExpandedBuiltins] = useState<Record<number, boolean>>({});
+    const [deletingAgentId, setDeletingAgentId] = useState<number | null>(null);
     const [error, setError] = useState('');
 
     const fetchAgents = useCallback(async () => {
@@ -103,28 +109,111 @@ export const AgentManager: React.FC = () => {
         }
     };
 
-    const renderAgentCard = (agent: any) => (
+    const deleteAgent = async (agent: any) => {
+        if (agent.builtin || !window.confirm(`Delete ${agent.name}? This cannot be undone.`)) return;
+        setDeletingAgentId(agent.id);
+        setError('');
+        try {
+            await axios.delete(`/api/agents/${agent.id}`);
+            setAgents(current => current.filter(item => item.id !== agent.id));
+        } catch (e: any) {
+            setError(e?.response?.data?.error || 'Failed to delete agent.');
+        } finally {
+            setDeletingAgentId(null);
+        }
+    };
+
+    const renderBuiltinCard = (agent: any) => {
+        const expanded = !!expandedBuiltins[agent.id];
+        const template = templates.find(item =>
+            item.canonical_name === agent.role_key || item.name === agent.role_key || item.name === agent.name
+        );
+        const allowedTools = template?.allowed_tools || [];
+        const bestModels = template?.best_models || [];
+        const canonicalName = agent.role_key || template?.canonical_name || agent.name;
+        const slug = agent.short_name || template?.slug || '—';
+        return (
+            <div key={agent.id} data-testid={`builtin-agent-${agent.id}`} className={`bg-white rounded-lg border shadow-sm ${agent.enabled === false ? 'opacity-60' : ''}`}>
+                <div className="flex items-center gap-3 p-4">
+                    <button
+                        type="button"
+                        aria-expanded={expanded}
+                        aria-label={`${expanded ? 'Collapse' : 'Expand'} ${agent.name}`}
+                        onClick={() => setExpandedBuiltins(current => ({ ...current, [agent.id]: !expanded }))}
+                        className="text-gray-500 hover:text-indigo-600 shrink-0"
+                    >
+                        {expanded ? <ChevronDown size={18} /> : <ChevronRight size={18} />}
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => setExpandedBuiltins(current => ({ ...current, [agent.id]: !expanded }))}
+                        className="min-w-0 flex-1 text-left"
+                    >
+                        <span className="block text-base font-bold text-gray-900 truncate">{agent.name}</span>
+                        <span className="block text-xs text-gray-500 truncate">{agent.description}</span>
+                    </button>
+                    <span className="bg-violet-100 text-violet-800 text-xs px-2 py-1 rounded-full shrink-0">Built-in</span>
+                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full max-w-40 truncate shrink-0">{agent.model || 'Default Model'}</span>
+                    <label className="relative inline-flex items-center cursor-pointer shrink-0" title={agent.enabled === false ? 'Enable agent' : 'Disable agent'}>
+                        <input
+                            type="checkbox"
+                            role="switch"
+                            aria-label={`${agent.enabled === false ? 'Enable' : 'Disable'} ${agent.name}`}
+                            checked={agent.enabled !== false}
+                            onChange={() => toggleAgent(agent)}
+                            className="sr-only peer"
+                        />
+                        <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:bg-green-500 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
+                    </label>
+                </div>
+                {expanded && (
+                    <div className="border-t px-5 py-4 space-y-4 text-sm">
+                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                            <div><span className="block font-semibold uppercase tracking-wide text-gray-400">Canonical system name</span><code className="text-gray-800">{canonicalName}</code></div>
+                            <div><span className="block font-semibold uppercase tracking-wide text-gray-400">Agent slug</span><code className="text-gray-800">{slug}</code></div>
+                        </div>
+                        <div>
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System prompt</p>
+                            <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">{agent.system_prompt}</div>
+                        </div>
+                        <div>
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Available tools</p>
+                            <div className="flex flex-wrap gap-1.5">
+                                {allowedTools.length > 0 ? allowedTools.map(tool => <code key={tool} className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-700">{tool}</code>) : <span className="text-xs text-gray-500">All tools</span>}
+                            </div>
+                        </div>
+                        {bestModels.length > 0 && (
+                            <div>
+                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Recommended models</p>
+                                <div className="flex flex-wrap gap-1.5">{bestModels.map(model => <code key={model} className="rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700">{model}</code>)}</div>
+                            </div>
+                        )}
+                        <button type="button" onClick={() => window.location.href = `/companies/${shortName}/agents/${agent.id}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">Open edit page →</button>
+                    </div>
+                )}
+            </div>
+        );
+    };
+
+    const renderCustomAgentCard = (agent: any) => (
         <div key={agent.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col ${agent.enabled === false ? 'opacity-60' : ''}`}>
             <div className="flex justify-between items-start mb-4 gap-3">
                 <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</h3>
-                <div className="flex items-center gap-2 shrink-0">
-                    {agent.builtin && <span className="bg-violet-100 text-violet-800 text-xs px-2 py-1 rounded-full">Built-in</span>}
-                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
-                </div>
+                <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
             </div>
             {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
             <div className="mt-auto">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
-                <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">
-                    {agent.system_prompt}
-                </div>
+                <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">{agent.system_prompt}</div>
             </div>
-            <button
-                onClick={() => toggleAgent(agent)}
-                className={`mt-4 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${agent.enabled === false ? 'bg-gray-200 text-gray-700 hover:bg-gray-300' : 'bg-green-100 text-green-800 hover:bg-green-200'}`}
-            >
-                {agent.enabled === false ? 'Enable agent' : 'Disable agent'}
-            </button>
+            <div className="mt-4 flex items-center gap-2">
+                <button onClick={() => toggleAgent(agent)} className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${agent.enabled === false ? 'bg-gray-200 text-gray-700 hover:bg-gray-300' : 'bg-green-100 text-green-800 hover:bg-green-200'}`}>
+                    {agent.enabled === false ? 'Enable agent' : 'Disable agent'}
+                </button>
+                <button type="button" onClick={() => deleteAgent(agent)} disabled={deletingAgentId === agent.id} aria-label={`Delete ${agent.name}`} title="Delete custom agent" className="px-3 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50">
+                    <Trash2 size={16} />
+                </button>
+            </div>
         </div>
     );
 
@@ -151,7 +240,7 @@ export const AgentManager: React.FC = () => {
                         <span className="text-xs text-gray-400">Protected defaults; enable or disable them as needed</span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
-                        {builtinAgents.map(renderAgentCard)}
+                        {builtinAgents.map(renderBuiltinCard)}
                     </div>
                 </div>
             )}
@@ -160,7 +249,7 @@ export const AgentManager: React.FC = () => {
                 <div>
                     <h2 className="text-lg font-semibold text-gray-800 mb-4">Custom agents</h2>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-                        {customAgents.map(renderAgentCard)}
+                        {customAgents.map(renderCustomAgentCard)}
                     </div>
                 </div>
             )}

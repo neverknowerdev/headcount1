@@ -12,10 +12,13 @@ import (
 // the company's db.Agent row.
 type AgentConfigResponse struct {
 	Name           string   `json:"name"`
+	CanonicalName  string   `json:"canonical_name"`
+	Slug           string   `json:"slug"`
 	Description    string   `json:"description"`
 	Prompt         string   `json:"prompt"`
 	ChatType       string   `json:"chat_type"`
 	ReasoningLevel string   `json:"reasoning_level"`
+	BestModels     []string `json:"best_models,omitempty"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
 	Permissions    string   `json:"permissions"`
 	CanUseWorkers  bool     `json:"can_use_workers"`
@@ -30,10 +33,13 @@ func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 	for _, cfg := range configs {
 		out = append(out, AgentConfigResponse{
 			Name:           cfg.Name,
+			CanonicalName:  cfg.Name,
+			Slug:           cfg.EffectiveShortName(),
 			Description:    cfg.Description,
 			Prompt:         cfg.Prompt,
 			ChatType:       string(cfg.ChatType),
 			ReasoningLevel: string(cfg.ReasoningLevel),
+			BestModels:     cfg.BestModels,
 			AllowedTools:   cfg.AllowedTools,
 			Permissions:    agentdefaults.PermissionsForConfig(cfg),
 			CanUseWorkers:  cfg.CanUseWorkers,

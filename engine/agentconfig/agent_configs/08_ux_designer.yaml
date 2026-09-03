@@ -1,5 +1,6 @@
 name: UX Designer
 short_name: UX
+best_models: [anthropic/claude-sonnet-4, openai/gpt-4.1, google/gemini-2.5-pro]
 description: Designs clear, accessible, efficient, and consistent user interfaces and flows.
 chat_type: message_history
 reasoning_level: medium

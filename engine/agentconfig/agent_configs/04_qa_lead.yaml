@@ -1,5 +1,6 @@
 name: QA Lead
 short_name: QA-LD
+best_models: [openai/gpt-5, anthropic/claude-sonnet-4, google/gemini-2.5-pro]
 description: Defines acceptance criteria, test cases, test scope, and maintains test infrastructure.
 chat_type: message_history
 reasoning_level: max

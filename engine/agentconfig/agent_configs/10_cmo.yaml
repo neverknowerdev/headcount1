@@ -1,5 +1,6 @@
 name: CMO
 short_name: CMO
+best_models: [openai/gpt-5, anthropic/claude-sonnet-4, google/gemini-2.5-pro]
 description: Owns marketing strategy, KPIs, channels, analysis, long-term planning, and delegation.
 chat_type: compact_thinking
 reasoning_level: max

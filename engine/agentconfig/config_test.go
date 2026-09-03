@@ -48,6 +48,7 @@ name = "TestAgent"
 description = "A test agent"
 chat_type = "message_history"
 allowed_models = ["model-x", "model-y"]
+best_models = ["model-best", "model-fast"]
 reasoning_level = "medium"
 allowed_tools = ["read", "grep"]
 `
@@ -59,6 +60,7 @@ func TestLoadFromBytes_ValidTOML(t *testing.T) {
 	assert.Equal(t, "A test agent", cfg.Description)
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
+	assert.Equal(t, []string{"model-best", "model-fast"}, cfg.BestModels)
 	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
 	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
 }
@@ -156,6 +158,7 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	// Builtin configs intentionally have no hardcoded models so that the
 	// runtime resolver picks from the configured provider's supported list.
 	assert.Empty(t, cfg.AllowedModels)
+	assert.NotEmpty(t, cfg.BestModels)
 
 	cfg, err = f.GetConfig("Coder")
 	require.NoError(t, err)
@@ -205,6 +208,12 @@ func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 		cfg, err := f.GetConfig(name)
 		require.NoError(t, err)
 		assert.NotEmpty(t, cfg.Prompt, "agent %q should have a non-empty prompt", name)
+	}
+}
+
+func TestBuiltinConfigs_HaveBestModels(t *testing.T) {
+	for _, cfg := range agentconfig.BuiltinConfigs() {
+		assert.NotEmpty(t, cfg.BestModels, "agent %q should have best model recommendations", cfg.Name)
 	}
 }
 

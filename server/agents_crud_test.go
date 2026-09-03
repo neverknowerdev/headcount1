@@ -61,6 +61,17 @@ func TestBuiltinAgentCanOnlyBeToggledAndCannotBeDeleted(t *testing.T) {
 	assert.False(t, updated.Enabled)
 	assert.Equal(t, "CEO", updated.Name)
 	assert.True(t, updated.Builtin)
+
+	custom, err := q.CreateAgent(context.Background(), db.Agent{
+		CompanyID: company.ID, Name: "Custom researcher", SystemPrompt: "Research the task.",
+	})
+	require.NoError(t, err)
+	customDeleteReq := httptest.NewRequest(http.MethodDelete, fmt.Sprintf("/agents/%d", custom.ID), nil)
+	customDeleteW := httptest.NewRecorder()
+	r.ServeHTTP(customDeleteW, customDeleteReq)
+	assert.Equal(t, http.StatusOK, customDeleteW.Code)
+	_, err = q.GetAgent(context.Background(), custom.ID)
+	assert.Error(t, err)
 }
 
 func TestCreateCompanySeedsAllBuiltinAgents(t *testing.T) {

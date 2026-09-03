@@ -28,7 +28,10 @@ func TestListAgentConfigsIncludesPromptAndPersistedToolPermissions(t *testing.T)
 		}
 	}
 	require.Equal(t, "Coder", coder.Name)
+	require.Equal(t, "Coder", coder.CanonicalName)
+	require.Equal(t, "CODER", coder.Slug)
 	require.NotEmpty(t, coder.Prompt)
+	require.NotEmpty(t, coder.BestModels)
 	require.Contains(t, coder.AllowedTools, "read")
 	require.Contains(t, coder.AllowedTools, "write")
 

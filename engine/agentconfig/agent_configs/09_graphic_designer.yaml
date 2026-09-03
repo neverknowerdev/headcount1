@@ -1,5 +1,6 @@
 name: Graphic Designer
 short_name: GFX
+best_models: [openai/gpt-image-1, google/gemini-2.5-flash-image-preview, anthropic/claude-sonnet-4]
 description: Creates and specifies visual assets, illustrations, imagery, and visual direction.
 chat_type: message_history
 reasoning_level: medium

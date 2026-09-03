@@ -1,5 +1,6 @@
 name: CTO
 short_name: CTO
+best_models: [anthropic/claude-opus-4.1, openai/gpt-5, google/gemini-2.5-pro]
 description: Architecture owner who creates technical specifications and delegates implementation.
 chat_type: compact_thinking
 reasoning_level: max

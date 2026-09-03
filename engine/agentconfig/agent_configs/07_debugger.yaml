@@ -1,5 +1,6 @@
 name: Debugger
 short_name: DEBUG
+best_models: [anthropic/claude-opus-4.1, openai/o3, google/gemini-2.5-pro]
 description: Gathers logs and evidence and discovers the most likely root cause of issues.
 chat_type: message_history
 reasoning_level: max

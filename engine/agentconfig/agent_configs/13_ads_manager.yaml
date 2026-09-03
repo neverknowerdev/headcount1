@@ -1,5 +1,6 @@
 name: Ads manager
 short_name: ADS
+best_models: [openai/gpt-5, google/gemini-2.5-pro, anthropic/claude-sonnet-4]
 description: Plans and manages advertising, KPI, budgets, execution monitoring, and optimization.
 chat_type: message_history
 reasoning_level: max
