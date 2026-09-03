@@ -36,6 +36,27 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 	}
 }
 
+func TestPostgresShadowManifestRewritesPublicReferencesAndHashesRenderedSQL(t *testing.T) {
+	manifest, err := BuildManifestForSchema("postgres", "headcount1_deploy_test")
+	require.NoError(t, err)
+	require.Equal(t, "headcount1_deploy_test", manifest.Schema)
+	entry, ok := manifest.Entry("20260816000001")
+	require.True(t, ok)
+	require.Contains(t, entry.UpSQL, `"headcount1_deploy_test"."users"`)
+	require.NotContains(t, entry.UpSQL, `"public"."users"`)
+	require.NotEqual(t, digest([]byte(entry.UpSQL)), entry.AtlasHash)
+}
+
+func TestPostgresShadowSchemaNameValidation(t *testing.T) {
+	_, err := BuildManifestForSchema("postgres", "bad-schema")
+	require.Error(t, err)
+	dsn, err := PostgresSearchPath("postgres://localhost/db?sslmode=disable", "headcount1_deploy_test")
+	require.NoError(t, err)
+	require.Contains(t, dsn, "search_path=headcount1_deploy_test,public")
+	_, err = PostgresSearchPath("postgres://localhost/db", "bad-schema")
+	require.Error(t, err)
+}
+
 func TestPlanReconciliationFindsCommonPrefix(t *testing.T) {
 	previous := Manifest{Dialect: "sqlite", Migrations: []Migration{
 		{Version: "1", AtlasHash: "h1", Reversible: true, DownSQL: "DROP TABLE a"},

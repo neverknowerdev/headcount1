@@ -292,9 +292,25 @@ func (u *Updater) RestartInPlace(reason string) error {
 		u.mu.Unlock()
 		return nil
 	}
+	current := u.current
 	u.restartPending = true
 	u.pendingExecPath = execPath
 	u.mu.Unlock()
+	if u.basePath != "" {
+		state, loadErr := LoadState(u.basePath)
+		if loadErr != nil && !os.IsNotExist(loadErr) {
+			return fmt.Errorf("restart: read durable state: %w", loadErr)
+		}
+		state = DeploymentState{
+			ID: deploymentID(current, "restart"), Phase: DeployPhaseStaged,
+			Target: current, CandidatePath: execPath, PreviousPath: execPath,
+			ArtifactSHA256: "restart", StartedAt: time.Now().UTC(),
+			SuccessfulReleases: append([]ReleaseRecord(nil), state.SuccessfulReleases...),
+		}
+		if err := SaveState(u.basePath, state); err != nil {
+			return fmt.Errorf("restart: persist durable state: %w", err)
+		}
+	}
 
 	log.Printf("Restart: %s; draining and restarting %s...", reason, execPath)
 	u.requestShutdown()
