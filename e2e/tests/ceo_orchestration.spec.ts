@@ -135,6 +135,8 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
         await expect(builtin.getByText('CEO', { exact: true })).toBeVisible();
         await expect(builtin.getByText('CMO', { exact: true })).toBeVisible();
         await expect(builtin.getByText('QA Manual', { exact: true })).toBeVisible();
+        await expect(builtin.getByText('Built-in', { exact: true })).toHaveCount(0);
+        await expect(builtin.getByText('e2e-placeholder-model', { exact: true })).toHaveCount(0);
         await expect(builtin.getByRole('switch').first()).toBeVisible();
     });
 });

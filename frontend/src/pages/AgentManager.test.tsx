@@ -97,7 +97,9 @@ describe('AgentManager templates', () => {
         expect(screen.getByText('CODER')).toBeTruthy();
         expect(screen.getByText('read')).toBeTruthy();
         expect(screen.getByText('write')).toBeTruthy();
-        expect(screen.getByText('openai/gpt-5-codex')).toBeTruthy();
+        expect(screen.queryByText('openai/gpt-5-codex')).toBeNull();
+        expect(screen.queryByText('Built-in', { exact: true })).toBeNull();
+        expect(screen.queryByText('openrouter/free', { exact: true })).toBeNull();
         expect(screen.getByRole('switch', { name: 'Disable Coder' })).toBeTruthy();
         expect(screen.getByRole('button', { name: 'Open edit page →' })).toBeTruthy();
     });
@@ -127,6 +129,7 @@ describe('AgentManager templates', () => {
             </MemoryRouter>,
         );
 
+        expect(await screen.findByRole('switch', { name: 'Disable Research helper' })).toBeTruthy();
         fireEvent.click(await screen.findByRole('button', { name: 'Delete Research helper' }));
         await waitFor(() => expect(axios.delete).toHaveBeenCalledWith('/api/agents/9'));
         expect(screen.queryByRole('button', { name: 'Delete Coder' })).toBeNull();

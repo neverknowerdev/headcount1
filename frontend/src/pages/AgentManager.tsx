@@ -16,6 +16,23 @@ type AgentTemplate = {
     permissions?: string;
 };
 
+const AgentToggle: React.FC<{ agent: any; onToggle: (agent: any) => void }> = ({ agent, onToggle }) => {
+    const action = agent.enabled === false ? 'Enable' : 'Disable';
+    return (
+        <label className="relative inline-flex items-center cursor-pointer shrink-0" title={`${action} agent`}>
+            <input
+                type="checkbox"
+                role="switch"
+                aria-label={`${action} ${agent.name}`}
+                checked={agent.enabled !== false}
+                onChange={() => onToggle(agent)}
+                className="sr-only peer"
+            />
+            <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:bg-green-500 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
+        </label>
+    );
+};
+
 export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
@@ -129,7 +146,6 @@ export const AgentManager: React.FC = () => {
             item.canonical_name === agent.role_key || item.name === agent.role_key || item.name === agent.name
         );
         const allowedTools = template?.allowed_tools || [];
-        const bestModels = template?.best_models || [];
         const canonicalName = agent.role_key || template?.canonical_name || agent.name;
         const slug = agent.short_name || template?.slug || '—';
         return (
@@ -147,24 +163,12 @@ export const AgentManager: React.FC = () => {
                     <button
                         type="button"
                         onClick={() => setExpandedBuiltins(current => ({ ...current, [agent.id]: !expanded }))}
-                        className="min-w-16 flex-1 text-left"
+                        className="min-w-0 flex-1 text-left"
                     >
-                        <span className="block text-base font-bold text-gray-900 truncate">{agent.name}</span>
-                        <span className="block text-xs text-gray-500 truncate">{agent.description}</span>
+                        <span className="block text-base font-bold text-gray-900 break-words">{agent.name}</span>
+                        <span className="block text-xs text-gray-500 line-clamp-2">{agent.description}</span>
                     </button>
-                    <span className="bg-violet-100 text-violet-800 text-xs px-2 py-1 rounded-full shrink-0">Built-in</span>
-                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full max-w-32 min-w-0 truncate">{agent.model || 'Default Model'}</span>
-                    <label className="relative inline-flex items-center cursor-pointer shrink-0" title={agent.enabled === false ? 'Enable agent' : 'Disable agent'}>
-                        <input
-                            type="checkbox"
-                            role="switch"
-                            aria-label={`${agent.enabled === false ? 'Enable' : 'Disable'} ${agent.name}`}
-                            checked={agent.enabled !== false}
-                            onChange={() => toggleAgent(agent)}
-                            className="sr-only peer"
-                        />
-                        <span className="w-9 h-5 bg-gray-300 rounded-full peer peer-checked:bg-green-500 after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:after:translate-x-4" />
-                    </label>
+                    <AgentToggle agent={agent} onToggle={toggleAgent} />
                 </div>
                 {expanded && (
                     <div className="border-t px-5 py-4 space-y-4 text-sm">
@@ -182,12 +186,6 @@ export const AgentManager: React.FC = () => {
                                 {allowedTools.length > 0 ? allowedTools.map(tool => <code key={tool} className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-700">{tool}</code>) : <span className="text-xs text-gray-500">All tools</span>}
                             </div>
                         </div>
-                        {bestModels.length > 0 && (
-                            <div>
-                                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Recommended models</p>
-                                <div className="flex flex-wrap gap-1.5">{bestModels.map(model => <code key={model} className="rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700">{model}</code>)}</div>
-                            </div>
-                        )}
                         <button type="button" onClick={() => window.location.href = `/companies/${shortName}/agents/${agent.id}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">Open edit page →</button>
                     </div>
                 )}
@@ -197,19 +195,16 @@ export const AgentManager: React.FC = () => {
 
     const renderCustomAgentCard = (agent: any) => (
         <div key={agent.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col ${agent.enabled === false ? 'opacity-60' : ''}`}>
-            <div className="flex justify-between items-start mb-4 gap-3">
-                <h3 className="text-lg font-bold text-gray-900 cursor-pointer hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</h3>
-                <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full">{agent.model || 'Default Model'}</span>
+            <div className="flex items-start gap-3 mb-4">
+                <button type="button" className="flex-1 min-w-0 text-left text-lg font-bold text-gray-900 break-words hover:text-indigo-600" onClick={() => window.location.href=`/companies/${shortName}/agents/${agent.id}`}>{agent.name}</button>
+                <AgentToggle agent={agent} onToggle={toggleAgent} />
             </div>
             {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
             <div className="mt-auto">
                 <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
                 <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">{agent.system_prompt}</div>
             </div>
-            <div className="mt-4 flex items-center gap-2">
-                <button onClick={() => toggleAgent(agent)} className={`flex-1 px-3 py-2 text-sm font-medium rounded-lg transition-colors ${agent.enabled === false ? 'bg-gray-200 text-gray-700 hover:bg-gray-300' : 'bg-green-100 text-green-800 hover:bg-green-200'}`}>
-                    {agent.enabled === false ? 'Enable agent' : 'Disable agent'}
-                </button>
+            <div className="mt-4 flex items-center justify-end">
                 <button type="button" onClick={() => deleteAgent(agent)} disabled={deletingAgentId === agent.id} aria-label={`Delete ${agent.name}`} title="Delete custom agent" className="px-3 py-2 text-red-600 border border-red-200 rounded-lg hover:bg-red-50 disabled:opacity-50">
                     <Trash2 size={16} />
                 </button>
