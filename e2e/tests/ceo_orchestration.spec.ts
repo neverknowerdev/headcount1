@@ -132,9 +132,9 @@ test.describe.serial('CEO consultation and durable orchestration', () => {
         const builtin = page.getByTestId('builtin-agents');
         await expect(builtin).toBeVisible();
         await expect(builtin).toContainText('Built-in agents');
-        await expect(builtin.getByRole('heading', { name: 'CEO', exact: true })).toBeVisible();
-        await expect(builtin.getByRole('heading', { name: 'CMO', exact: true })).toBeVisible();
-        await expect(builtin.getByRole('heading', { name: 'QA Manual', exact: true })).toBeVisible();
-        await expect(builtin.getByRole('button', { name: 'Disable agent' }).first()).toBeVisible();
+        await expect(builtin.getByText('CEO', { exact: true })).toBeVisible();
+        await expect(builtin.getByText('CMO', { exact: true })).toBeVisible();
+        await expect(builtin.getByText('QA Manual', { exact: true })).toBeVisible();
+        await expect(builtin.getByRole('switch').first()).toBeVisible();
     });
 });

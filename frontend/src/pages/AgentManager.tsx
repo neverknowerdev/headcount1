@@ -134,7 +134,7 @@ export const AgentManager: React.FC = () => {
         const slug = agent.short_name || template?.slug || '—';
         return (
             <div key={agent.id} data-testid={`builtin-agent-${agent.id}`} className={`bg-white rounded-lg border shadow-sm ${agent.enabled === false ? 'opacity-60' : ''}`}>
-                <div className="flex items-center gap-3 p-4">
+                <div className="flex items-center gap-2 p-4">
                     <button
                         type="button"
                         aria-expanded={expanded}
@@ -147,13 +147,13 @@ export const AgentManager: React.FC = () => {
                     <button
                         type="button"
                         onClick={() => setExpandedBuiltins(current => ({ ...current, [agent.id]: !expanded }))}
-                        className="min-w-0 flex-1 text-left"
+                        className="min-w-16 flex-1 text-left"
                     >
                         <span className="block text-base font-bold text-gray-900 truncate">{agent.name}</span>
                         <span className="block text-xs text-gray-500 truncate">{agent.description}</span>
                     </button>
                     <span className="bg-violet-100 text-violet-800 text-xs px-2 py-1 rounded-full shrink-0">Built-in</span>
-                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full max-w-40 truncate shrink-0">{agent.model || 'Default Model'}</span>
+                    <span className="bg-indigo-100 text-indigo-800 text-xs px-2 py-1 rounded-full max-w-32 min-w-0 truncate">{agent.model || 'Default Model'}</span>
                     <label className="relative inline-flex items-center cursor-pointer shrink-0" title={agent.enabled === false ? 'Enable agent' : 'Disable agent'}>
                         <input
                             type="checkbox"
