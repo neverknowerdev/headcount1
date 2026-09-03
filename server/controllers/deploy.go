@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -37,7 +38,9 @@ type DeployWebhookPayload struct {
 	BuildDate   string `json:"build_date"`
 	Version     string `json:"version"` // human-facing version of the incoming build
 	DownloadURL string `json:"download_url"`
-	SHA256      string `json:"sha256"` // hex digest of the binary at DownloadURL
+	SHA256      string `json:"sha256"`              // hex digest of the binary at DownloadURL
+	Signature   string `json:"signature,omitempty"` // base64 Ed25519 signature over the artifact envelope
+	KeyID       string `json:"key_id,omitempty"`
 	// Target is the environment CI intends this for (production | staging). The
 	// server also enforces its own env, so a mismatched target is ignored — this
 	// is a belt-and-suspenders guard against a staging event reaching prod.
@@ -267,6 +270,16 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		Branch:     payload.Ref,
 		CommitHash: payload.Commit,
 		BuildDate:  payload.BuildDate,
+	}
+	if publicKey := strings.TrimSpace(os.Getenv("HEADCOUNT1_UPDATE_PUBLIC_KEY")); publicKey != "" {
+		if payload.Signature == "" {
+			respond(http.StatusBadRequest, map[string]interface{}{"error": "signed update envelope is required"})
+			return
+		}
+		if err := updater.VerifyArtifactSignature(payload.DownloadURL, payload.SHA256, target, payload.Signature, publicKey); err != nil {
+			respond(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
 	}
 	if api.updater.IsCurrent(target) {
 		// Same build — but env is read once at startup, so new configuration for

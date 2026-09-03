@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"embed"
+	"errors"
 	"fmt"
 	"io/fs"
 	"log"
@@ -70,7 +71,26 @@ func main() {
 	// child (Linux Landlock, see engine/aicli/tools), this applies the
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
+	if os.Getenv("HEADCOUNT1_SUPERVISOR_CHILD") != "1" {
+		settings := appsettings.Load()
+		executable, err := os.Executable()
+		if err != nil {
+			log.Printf("fatal supervisor setup error: %v", err)
+			os.Exit(1)
+		}
+		if err := updater.RunSupervisor(context.Background(), executable, os.Args[1:], settings.BasePath); err != nil {
+			log.Printf("fatal supervisor error: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if err := run(); err != nil {
+		if errors.Is(err, updater.ErrUpdateRequested) {
+			os.Exit(updater.UpdateRequestedExitCode)
+		}
+		if errors.Is(err, updater.ErrPreflightPassed) {
+			os.Exit(updater.PreflightPassedExitCode)
+		}
 		log.Printf("fatal startup error: %v", err)
 		os.Exit(1)
 	}
@@ -119,11 +139,18 @@ func run() error {
 	tools.SetHiddenReadDirs([]string{basePath})
 
 	dbConnStr := os.Getenv("DATABASE_URL")
+	requestedSchema := strings.TrimSpace(os.Getenv("HEADCOUNT1_MIGRATION_SCHEMA"))
 
 	var database *gorm.DB
 
 	if strings.HasPrefix(dbConnStr, "postgres://") {
 		log.Println("Connecting to PostgreSQL database")
+		if requestedSchema != "" {
+			if dbConnStr, err = dbmigrations.PostgresSearchPath(dbConnStr, requestedSchema); err != nil {
+				return handleStartupFailure(upd, basePath, nil, "postgres", dbmigrations.Manifest{}, currentBuild, err)
+			}
+			log.Printf("PostgreSQL migration/app queries isolated to schema %s", requestedSchema)
+		}
 		database, err = gorm.Open(postgres.Open(dbConnStr), &gorm.Config{})
 	} else {
 		log.Println("Connecting to SQLite database")
@@ -155,7 +182,7 @@ func run() error {
 	sqlDB.SetMaxOpenConns(1)
 
 	dialect := database.Dialector.Name()
-	candidateManifest, err := dbmigrations.BuildManifest(dialect)
+	candidateManifest, err := dbmigrations.BuildManifestForSchema(dialect, requestedSchema)
 	if err != nil {
 		return handleStartupFailure(upd, basePath, sqlDB, dialect, dbmigrations.Manifest{}, currentBuild, err)
 	}
@@ -163,7 +190,7 @@ func run() error {
 	if err := upd.MarkMigrating(); err != nil {
 		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
-	if err := dbmigrations.Reconcile(context.Background(), sqlDB, dialect, Version, basePath, candidateManifest); err != nil {
+	if err := dbmigrations.ReconcileWithSchema(context.Background(), sqlDB, dialect, Version, basePath, candidateManifest, requestedSchema); err != nil {
 		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
 
@@ -343,6 +370,17 @@ func run() error {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	// Supervisor and deployment probes use these unauthenticated, side-effect
+	// free endpoints. Reaching this router means migrations and startup wiring
+	// completed; /api remains the authenticated application surface.
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -463,6 +501,11 @@ func run() error {
 			_ = listener.Close()
 			return
 		}
+		if os.Getenv("HEADCOUNT1_PREFLIGHT_ONLY") == "1" {
+			_ = listener.Close()
+			serverErr <- updater.ErrPreflightPassed
+			return
+		}
 		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
 			serverErr <- fmt.Errorf("server error: %w", err)
 		}
@@ -471,6 +514,9 @@ func run() error {
 	select {
 	case <-ctx.Done():
 	case err := <-serverErr:
+		if errors.Is(err, updater.ErrPreflightPassed) {
+			return err
+		}
 		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
 	log.Println("Shutting down…")
@@ -534,6 +580,10 @@ func run() error {
 	// replaces this process image in place, keeping the same PID, so there is
 	// never a window with two servers competing for the port.
 	if execPath, pending := upd.RestartPending(); pending {
+		if os.Getenv("HEADCOUNT1_SUPERVISOR_CHILD") == "1" {
+			log.Printf("Deploy: requesting stable supervisor hand-off to %s", execPath)
+			return updater.ErrUpdateRequested
+		}
 		log.Printf("Deploy: exec into new binary %s", execPath)
 		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
 			// Exec only returns on failure; the old image is still running but
@@ -562,6 +612,9 @@ func handleStartupFailure(upd *updater.Updater, basePath string, database *sql.D
 		}
 	}
 	if previous == "" {
+		return startupErr
+	}
+	if os.Getenv("HEADCOUNT1_SUPERVISOR_CANDIDATE") == "1" {
 		return startupErr
 	}
 	log.Printf("Deploy candidate failed; returning to previous binary %s", previous)
