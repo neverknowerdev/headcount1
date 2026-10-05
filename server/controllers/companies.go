@@ -63,7 +63,8 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ShortName   string  `json:"short_name"`
+		Name        *string `json:"name"`
+		ShortName   *string `json:"short_name"`
 		Description *string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -74,7 +75,12 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 	comp := api.companyFromCtx(r) // loaded + authorized by LoadCompany
 
 	oldShortName := comp.ShortName
-	comp.ShortName = req.ShortName
+	if req.Name != nil {
+		comp.Name = *req.Name
+	}
+	if req.ShortName != nil {
+		comp.ShortName = *req.ShortName
+	}
 	if req.Description != nil {
 		comp.Description = *req.Description
 	}
@@ -84,11 +90,11 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Rename the company-scoped directories on disk if the shortname changed.
-	if oldShortName != req.ShortName {
+	if req.ShortName != nil && oldShortName != *req.ShortName {
 		settings := LoadSettings()
 		paths := filesystem.NewPaths(settings.BasePath)
 		oldDirs := paths.CompanyDirs(oldShortName)
-		newDirs := paths.CompanyDirs(req.ShortName)
+		newDirs := paths.CompanyDirs(*req.ShortName)
 		for i := range oldDirs {
 			if _, err := os.Stat(oldDirs[i]); err != nil {
 				continue
