@@ -1,0 +1,416 @@
+package migrations
+
+import (
+	"context"
+	"database/sql"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io/fs"
+	"os"
+	"path"
+	"sort"
+	"strings"
+	"time"
+
+	"ariga.io/atlas/sql/migrate"
+	"ariga.io/atlas/sql/postgres"
+	"ariga.io/atlas/sql/schema"
+	"ariga.io/atlas/sql/sqlite"
+	"gorm.io/gorm"
+)
+
+const revisionTable = "atlas_schema_revisions"
+
+// Apply applies all pending embedded migrations for the database dialect.
+// Databases without an Atlas revision history are expected to be new and are
+// initialized by applying the complete migration set from an empty schema.
+func Apply(ctx context.Context, database *sql.DB, dialect, operatorVersion string) error {
+	return ApplyWithSchema(ctx, database, dialect, operatorVersion, "")
+}
+
+// ApplyWithSchema applies migrations using an optional PostgreSQL schema. An
+// empty schema preserves the historical public-schema behavior. The explicit
+// schema hook lets a candidate binary preflight against an isolated shadow
+// schema without touching live application tables.
+func ApplyWithSchema(ctx context.Context, database *sql.DB, dialect, operatorVersion, schemaName string) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+
+	drv, err := openDriver(database, dialect)
+	if err != nil {
+		return err
+	}
+	store := &revisionStore{db: database, dialect: dialect, schema: schemaName}
+	if err := store.ensure(ctx); err != nil {
+		return fmt.Errorf("initialize Atlas revision store: %w", err)
+	}
+	dir, err := embeddedDir(dialect, schemaName)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+
+	// The revision table is created before Atlas inspects the database, so a
+	// brand-new database is technically non-empty to Atlas.
+	options := []migrate.ExecutorOption{
+		migrate.WithOperatorVersion(operatorVersion),
+		migrate.WithAllowDirty(true),
+	}
+
+	executor, err := migrate.NewExecutor(drv, dir, store, options...)
+	if err != nil {
+		return fmt.Errorf("create Atlas migration executor: %w", err)
+	}
+	pending, err := executor.Pending(ctx)
+	if errors.Is(err, migrate.ErrNoPendingFiles) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect pending migrations: %w", err)
+	}
+	for _, file := range pending {
+		if err := executeFileTransaction(ctx, database, dialect, schemaName, dir, file, options...); err != nil {
+			return wrapMigrationError("up", err)
+		}
+	}
+	return nil
+}
+
+// Reconcile applies the candidate migration branch. A normal forward
+// deployment simply delegates to Atlas. If the database history diverged from
+// the candidate, it first rolls back to the common prefix using the candidate
+// or last-known-good manifest, then applies the candidate branch.
+func Reconcile(ctx context.Context, database *sql.DB, dialect, operatorVersion, basePath string, candidate Manifest) error {
+	return ReconcileWithSchema(ctx, database, dialect, operatorVersion, basePath, candidate, "")
+}
+
+// ReconcileWithSchema is the schema-aware form of Reconcile. For PostgreSQL,
+// schemaName is validated and used for both Atlas history and SQL references.
+func ReconcileWithSchema(ctx context.Context, database *sql.DB, dialect, operatorVersion, basePath string, candidate Manifest, schemaName string) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+	store := &revisionStore{db: database, dialect: dialect, schema: schemaName}
+	if err := store.ensure(ctx); err != nil {
+		return fmt.Errorf("initialize Atlas revision store: %w", err)
+	}
+	applied, err := readAppliedWithSchema(ctx, database, dialect, schemaName)
+	if err != nil {
+		return fmt.Errorf("read applied migrations: %w", err)
+	}
+	previous, err := LoadManifestForSchema(basePath, dialect, schemaName)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	plan, err := PlanReconciliation(applied, candidate, previous)
+	if err != nil {
+		return err
+	}
+	if len(plan.Rollback) > 0 {
+		if err := ApplyDown(ctx, database, dialect, plan.Rollback); err != nil {
+			return err
+		}
+	}
+	if err := ApplyWithSchema(ctx, database, dialect, operatorVersion, schemaName); err != nil {
+		return err
+	}
+	if err := SaveManifest(basePath, candidate); err != nil {
+		return fmt.Errorf("save migration manifest: %w", err)
+	}
+	return nil
+}
+
+func wrapMigrationError(phase string, err error) error {
+	var stmtErr *migrate.StmtExecError
+	if errors.As(err, &stmtErr) {
+		statementPosition := 0
+		if stmtErr.Stmt != nil {
+			statementPosition = stmtErr.Stmt.Pos
+		}
+		statement := ""
+		if stmtErr.Stmt != nil {
+			statement = stmtErr.Stmt.Text
+		}
+		return &MigrationError{Phase: phase, Version: stmtErr.Version, StatementPosition: statementPosition, Statement: statement, Cause: stmtErr.Err}
+	}
+	return fmt.Errorf("apply Atlas migrations: %w", err)
+}
+
+// ApplyGORM adapts a GORM database handle to the embedded migration runner.
+// It exists for callers that already use GORM for queries; schema creation is
+// still performed exclusively by Atlas migrations.
+func ApplyGORM(database *gorm.DB, dialect, operatorVersion string) error {
+	if database == nil {
+		return errors.New("database is nil")
+	}
+	sqlDB, err := database.DB()
+	if err != nil {
+		return fmt.Errorf("get SQL database: %w", err)
+	}
+	return Apply(context.Background(), sqlDB, dialect, operatorVersion)
+}
+
+// executeFileTransaction makes the transaction boundary explicit instead of
+// relying on the behavior of the pinned Atlas executor. The revision row and
+// every statement in one migration are committed together, so a failed
+// migration cannot leave a candidate schema half-applied on PostgreSQL or
+// SQLite when the dialect supports transactional DDL.
+func executeFileTransaction(ctx context.Context, database *sql.DB, dialect, schemaName string, dir *migrate.MemDir, file migrate.File, options ...migrate.ExecutorOption) error {
+	tx, err := database.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	txDriver, err := openDriver(tx, dialect)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	txStore := &revisionStore{db: tx, dialect: dialect, schema: schemaName}
+	txExecutor, err := migrate.NewExecutor(txDriver, dir, txStore, options...)
+	if err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := txExecutor.Execute(ctx, file); err != nil {
+		_ = tx.Rollback()
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return nil
+}
+
+func openDriver(database schema.ExecQuerier, dialect string) (migrate.Driver, error) {
+	switch dialect {
+	case "postgres":
+		driver, err := postgres.Open(database)
+		if err != nil {
+			return nil, fmt.Errorf("open Atlas PostgreSQL driver: %w", err)
+		}
+		return driver, nil
+	case "sqlite":
+		driver, err := sqlite.Open(database)
+		if err != nil {
+			return nil, fmt.Errorf("open Atlas SQLite driver: %w", err)
+		}
+		return driver, nil
+	default:
+		return nil, fmt.Errorf("unsupported database dialect %q", dialect)
+	}
+}
+
+func embeddedDir(dialect string, schemaName ...string) (*migrate.MemDir, error) {
+	schema := ""
+	if len(schemaName) > 0 {
+		schema = schemaName[0]
+	}
+	entries, err := fs.ReadDir(Files, dialect)
+	if err != nil {
+		return nil, fmt.Errorf("read embedded %s migrations: %w", dialect, err)
+	}
+	var names []string
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".up.sql") {
+			names = append(names, entry.Name())
+		}
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return nil, fmt.Errorf("no embedded %s migrations found", dialect)
+	}
+
+	dir := migrate.OpenMemDir(fmt.Sprintf("headcount1-%s-%d", dialect, time.Now().UnixNano()))
+	var files []migrate.File
+	for _, name := range names {
+		contents, err := fs.ReadFile(Files, path.Join(dialect, name))
+		if err != nil {
+			dir.Close()
+			return nil, fmt.Errorf("read embedded migration %s: %w", name, err)
+		}
+		contents, err = rewriteSchema(contents, dialect, schema)
+		if err != nil {
+			dir.Close()
+			return nil, fmt.Errorf("rewrite migration %s: %w", name, err)
+		}
+		atlasName := strings.TrimSuffix(name, ".up.sql") + ".sql"
+		files = append(files, migrate.NewLocalFile(atlasName, contents))
+	}
+	if err := dir.CopyFiles(files); err != nil {
+		dir.Close()
+		return nil, fmt.Errorf("prepare embedded migrations: %w", err)
+	}
+	return dir, nil
+}
+
+type revisionStore struct {
+	db      revisionDB
+	dialect string
+	schema  string
+}
+
+type revisionDB interface {
+	ExecContext(context.Context, string, ...any) (sql.Result, error)
+	QueryContext(context.Context, string, ...any) (*sql.Rows, error)
+	QueryRowContext(context.Context, string, ...any) *sql.Row
+}
+
+func (s *revisionStore) Ident() *migrate.TableIdent {
+	if s.dialect == "postgres" {
+		schema := s.schema
+		if schema == "" {
+			schema = "public"
+		}
+		return &migrate.TableIdent{Name: revisionTable, Schema: schema}
+	}
+	return &migrate.TableIdent{Name: revisionTable}
+}
+
+func (s *revisionStore) ensure(ctx context.Context) error {
+	if s.dialect == "postgres" {
+		if s.schema == "" {
+			s.schema = "public"
+		}
+		if !validSchemaName(s.schema) {
+			return fmt.Errorf("invalid PostgreSQL schema %q", s.schema)
+		}
+		if _, err := s.db.ExecContext(ctx, `CREATE SCHEMA IF NOT EXISTS `+quoteIdent(s.schema)); err != nil {
+			return err
+		}
+	}
+	_, err := s.db.ExecContext(ctx, `CREATE TABLE IF NOT EXISTS `+s.tableName()+` (
+  version TEXT PRIMARY KEY,
+  description TEXT NOT NULL,
+  type INTEGER NOT NULL DEFAULT 2,
+  applied INTEGER NOT NULL DEFAULT 0,
+  total INTEGER NOT NULL DEFAULT 0,
+  executed_at TIMESTAMP NOT NULL,
+  execution_time BIGINT NOT NULL DEFAULT 0,
+  error TEXT,
+  error_stmt TEXT,
+  hash TEXT NOT NULL,
+  partial_hashes TEXT,
+  operator_version TEXT NOT NULL DEFAULT ''
+)`)
+	return err
+}
+
+func (s *revisionStore) ReadRevisions(ctx context.Context) ([]*migrate.Revision, error) {
+	rows, err := s.db.QueryContext(ctx, `SELECT version, description, type, applied, total, executed_at, execution_time, error, error_stmt, hash, partial_hashes, operator_version FROM `+s.tableName()+` ORDER BY version`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var revisions []*migrate.Revision
+	for rows.Next() {
+		revision, err := scanRevision(rows)
+		if err != nil {
+			return nil, err
+		}
+		revisions = append(revisions, revision)
+	}
+	return revisions, rows.Err()
+}
+
+func (s *revisionStore) ReadRevision(ctx context.Context, version string) (*migrate.Revision, error) {
+	row := s.db.QueryRowContext(ctx, `SELECT version, description, type, applied, total, executed_at, execution_time, error, error_stmt, hash, partial_hashes, operator_version FROM `+s.tableName()+` WHERE version = `+s.placeholder(1), version)
+	revision, err := scanRevision(row)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, migrate.ErrRevisionNotExist
+	}
+	return revision, err
+}
+
+func (s *revisionStore) WriteRevision(ctx context.Context, revision *migrate.Revision) error {
+	partialHashes, err := json.Marshal(revision.PartialHashes)
+	if err != nil {
+		return err
+	}
+	if revision.PartialHashes == nil {
+		partialHashes = nil
+	}
+	args := []any{
+		revision.Version, revision.Description, revision.Type, revision.Applied, revision.Total,
+		revision.ExecutedAt, revision.ExecutionTime, nullableString(revision.Error), nullableString(revision.ErrorStmt),
+		revision.Hash, nullableBytes(partialHashes), revision.OperatorVersion,
+	}
+	query := `INSERT INTO ` + s.tableName() + ` (version, description, type, applied, total, executed_at, execution_time, error, error_stmt, hash, partial_hashes, operator_version) VALUES (` + s.placeholders(12) + `) ON CONFLICT(version) DO UPDATE SET description = excluded.description, type = excluded.type, applied = excluded.applied, total = excluded.total, executed_at = excluded.executed_at, execution_time = excluded.execution_time, error = excluded.error, error_stmt = excluded.error_stmt, hash = excluded.hash, partial_hashes = excluded.partial_hashes, operator_version = excluded.operator_version`
+	_, err = s.db.ExecContext(ctx, query, args...)
+	return err
+}
+
+func (s *revisionStore) DeleteRevision(ctx context.Context, version string) error {
+	_, err := s.db.ExecContext(ctx, `DELETE FROM `+s.tableName()+` WHERE version = `+s.placeholder(1), version)
+	return err
+}
+
+type scanner interface{ Scan(...any) error }
+
+func scanRevision(row scanner) (*migrate.Revision, error) {
+	var (
+		revision                   migrate.Revision
+		typ                        int
+		execTime                   int64
+		executed                   time.Time
+		errText, stmtText, partial sql.NullString
+	)
+	if err := row.Scan(&revision.Version, &revision.Description, &typ, &revision.Applied, &revision.Total, &executed, &execTime, &errText, &stmtText, &revision.Hash, &partial, &revision.OperatorVersion); err != nil {
+		return nil, err
+	}
+	revision.Type = migrate.RevisionType(typ)
+	revision.ExecutedAt = executed
+	revision.ExecutionTime = time.Duration(execTime)
+	revision.Error = errText.String
+	revision.ErrorStmt = stmtText.String
+	if partial.Valid && partial.String != "" {
+		if err := json.Unmarshal([]byte(partial.String), &revision.PartialHashes); err != nil {
+			return nil, fmt.Errorf("decode partial hashes: %w", err)
+		}
+	}
+	return &revision, nil
+}
+
+func (s *revisionStore) placeholder(n int) string {
+	if s.dialect == "postgres" {
+		return fmt.Sprintf("$%d", n)
+	}
+	return "?"
+}
+
+func (s *revisionStore) placeholders(n int) string {
+	values := make([]string, n)
+	for i := range values {
+		values[i] = s.placeholder(i + 1)
+	}
+	return strings.Join(values, ", ")
+}
+
+func (s *revisionStore) tableName() string {
+	if s.dialect == "postgres" {
+		schema := s.schema
+		if schema == "" {
+			schema = "public"
+		}
+		return quoteIdent(schema) + "." + quoteIdent(revisionTable)
+	}
+	return revisionTable
+}
+
+func nullableString(value string) any {
+	if value == "" {
+		return nil
+	}
+	return value
+}
+
+func nullableBytes(value []byte) any {
+	if len(value) == 0 {
+		return nil
+	}
+	return string(value)
+}
+
+var _ schema.ExecQuerier = (*sql.DB)(nil)

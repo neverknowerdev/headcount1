@@ -4,10 +4,12 @@ import {
   ChevronDown, ChevronRight,
   Bot, User, AlertCircle, Loader2, Code2, FileText,
   FileText as FileIcon, Terminal, Search, ListChecks,
-  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch
+  Wrench, Brain, ChevronUp, MessageSquare, XCircle, GitBranch, Download
 } from 'lucide-react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { normalizeRunLogEntries } from '../utils/runLogParser';
+import { getRunAgentName } from '../utils/runDisplay';
 
 interface TokenUsage {
   prompt?: number;
@@ -31,7 +33,7 @@ export interface RunTokenStats {
 }
 
 interface LogEntry {
-  type: 'info' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
+  type: 'info' | 'system' | 'request' | 'response' | 'tool_call' | 'tool_response' | 'error' | 'session_started' | 'session_ended';
   content: string;
   model?: string;
   status_code?: number;
@@ -45,6 +47,19 @@ interface LogEntry {
   task_id?: number;
   title?: string;
   status?: string;
+}
+
+// A run log is an explicit request/response exchange. Requests are emitted by
+// the agent/client, while responses are emitted by the configured LLM
+// provider. Keeping these identities separate prevents a provider response
+// from being mistaken for another agent action in the transcript.
+const LLM_PROVIDER_LABEL = 'LLM Provider';
+
+function requestActorName(entry: LogEntry, fallback?: string): string {
+  // The run response is the authoritative control-plane identity. The
+  // per-entry value is retained as a compatibility fallback for old logs or
+  // embedded child transcripts that predate the run-level identity field.
+  return fallback?.trim() || entry.agent_name?.trim() || 'Agent';
 }
 
 interface LogMessage {
@@ -66,6 +81,8 @@ interface RunLogViewerProps {
   tokenStats?: RunTokenStats | null;
   compact?: boolean;
   agentStats?: AgentTokenStats[];
+  runId?: number;
+  agentName?: string;
 }
 
 // ─── Hierarchical grouping ────────────────────────────────────────────────────
@@ -143,6 +160,11 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
         items.push(outItem);
         break;
       }
+      case 'system': {
+        lastOut = null;
+        items.push({ kind: 'system', key: key++, content: msg.entry.content, ts: msg.entry.ts });
+        break;
+      }
       case 'tool_call': {
         if (lastOut) lastOut.toolPairs.push({ call: msg, response: null });
         break;
@@ -199,13 +221,47 @@ function groupMessages(messages: LogMessage[]): GroupedItem[] {
 
 // ─── Utility functions ────────────────────────────────────────────────────────
 
-function JsonBlock({ data }: { data: string }) {
+function JsonBlock({ data, label = 'JSON' }: { data: string; label?: string }) {
   let formatted = data;
-  try { formatted = JSON.stringify(JSON.parse(data), null, 2); } catch {}
+  let isJson = false;
+  try {
+    formatted = JSON.stringify(JSON.parse(data), null, 2);
+    isJson = true;
+  } catch {}
+
+  const [copied, setCopied] = useState(false);
+  const copy = async (event: React.MouseEvent) => {
+    event.stopPropagation();
+    try {
+      await navigator.clipboard?.writeText(formatted);
+      setCopied(true);
+      window.setTimeout(() => setCopied(false), 1500);
+    } catch {
+      // Clipboard access is optional (for example in a restricted browser
+      // context); the payload remains fully readable without it.
+    }
+  };
+
   return (
-    <pre className="p-2 text-xs font-mono text-gray-800 bg-gray-50 rounded overflow-x-auto whitespace-pre-wrap max-h-96 overflow-y-auto border border-gray-200">
-      {formatted}
-    </pre>
+    <div className="rounded-lg overflow-hidden border border-slate-700 bg-slate-950 shadow-sm" data-testid="json-block">
+      <div className="flex items-center justify-between gap-2 px-3 py-1.5 bg-slate-900 text-[11px] text-slate-300">
+        <span className="font-semibold tracking-wide">{label}</span>
+        <div className="flex items-center gap-2">
+          <span className="text-slate-500">{isJson ? 'formatted' : 'text payload'}</span>
+          <button
+            type="button"
+            onClick={copy}
+            className="px-1.5 py-0.5 rounded border border-slate-600 hover:bg-slate-800 text-slate-200"
+            aria-label={`Copy ${label}`}
+          >
+            {copied ? 'Copied' : 'Copy'}
+          </button>
+        </div>
+      </div>
+      <pre className="p-3 text-xs leading-5 font-mono text-slate-100 bg-slate-950 overflow-x-auto whitespace-pre-wrap break-words max-h-96 overflow-y-auto">
+        {formatted}
+      </pre>
+    </div>
   );
 }
 
@@ -243,6 +299,12 @@ function renderAsText(content: string): string {
         .map((b: any) => b.text || '')
         .join('\n');
       if (texts) return texts;
+    }
+    if (parsed && typeof parsed === 'object') {
+      const entries = Object.entries(parsed)
+        .filter(([, value]) => value !== undefined && value !== null && value !== '')
+        .map(([key, value]) => `${key}: ${typeof value === 'string' ? value : JSON.stringify(value)}`);
+      if (entries.length > 0) return entries.join('\n');
     }
   } catch {}
   return content;
@@ -328,6 +390,11 @@ function getAgentMessage(content: string): {
 } {
   try {
     const parsed = JSON.parse(content);
+    if (parsed.role === 'assistant') {
+      const text = stringifyMessageContent(parsed.content);
+      const toolCalls = Array.isArray(parsed.tool_calls) ? parsed.tool_calls : [];
+      return { text: text || null, reasoning: parsed.reasoning || null, toolCalls, tokens: parsed.tokens || null };
+    }
     if (parsed.parts && Array.isArray(parsed.parts)) {
       const textParts = parsed.parts.filter((p: any) => p.type === 'text' && p.text).map((p: any) => p.text);
       const toolCalls = parsed.parts.filter((p: any) => p.type === 'tool_call' || p.tool_call).map((p: any) => p.tool_call || p);
@@ -342,7 +409,24 @@ function getAgentMessage(content: string): {
         return { text: textParts.join('\n\n') || null, reasoning: null, toolCalls, tokens: null };
       }
     }
-    if (parsed.reasoning || parsed.content || parsed.tool_calls || parsed.tokens) {
+
+    // Proxy logs retain the original provider response in `raw`. Providers
+    // that return tool calls there (including ask_human) must still be
+    // rendered as tool calls rather than as an opaque JSON block.
+    if (typeof parsed.raw === 'string') {
+      try {
+        const rawParsed = JSON.parse(parsed.raw);
+        if (rawParsed.choices && Array.isArray(rawParsed.choices)) {
+          const textParts = rawParsed.choices.map((c: any) => c.message?.content || c.delta?.content || c.text || '').filter(Boolean);
+          const toolCalls = rawParsed.choices.flatMap((c: any) => c.message?.tool_calls || c.delta?.tool_calls || []);
+          if (textParts.length > 0 || toolCalls.length > 0) {
+            return { text: textParts.join('\n\n') || null, reasoning: parsed.reasoning || null, toolCalls, tokens: parsed.tokens || null };
+          }
+        }
+      } catch {}
+    }
+
+    if (parsed.reasoning || parsed.content || parsed.tool_calls || parsed.tokens || parsed.raw) {
       const tokens: TokenUsage = parsed.tokens || null;
       let text = parsed.content || null;
       if (!text && typeof parsed.raw === 'string') {
@@ -381,6 +465,7 @@ function getToolIcon(toolName: string): { Icon: any; color: string; bg: string }
     case 'grep':
     case 'rg':     return { Icon: Search,      color: 'text-purple-600', bg: 'bg-purple-100' };
     case 'update_task_status': return { Icon: ListChecks, color: 'text-green-700', bg: 'bg-green-100' };
+    case 'ask_human': return { Icon: MessageSquare, color: 'text-violet-600', bg: 'bg-violet-100' };
     case 'todowrite': return { Icon: ListChecks, color: 'text-blue-600', bg: 'bg-blue-100' };
     default:       return { Icon: Wrench,      color: 'text-amber-600',  bg: 'bg-amber-100' };
   }
@@ -393,16 +478,62 @@ function getToolCallPreview(entry: LogEntry): string {
     if (args.command) return String(args.command);
     if (args.pattern) return String(args.pattern);
     if (args.status) return `status: ${args.status}`;
+    if (args.question) return String(args.question);
+    if (args.filename) return String(args.filename);
+    if (args.title) return String(args.title);
+    if (args.agent_name) return String(args.agent_name);
+    if (args.session_id) return `session #${args.session_id}`;
+    if (args.recipient) return String(args.recipient);
+    if (args.message) return String(args.message);
+    if (args.reason) return String(args.reason);
   } catch {}
   return entry.tool_name || 'tool call';
 }
 
+function getArgsPreview(args: any): string {
+  if (!args || typeof args !== 'object') return '';
+  return String(
+    args.filePath || args.command || args.pattern || args.status || args.question ||
+    args.filename || args.title || args.agent_name ||
+    (args.session_id ? `session #${args.session_id}` : '') || args.recipient ||
+    args.message || args.reason || ''
+  );
+}
+
+function ToolArguments({ data }: { data: string }) {
+  let parsed: any;
+  try { parsed = JSON.parse(data); } catch { parsed = null; }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    return <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100">{data}</pre>;
+  }
+  const entries = Object.entries(parsed);
+  if (entries.length === 0) return <span className="text-xs text-gray-500">No parameters</span>;
+  return (
+    <dl className="grid grid-cols-[max-content_1fr] gap-x-3 gap-y-1 text-xs bg-amber-50/50 rounded p-2 border border-amber-100">
+      {entries.map(([key, value]) => (
+        <React.Fragment key={key}>
+          <dt className="font-mono font-semibold text-amber-700">{key}</dt>
+          <dd className="text-gray-700 whitespace-pre-wrap break-words min-w-0">{typeof value === 'string' ? value : JSON.stringify(value, null, 2)}</dd>
+        </React.Fragment>
+      ))}
+    </dl>
+  );
+}
+
 // ─── SystemRow: system prompt ─────────────────────────────────────────────────
+
+function payloadPreview(content: string): string {
+  try {
+    const parsed = JSON.parse(content);
+    if (typeof parsed?.content === 'string') return parsed.content;
+  } catch {}
+  return content;
+}
 
 function SystemRow({ content, ts }: { content: string; ts?: string }) {
   const [expanded, setExpanded] = useState(false);
   const time = formatTime(ts);
-  const preview = content.split('\n').find(l => l.trim()) || '';
+  const preview = payloadPreview(content).split('\n').find(l => l.trim()) || '';
   const previewShort = preview.length > 80 ? preview.slice(0, 80) + '…' : preview;
 
   return (
@@ -421,9 +552,7 @@ function SystemRow({ content, ts }: { content: string; ts?: string }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 bg-purple-50/10">
-          <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words font-mono bg-white border border-purple-100 rounded-lg p-3 max-h-80 overflow-y-auto">
-            {content}
-          </pre>
+          <div className="pl-7"><JsonBlock data={content} label="System payload" /></div>
         </div>
       )}
     </div>
@@ -432,7 +561,7 @@ function SystemRow({ content, ts }: { content: string; ts?: string }) {
 
 // ─── InitUserRow: user message from initial context (task or human comment) ───
 
-function InitUserRow({ content, ts, rawMode }: { content: string; ts?: string; rawMode: boolean }) {
+function InitUserRow({ content, ts, rawMode, agentName }: { content: string; ts?: string; rawMode: boolean; agentName?: string }) {
   const [expanded, setExpanded] = useState(false);
   const time = formatTime(ts);
   const preview = content.split('\n').find(l => l.trim()) || '';
@@ -448,7 +577,7 @@ function InitUserRow({ content, ts, rawMode }: { content: string; ts?: string; r
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <User size={13} className="text-blue-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
+        <span className="shrink-0 text-xs font-semibold text-blue-600">{agentName || 'Agent'}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-400 italic">{previewShort}</span>
       </button>
@@ -461,7 +590,7 @@ function InitUserRow({ content, ts, rawMode }: { content: string; ts?: string; r
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Request payload" /></div>
           )}
         </div>
       )}
@@ -500,7 +629,7 @@ function InitHumanRow({ content, ts, rawMode }: { content: string; ts?: string; 
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Human message" /></div>
           )}
         </div>
       )}
@@ -526,7 +655,7 @@ function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: stri
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <Bot size={13} className="text-indigo-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-indigo-600">AI Model</span>
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">{LLM_PROVIDER_LABEL}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-600">{previewShort}</span>
       </button>
@@ -539,7 +668,7 @@ function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: stri
               </div>
             </div>
           ) : (
-            <pre className="pl-7 text-xs text-gray-700 whitespace-pre-wrap break-words">{content}</pre>
+            <div className="pl-7"><JsonBlock data={content} label="Provider message" /></div>
           )}
         </div>
       )}
@@ -549,7 +678,7 @@ function InitAssistantRow({ content, ts, rawMode }: { content: string; ts?: stri
 
 // ─── InRow: collapsed request (IN) ───────────────────────────────────────────
 
-function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
+function InRow({ msg, rawMode, agentName }: { msg: LogMessage; rawMode: boolean; agentName?: string }) {
   const [expanded, setExpanded] = useState(false);
   const entry = msg.entry;
   const time = formatTime(entry.ts);
@@ -574,7 +703,7 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <User size={13} className="text-blue-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-blue-600">Agent</span>
+        <span className="shrink-0 text-xs font-semibold text-blue-600">{requestActorName(entry, agentName)}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-400 italic" title={previewText || ''}>
           {previewText || ''}
@@ -639,7 +768,7 @@ function InRow({ msg, rawMode }: { msg: LogMessage; rawMode: boolean }) {
               </div>
               <div className="divide-y divide-green-50">
                 {parsed.toolResults.map((tr, i) => (
-                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} />
+                  <ToolResultRow key={i} name={tr.name} content={tr.content} preview={tr.preview} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -692,7 +821,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
           {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         </span>
         <Bot size={13} className="text-indigo-500 shrink-0" />
-        <span className="shrink-0 text-xs font-semibold text-indigo-600">AI Model</span>
+        <span className="shrink-0 text-xs font-semibold text-indigo-600">{LLM_PROVIDER_LABEL}</span>
         {time && <span className="shrink-0 text-xs text-gray-400 font-mono">{time}</span>}
         <span className="flex-1 truncate text-xs text-gray-600" title={previewText}>
           {previewText}
@@ -764,7 +893,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
               </div>
               <div className="divide-y divide-amber-50">
                 {toolPairs.map((pair, i) => (
-                  <ToolPairRow key={i} pair={pair} />
+                  <ToolPairRow key={i} pair={pair} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -778,7 +907,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
               </div>
               <div className="divide-y divide-amber-50">
                 {parsedToolCalls.map((tc: any, i: number) => (
-                  <ToolCallRow key={i} toolCall={tc} />
+                  <ToolCallRow key={i} toolCall={tc} rawMode={rawMode} />
                 ))}
               </div>
             </div>
@@ -796,7 +925,7 @@ function OutRow({ msg, toolPairs, rawMode }: { msg: LogMessage; toolPairs: ToolP
 
 // ─── ToolPairRow: call + response nested inside OutRow ────────────────────────
 
-function ToolPairRow({ pair }: { pair: ToolPair }) {
+function ToolPairRow({ pair, rawMode }: { pair: ToolPair; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const call = pair.call;
   const resp = pair.response;
@@ -804,7 +933,7 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
   const { Icon, color, bg } = getToolIcon(name);
   const callPreview = call ? getToolCallPreview(call.entry) : '';
   const respFirstLine = resp
-    ? (resp.entry.content.split('\n').find(l => l.trim()) || '').slice(0, 60)
+    ? (renderAsText(resp.entry.content).split('\n').find(l => l.trim()) || '').slice(0, 80)
     : '';
   const respTokens = resp?.entry.output_tokens || 0;
 
@@ -829,7 +958,7 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
           {call && (
             <div>
               <div className="text-xs text-amber-600 font-medium mb-0.5 pl-1">Call</div>
-              <JsonBlock data={call.entry.content} />
+              {rawMode ? <JsonBlock data={call.entry.content} label="Tool call arguments" /> : <ToolArguments data={call.entry.content} />}
             </div>
           )}
           {resp && (
@@ -837,9 +966,13 @@ function ToolPairRow({ pair }: { pair: ToolPair }) {
               <div className="text-xs text-green-600 font-medium mb-0.5 pl-1">
                 Response{respTokens > 0 ? ` (${formatTokens(respTokens)} tok)` : ''}
               </div>
-              <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
-                {renderAsText(resp.entry.content)}
-              </pre>
+              {rawMode ? (
+                <JsonBlock data={resp.entry.content} label="Tool response" />
+              ) : (
+                <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+                  {renderAsText(resp.entry.content)}
+                </pre>
+              )}
             </div>
           )}
         </div>
@@ -899,9 +1032,7 @@ function ErrorRow({ msg }: { msg: LogMessage }) {
       </button>
       {expanded && (
         <div className="px-3 pb-3 pt-1 pl-10">
-          <pre className="text-xs text-red-800 whitespace-pre-wrap break-words bg-red-100/50 rounded p-2 border border-red-200">
-            {entry.content}
-          </pre>
+          <JsonBlock data={entry.content} label="Error payload" />
         </div>
       )}
     </div>
@@ -914,7 +1045,7 @@ function InfoRow({ msg }: { msg: LogMessage }) {
   return (
     <div className="border-b border-gray-50 px-3 py-1 flex items-center gap-2">
       <span className="text-gray-300 text-xs shrink-0">•</span>
-      <span className="text-xs text-gray-500 truncate">{msg.entry.content}</span>
+      <span className="text-xs text-gray-500 min-w-0 flex-1 whitespace-pre-wrap break-words" title={msg.entry.content}>{msg.entry.content}</span>
       {msg.entry.ts && (
         <span className="text-xs text-gray-300 font-mono shrink-0 ml-auto">{formatTime(msg.entry.ts)}</span>
       )}
@@ -924,7 +1055,7 @@ function InfoRow({ msg }: { msg: LogMessage }) {
 
 // ─── ToolResultRow (inside InRow expanded) ────────────────────────────────────
 
-function ToolResultRow({ name, content, preview }: { name: string; content: string; preview: string }) {
+function ToolResultRow({ name, content, preview, rawMode }: { name: string; content: string; preview: string; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const { Icon, color, bg } = getToolIcon(name);
   return (
@@ -942,9 +1073,13 @@ function ToolResultRow({ name, content, preview }: { name: string; content: stri
       </button>
       {expanded && (
         <div className="px-3 pb-2">
-          <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
-            {renderAsText(content)}
-          </pre>
+          {rawMode ? (
+            <JsonBlock data={content} label={`${name} result`} />
+          ) : (
+            <pre className="text-xs text-gray-700 bg-green-50/50 rounded p-2 whitespace-pre-wrap break-words border border-green-100 max-h-60 overflow-y-auto">
+              {renderAsText(content)}
+            </pre>
+          )}
         </div>
       )}
     </div>
@@ -953,11 +1088,12 @@ function ToolResultRow({ name, content, preview }: { name: string; content: stri
 
 // ─── ToolCallRow (inside OutRow expanded, parsed from response content) ───────
 
-function ToolCallRow({ toolCall }: { toolCall: any }) {
+function ToolCallRow({ toolCall, rawMode }: { toolCall: any; rawMode: boolean }) {
   const [expanded, setExpanded] = useState(false);
   const name = toolCall.name || toolCall.function?.name || 'unknown';
   const { Icon, color, bg } = getToolIcon(name);
   const args = toolCall.arguments || toolCall.function?.arguments || {};
+  const argsObject = typeof args === 'string' ? (() => { try { return JSON.parse(args); } catch { return {}; } })() : args;
   const argsStr = typeof args === 'string' ? args : JSON.stringify(args, null, 2);
 
   return (
@@ -972,14 +1108,12 @@ function ToolCallRow({ toolCall }: { toolCall: any }) {
         </div>
         <span className={`font-mono font-medium ${color}`}>{name}</span>
         <span className="text-gray-500 truncate flex-1">
-          {(args as any).filePath || (args as any).command || (args as any).pattern || (args as any).status || ''}
+            {getArgsPreview(argsObject)}
         </span>
       </button>
       {expanded && (
         <div className="px-3 pb-2">
-          <pre className="text-xs font-mono text-gray-700 bg-amber-50/50 rounded p-2 whitespace-pre-wrap break-words border border-amber-100">
-            {argsStr}
-          </pre>
+          {rawMode ? <JsonBlock data={argsStr} label="Tool call arguments" /> : <ToolArguments data={argsStr} />}
         </div>
       )}
     </div>
@@ -995,7 +1129,7 @@ interface SessionMeta {
   title?: string;
 }
 
-function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
+function SessionRow({ msg, ended, agentName: parentAgentName }: { msg: LogMessage; ended?: LogMessage; agentName?: string }) {
   const [expanded, setExpanded] = useState(false);
   const [childRun, setChildRun] = useState<any>(null);
   const [loading, setLoading] = useState(false);
@@ -1074,6 +1208,8 @@ function SessionRow({ msg, ended }: { msg: LogMessage; ended?: LogMessage }) {
                 status={childRun.status}
                 tokenStats={childRun.token_stats}
                 autoScroll={false}
+                runId={runId}
+                agentName={getRunAgentName(childRun) || agentName || parentAgentName}
               />
             </div>
           )}
@@ -1252,13 +1388,17 @@ export function TokenStatsBar({ stats, messages, agentStats }: TokenStatsBarProp
 
 // ─── Main RunLogViewer ────────────────────────────────────────────────────────
 
-export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats }) => {
+export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, autoScroll = true, tokenStats = null, compact = false, agentStats, runId, agentName }) => {
   const containerRef = useRef<HTMLDivElement>(null);
   const bottomRef = useRef<HTMLDivElement>(null);
   const [isAtBottom, setIsAtBottom] = useState(true);
   const [rawMode, setRawMode] = useState(false);
 
-  const grouped = useMemo(() => groupMessages(messages || []), [messages]);
+  const displayMessages = useMemo(
+    () => normalizeRunLogEntries((messages || []).map((message: any) => message?.entry ?? message)) as LogMessage[],
+    [messages],
+  );
+  const grouped = useMemo(() => groupMessages(displayMessages), [displayMessages]);
   const visibleItems = compact ? grouped.slice(-10) : grouped;
 
   const counts = useMemo(() => {
@@ -1279,7 +1419,7 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
     if (autoScroll && isAtBottom && bottomRef.current) {
       bottomRef.current.scrollIntoView({ behavior: 'smooth' });
     }
-  }, [messages, autoScroll, isAtBottom]);
+  }, [displayMessages, autoScroll, isAtBottom]);
 
   const handleScroll = () => {
     if (!containerRef.current) return;
@@ -1300,14 +1440,14 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
         ) : (
           <div>
             {visibleItems.map(item => {
-              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} />;
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={false} agentName={agentName} />;
               if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={false} />;
               if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
-              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={false} agentName={agentName} />;
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
               if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={false} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
-              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} agentName={agentName} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>
@@ -1341,16 +1481,28 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
               {counts.tools > 0 && <span className="px-1.5 py-0.5 bg-amber-50  text-amber-700  rounded">{counts.tools} tools</span>}
             </div>
           )}
-          <TokenStatsBar stats={tokenStats} messages={messages || []} agentStats={agentStats} />
+          <TokenStatsBar stats={tokenStats} messages={displayMessages} agentStats={agentStats} />
         </div>
-        <button
-          onClick={() => setRawMode(!rawMode)}
-          className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors shrink-0"
-          title={rawMode ? 'Switch to formatted view' : 'Switch to raw JSON view'}
-        >
-          {rawMode ? <FileText size={12} /> : <Code2 size={12} />}
-          {rawMode ? 'Formatted' : 'Raw JSON'}
-        </button>
+        <div className="flex items-center gap-2 shrink-0">
+          {runId && (
+            <a
+              href={`/api/runs/${runId}/download`}
+              className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+              title="Download all logs for this run and its nested sessions"
+              data-testid="download-run-log"
+            >
+              <Download size={12} /> Download
+            </a>
+          )}
+          <button
+            onClick={() => setRawMode(!rawMode)}
+            className="flex items-center gap-1.5 text-xs text-gray-500 hover:text-gray-700 px-2 py-1 rounded hover:bg-gray-200 transition-colors"
+            title={rawMode ? 'Switch to formatted view' : 'Switch to raw JSON view'}
+          >
+            {rawMode ? <FileText size={12} /> : <Code2 size={12} />}
+            {rawMode ? 'Formatted' : 'Raw JSON'}
+          </button>
+        </div>
       </div>
 
       {/* Failed with no captured logs */}
@@ -1377,14 +1529,14 @@ export const RunLogViewer: React.FC<RunLogViewerProps> = ({ messages, status, au
         ) : (
           <div>
             {grouped.map(item => {
-              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} />;
+              if (item.kind === 'in')             return <InRow            key={item.key} msg={item.msg} rawMode={rawMode} agentName={agentName} />;
               if (item.kind === 'out')            return <OutRow           key={item.key} msg={item.msg} toolPairs={item.toolPairs} rawMode={rawMode} />;
               if (item.kind === 'system')         return <SystemRow        key={item.key} content={item.content} ts={item.ts} />;
-              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
+              if (item.kind === 'init-user')      return <InitUserRow      key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} agentName={agentName} />;
               if (item.kind === 'init-human')     return <InitHumanRow     key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
               if (item.kind === 'init-assistant') return <InitAssistantRow key={item.key} content={item.content} ts={item.ts} rawMode={rawMode} />;
               if (item.kind === 'error')          return <ErrorRow         key={item.key} msg={item.msg} />;
-              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} />;
+              if (item.kind === 'session')        return <SessionRow       key={item.key} msg={item.msg} ended={item.ended} agentName={agentName} />;
               return <InfoRow key={item.key} msg={item.msg} />;
             })}
           </div>

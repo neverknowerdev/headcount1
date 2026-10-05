@@ -10,10 +10,35 @@ import (
 
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/envstore"
+	"agent-orchestrator/pkg/updater"
 	"agent-orchestrator/pkg/utils"
 
 	"github.com/stretchr/testify/require"
 )
+
+func TestGetDeployAttemptStatusReadsDurableFailure(t *testing.T) {
+	basePath := t.TempDir()
+	t.Setenv("HEADCOUNT1_DEPLOY_API_KEY", "secret")
+	state := updater.DeploymentState{
+		ID: "deployment-1", Phase: updater.DeployPhaseFailed,
+		Target:    updater.VersionInfo{CommitHash: "new"},
+		LastError: "up migration 2026 failed: statement: ALTER TABLE broken",
+	}
+	require.NoError(t, updater.SaveState(basePath, state))
+	api := NewAPI(nil, nil, nil).SetUpdater(updater.NewWithBasePath("old", "main", "old", "today", nil, basePath))
+	req := httptest.NewRequest(http.MethodGet, "/deploy/webhook/status?deployment_id=deployment-1", nil)
+	req.Header.Set("X-Deploy-Key", "secret")
+	rec := httptest.NewRecorder()
+	api.GetDeployAttemptStatus(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "ALTER TABLE broken")
+
+	req = httptest.NewRequest(http.MethodGet, "/deploy/webhook/status?deployment_id=other", nil)
+	req.Header.Set("X-Deploy-Key", "secret")
+	rec = httptest.NewRecorder()
+	api.GetDeployAttemptStatus(rec, req)
+	require.Equal(t, http.StatusNotFound, rec.Code)
+}
 
 func TestDeployDecision(t *testing.T) {
 	releasesProd := appsettings.Settings{DeploySource: appsettings.DeploySourceReleases, AutoDeploy: true}

@@ -32,6 +32,17 @@ func (r *Registry) Register(t Tool) {
 	r.tools[t.Def().Function.Name] = t
 }
 
+// Unregister removes a transient control-plane tool after its activation
+// window.
+func (r *Registry) Unregister(name string) { delete(r.tools, name) }
+
+func (r *Registry) DefsByName(name string) ToolDef {
+	if tool, ok := r.tools[name]; ok {
+		return tool.Def()
+	}
+	return ToolDef{Type: "function", Function: FuncMeta{Name: name}}
+}
+
 // Defs returns the ToolDef slice for inclusion in a ChatRequest.
 func (r *Registry) Defs() []ToolDef {
 	defs := make([]ToolDef, 0, len(r.tools))
@@ -93,6 +104,33 @@ var legacyToolAliases = map[string]string{
 	"exec_command": "bash",
 }
 
+// Exclude returns a new Registry without the named tools. Unlike Filter, an
+// empty exclusion set is still meaningful to callers because it preserves the
+// full registry unchanged.
+func (r *Registry) Exclude(denied []string) *Registry {
+	if len(denied) == 0 {
+		return r
+	}
+	filtered := NewRegistry()
+	for name, tool := range r.tools {
+		if !nameMatchesFilter(name, denied) {
+			filtered.Register(tool)
+		}
+	}
+	return filtered
+}
+
+// Names returns the registered tool names in stable order. It is used for
+// diagnostics and effective-permission logging.
+func (r *Registry) Names() []string {
+	names := make([]string, 0, len(r.tools))
+	for name := range r.tools {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	return names
+}
+
 // nameMatchesFilter reports whether a tool name matches any filter entry.
 // An entry ending in "*" matches by prefix (e.g. "codegraph_*"); legacy
 // aliases (exec_command → bash, …) match the canonical name.
@@ -120,11 +158,7 @@ func (r *Registry) PromptListing() string {
 	if len(r.tools) == 0 {
 		return ""
 	}
-	names := make([]string, 0, len(r.tools))
-	for name := range r.tools {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := r.Names()
 
 	var b strings.Builder
 	b.WriteString("\n\n## Available tools\n\n")

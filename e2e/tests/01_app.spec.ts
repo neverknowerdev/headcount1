@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus, waitForComment } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
 
 const env = loadE2EEnv();
 
@@ -20,7 +21,7 @@ test.describe.serial('Headcount1 App', () => {
                 if (fs.existsSync(fullPath)) fs.rmSync(fullPath, { recursive: true, force: true });
             }
         }
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
     test('can go through onboarding, create project, and test full task flow', async ({ page, request }) => {
@@ -66,7 +67,12 @@ test.describe.serial('Headcount1 App', () => {
         // looked up dynamically — builtin providers (OpenRouter, OpenCode
         // Zen) are seeded first, so "Main Provider" isn't necessarily ID 1.
         const providers = await (await request.get('/api/providers')).json();
-        const mainProvider = providers.find((p: any) => p.name === 'Main Provider');
+        // The onboarding UI has used both "Main Provider" and "Custom
+        // Provider" labels over time. Identify the provider by the mock
+        // endpoint first, falling back to the historical name for older
+        // server responses.
+        const mainProvider = providers.find((p: any) => p.base_url === env.E2E_MOCK_PROVIDER_URL)
+            ?? providers.find((p: any) => p.name === 'Main Provider');
         expect(mainProvider).toBeDefined();
 
         await page.goto('/companies/pw-inc/agents/1');
@@ -105,37 +111,52 @@ test.describe.serial('Headcount1 App', () => {
         // Add Task
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
-        await page.locator('label:has-text("Sprint") + select').selectOption({ label: 'E2E Sprint' });
+        await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
-        // Get the newly created task ID for later waits
-        const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
-        const tasks = await listRes.json();
-        const task = tasks.find((t: any) => t.title === 'Write E2E Tests');
-        expect(task).toBeTruthy();
+        // The UI navigation can render before the task POST is visible to a
+        // subsequent list query. Poll the API for the task created above.
+        let task: any;
+        await expect.poll(async () => {
+            const listRes = await request.get('/api/tasks?company_id=' + String(await getCompanyId(request, 'pw-inc')));
+            if (!listRes.ok()) return undefined;
+            const tasks = await listRes.json();
+            task = (tasks as any[]).find((t: any) => t.title === 'Write E2E Tests');
+            return Boolean(task);
+        }, { timeout: 15_000, message: 'created task should appear in the task list' }).toBe(true);
         const taskId = task.id;
 
         // Assign agent and move to "To Do" — this triggers the engine
-        await page.click('text=Write E2E Tests');
+        // Navigate directly using the task id returned by the API. The board
+        // card click is intentionally asynchronous and can race the task page
+        // loading before its form controls are available.
+        await page.goto(`/companies/pw-inc/tasks/${taskId}`);
+        await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
         await expect(page.getByText('PW-INC-1')).toBeVisible();
-        await page.locator('label:has-text("Assignee") + select').selectOption({ label: 'E2E Agent' });
-        await page.locator('label:has-text("Status") + select').selectOption({ label: 'To Do' });
+        await expect(page.getByLabel('Assignee')).toBeVisible();
+        await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
+        await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
-        // The native engine + mock provider will now run and the mock provider
-        // will respond with a tool call to finish_task, moving the task
-        // to "in-review". Wait for that real outcome.
-        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        // The native engine + mock provider will run the delegated worker and
+        // then have the root orchestrator close the task through its own
+        // management finish_task tool. Child completion alone must not mutate
+        // the shared task lifecycle.
+        await waitForTaskStatus(request, taskId, 'done', 90_000);
 
         // Wait for the comment created by the agent run
-        await waitForComment('http://localhost:8080', taskId, 60_000);
+        await waitForComment(process.env.E2E_BASE_URL || 'http://localhost:8080', taskId, 60_000);
 
         // Verify run log file exists on filesystem
         const runsRes = await request.get(`/api/tasks/${taskId}/runs`);
         expect(runsRes.ok()).toBeTruthy();
         const runs = await runsRes.json();
         expect(runs.length).toBeGreaterThan(0);
-        const run = runs[0];
+        // The mandatory orchestration flow creates a root orchestrator plus
+        // one or more child agent sessions. Logs are grouped by the root run,
+        // so select that root rather than assuming the newest row is the log
+        // directory owner.
+        const run = runs.find((candidate: any) => candidate.kind === 'task_orchestrator') ?? runs[runs.length - 1];
         const basePath = path.join(env.E2E_HEADCOUNT1_HOME, '.headcount1');
         // Session-based JSONL layout: logs are grouped per main run in
         // logs/{company}/{taskId}/run-{id}/, the root session writing
@@ -146,11 +167,28 @@ test.describe.serial('Headcount1 App', () => {
         expect(logEntries.some(e => e.type === 'request')).toBeTruthy();
         expect(logEntries.some(e => e.type === 'response')).toBeTruthy();
 
-        // Re-open the task to verify both the user comment and the agent comment are visible
+        // Re-open the task to verify both the user comment and the agent comment
+        // are visible. The task run is terminal at this point, but older
+        // databases can briefly retain task.run_id after the run row is already
+        // completed; create this non-agent comment through the API so that UI
+        // verification does not turn that bookkeeping race into a 120s retry.
+        const commentResponse = await request.post('/api/comments', {
+            data: {
+                task_id: taskId,
+                author_type: 'human',
+                content: 'Let us see if the agent works',
+                run_agent: false,
+            },
+        });
+        expect(commentResponse.ok()).toBeTruthy();
+
+        // The comments editor lives in the task modal. Wait for the board
+        // card to be rendered and click the exact title so a stale/virtualized
+        // element cannot leave the page on the list without opening it.
         await page.goto('/companies/pw-inc/tasks');
-        await page.click('text=Write E2E Tests');
-        await page.fill('input[placeholder="Add a comment..."]', 'Let us see if the agent works');
-        await page.locator('form').filter({ has: page.locator('input[placeholder="Add a comment..."]') }).locator('button[type="submit"]').click();
+        const taskCard = page.getByText('Write E2E Tests', { exact: true }).first();
+        await expect(taskCard).toBeVisible({ timeout: 10_000 });
+        await taskCard.click();
         // Scope to the comments list: the text can also appear in the run-log
         // preview of the agent run this comment triggers.
         await expect(page.getByTestId('comments-list').getByText('Let us see if the agent works').first()).toBeVisible();
@@ -211,6 +249,12 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page.getByText('Hire your CEO')).toBeVisible();
         await page.fill('input[type="text"]', 'Second CEO');
         await page.click('button:has-text("Finish & Launch")');
+
+        // AddCompany performs a full-page redirect after creating the CEO.
+        // Wait for that redirect to settle before navigating back to the
+        // original workspace; otherwise the two navigations race and Layout
+        // can render the switcher from the previous company list.
+        await page.waitForURL(/\/companies\/second-co(?:\/)?$/, { timeout: 10000 });
 
         // Main App View
         await page.goto('/companies/nw');

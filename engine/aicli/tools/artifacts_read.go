@@ -32,7 +32,7 @@ func (t *ListArtifacts) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "list_artifacts",
+			Name: string(aicli.ToolListArtifacts),
 			Description: "List all artifacts (deliverables) of this task and its subtasks: filename, size, and which run/agent wrote it. " +
 				"Use this to find deliverables produced by other agents before reading them with read_artifact.",
 			Parameters: json.RawMessage(`{"type":"object","properties":{}}`),
@@ -69,7 +69,7 @@ func (t *ReadArtifact) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "read_artifact",
+			Name: string(aicli.ToolReadArtifact),
 			Description: "Read the full content of an artifact (deliverable) of this task tree by filename. " +
 				"Use list_artifacts first to see what exists. This is the ONLY reliable way to read deliverables " +
 				"produced by other agents — artifacts are stored outside the workspace filesystem.",

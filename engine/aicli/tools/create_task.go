@@ -10,15 +10,17 @@ import (
 
 // CreateTaskParams carries the parameters of one create_task call.
 type CreateTaskParams struct {
-	Title           string `json:"title"`
-	Description     string `json:"description"`
-	Status          string `json:"status"`
-	Priority        string `json:"priority"`
-	TaskType        string `json:"task_type"`
-	SprintID        int32  `json:"sprint_id"`
-	ProjectID       int32  `json:"project_id"`
-	DueDate         string `json:"due_date"`
-	AgentConfigName string `json:"agent_config_name"`
+	Title       string `json:"title"`
+	Description string `json:"description"`
+	Status      string `json:"status"`
+	Priority    string `json:"priority"`
+	SprintID    int32  `json:"sprint_id"`
+	ProjectID   int32  `json:"project_id"`
+	DueDate     string `json:"due_date"`
+	// AgentName is the database Agent role key or display name to assign.
+	AgentName        string  `json:"agent_name"`
+	DependsOnTaskIDs []int32 `json:"depends_on_task_ids"`
+	RelatedToTaskIDs []int32 `json:"related_to_task_ids"`
 }
 
 // CreateTask creates a new TOP-LEVEL task on the board, alongside the tasks
@@ -38,7 +40,7 @@ func (t *CreateTask) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "create_task",
+			Name: string(aicli.ToolCreateTask),
 			Description: "Create a new TOP-LEVEL task on the board (a sibling of the current task, not a subtask). " +
 				"Use it for planning: recording decided-on work as separate tasks with their own lifecycle. " +
 				"The call returns immediately — nothing is executed now. Tasks created in \"backlog\" (default) wait for " +
@@ -64,11 +66,6 @@ func (t *CreateTask) Def() aicli.ToolDef {
 						"enum":["Low","Normal","High","Urgent"],
 						"description":"Task priority (default Normal)"
 					},
-					"task_type":{
-						"type":"string",
-						"enum":["plan and implement","implement"],
-						"description":"Task type (default \"plan and implement\")"
-					},
 					"sprint_id":{
 						"type":"integer",
 						"description":"Sprint to place the task in (default: the current task's sprint)"
@@ -81,9 +78,17 @@ func (t *CreateTask) Def() aicli.ToolDef {
 						"type":"string",
 						"description":"Optional due date, RFC3339 (e.g. \"2026-08-01T00:00:00Z\")"
 					},
-					"agent_config_name":{
+					"agent_name":{
 						"type":"string",
-						"description":"Optional agent config to pin for execution (default: routed through the CEO orchestrator)"
+						"description":"Optional database agent role key or name to assign (for example \"CTO\")"
+					},
+					"depends_on_task_ids":{
+						"type":"array","items":{"type":"integer"},
+						"description":"Existing tasks that must be done before this task can start"
+					},
+					"related_to_task_ids":{
+						"type":"array","items":{"type":"integer"},
+						"description":"Existing tasks that are informationally related"
 					}
 				},
 				"required":["title","description"]

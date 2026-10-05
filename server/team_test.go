@@ -1,6 +1,7 @@
 package server
 
 import (
+	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -29,11 +30,7 @@ func setupTeamTestDB(t *testing.T) *gorm.DB {
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(
-		&db.User{}, &db.Session{},
-		&db.Team{}, &db.TeamMember{}, &db.TeamInvite{},
-		&db.Company{},
-	))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

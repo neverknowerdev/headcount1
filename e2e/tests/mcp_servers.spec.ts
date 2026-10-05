@@ -1,11 +1,12 @@
 import { test, expect, request as pwRequest } from '@playwright/test';
+import { resetE2E } from '../helpers/reset';
 
 test.describe.serial('MCP Servers', () => {
     const shortName = 'mcp-test-co';
     let companyId: number;
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request);
         const res = await request.post('/api/companies', {
             data: { name: 'MCP Test Co', short_name: shortName, color: '#7c3aed' },
         });

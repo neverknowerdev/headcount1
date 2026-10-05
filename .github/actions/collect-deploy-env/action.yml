@@ -15,9 +15,10 @@ description: >-
 #
 # Two things are NOT delivered:
 #
-#   1. CI's own credentials (GITHUB_TOKEN, DEPLOY_API_KEY, DEPLOY_URL). They
-#      belong to the deploy machinery, not to the app, and the server must never
-#      hold them.
+#   1. CI's own credentials (GITHUB_TOKEN, DEPLOY_API_KEY). They belong to the
+#      deploy machinery, not to the app, and the server must never hold them.
+#      DEPLOY_URL is intentionally delivered because the app uses it to build
+#      OAuth callbacks and public links.
 #   2. Anything named in vars.DEPLOY_ENV_EXCLUDE (one name per line), the escape
 #      hatch for a repository secret that exists for some other workflow and has
 #      no business on the app server.
@@ -82,7 +83,6 @@ runs:
           echo "ACTIONS_ID_TOKEN_REQUEST_TOKEN"
           echo "ACTIONS_ID_TOKEN_REQUEST_URL"
           echo "DEPLOY_API_KEY"
-          echo "DEPLOY_URL"
           echo "DEPLOY_ENV_EXCLUDE"
           printf '%s\n' "$EXCLUDE" | tr ',' '\n' | sed 's/#.*//; s/[[:space:]]//g'
         } | grep -v '^$' | tr '[:lower:]' '[:upper:]' | sort -u > "$RUNNER_TEMP/.excluded.txt"

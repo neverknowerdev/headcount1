@@ -103,3 +103,14 @@ func TestRegistry_Execute_ScrubsSecrets(t *testing.T) {
 	assert.Error(t, err)
 	assert.NotContains(t, err.Error(), secret)
 }
+
+func TestRegistry_ExcludeAndNames(t *testing.T) {
+	reg := aicli.NewRegistry()
+	reg.Register(&listingStubTool{name: "read", desc: "Read."})
+	reg.Register(&listingStubTool{name: "write", desc: "Write."})
+	reg.Register(&listingStubTool{name: "codegraph_explore", desc: "Explore."})
+
+	filtered := reg.Exclude([]string{"write", "codegraph_*"})
+	assert.Equal(t, []string{"read"}, filtered.Names())
+	assert.Equal(t, []string{"codegraph_explore", "read", "write"}, reg.Names(), "Exclude must not mutate the source registry")
+}

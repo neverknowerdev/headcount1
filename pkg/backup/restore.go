@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"gorm.io/gorm"
 )
@@ -239,7 +240,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 			if rows, err := readRowsFile(filepath.Join(taskDir, "artifacts.json")); err == nil {
 				addRows("artifacts", rows)
 			}
-			addRows("runs", readRowDir(filepath.Join(taskDir, "runs")))
+			addRows("runs", normalizeRestoredRunRows(readRowDir(filepath.Join(taskDir, "runs"))))
 		}
 	}
 
@@ -272,6 +273,26 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	resetPostgresSequences(database, insertOrder)
 
 	return nil
+}
+
+// normalizeRestoredRunRows prevents a restored database from claiming that a
+// live session is still executing. A backup contains only durable rows; the
+// in-memory cancellation handle and goroutine that owned a running/waiting
+// session are not part of the archive. Restore therefore records those
+// snapshot-time active sessions as interrupted so they remain visible and
+// recoverable without being mistaken for currently active work.
+func normalizeRestoredRunRows(rows []row) []row {
+	for _, run := range rows {
+		status, _ := run["status"].(string)
+		switch status {
+		case "running", "resuming", "waiting":
+			run["status"] = "interrupted"
+			if endedAt, exists := run["ended_at"]; !exists || endedAt == nil || endedAt == "" {
+				run["ended_at"] = time.Now().UTC().Format(time.RFC3339Nano)
+			}
+		}
+	}
+	return rows
 }
 
 // resetPostgresSequences advances each table's identity sequence past the

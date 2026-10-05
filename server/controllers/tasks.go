@@ -13,6 +13,7 @@ import (
 	"agent-orchestrator/db"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
+	"agent-orchestrator/pkg/githubapp"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -75,6 +76,7 @@ func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
 
 	api.respondJSON(w, http.StatusOK, tasks)
 }
@@ -114,23 +116,21 @@ func (api *API) authorizeTaskRefs(r *http.Request, companyID int32, projectID, a
 
 func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID       int32   `json:"company_id"`
-		ProjectID       *int32  `json:"project_id"`
-		AgentID         *int32  `json:"agent_id"`
-		SprintID        int32   `json:"sprint_id"`
-		ParentID        *int32  `json:"parent_id"`
-		Title           string  `json:"title"`
-		TaskType        string  `json:"task_type"`
-		Description     string  `json:"description"`
-		Priority        string  `json:"priority"`
-		DueDate         *string `json:"due_date"`
-		AgentConfigName string  `json:"agent_config_name"`
+		CompanyID     int32   `json:"company_id"`
+		ProjectID     *int32  `json:"project_id"`
+		AgentID       *int32  `json:"agent_id"`
+		SprintID      int32   `json:"sprint_id"`
+		ParentID      *int32  `json:"parent_id"`
+		Title         string  `json:"title"`
+		Description   string  `json:"description"`
+		Priority      string  `json:"priority"`
+		GitBaseBranch string  `json:"git_base_branch"`
+		DueDate       *string `json:"due_date"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-
 	var dueDate *time.Time
 	if req.DueDate != nil {
 		t, _ := time.Parse(time.RFC3339, *req.DueDate)
@@ -142,9 +142,13 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		priority = "Normal"
 	}
 
-	taskType := req.TaskType
-	if taskType == "" {
-		taskType = db.TaskTypePlanAndImplement
+	gitBaseBranch := strings.TrimSpace(req.GitBaseBranch)
+	if gitBaseBranch == "" {
+		gitBaseBranch = db.DefaultTaskGitBaseBranch
+	}
+	if err := git.ValidateBranchName(r.Context(), gitBaseBranch); err != nil {
+		api.respondError(w, http.StatusBadRequest, err.Error())
+		return
 	}
 
 	if req.CompanyID == 0 {
@@ -162,18 +166,17 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	}
 
 	p := db.Task{
-		CompanyID:       req.CompanyID,
-		ProjectID:       req.ProjectID,
-		Title:           req.Title,
-		TaskType:        taskType,
-		Status:          "backlog",
-		AgentID:         req.AgentID,
-		SprintID:        req.SprintID,
-		ParentID:        req.ParentID,
-		Description:     req.Description,
-		Priority:        priority,
-		DueDate:         dueDate,
-		AgentConfigName: req.AgentConfigName,
+		CompanyID:     req.CompanyID,
+		ProjectID:     req.ProjectID,
+		Title:         req.Title,
+		Status:        db.TaskStatusBacklog,
+		AgentID:       req.AgentID,
+		SprintID:      req.SprintID,
+		ParentID:      req.ParentID,
+		Description:   req.Description,
+		Priority:      priority,
+		GitBaseBranch: gitBaseBranch,
+		DueDate:       dueDate,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
@@ -195,30 +198,85 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 
 	api.logActivity(comp.ID, "task_created", int32(task.ID), "task", "")
 
+	tasks := []db.Task{task}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
+	task = tasks[0]
 	api.respondJSON(w, http.StatusCreated, task)
 }
 
+func isTaskStatus(status string) bool {
+	switch status {
+	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInProgress,
+		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone, db.TaskStatusRefinement:
+		return true
+	default:
+		return false
+	}
+}
+
 func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
-	api.respondJSON(w, http.StatusOK, api.taskFromCtx(r)) // loaded + authorized by LoadTask
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	tasks := []db.Task{task}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
+	task = tasks[0]
+	api.respondJSON(w, http.StatusOK, task)
+}
+
+func (api *API) attachTaskRelationSummaries(ctx context.Context, tasks []db.Task) {
+	ids := make([]int32, 0, len(tasks))
+	for _, task := range tasks {
+		ids = append(ids, task.ID)
+	}
+	summaries, err := api.q.ListTaskRelationSummaries(ctx, ids)
+	if err != nil {
+		return
+	}
+	for i := range tasks {
+		if summary, ok := summaries[tasks[i].ID]; ok {
+			tasks[i].RelationSummary = &summary
+		}
+	}
+}
+
+func (api *API) reconcileDependents(ctx context.Context, prerequisiteTaskID int32) {
+	dependents, err := api.q.ListDependentTasks(ctx, prerequisiteTaskID)
+	if err != nil {
+		return
+	}
+	for _, dependent := range dependents {
+		id := dependent.ID
+		go func() {
+			if err := api.engine.ProcessTask(context.Background(), id); err != nil {
+				fmt.Printf("Warning: failed to reconcile dependent task %d: %v\n", id, err)
+			}
+		}()
+	}
 }
 
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ProjectID       *int32  `json:"project_id"`
-		AgentID         *int32  `json:"agent_id"`
-		SprintID        *int32  `json:"sprint_id"`
-		ParentID        *int32  `json:"parent_id"`
-		Title           string  `json:"title"`
-		TaskType        string  `json:"task_type"`
-		Description     string  `json:"description"`
-		Priority        string  `json:"priority"`
-		DueDate         *string `json:"due_date"`
-		Status          string  `json:"status"`
-		IsArchived      *bool   `json:"is_archived"`
-		AgentConfigName string  `json:"agent_config_name"`
+		ProjectID     *int32  `json:"project_id"`
+		AgentID       *int32  `json:"agent_id"`
+		SprintID      *int32  `json:"sprint_id"`
+		ParentID      *int32  `json:"parent_id"`
+		Title         string  `json:"title"`
+		Description   string  `json:"description"`
+		Priority      string  `json:"priority"`
+		GitBaseBranch string  `json:"git_base_branch"`
+		DueDate       *string `json:"due_date"`
+		Status        string  `json:"status"`
+		IsArchived    *bool   `json:"is_archived"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if req.Status != "" && !isTaskStatus(req.Status) {
+		api.respondError(w, http.StatusBadRequest, "invalid task status")
+		return
+	}
+	if req.Status == db.TaskStatusDependsOnTask {
+		api.respondError(w, http.StatusConflict, "depends-on-task is managed by task dependencies")
 		return
 	}
 
@@ -237,9 +295,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		task.Status = req.Status
 		statusChanged = true
 	}
-	if req.TaskType != "" {
-		task.TaskType = req.TaskType
-	}
 
 	if req.Title != "" {
 		task.Title = req.Title
@@ -249,6 +304,18 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.Priority != "" {
 		task.Priority = req.Priority
+	}
+	if req.GitBaseBranch != "" && req.GitBaseBranch != task.GitBaseBranch {
+		if task.Status == "in-progress" || task.Status == "in-review" || task.Status == "done" {
+			api.respondError(w, http.StatusConflict, "base branch cannot be changed after work has started")
+			return
+		}
+		branch := strings.TrimSpace(req.GitBaseBranch)
+		if err := git.ValidateBranchName(r.Context(), branch); err != nil {
+			api.respondError(w, http.StatusBadRequest, err.Error())
+			return
+		}
+		task.GitBaseBranch = branch
 	}
 
 	if req.ProjectID != nil {
@@ -266,10 +333,6 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	if req.IsArchived != nil {
 		task.IsArchived = *req.IsArchived
 	}
-	if req.AgentConfigName != "" {
-		task.AgentConfigName = req.AgentConfigName
-	}
-
 	if req.DueDate != nil {
 		t, _ := time.Parse(time.RFC3339, *req.DueDate)
 		task.DueDate = &t
@@ -292,6 +355,9 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			Content:     string(content),
 		}); err == nil {
 			api.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", sc)
+		}
+		if task.Status == db.TaskStatusDone {
+			api.reconcileDependents(r.Context(), task.ID)
 		}
 	}
 
@@ -318,7 +384,7 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	var runs []db.Run
-	if err := api.db.Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := api.db.Preload("Agent").Where("task_id = ?", task.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -331,13 +397,20 @@ func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	ctx := context.Background()
+	rootTask, rootErr := api.q.GetRootTask(ctx, task.ID)
+	if rootErr != nil {
+		rootTask = task
+	}
 
-	project, err := api.q.GetProject(ctx, *task.ProjectID)
+	if rootTask.ProjectID == nil {
+		return
+	}
+	project, err := api.q.GetProject(ctx, *rootTask.ProjectID)
 	if err != nil || project.RepositoryUrl == "" {
 		return
 	}
 
-	company, err := api.q.GetCompany(ctx, task.CompanyID)
+	company, err := api.q.GetCompany(ctx, rootTask.CompanyID)
 	if err != nil {
 		return
 	}
@@ -345,12 +418,34 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	settings := LoadSettings()
 	fsManager := filesystem.NewManager(settings.BasePath)
 	repoDir := fsManager.GetProjectRepoPath(company, project)
-	worktreeDir := fsManager.GetTaskWorktreePath(company, task)
+	worktreeDir := fsManager.GetTaskWorktreePath(company, rootTask)
 	keyPath, keyCleanup := filesystem.ResolveSSHKeyPathForCompany(ctx, api.q, settings.BasePath, company)
 	defer keyCleanup()
 	gitMgr := git.NewGitManager(repoDir, keyPath)
 
-	branchName := fmt.Sprintf("task-%d", task.ID)
+	branchName := strings.TrimSpace(rootTask.GitHubBranch)
+	if branchName == "" {
+		branchName = db.TaskGitBranch(rootTask.RefKey, rootTask.ID)
+		rootTask.GitHubBranch = branchName
+		if _, updateErr := api.q.UpdateTask(ctx, rootTask); updateErr != nil {
+			fmt.Printf("Warning: failed to persist task branch %s: %v\n", branchName, updateErr)
+			return
+		}
+	}
+	if project.GitHubInstallationID != 0 {
+		if token, tokenErr := githubapp.TokenForProject(ctx, project); tokenErr == nil && token != "" {
+			gitMgr.WithHTTPToken(token)
+		} else if tokenErr != nil {
+			fmt.Printf("Warning: failed to create GitHub App token for project %d: %v\n", project.ID, tokenErr)
+			return
+		}
+		// GitHub-backed projects publish a draft PR. Never merge or force-push
+		// the default branch as part of task status changes.
+		// The task-level branch is already canonical and shared by all runs.
+		if newStatus == "done" {
+			return
+		}
+	}
 
 	if newStatus == "done" {
 		// Merge worktree branch into main
@@ -359,25 +454,14 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 				fmt.Printf("Warning: failed to merge branch %s: %v\n", branchName, mergeErr)
 				return
 			}
-			if removeErr := gitMgr.RemoveWorktree(ctx, worktreeDir); removeErr != nil {
-				fmt.Printf("Warning: failed to remove worktree: %v\n", removeErr)
-			}
-			// Clean up the task workspace directory
-			os.RemoveAll(worktreeDir)
-			fmt.Printf("Merged and cleaned up worktree for task %d\n", task.ID)
+			// Keep the worktree and durable session workspaces until the in-binary
+			// retention job removes them ten days after the task became Done.
+			fmt.Printf("Merged worktree for task %d; deferred cleanup is scheduled\n", task.ID)
 		}
 	} else if task.Status == "done" && newStatus != "done" {
-		// Task reopened: remove old worktree and recreate
-		if _, statErr := os.Stat(worktreeDir); statErr == nil {
-			gitMgr.RemoveWorktree(ctx, worktreeDir)
-			os.RemoveAll(worktreeDir)
-		}
-		// Pull latest and recreate worktree
-		gitMgr.Pull(ctx)
-		if wtErr := gitMgr.CreateWorktree(ctx, repoDir, worktreeDir, branchName, "origin/main"); wtErr != nil {
-			fmt.Printf("Warning: failed to recreate worktree for task %d: %v\n", task.ID, wtErr)
-		} else {
-			fmt.Printf("Recreated worktree for reopened task %d\n", task.ID)
-		}
+		// Reopening within the retention window reuses the preserved worktree;
+		// deleting and recreating it would discard the exact session state a
+		// fork or recovery may need.
+		fmt.Printf("Reopened task %d; preserving its worktree\n", task.ID)
 	}
 }

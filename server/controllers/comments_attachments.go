@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -61,6 +62,21 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
+	if req.AuthorType == "human" {
+		// Human replies are a control-plane signal, not a new manual run. The
+		// native engine correlates the reply with the durable ask_user comment,
+		// unblocks the task, resumes gated sessions, and wakes the orchestrator.
+		if handler, ok := api.engine.(interface {
+			HandleHumanReply(context.Context, int32) error
+		}); ok {
+			if err := handler.HandleHumanReply(r.Context(), req.TaskID); err != nil {
+				// The comment is already durable. Do not turn a successful human
+				// reply into a 500 (which invites duplicate answers); the waiting
+				// session/watchdog can retry the idempotent control-plane transition.
+				log.Printf("human reply transition pending for task %d: %v", req.TaskID, err)
+			}
+		}
+	}
 
 	if req.RunAgent {
 		task, err := api.q.GetTask(r.Context(), req.TaskID)

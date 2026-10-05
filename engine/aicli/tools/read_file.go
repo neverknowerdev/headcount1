@@ -26,7 +26,7 @@ func (t *ReadFile) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "read",
+			Name:        string(aicli.ToolRead),
 			Description: "Read a file inside the workspace. Returns the file content as text.",
 			Parameters: json.RawMessage(`{
 				"type":"object",

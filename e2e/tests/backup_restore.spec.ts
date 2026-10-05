@@ -2,6 +2,7 @@ import { test, expect } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
+import { resetE2E } from '../helpers/reset';
 
 test.describe.serial('Backup & Restore', () => {
     // Tenant-scoped, per-user export/import (the real user-facing feature): a
@@ -175,8 +176,7 @@ test.describe.serial('Backup & Restore', () => {
         expect(fs.existsSync(archivePath)).toBeTruthy();
 
         // Wipe the database
-        const wipeRes = await request.post('/api/e2e/wipe-db');
-        expect(wipeRes.ok()).toBeTruthy();
+        await resetE2E(request);
 
         // Verify data is gone
         const companiesAfterWipe = await request.get('/api/companies');
@@ -259,7 +259,7 @@ test.describe.serial('Backup & Restore', () => {
         expect(backupRes.ok()).toBeTruthy();
         const archivePath = (await backupRes.json()).archive_path;
 
-        expect((await request.post('/api/e2e/wipe-db')).ok()).toBeTruthy();
+        await resetE2E(request);
 
         const restoreRes = await request.post('/api/backup/restore', {
             data: { archive_path: archivePath },

@@ -27,7 +27,7 @@ func (t *WebFetch) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name: "web_fetch",
+			Name: string(aicli.ToolWebFetch),
 			Description: "Fetch the content of a URL. By default converts HTML to clean Markdown " +
 				"using markitdown so the LLM can read it without HTML noise. " +
 				"Set to_markdown=false to receive the raw response body instead.",

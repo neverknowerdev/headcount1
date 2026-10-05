@@ -1,11 +1,20 @@
 package endpoints
 
 import (
+	"archive/zip"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strconv"
+	"strings"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine"
+	"agent-orchestrator/pkg/filesystem"
 
 	"github.com/go-chi/chi/v5"
 	"gorm.io/gorm"
@@ -19,6 +28,10 @@ import (
 // an extra round trip to /runs/{id}/token-stats.
 type RunResponse struct {
 	db.Run
+	// AgentName is the UI identity of this session. An orchestrator is a
+	// control-plane session even when it executes with the CEO agent's model
+	// configuration, so it must not be presented as the CEO.
+	AgentName        string `json:"agent_name"`
 	IsLatest         bool
 	parsedEntries    []interface{}
 	parsedTokenStats interface{}
@@ -51,7 +64,13 @@ func (r RunResponse) MarshalJSON() ([]byte, error) {
 }
 
 func toRunResponse(run db.Run) RunResponse {
-	resp := RunResponse{Run: run}
+	agentName := run.Agent.Name
+	if run.Kind == db.RunKindTaskOrchestrator {
+		agentName = "Orchestrator"
+	} else if run.Kind == db.RunKindHelperWorker {
+		agentName = "Worker"
+	}
+	resp := RunResponse{Run: run, AgentName: agentName}
 	if run.LogEntries != "" {
 		_ = json.Unmarshal([]byte(run.LogEntries), &resp.parsedEntries)
 	}
@@ -91,7 +110,7 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 	var runs []db.Run
 	err := api.db.
 		Omit("log_content", "log_entries").
-		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
+		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title", "orchestrator_run_id") }).
 		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
 		Where("task_id IN ?", taskIDs).
 		Order("started_at desc").
@@ -115,7 +134,8 @@ func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {
 	// Mark is_latest so the frontend can show the Re-run button only on the
 	// most recent run. Delegated child sessions are never re-runnable entry
 	// points — only the main (root) session of a task can be re-run.
-	if run.ParentRunID == nil {
+	isOrchestrator := run.Task.OrchestratorRunID != nil && *run.Task.OrchestratorRunID == run.ID
+	if run.ParentRunID == nil && !isOrchestrator {
 		var maxID int64
 		api.db.Model(&db.Run{}).Where("task_id = ?", run.TaskID).Select("MAX(id)").Scan(&maxID)
 		resp.IsLatest = int64(run.ID) == maxID
@@ -154,6 +174,86 @@ func (api *API) ListChildRuns(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, out)
 }
 
+// DownloadRunLogs streams the complete log directory for an execution tree.
+// A request for either the root run or a child run resolves to the same root,
+// so nested sessions are always included in one archive.
+func (api *API) DownloadRunLogs(w http.ResponseWriter, r *http.Request) {
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+	rootRun, err := api.rootRun(r, run)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "parent run not found")
+		return
+	}
+
+	logDir := filesystem.NewPaths(LoadSettings().BasePath).RunLogsDir(rootRun.Task.Company.ShortName, rootRun.TaskID, rootRun.ID)
+	if _, err := os.Stat(logDir); err != nil {
+		if os.IsNotExist(err) {
+			api.respondError(w, http.StatusNotFound, "run logs not found")
+		} else {
+			api.respondError(w, http.StatusInternalServerError, "failed to access run logs")
+		}
+		return
+	}
+	var files []string
+	if err := filepath.WalkDir(logDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !entry.IsDir() {
+			files = append(files, path)
+		}
+		return nil
+	}); err != nil {
+		api.respondError(w, http.StatusInternalServerError, "failed to enumerate run logs")
+		return
+	}
+	if len(files) == 0 {
+		api.respondError(w, http.StatusNotFound, "run logs not found")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", fmt.Sprintf("run-%d-logs.zip", rootRun.ID)))
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	for _, path := range files {
+		rel, err := filepath.Rel(logDir, path)
+		if err != nil {
+			return
+		}
+		file, err := os.Open(path)
+		if err != nil {
+			return
+		}
+		writer, err := zw.Create(filepath.ToSlash(rel))
+		if err != nil {
+			file.Close()
+			return
+		}
+		_, _ = io.Copy(writer, file)
+		file.Close()
+	}
+}
+
+func (api *API) rootRun(r *http.Request, run db.Run) (db.Run, error) {
+	if run.RootRunID != nil {
+		return api.q.GetRun(r.Context(), *run.RootRunID)
+	}
+	seen := map[int32]bool{}
+	for run.ParentRunID != nil {
+		if seen[run.ID] {
+			return db.Run{}, fmt.Errorf("run hierarchy cycle")
+		}
+		seen[run.ID] = true
+		parent, err := api.q.GetRun(r.Context(), *run.ParentRunID)
+		if err != nil {
+			return db.Run{}, err
+		}
+		run = parent
+	}
+	return run, nil
+}
+
 func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 
@@ -173,6 +273,11 @@ func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := api.engine.RerunTask(r.Context(), task.ID); err != nil {
+		var blocked *engine.TaskDependencyBlockedError
+		if errors.As(err, &blocked) {
+			api.respondJSON(w, http.StatusConflict, map[string]interface{}{"error": err.Error(), "task_id": blocked.TaskID, "blocked_by": blocked.Blockers})
+			return
+		}
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
@@ -208,4 +313,58 @@ func (api *API) StopRun(w http.ResponseWriter, r *http.Request) {
 	api.engine.StopRun(r.Context(), run.ID)
 
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "stopping"})
+}
+
+// DownloadRunLog streams the run's execution log as a JSONL attachment.
+// Prefers the on-disk log file when present; otherwise serializes log_entries
+// (or falls back to legacy log_content).
+func (api *API) DownloadRunLog(w http.ResponseWriter, r *http.Request) {
+	run := api.runFromCtx(r) // loaded + authorized by LoadRun
+
+	filename := fmt.Sprintf("run-%d_run_log.jsonl", run.ID)
+	if name := strings.TrimSpace(run.Name); name != "" {
+		safe := strings.Map(func(r rune) rune {
+			if (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9') || r == '-' || r == '_' {
+				return r
+			}
+			return -1
+		}, name)
+		safe = strings.Trim(safe, "-")
+		if safe != "" {
+			filename = safe + "_run_log.jsonl"
+		}
+	}
+
+	if run.LogFilePath != "" {
+		if info, statErr := os.Stat(run.LogFilePath); statErr == nil && !info.IsDir() {
+			w.Header().Set("Content-Type", "application/x-ndjson")
+			w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+			http.ServeFile(w, r, run.LogFilePath)
+			return
+		}
+	}
+
+	var body []byte
+	if run.LogEntries != "" && run.LogEntries != "[]" {
+		var entries []json.RawMessage
+		if json.Unmarshal([]byte(run.LogEntries), &entries) == nil && len(entries) > 0 {
+			var b strings.Builder
+			for _, entry := range entries {
+				b.Write(entry)
+				b.WriteByte('\n')
+			}
+			body = []byte(b.String())
+		}
+	}
+	if len(body) == 0 {
+		if run.LogContent == "" {
+			api.respondError(w, http.StatusNotFound, "run has no log")
+			return
+		}
+		body = []byte(run.LogContent)
+	}
+
+	w.Header().Set("Content-Type", "application/x-ndjson")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", filename))
+	w.Write(body)
 }

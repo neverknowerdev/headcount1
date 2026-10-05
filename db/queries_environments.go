@@ -12,23 +12,6 @@ import (
 	"gorm.io/gorm/clause"
 )
 
-// DefaultEnvironmentName is the company-level platform environment whose
-// entries agent runs receive as shell env vars.
-const DefaultEnvironmentName = "headcount1 cloud"
-
-// Environment entry kinds. Both are sealed at rest; the kind matters at the
-// boundaries (redaction, and how connectors push them to deploy targets).
-const (
-	EnvEntrySecret   = "secret"
-	EnvEntryVariable = "variable"
-)
-
-// Connector providers.
-const (
-	ConnectorVercel = "vercel"
-	ConnectorGitHub = "github"
-)
-
 // envVarNameRe validates secret names: they become shell env vars, so they
 // must be safe to place in a process environment (and unambiguous in docs).
 var envVarNameRe = regexp.MustCompile(`^[A-Za-z_][A-Za-z0-9_]*$`)

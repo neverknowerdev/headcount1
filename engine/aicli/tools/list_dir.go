@@ -27,7 +27,7 @@ func (t *ListDir) Def() aicli.ToolDef {
 	return aicli.ToolDef{
 		Type: "function",
 		Function: aicli.FuncMeta{
-			Name:        "ls",
+			Name:        string(aicli.ToolListDir),
 			Description: "List files inside the workspace. Returns a line-per-entry listing.",
 			Parameters: json.RawMessage(`{
 				"type":"object",

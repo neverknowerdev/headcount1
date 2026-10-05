@@ -153,6 +153,9 @@ var presetDiscoverers = map[string]PresetDiscoverer{
 // alphabetical order from FetchModels.
 var presetDefaultPriority = map[string][]string{
 	db.ProviderPresetMiniMax: {"MiniMax-M3"},
+	// DeepSeek may expose the marketing name with or without a vendor
+	// namespace depending on the OpenAI-compatible gateway.
+	db.ProviderPresetDeepSeek: {"deepseek-v4-flash", "deepseek/deepseek-v4-flash"},
 }
 
 // FetchModelsForPreset fetches the model catalog for a provider created from

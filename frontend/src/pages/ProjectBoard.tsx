@@ -4,12 +4,21 @@ import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
 import { DragDropContext, Droppable, Draggable } from '@hello-pangea/dnd';
 import type { DropResult } from '@hello-pangea/dnd';
-import { Plus, Settings } from 'lucide-react';
+import { Plus, Settings, LockKeyhole, ArrowUpRight, Link2 } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { useCoalescedCallback } from '../utils/useCoalescedCallback';
 
-const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'in-review', 'blocked', 'done'];
+const STATUSES = ['backlog', 'to-do', 'in-progress', 'blocked', 'depends-on-task', 'in-review', 'done'];
+const STATUS_LABELS: Record<string, string> = {
+    backlog: 'Backlog',
+    'to-do': 'To Do',
+    'in-progress': 'In Progress',
+    blocked: 'Blocked',
+    'depends-on-task': 'Depends on Task',
+    'in-review': 'In Review',
+    done: 'Done',
+};
 
 interface Task {
     id: number;
@@ -19,6 +28,11 @@ interface Task {
     priority: string;
     ref_key?: string;
     parent_id?: number | null;
+    relation_summary?: {
+        blocked_by: Task[];
+        blocks: Task[];
+        related_to: Task[];
+    };
 }
 
 interface Project {
@@ -118,6 +132,7 @@ export const ProjectBoard: React.FC = () => {
       if (!result.destination) return;
 
       const { source, destination, draggableId } = result;
+      if (destination.droppableId === 'depends-on-task') return;
       if (source.droppableId !== destination.droppableId) {
           // Optimistic UI update
           setTasks(prev => prev.map(t =>
@@ -187,7 +202,7 @@ export const ProjectBoard: React.FC = () => {
                 <div key={status} className="w-72 bg-gray-100 rounded-lg flex flex-col max-h-full">
                 <div className="p-3 border-b border-gray-200">
                     <h3 className="font-semibold text-gray-700 uppercase text-xs tracking-wider flex justify-between">
-                        {status.replace('-', ' ')}
+                        {STATUS_LABELS[status] || status}
                         <span className="bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full text-xs">
                             {tasks.filter(t => t.status === status).length}
                         </span>
@@ -212,6 +227,27 @@ export const ProjectBoard: React.FC = () => {
                                         className={`bg-white p-4 rounded-md border shadow-sm ${snapshot.isDragging ? 'shadow-lg ring-2 ring-indigo-500 border-transparent' : 'hover:border-indigo-300'} transition-shadow cursor-grab`}
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
+                                        {task.relation_summary?.blocked_by?.length ? (
+                                            <div className="mt-2 flex items-center gap-1 text-[11px] text-amber-700 truncate" title={task.relation_summary.blocked_by.map(item => item.title).join(', ')}>
+                                                <LockKeyhole size={12} className="shrink-0" />
+                                                <span>Blocked by {task.relation_summary.blocked_by.slice(0, 2).map(item => item.ref_key || `#${item.id}`).join(', ')}</span>
+                                                {task.relation_summary.blocked_by.length > 2 && <span>+{task.relation_summary.blocked_by.length - 2}</span>}
+                                            </div>
+                                        ) : null}
+                                        {task.relation_summary?.blocks?.length ? (
+                                            <div className="mt-1 flex items-center gap-1 text-[11px] text-gray-500 truncate" title={task.relation_summary.blocks.map(item => item.title).join(', ')}>
+                                                <ArrowUpRight size={12} className="shrink-0" />
+                                                <span>Blocks {task.relation_summary.blocks.slice(0, 2).map(item => item.ref_key || `#${item.id}`).join(', ')}</span>
+                                                {task.relation_summary.blocks.length > 2 && <span>+{task.relation_summary.blocks.length - 2}</span>}
+                                            </div>
+                                        ) : null}
+                                        {task.relation_summary?.related_to?.length ? (
+                                            <div className="mt-1 flex items-center gap-1 text-[11px] text-gray-400 truncate" title={task.relation_summary.related_to.map(item => item.title).join(', ')}>
+                                                <Link2 size={12} className="shrink-0" />
+                                                <span>Related {task.relation_summary.related_to.slice(0, 2).map(item => item.ref_key || `#${item.id}`).join(', ')}</span>
+                                                {task.relation_summary.related_to.length > 2 && <span>+{task.relation_summary.related_to.length - 2}</span>}
+                                            </div>
+                                        ) : null}
                                         <div className="mt-4 flex justify-between items-center">
                                             <span className="text-xs text-gray-400">{task.ref_key || `${prefix}-${task.id}`}</span>
                                             {task.priority !== 'Normal' && (

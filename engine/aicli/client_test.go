@@ -81,6 +81,20 @@ func TestComplete_DoesNotRetryOnHardClientError(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&calls), "a hard 4xx must fail fast, not retry")
 }
 
+func TestComplete_NonJSONErrorIncludesStatusAndBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/plain")
+		w.WriteHeader(http.StatusUnauthorized)
+		_, _ = w.Write([]byte("gateway requires a run token or an authenticated session"))
+	}))
+	defer srv.Close()
+
+	_, _, err := newRetryTestClient(srv).Complete(context.Background(), aicli.ChatRequest{})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "status=401")
+	assert.Contains(t, err.Error(), "gateway requires a run token")
+}
+
 func TestComplete_RetriesOnNetworkError(t *testing.T) {
 	// Simulate transient network failures (connection reset, DNS hiccup,
 	// timeout) below the HTTP-status layer entirely, by hijacking and

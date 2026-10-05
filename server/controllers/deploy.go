@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 
@@ -37,7 +38,9 @@ type DeployWebhookPayload struct {
 	BuildDate   string `json:"build_date"`
 	Version     string `json:"version"` // human-facing version of the incoming build
 	DownloadURL string `json:"download_url"`
-	SHA256      string `json:"sha256"` // hex digest of the binary at DownloadURL
+	SHA256      string `json:"sha256"`              // hex digest of the binary at DownloadURL
+	Signature   string `json:"signature,omitempty"` // base64 Ed25519 signature over the artifact envelope
+	KeyID       string `json:"key_id,omitempty"`
 	// Target is the environment CI intends this for (production | staging). The
 	// server also enforces its own env, so a mismatched target is ignored — this
 	// is a belt-and-suspenders guard against a staging event reaching prod.
@@ -101,6 +104,7 @@ func SetBootKeyStatus(backend string, snapshotFound bool, restoredVaults int) {
 // effective source setting, for the UI's Deployment panel. Behind auth.
 func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	settings := LoadSettings()
+	admin := api.isInstanceAdmin(r.Context(), api.currentUserID(r))
 	resp := map[string]interface{}{
 		"environment":   utils.CurrentEnv(),
 		"deploy_source": settings.EffectiveDeploySource(),
@@ -110,13 +114,19 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		st := api.updater.GetStatus()
 		resp["current"] = st.Current
 		resp["deploying"] = st.Deploying
+		if st.Phase != "" {
+			resp["phase"] = st.Phase
+		}
+		if st.DeploymentID != "" {
+			resp["deployment_id"] = st.DeploymentID
+		}
 		if st.Deploying && st.LastDeploy != nil {
 			resp["deploy_target"] = st.LastDeploy
 		}
 		// A deploy failure message can carry internal detail (download URLs,
 		// filesystem paths), so it goes only to the operator — same gate as the
 		// instance-global fields in GetSettings.
-		if st.LastError != "" && (utils.IsE2E() || globalAdminAPIEnabled()) {
+		if st.LastError != "" && admin {
 			resp["last_error"] = st.LastError
 		}
 	}
@@ -124,7 +134,7 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 	// so an operator can confirm configuration arrived without shell access to
 	// the box. Same operator-only gate as last_error: the list of secret names a
 	// server holds is itself a hint worth not publishing.
-	if utils.IsE2E() || globalAdminAPIEnabled() {
+	if admin {
 		if store, err := envstore.Load(); err == nil {
 			resp["env_key_names"] = store.Keys()
 			resp["env_updated_at"] = store.UpdatedAt
@@ -139,6 +149,35 @@ func (api *API) GetDeployStatus(w http.ResponseWriter, r *http.Request) {
 		bootKeyMu.RUnlock()
 	}
 	api.respondJSON(w, http.StatusOK, resp)
+}
+
+// GetDeployAttemptStatus is the CI-facing status endpoint. It uses the same
+// deploy key as the webhook and reads the durable journal, so it remains
+// useful after the candidate process failed and the previous binary came back.
+func (api *API) GetDeployAttemptStatus(w http.ResponseWriter, r *http.Request) {
+	key := utils.DeployAPIKey()
+	if key == "" {
+		api.respondError(w, http.StatusNotFound, "not found")
+		return
+	}
+	if subtle.ConstantTimeCompare([]byte(r.Header.Get("X-Deploy-Key")), []byte(key)) != 1 {
+		api.respondError(w, http.StatusUnauthorized, "invalid deploy key")
+		return
+	}
+	if api.updater == nil {
+		api.respondError(w, http.StatusServiceUnavailable, "updater not available")
+		return
+	}
+	state, found, err := api.updater.DeploymentState(r.URL.Query().Get("deployment_id"))
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	if !found {
+		api.respondError(w, http.StatusNotFound, "deployment not found")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, state)
 }
 
 // DeployWebhook is the PUBLIC endpoint CI calls to trigger a deploy. It is not
@@ -232,6 +271,16 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 		CommitHash: payload.Commit,
 		BuildDate:  payload.BuildDate,
 	}
+	if publicKey := strings.TrimSpace(os.Getenv("HEADCOUNT1_UPDATE_PUBLIC_KEY")); publicKey != "" {
+		if payload.Signature == "" {
+			respond(http.StatusBadRequest, map[string]interface{}{"error": "signed update envelope is required"})
+			return
+		}
+		if err := updater.VerifyArtifactSignature(payload.DownloadURL, payload.SHA256, target, payload.Signature, publicKey); err != nil {
+			respond(http.StatusBadRequest, map[string]interface{}{"error": err.Error()})
+			return
+		}
+	}
 	if api.updater.IsCurrent(target) {
 		// Same build — but env is read once at startup, so new configuration for
 		// the commit we're already on still needs a cycle to take effect.
@@ -255,7 +304,7 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Deploy runs SYNCHRONOUSLY so a failure (bad download, digest mismatch,
-	// swap error) comes back as this request's status code and shows up in the
+	// staging error) comes back as this request's status code and shows up in the
 	// CI job log, instead of only in the server's own log. That is safe because
 	// a successful Deploy does not kill the process from under the response: it
 	// arms a restart and requests a graceful shutdown after a grace delay, and
@@ -275,8 +324,9 @@ func (api *API) DeployWebhook(w http.ResponseWriter, r *http.Request) {
 	}
 
 	respond(http.StatusAccepted, map[string]interface{}{
-		"status": "deploying",
-		"target": target.DisplayString(),
+		"status":        "deploying",
+		"target":        target.DisplayString(),
+		"deployment_id": api.updater.GetStatus().DeploymentID,
 	})
 }
 

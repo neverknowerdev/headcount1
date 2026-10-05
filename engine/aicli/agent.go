@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-orchestrator/db"
@@ -13,6 +14,21 @@ import (
 	"agent-orchestrator/pkg/secrets/redact"
 	"agent-orchestrator/pkg/tokens"
 )
+
+type toolCallMessageIDContextKey struct{}
+
+// WithToolCallMessageID annotates tool execution with the canonical JSONL
+// message sequence of the assistant message that requested the tool.
+func WithToolCallMessageID(ctx context.Context, messageID int64) context.Context {
+	return context.WithValue(ctx, toolCallMessageIDContextKey{}, messageID)
+}
+
+// ToolCallMessageID returns the canonical message sequence for the current
+// tool call, or zero when the call is executed outside a logged agent turn.
+func ToolCallMessageID(ctx context.Context) int64 {
+	messageID, _ := ctx.Value(toolCallMessageIDContextKey{}).(int64)
+	return messageID
+}
 
 // ErrMaxTurns is returned (wrapped) when the agent loop hits its turn cap
 // without producing a final answer. Callers can errors.Is against it to
@@ -46,24 +62,23 @@ type PauseRequested func() bool
 // mcpDispatcherTools is the set of tool names used by the MCP dispatcher layer.
 // Their responses are pruned from older history turns to avoid token accumulation.
 var mcpDispatcherTools = map[string]bool{
-	"call_mcp_tool":     true,
-	"discover_mcp_tool": true,
+	string(ToolCallMCP):     true,
+	string(ToolDiscoverMCP): true,
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
-// ask_human, create_subtask, answer_subtask_question and ask_task_owner block
-// by design (waiting on a human reply, a nested delegated session, or the
-// task owner's answer) and can legitimately take hours. browser_use is
+// ask_human, create_subtask and ask_task_owner block
+// by design (waiting on a human reply, a durable child session, or the
+// orchestrator's answer) and can legitimately take hours. browser_use is
 // stateful: it parents a headless browser on the first call's context so the
 // browser survives for the whole run — a per-call cancel would kill it
 // between turns and lose all navigation state. Its operations carry their
 // own internal timeouts instead.
 var blockingTools = map[string]bool{
-	"ask_human":               true,
-	"create_subtask":          true,
-	"answer_subtask_question": true,
-	"ask_task_owner":          true,
-	"browser_use":             true,
+	string(ToolAskHuman):      true,
+	string(ToolCreateSubtask): true,
+	string(ToolAskTaskOwner):  true,
+	string(ToolBrowserUse):    true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool
@@ -72,6 +87,10 @@ var blockingTools = map[string]bool{
 const toolCallTimeout = 10 * time.Minute
 
 const (
+	// maxTurns is the safety cap for one agent session. Delegated workflows
+	// can legitimately require many tool/LLM round trips before finish_task.
+	maxTurns = 300
+
 	// maxToolOutputChars caps a single tool result appended to history.
 	// Pathologically large outputs (full-file dumps, huge search results)
 	// are truncated with a marker so the agent can re-query more narrowly.
@@ -113,6 +132,8 @@ type RunLogger interface {
 	LogRequest(model, agentName, providerName string, body []byte)
 	LogResponse(model, providerName string, statusCode int, body []byte, reasoning string, usage logging.Usage)
 	LogToolResultsFromRequest(model, providerName string, messages []map[string]interface{})
+	LogConversationMessage(messageJSON []byte) int64
+	Sync() error
 	FilePath() string
 }
 
@@ -126,16 +147,34 @@ type Agent struct {
 	ProviderName   string
 	AgentName      string
 	ReasoningLevel string // "low", "medium", "max" → mapped to API values
+	// ResumeNotice is appended after a restored pending tool result and before
+	// the first post-resume LLM request. It is runtime-only metadata.
+	ResumeNotice string
+	// HistoryAlreadyLogged tells the agent that the supplied history was
+	// restored from the canonical JSONL trajectory and must not be emitted a
+	// second time. Fresh sessions log their initial system/user messages once.
+	HistoryAlreadyLogged bool
 	// MCPListingCostPerTurn is the estimated token cost of the MCP CompactListing
 	// injected into the system prompt on every turn. Accumulated in RunTokenStats.
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools are tool names that end the run: once such a tool
 	// executes successfully, the loop returns without another LLM call.
-	TerminalTools map[string]bool
-	q             *db.Queries
-	runID         int32
-	logger        RunLogger
+	TerminalTools        map[string]bool
+	q                    *db.Queries
+	runID                int32
+	logger               RunLogger
+	conversationSequence int64
+	beforeTurn           func(context.Context, []Message) ([]Message, error)
+	// interrupt is checked after a response that would otherwise end the run.
+	// Hosts may use it for an explicit control-plane interruption; normal
+	// session messaging is delivered through BeforeTurn and durable RunEvents.
+	interrupt func(context.Context, []Message) ([]Message, error)
+	// asyncPersistence tracks the small, non-critical bookkeeping writes that
+	// are launched while executing a tool. A canceled session joins them before
+	// it returns so an E2E database wipe (or shutdown) cannot race a late log or
+	// token-stat write from an already-stopped session.
+	asyncPersistence sync.WaitGroup
 }
 
 // Config collects all the dependencies needed to create an Agent.
@@ -148,14 +187,27 @@ type Config struct {
 	// ReasoningLevel controls how much reasoning the LLM applies.
 	// Accepted values: "low", "medium", "max". Empty = provider default.
 	ReasoningLevel        string
+	ResumeNotice          string
+	HistoryAlreadyLogged  bool
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
 	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
-	TerminalTools []string
-	Queries       *db.Queries
-	RunID         int32
-	Logger        RunLogger
+	TerminalTools               []string
+	Queries                     *db.Queries
+	RunID                       int32
+	Logger                      RunLogger
+	InitialConversationSequence int64
+	// BeforeTurn supplies durable control messages immediately before the next
+	// provider request. It receives the complete conversation accumulated so
+	// far and never interrupts an in-flight tool or LLM call.
+	BeforeTurn func(context.Context, []Message) ([]Message, error)
+	// Interrupt handles a pending host-side question after a provider response
+	// is received but before a no-tool response ends the session. Tool calls are
+	// always completed first; the next BeforeTurn handles interruptions queued
+	// while tools were running. It receives the complete current conversation
+	// so the isolated answer can use the worker's prior context.
+	Interrupt func(context.Context, []Message) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
@@ -175,13 +227,33 @@ func New(cfg Config) *Agent {
 		ProviderName:          cfg.ProviderName,
 		AgentName:             cfg.AgentName,
 		ReasoningLevel:        cfg.ReasoningLevel,
+		ResumeNotice:          cfg.ResumeNotice,
+		HistoryAlreadyLogged:  cfg.HistoryAlreadyLogged,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
 		TerminalTools:         terminal,
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
+		conversationSequence:  cfg.InitialConversationSequence,
+		beforeTurn:            cfg.BeforeTurn,
+		interrupt:             cfg.Interrupt,
 	}
+}
+
+// ConversationSequence returns the JSONL sequence of the newest canonical
+// message emitted by this agent. It is used as the durable checkpoint cursor.
+func (a *Agent) ConversationSequence() int64 { return a.conversationSequence }
+
+func (a *Agent) logConversationMessage(message Message) {
+	if a.logger == nil {
+		return
+	}
+	payload, err := json.Marshal(message)
+	if err != nil {
+		return
+	}
+	a.conversationSequence = a.logger.LogConversationMessage(payload)
 }
 
 // Run executes the agent loop starting with systemPrompt and userMessage.
@@ -228,6 +300,15 @@ func BuildHistory(systemPrompt string, messages []Message) []Message {
 // completion. On early termination it returns the history as of that point
 // alongside either ErrPaused (see PauseRequested) or another error.
 func (a *Agent) RunWithHistory(ctx context.Context, history []Message, pause PauseRequested) (string, []Message, error) {
+	defer func() {
+		// Normal completion keeps bookkeeping writes off the model turn's
+		// critical path. Cancellation is different: the caller is about to
+		// tear down the session, so join the writes that were given the
+		// canceled session context and let them exit before returning.
+		if ctx.Err() != nil {
+			a.asyncPersistence.Wait()
+		}
+	}()
 	switch a.Mode {
 	case ModeMessageHistory, "":
 		return a.runMessageHistory(ctx, history, "", pause)
@@ -261,6 +342,12 @@ func (a *Agent) reasoningEffort() string {
 // were never executed. That step is replayed first, before the main loop
 // begins, so resuming is indistinguishable from having never paused.
 func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reasoningEffort string, pause PauseRequested) (string, []Message, error) {
+	if !a.HistoryAlreadyLogged {
+		for _, message := range history {
+			a.logConversationMessage(message)
+		}
+		a.HistoryAlreadyLogged = true
+	}
 	if n := len(history); n > 0 {
 		last := history[n-1]
 		if last.Role == "assistant" && len(last.ToolCalls) > 0 {
@@ -272,16 +359,34 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				a.logger.LogToolResultsFromRequest(a.Client.Model, a.ProviderName, msgsToMap(toolMessages))
 			}
 			history = append(history, toolMessages...)
+			for _, message := range toolMessages {
+				a.logConversationMessage(message)
+			}
 			if terminalDone {
 				return strings.TrimSpace(last.Content), history, nil
 			}
 		}
 	}
+	if a.ResumeNotice != "" {
+		notice := Message{Role: "system", Content: a.ResumeNotice}
+		history = append(history, notice)
+		a.logConversationMessage(notice)
+		a.ResumeNotice = ""
+	}
 
-	const maxTurns = 50
 	for turn := 0; turn < maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()
+		}
+		if a.beforeTurn != nil {
+			messages, hookErr := a.beforeTurn(ctx, history)
+			if hookErr != nil {
+				return "", history, fmt.Errorf("before-turn control message failed: %w", hookErr)
+			}
+			for _, message := range messages {
+				history = append(history, message)
+				a.logConversationMessage(message)
+			}
 		}
 
 		req := ChatRequest{
@@ -322,12 +427,18 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				ReasoningTokens:  resp.Usage.CompletionTokensDetails.ReasoningTokens,
 			}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -339,12 +450,18 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 				MCPServerTokens: a.MCPServerListingCosts,
 			}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -358,9 +475,27 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		// Append the assistant turn to history before processing tool calls
 		// so the next LLM call sees the full context.
 		history = append(history, assistantMsg)
+		a.logConversationMessage(assistantMsg)
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			// No tools to invoke — the assistant's text is the final answer.
+			// A host-side question may have arrived while this provider request
+			// was in flight. Service it before ending the run so the main loop can
+			// continue with the isolated answer in its durable history.
+			if a.interrupt != nil {
+				interruptMessages, interruptErr := a.interrupt(ctx, history)
+				if interruptErr != nil {
+					return "", history, fmt.Errorf("interrupt handling failed: %w", interruptErr)
+				}
+				if len(interruptMessages) > 0 {
+					history = append(history, interruptMessages...)
+					for _, message := range interruptMessages {
+						a.logConversationMessage(message)
+					}
+					continue
+				}
+			}
+			// No tools or pending interruptions — the assistant's text is the
+			// final answer.
 			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 
@@ -387,6 +522,9 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		}
 
 		history = append(history, toolMessages...)
+		for _, message := range toolMessages {
+			a.logConversationMessage(message)
+		}
 
 		// A terminal tool (e.g. finish_task) completed — the run is over.
 		// Skip the extra wrap-up LLM round; the finish summary already exists.
@@ -412,7 +550,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		argTokens := tokens.EstimateBytes(argsRaw)
 
 		// Log the tool call invocation.
-		a.appendRunLog("tool_call", tc.Function.Arguments, map[string]interface{}{
+		a.appendRunLog(ctx, "tool_call", tc.Function.Arguments, map[string]interface{}{
 			"tool_name":     tc.Function.Name,
 			"input_tokens":  argTokens,
 			"output_tokens": argTokens, // backwards-compat alias
@@ -424,12 +562,13 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 			execCtx, cancel = context.WithTimeout(ctx, toolCallTimeout)
 			defer cancel()
 		}
+		execCtx = WithToolCallMessageID(execCtx, a.conversationSequence)
 		output, execErr := a.Registry.Execute(execCtx, tc.Function.Name, argsRaw)
 		if execErr != nil {
 			output = fmt.Sprintf("error: %v", execErr)
 			// Surface the failure as a visible error entry in the run log,
 			// in addition to returning it to the LLM as the tool result.
-			a.appendRunLog("error", fmt.Sprintf("tool %s failed: %v", tc.Function.Name, execErr), map[string]interface{}{
+			a.appendRunLog(ctx, "error", fmt.Sprintf("tool %s failed: %v", tc.Function.Name, execErr), map[string]interface{}{
 				"tool_name": tc.Function.Name,
 			})
 		} else if a.TerminalTools[tc.Function.Name] {
@@ -450,7 +589,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		}
 
 		// Log the tool result.
-		a.appendRunLog("tool_response", preview, map[string]interface{}{
+		a.appendRunLog(ctx, "tool_response", preview, map[string]interface{}{
 			"tool_name":     tc.Function.Name,
 			"output_tokens": outTokens,
 		})
@@ -459,12 +598,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 		if a.q != nil && a.runID > 0 {
 			delta := db.RunTokenStats{ToolOutputTokens: outTokens}
 			runID := a.runID
+			a.asyncPersistence.Add(1)
 			go func() {
+				defer a.asyncPersistence.Done()
 				for i := 0; i < 3; i++ {
-					if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+					if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 						break
 					}
-					time.Sleep(100 * time.Millisecond)
+					select {
+					case <-ctx.Done():
+						return
+					case <-time.After(100 * time.Millisecond):
+					}
 				}
 			}()
 		}
@@ -492,12 +637,18 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	if a.q != nil && a.runID > 0 && mcpTotalTokens > 0 {
 		delta := db.RunTokenStats{MCPToolTokens: mcpTotalTokens, MCPServerTokens: mcpServerTokens}
 		runID := a.runID
+		a.asyncPersistence.Add(1)
 		go func() {
+			defer a.asyncPersistence.Done()
 			for i := 0; i < 3; i++ {
-				if err := a.q.AddRunTokenStats(context.Background(), runID, delta); err == nil {
+				if err := a.q.AddRunTokenStats(ctx, runID, delta); err == nil {
 					break
 				}
-				time.Sleep(100 * time.Millisecond)
+				select {
+				case <-ctx.Done():
+					return
+				case <-time.After(100 * time.Millisecond):
+				}
 			}
 		}()
 	}
@@ -505,7 +656,7 @@ func (a *Agent) executeToolCalls(ctx context.Context, calls []ToolCall) ([]Messa
 	return results, terminalDone, nil
 }
 
-func (a *Agent) appendRunLog(entryType, content string, extra map[string]interface{}) {
+func (a *Agent) appendRunLog(ctx context.Context, entryType, content string, extra map[string]interface{}) {
 	if a.q == nil || a.runID <= 0 {
 		return
 	}
@@ -518,12 +669,18 @@ func (a *Agent) appendRunLog(entryType, content string, extra map[string]interfa
 		entry[k] = v
 	}
 	runID := a.runID
+	a.asyncPersistence.Add(1)
 	go func() {
+		defer a.asyncPersistence.Done()
 		for i := 0; i < 3; i++ {
-			if err := a.q.AppendRunLogEntry(context.Background(), runID, entry); err == nil {
+			if err := a.q.AppendRunLogEntry(ctx, runID, entry); err == nil {
 				break
 			}
-			time.Sleep(100 * time.Millisecond)
+			select {
+			case <-ctx.Done():
+				return
+			case <-time.After(100 * time.Millisecond):
+			}
 		}
 	}()
 }

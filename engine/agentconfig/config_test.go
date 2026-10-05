@@ -50,8 +50,6 @@ chat_type = "message_history"
 allowed_models = ["model-x", "model-y"]
 reasoning_level = "medium"
 allowed_tools = ["read", "grep"]
-subagents = ["Other"]
-parent_agent = "Boss"
 `
 
 func TestLoadFromBytes_ValidTOML(t *testing.T) {
@@ -63,8 +61,6 @@ func TestLoadFromBytes_ValidTOML(t *testing.T) {
 	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
 	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
 	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
-	assert.Equal(t, []string{"Other"}, cfg.Subagents)
-	assert.Equal(t, "Boss", cfg.ParentAgent)
 }
 
 func TestLoadFromBytes_InvalidTOML(t *testing.T) {
@@ -139,6 +135,12 @@ func TestDefaultFactory_GetConfig(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
 	assert.Empty(t, cfg.AllowedModels)
+	for _, tool := range []string{"bash", "read", "write", "ls", "grep"} {
+		assert.True(t, cfg.IsToolAllowed(tool), "Coder should be allowed to use runtime tool %q", tool)
+	}
+	for _, legacy := range []string{"exec_command", "read_file", "write_file", "list_dir"} {
+		assert.False(t, cfg.IsToolAllowed(legacy), "legacy tool name %q must not be used in the runtime allowlist", legacy)
+	}
 }
 
 func TestDefaultFactory_GetConfig_NotFound(t *testing.T) {
@@ -180,26 +182,28 @@ func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
 	}
 }
 
-func TestDefaultFactory_SubagentHierarchy(t *testing.T) {
+func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
 	f := agentconfig.NewDefaultFactory()
 
 	ceo, _ := f.GetConfig("CEO")
-	assert.Contains(t, ceo.Subagents, "CTO")
-	assert.Contains(t, ceo.Subagents, "CMO")
-	assert.Contains(t, ceo.Subagents, "Designer")
+	assert.True(t, ceo.CanUseWorkers)
 
 	cto, _ := f.GetConfig("CTO")
-	assert.Equal(t, "CEO", cto.ParentAgent)
-	assert.Contains(t, cto.Subagents, "Coder")
-	assert.Contains(t, cto.Subagents, "Debugger")
-	assert.Contains(t, cto.Subagents, "QA")
+	assert.True(t, cto.CanUseWorkers)
 
 	cmo, _ := f.GetConfig("CMO")
-	assert.Equal(t, "CEO", cmo.ParentAgent)
-	assert.Contains(t, cmo.Subagents, "SMM")
-	assert.Contains(t, cmo.Subagents, "PPC Specialist")
-	assert.Contains(t, cmo.Subagents, "Post Writer")
+	assert.True(t, cmo.CanUseWorkers)
 
 	coder, _ := f.GetConfig("Coder")
-	assert.Equal(t, "CTO", coder.ParentAgent)
+	assert.False(t, coder.CanUseWorkers)
+}
+
+func TestDefaultFactoryPromptsMatchToolCapabilities(t *testing.T) {
+	f := agentconfig.NewDefaultFactory()
+	ceo, _ := f.GetConfig("CEO")
+	cto, _ := f.GetConfig("CTO")
+	cmo, _ := f.GetConfig("CMO")
+	assert.Contains(t, ceo.Prompt, "helper worker")
+	assert.NotContains(t, cto.Prompt, "ask_human")
+	assert.NotContains(t, cmo.Prompt, "ask_human")
 }

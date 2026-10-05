@@ -50,12 +50,11 @@ type AgentConfig struct {
 	ReasoningLevel ReasoningLevel `toml:"reasoning_level"`
 	// MemoryTags are labels used by the memory bank (future feature).
 	MemoryTags []string `toml:"memory_tags"`
-	// Subagents lists config names that this agent may delegate to.
-	Subagents []string `toml:"subagents"`
-	// ParentAgent is the config name of this agent's parent, if any.
-	ParentAgent string `toml:"parent_agent"`
 	// AllowedTools lists tool names the agent may invoke. Empty = all tools.
 	AllowedTools []string `toml:"allowed_tools"`
+	// CanUseWorkers permits bounded ephemeral helper-worker runs. It is a
+	// persisted capability and is intentionally independent of the display name.
+	CanUseWorkers bool `toml:"can_use_workers"`
 	// AllowedMCPs lists MCP server names the agent may use. Empty = all enabled MCPs.
 	AllowedMCPs []string `toml:"allowed_mcps"`
 }

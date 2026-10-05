@@ -1,6 +1,7 @@
 package llmdiscovery
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"encoding/json"
 	"net/http"
@@ -29,7 +30,7 @@ func setupTestDB(t *testing.T) *gorm.DB {
 	dbPath := filepath.Join(t.TempDir(), "test.db")
 	database, err := gorm.Open(sqlite.Open(dbPath), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 

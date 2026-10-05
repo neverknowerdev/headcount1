@@ -16,6 +16,7 @@ import (
 type Settings struct {
 	BasePath         string   `json:"base_path" yaml:"base_path"`
 	WorkspaceFolders []string `json:"workspace_folders" yaml:"workspace_folders"`
+	GitRemoteURL     string   `json:"git_remote_url" yaml:"git_remote_url"`
 	// Deploy configuration (app-global). Deploys are pushed to this server by
 	// CI as authenticated webhook events; these settings decide which events a
 	// PRODUCTION server acts on (staging accepts any branch — see the deploy

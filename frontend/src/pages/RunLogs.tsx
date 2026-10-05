@@ -5,6 +5,7 @@ import { useStore } from '../store';
 import { TokenStatsBar } from '../components/RunLogViewer';
 import { buildAgentStats } from '../utils/runStats';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+import { getRunAgentName } from '../utils/runDisplay';
 
 const formatTokens = (n: number): string => {
     if (!n || n < 1000) return String(n || 0);
@@ -87,7 +88,7 @@ export const RunLogs: React.FC = () => {
                 fetchRuns();
                 return;
             }
-            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, current_status: status } : r));
+            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, latest_reported_status: status } : r));
         }
     }, {
         enabled: !!selectedCompanyId,
@@ -131,12 +132,12 @@ export const RunLogs: React.FC = () => {
                             const children = childrenByParent.get(r.id) || [];
                             const descendants = (descendantsByRoot.get(r.id) || []).filter((d: any) => d.id !== r.id);
                             const agentStats = descendants.length > 0 ? buildAgentStats(r, descendants) : undefined;
+                            const isOrchestrator = r.task?.orchestrator_run_id === r.id || (r.parent_run_id == null && String(r.name || '').endsWith('-orchestrator'));
                             return (
                             <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        Run {r.name || `#${r.id}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {r.agent?.name}
-                                        {!r.name && r.agent_config_name ? ` · ${r.agent_config_name}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
+                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'}{r.title ? ` · ${r.title}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                         {children.length > 0 && (
                                             <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
                                         )}
@@ -158,11 +159,12 @@ export const RunLogs: React.FC = () => {
                                 <div className="border-t p-4 space-y-4">
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <InfoItem label="Status" value={<span className="capitalize">{r.status}</span>} />
-                                        <InfoItem label="Agent" value={`${r.agent?.name || '—'}${r.agent_config_name ? ` (${r.agent_config_name})` : ''}`} />
+                                        <InfoItem label="Agent" value={getRunAgentName(r) || '—'} />
+                                        {r.title && <InfoItem label="Session purpose" value={r.title} />}
                                         <InfoItem label="Started" value={formatDateTime(r.started_at)} />
                                         <InfoItem label="Duration" value={formatDuration(r.started_at, r.ended_at)} />
-                                        {r.current_status && (
-                                            <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.current_status}</span>} />
+                                        {r.latest_reported_status && (
+                                            <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.latest_reported_status}</span>} />
                                         )}
                                     </div>
 
@@ -191,7 +193,7 @@ export const RunLogs: React.FC = () => {
                                                         data-testid="child-session-link"
                                                         className="text-xs bg-white border rounded px-2 py-1 hover:bg-gray-100 flex items-center justify-between gap-2"
                                                     >
-                                                        <span className="truncate">{c.name || `#${c.id}`} {c.agent_config_name ? `· ${c.agent_config_name}` : c.agent?.name ? `· ${c.agent.name}` : ''}</span>
+                                                        <span className="truncate">{c.name || `#${c.id}`} {getRunAgentName(c) ? `· ${getRunAgentName(c)}` : ''}</span>
                                                         <span className="text-gray-500 capitalize shrink-0">{c.status}</span>
                                                     </Link>
                                                 ))}

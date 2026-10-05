@@ -22,9 +22,10 @@ func (api *API) ListCompanies(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name      string `json:"name"`
-		ShortName string `json:"short_name"`
-		Color     string `json:"color"`
+		Name        string `json:"name"`
+		ShortName   string `json:"short_name"`
+		Description string `json:"description"`
+		Color       string `json:"color"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -33,10 +34,11 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 
 	uid := api.currentUserID(r)
 	comp := db.Company{
-		Name:      req.Name,
-		ShortName: req.ShortName,
-		Color:     req.Color,
-		UserID:    &uid, // creator (engine resolves their Default Models)
+		Name:        req.Name,
+		ShortName:   req.ShortName,
+		Description: req.Description,
+		Color:       req.Color,
+		UserID:      &uid, // creator (engine resolves their Default Models)
 	}
 	if membership, err := api.requireMembership(r); err == nil {
 		comp.TeamID = &membership.TeamID
@@ -61,7 +63,8 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		ShortName string `json:"short_name"`
+		ShortName   string  `json:"short_name"`
+		Description *string `json:"description"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -72,6 +75,9 @@ func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {
 
 	oldShortName := comp.ShortName
 	comp.ShortName = req.ShortName
+	if req.Description != nil {
+		comp.Description = *req.Description
+	}
 	if err := api.db.Save(&comp).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return

@@ -311,7 +311,7 @@ func (api *API) RegisterFinish(w http.ResponseWriter, r *http.Request) {
 	clearReenrollCookie(w, r)
 
 	api.issueTokenPair(w, r, user)
-	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email}, "unlocked": true})
+	api.respondJSON(w, http.StatusCreated, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email, IsAdmin: user.IsAdmin}, "unlocked": true})
 }
 
 // validReenrollTicket reports whether the request carries the re-enroll ticket
@@ -500,7 +500,7 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 			unlocked = true
 		}
 	}
-	api.respondJSON(w, http.StatusOK, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email}, "unlocked": unlocked})
+	api.respondJSON(w, http.StatusOK, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email, IsAdmin: user.IsAdmin}, "unlocked": unlocked})
 }
 
 // ── add another device (behind RequireAuth, must be unlocked) ─────────────────

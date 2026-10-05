@@ -1,6 +1,7 @@
 package db_test
 
 import (
+	"agent-orchestrator/db/migrations"
 	"context"
 	"testing"
 	"time"
@@ -18,7 +19,7 @@ func setupRefreshTestDB(t *testing.T) (*db.Queries, *gorm.DB, context.Context, i
 	require.NoError(t, err)
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.RefreshToken{}, &db.Session{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
 	ctx := context.Background()
 	user, err := q.CreateUser(ctx, "refresh@test.local")

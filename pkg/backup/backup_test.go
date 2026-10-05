@@ -1,6 +1,7 @@
 package backup
 
 import (
+	"agent-orchestrator/db/migrations"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -20,16 +21,7 @@ func openTestDB(t *testing.T, dir string) *gorm.DB {
 	}
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
-	if err := database.AutoMigrate(
-		&db.User{}, &db.WebAuthnCredential{}, &db.Team{}, &db.TeamMember{},
-		&db.Session{}, &db.PasswordResetToken{}, &db.TeamInvite{},
-		&db.Company{}, &db.Project{}, &db.Sprint{}, &db.LLMProvider{},
-		&db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{},
-		&db.Agent{}, &db.Skill{}, &db.Task{}, &db.Comment{}, &db.Attachment{},
-		&db.Run{}, &db.Artifact{}, &db.ActivityLog{}, &db.ProxyRequestLog{},
-		&db.MCPServer{}, &db.MCPAccount{}, &db.AgentMCPServer{},
-		&db.AgentMCPAccount{}, &db.AgentMCPToolFilter{},
-	); err != nil {
+	if err := migrations.ApplyGORM(database, "sqlite", "test"); err != nil {
 		t.Fatalf("migrate: %v", err)
 	}
 	return database
@@ -54,9 +46,9 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	agent := db.Agent{CompanyID: comp.ID, Name: "dev"}
 	database.Create(&agent)
 	agentID := agent.ID
-	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: "done", TaskType: "plan_and_implement", Priority: "Normal"}
+	parentTask := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agentID, Title: "parent", Status: db.TaskStatusDone, Priority: "Normal"}
 	database.Create(&parentTask)
-	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: "backlog", TaskType: "plan_and_implement", Priority: "Normal"}
+	childTask := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, ParentID: &parentTask.ID, Title: "child", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	database.Create(&childTask)
 	comment := db.Comment{TaskID: parentTask.ID, AuthorType: "human", Content: "hi"}
 	database.Create(&comment)
@@ -137,6 +129,48 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 		if _, err := os.Stat(f); err == nil {
 			t.Errorf("secret file was restored — it must be excluded from backups: %s", f)
 		}
+	}
+}
+
+func TestBackupRestoreInterruptsSnapshotActiveRuns(t *testing.T) {
+	basePath := t.TempDir()
+	database := openTestDB(t, t.TempDir())
+
+	company := db.Company{Name: "Active Snapshot Co", ShortName: "active-snapshot"}
+	if err := database.Create(&company).Error; err != nil {
+		t.Fatal(err)
+	}
+	agent := db.Agent{CompanyID: company.ID, Name: "worker"}
+	if err := database.Create(&agent).Error; err != nil {
+		t.Fatal(err)
+	}
+	agentID := agent.ID
+	task := db.Task{CompanyID: company.ID, AgentID: &agentID, Title: "active task", Status: db.TaskStatusInProgress}
+	if err := database.Create(&task).Error; err != nil {
+		t.Fatal(err)
+	}
+	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "waiting"}
+	if err := database.Create(&run).Error; err != nil {
+		t.Fatal(err)
+	}
+
+	archivePath, err := CreateBackup(basePath, database)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := RestoreBackup(archivePath, t.TempDir(), database); err != nil {
+		t.Fatal(err)
+	}
+
+	var restored db.Run
+	if err := database.First(&restored, run.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restored.Status != "interrupted" {
+		t.Fatalf("restored active run status = %q, want interrupted", restored.Status)
+	}
+	if restored.EndedAt == nil {
+		t.Fatal("restored interrupted run should have ended_at")
 	}
 }
 

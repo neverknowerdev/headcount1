@@ -7,6 +7,9 @@ import * as os from 'os';
 import * as path from 'path';
 import { AddressInfo } from 'net';
 import { startMockProviderServer } from '../fixtures/mock-provider-server';
+import { terminateProcess } from '../helpers/process';
+import { fetchWithTimeout, requireFetchOK } from '../helpers/http';
+import { resetE2EBase } from '../helpers/reset';
 
 /**
  * Server-side deploy webhook, end-to-end.
@@ -72,23 +75,23 @@ test.describe.serial('Deploy webhook', () => {
                 HEADCOUNT1_DEPLOY_ALLOWED_HOSTS: '127.0.0.1',
             },
             stdio: ['ignore', 'pipe', 'pipe'],
+            detached: true,
         });
         child.stdout?.on('data', (d) => { serverLog += d.toString(); });
         child.stderr?.on('data', (d) => { serverLog += d.toString(); });
         server = child;
         await expect
-            .poll(async () => { try { return (await fetch(`${base}/api/ping`)).ok; } catch { return false; } },
+            .poll(async () => { try {
+                if (child.exitCode !== null || child.signalCode !== null) throw new Error(`isolated server exited (code=${child.exitCode}, signal=${child.signalCode})\n${serverLog}`);
+                return (await fetchWithTimeout(`${base}/api/ping`, {}, 2_000)).ok;
+            } catch (err) { if (child.exitCode !== null || child.signalCode !== null) throw err; return false; } },
                 { timeout: 60_000, intervals: [500] })
             .toBe(true);
     }
 
     async function stopServer(): Promise<void> {
         const child = server;
-        if (child && child.exitCode === null) {
-            const exited = new Promise<void>((resolve) => child.once('exit', () => resolve()));
-            child.kill('SIGTERM');
-            await exited;
-        }
+        if (child) await terminateProcess(child, { group: true, timeoutMs: 4_000 });
         server = null;
         // A deploy execs in place so the PID is unchanged and the kill above is
         // enough. This is a belt-and-braces reap for a run that failed midway;
@@ -98,23 +101,23 @@ test.describe.serial('Deploy webhook', () => {
     }
 
     async function version(): Promise<string> {
-        const res = await fetch(`${base}/api/version`);
+        const res = await fetchWithTimeout(`${base}/api/version`, {}, 5_000);
         if (!res.ok) return '';
         return (await res.json()).commit_hash ?? '';
     }
 
     function deployPost(key: string, payload: unknown): Promise<Response> {
-        return fetch(`${base}/api/deploy/webhook`, {
+        return fetchWithTimeout(`${base}/api/deploy/webhook`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json', 'X-Deploy-Key': key },
             body: JSON.stringify(payload),
-        });
+        }, 10_000);
     }
 
     async function postJSON(url: string, data: unknown): Promise<any> {
-        const res = await fetch(url, {
+        const res = await fetchWithTimeout(url, {
             method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data),
-        });
+        }, 10_000);
         if (!res.ok) {
             let detail = '';
             try { detail = await res.text(); } catch { /* ignore */ }
@@ -157,7 +160,7 @@ test.describe.serial('Deploy webhook', () => {
         // Every test starts on binary A, whatever the previous test deployed.
         fs.copyFileSync(pristineBinA, serverBinPath);
         fs.chmodSync(serverBinPath, 0o755);
-        if (mock) await fetch(`${mock.baseUrl}/__test/reset`, { method: 'POST' });
+        if (mock) await requireFetchOK(`${mock.baseUrl}/__test/reset`, { method: 'POST' }, 5_000);
     });
 
     test.afterEach(async () => {
@@ -252,14 +255,19 @@ test.describe.serial('Deploy webhook', () => {
         const statusMarker = 'progress recorded before the deploy';
 
         await startServer();
-        await fetch(`${base}/api/e2e/wipe-db`, { method: 'POST' });
+        await resetE2EBase(base, mockUrl);
         expect(await version()).toBe(runningCommit);
 
         // Seed a runnable task on this isolated server.
         const provider = await postJSON(`${base}/api/providers`, {
             name: 'mock', base_url: mockUrl, api_key: 'test-key',
-            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model',
+            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         });
+        const orchestratorSetting = await fetch(`${base}/api/default-model-settings/task_orchestrator`, {
+            method: 'PUT', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ provider_id: provider.id, model: 'e2e-orchestrator-model' }),
+        });
+        expect(orchestratorSetting.ok).toBeTruthy();
         const company = await postJSON(`${base}/api/companies`, { name: 'Deploy Co', short_name: 'dc', color: '#0ea5e9' });
         const sprint = await postJSON(`${base}/api/sprints`, { company_id: company.id, name: 'S1', goal: 'ship' });
         const agent = await postJSON(`${base}/api/agents`, {
@@ -268,34 +276,48 @@ test.describe.serial('Deploy webhook', () => {
         });
         const task = await postJSON(`${base}/api/tasks`, {
             company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
-            title: 'Survives a deploy', description: 'a task to deploy through', task_type: 'implement',
+            title: 'Survives a deploy', description: 'a task to deploy through',
         });
 
         // Turn 1 reports progress (a tool call, so the run has more to do and is
         // a valid pause point); turn 2 finishes after the restart.
         await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
+            body: JSON.stringify({ model: 'e2e-mock-model',
                 entries: [
                     { tool_call: { id: 'rs-1', name: 'report_status', arguments: { status: statusMarker } } },
                     { tool_call: { id: 'ft-1', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Survived the deploy.' } } },
                 ],
             }),
         });
+        await fetch(`${mockUrl}/__test/set-scenario`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
+                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', title: 'Complete task', prompt: 'Complete the task.' } } },
+                { text: 'The worker completed the task.' },
+                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The resumed worker completed successfully and the result was verified.' } } },
+            ] }),
+        });
         // Hold the LLM response so the run is provably blocked mid-turn.
-        await fetch(`${mockUrl}/__test/hold`, { method: 'POST' });
+        await fetch(`${mockUrl}/__test/hold-worker`, { method: 'POST' });
 
         await fetch(`${base}/api/tasks/${task.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'to-do' }),
         });
         await expect
-            .poll(async () => (await (await fetch(`${mockUrl}/__test/requests`)).json()).completionsReceived as number,
+            .poll(async () => {
+                const requests = await (await fetch(`${mockUrl}/__test/requests`)).json();
+                return (requests.requests as any[]).filter((entry) =>
+                    entry.path?.includes('chat/completions') && entry.body?.model === 'e2e-mock-model').length;
+            },
                 { timeout: 30_000, intervals: [200], message: 'run should reach its first LLM call' })
-            .toBeGreaterThanOrEqual(1);
+            .toBe(1);
 
         const runs = await (await fetch(`${base}/api/tasks/${task.id}/runs`)).json();
-        expect(runs.length).toBe(1);
-        const runId = runs[0].id;
+        expect(runs.length).toBe(2);
+        const worker = runs.find((run: any) => run.kind === 'agent_session');
+        expect(worker).toBeTruthy();
+        const runId = worker.id;
 
         // Deploy while that run is blocked on its LLM call.
         const drainMark = serverLog.length;
@@ -343,9 +365,9 @@ test.describe.serial('Deploy webhook', () => {
         // The tool call pending at pause time ran on resume, and the task
         // reached the status the agent set after the restart.
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
-        expect(finalRun.current_status).toBe(statusMarker);
+        expect(finalRun.latest_reported_status).toBe(statusMarker);
         const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
-        expect(finalTask.status).toBe('in-review');
+        expect(finalTask.status).toBe('done');
     });
 
     // Configuration delivery: CI reads its GitHub Environment's vars/secrets and

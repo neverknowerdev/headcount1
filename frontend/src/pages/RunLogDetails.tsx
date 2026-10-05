@@ -5,57 +5,10 @@ import { ArrowLeft, Square, AlertCircle, RotateCcw } from 'lucide-react';
 import { RunLogViewer, type AgentTokenStats } from '../components/RunLogViewer';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { buildAgentStats } from '../utils/runStats';
+import { parseLogContent } from '../utils/runLogParser';
+import { getRunAgentName } from '../utils/runDisplay';
 
 import { mergeSnapshotWithLiveTail, sortBySeq } from '../utils/logMerge';
-
-function parseLogContent(logContent: string): any[] {
-    if (!logContent) return [];
-    const lines = logContent.split('\n').filter((l: string) => l.trim());
-    const messages: any[] = [];
-    let i = 0;
-    for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed.startsWith('{')) {
-            try {
-                const parsed = JSON.parse(trimmed);
-                if (parsed.type === 'tool_response' || parsed.type === 'tool_result' || parsed.type === 'tool') {
-                    messages.push({ id: i++, entry: { ...parsed, type: 'tool_response', content: parsed.content || trimmed, tool_name: parsed.tool_name || parsed.name } });
-                    continue;
-                }
-                // JSONL run log: every line is a structured entry with a type,
-                // the same shape as the DB log_entries — use it as-is.
-                if (typeof parsed.type === 'string') {
-                    messages.push({ id: i++, entry: parsed });
-                    continue;
-                }
-                // Legacy text-log heuristics: raw request/response bodies that
-                // were embedded in the old ===-delimited format.
-                if (parsed.agent && parsed.parts && Array.isArray(parsed.parts)) {
-                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model?.modelID || parsed.model } });
-                    continue;
-                }
-                if (parsed.info && parsed.parts && Array.isArray(parsed.parts)) {
-                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
-                    continue;
-                }
-                if (parsed.messages && Array.isArray(parsed.messages)) {
-                    messages.push({ id: i++, entry: { type: 'request', content: trimmed, model: parsed.model } });
-                    continue;
-                }
-                if (parsed.choices && Array.isArray(parsed.choices)) {
-                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
-                    continue;
-                }
-                if (parsed.reasoning || parsed.tokens || parsed.raw) {
-                    messages.push({ id: i++, entry: { type: 'response', content: trimmed, status_code: 200 } });
-                    continue;
-                }
-            } catch { /* treat as info */ }
-        }
-        messages.push({ id: i++, entry: { type: 'info', content: trimmed } });
-    }
-    return messages;
-}
 
 export const RunLogDetails: React.FC = () => {
     const { shortName, id } = useParams<{shortName: string, id: string}>();
@@ -173,7 +126,7 @@ export const RunLogDetails: React.FC = () => {
             fetchAgentStats(run);
         } else if (msg.type === 'run_status' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
-            setRun((prev: any) => prev ? { ...prev, current_status: msg.payload.status } : prev);
+            setRun((prev: any) => prev ? { ...prev, latest_reported_status: msg.payload.status } : prev);
         } else if (msg.type === 'run_stalled' && msg.payload.run_id === runIdInt) {
             lastEventAtRef.current = Date.now();
             setStreamStalled({ at: Date.now(), message: msg.payload.message || 'Stream stalled' });
@@ -220,7 +173,19 @@ export const RunLogDetails: React.FC = () => {
                     <Link to={`/companies/${shortName}/runs`} className="text-gray-500 hover:text-gray-900">
                         <ArrowLeft size={20} />
                     </Link>
-                    <h1 className="text-2xl font-bold">Run {run.name || `#${run.id}`} Details</h1>
+                    <h1 className="text-2xl font-bold flex items-center gap-2 flex-wrap">
+                        <span>Run {run.name || `#${run.id}`} Details</span>
+                        {getRunAgentName(run) && (
+                            <span className="text-sm font-medium bg-gray-100 text-gray-700 px-2 py-1 rounded-full" data-testid="run-agent-badge">
+                                {getRunAgentName(run)}
+                            </span>
+                        )}
+                        {run.title && (
+                            <span className="text-sm font-medium bg-slate-50 text-slate-700 px-2 py-1 rounded-full" data-testid="run-title-badge" title="Session purpose">
+                                {run.title}
+                            </span>
+                        )}
+                    </h1>
                 </div>
                 <div className="flex items-center gap-2">
                     {run.status === 'running' && (
@@ -263,16 +228,22 @@ export const RunLogDetails: React.FC = () => {
                         <p className="text-sm text-gray-500">Status</p>
                         <p className="font-medium capitalize">{run.status}</p>
                     </div>
-                    {run.current_status && (
+                    {run.latest_reported_status && (
                         <div>
                             <p className="text-sm text-gray-500">Current Activity</p>
-                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.current_status}</p>
+                            <p className="font-medium text-violet-700" data-testid="run-current-status">{run.latest_reported_status}</p>
                         </div>
                     )}
                     <div>
                         <p className="text-sm text-gray-500">Agent</p>
-                        <p className="font-medium">{run.agent?.name}{run.agent_config_name ? ` (${run.agent_config_name})` : ''}</p>
+                        <p className="font-medium">{getRunAgentName(run) || '—'}</p>
                     </div>
+                    {run.title && (
+                        <div>
+                            <p className="text-sm text-gray-500">Session purpose</p>
+                            <p className="font-medium">{run.title}</p>
+                        </div>
+                    )}
                     {run.parent_run_id && (
                         <div>
                             <p className="text-sm text-gray-500">Parent Session</p>
@@ -292,7 +263,7 @@ export const RunLogDetails: React.FC = () => {
                 </div>
 
                 <div className="col-span-2 bg-gray-50 rounded-lg shadow border flex flex-col min-h-0">
-                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} />
+                    <RunLogViewer messages={logMessages} status={run.status} tokenStats={tokenStats} agentStats={agentStats} runId={run.id} agentName={getRunAgentName(run)} />
                 </div>
             </div>
         </div>

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"agent-orchestrator/db/migrations"
 	"bytes"
 	"context"
 	"encoding/json"
@@ -23,7 +24,7 @@ func setupDefaultModelSettingsTestDB(t *testing.T) *gorm.DB {
 	t.Helper()
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
-	require.NoError(t, database.AutoMigrate(&db.User{}, &db.LLMProvider{}, &db.ModelGroup{}, &db.ModelGroupMember{}, &db.DefaultModelSetting{}))
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	return database
 }
 
@@ -42,14 +43,14 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	uid := testSeedUserID(t, q)
 	require.NoError(t, q.EnsureDefaultModelSettingsForUser(context.Background(), uid))
 
-	// List shows both purposes, initially unconfigured (no Utility group in this DB).
+	// List shows all configurable purposes, initially unconfigured (no Utility group in this DB).
 	req := httptest.NewRequest(http.MethodGet, "/default-model-settings", nil)
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)
 	var list []db.DefaultModelSetting
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &list))
-	require.Len(t, list, 2)
+	require.Len(t, list, 3)
 
 	// Point commit_messages at a fixed provider+model.
 	provider := db.LLMProvider{Name: "P", DefaultModel: "p-default", UserID: &uid}
@@ -67,12 +68,12 @@ func TestDefaultModelSettings_ListAndUpdate(t *testing.T) {
 	assert.Equal(t, "my-model", updated.Model)
 	assert.Nil(t, updated.ModelGroupID)
 
-	// Point ask_artifact at a model group instead.
+	// Point helper_worker at a model group instead.
 	group := db.ModelGroup{Name: "G", Slug: "g", UserID: &uid}
 	require.NoError(t, database.Create(&group).Error)
 	payload = map[string]interface{}{"model_group_id": group.ID}
 	b, _ = json.Marshal(payload)
-	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/default-model-settings/%s", db.PurposeAskArtifact), bytes.NewReader(b))
+	req = httptest.NewRequest(http.MethodPut, fmt.Sprintf("/default-model-settings/%s", db.PurposeHelperWorker), bytes.NewReader(b))
 	w = httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	require.Equal(t, http.StatusOK, w.Code)

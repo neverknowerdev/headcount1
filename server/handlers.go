@@ -6,6 +6,7 @@ import (
 	"log"
 	"net/http"
 	"net/url"
+	"strings"
 	"time"
 
 	"agent-orchestrator/db"
@@ -69,21 +70,30 @@ func (s *Server) StartMCPCacheScheduler(ctx context.Context) {
 	}
 }
 
-// InstallMCPNpmDeps reads the Deps field from every MCP server in the database
-// and installs any npm packages that are not already present globally.
-// Runs after the platform setup script so npm is guaranteed to exist.
-func (s *Server) InstallMCPNpmDeps(ctx context.Context) {
-	pkgs, err := db.New(s.db).ListAllMCPNpmDeps(ctx)
+// InstallMCPDependencies installs and verifies dependencies one MCP server at a
+// time. Errors are persisted on that server so the MCP page can identify the
+// affected integration and offer a retry instead of surfacing a platform-wide
+// setup failure.
+func (s *Server) InstallMCPDependencies(ctx context.Context) {
+	q := db.New(s.db)
+	servers, err := q.ListMCPServers(ctx, 0, 0)
 	if err != nil {
-		log.Printf("mcp npm deps: failed to query deps: %v", err)
+		log.Printf("mcp deps: failed to list servers: %v", err)
 		return
 	}
-	if len(pkgs) == 0 {
-		return
-	}
-	depsJSON, _ := json.Marshal(pkgs)
-	if err := setup.InstallNpmDeps(ctx, string(depsJSON)); err != nil {
-		log.Printf("mcp npm deps: %v", err)
+	for _, mcpServer := range servers {
+		installCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		err := setup.InstallMCPDependencies(installCtx, mcpServer)
+		cancel()
+		if err != nil {
+			message := "Dependency setup failed: " + err.Error()
+			_ = q.UpdateMCPServerLastError(ctx, mcpServer.ID, message)
+			log.Printf("mcp deps: %s: %v", mcpServer.Name, err)
+			continue
+		}
+		if strings.HasPrefix(mcpServer.LastError, "Dependency setup failed:") {
+			_ = q.UpdateMCPServerLastError(ctx, mcpServer.ID, "")
+		}
 	}
 }
 
@@ -118,6 +128,10 @@ func (s *Server) MountPublic(r chi.Router) {
 	// here. It authenticates with the shared HEADCOUNT1_DEPLOY_API_KEY, and is
 	// a no-op unless that key is configured — see DeployWebhook.
 	r.Post("/deploy/webhook", api.DeployWebhook)
+	r.Get("/deploy/webhook/status", api.GetDeployAttemptStatus)
+	// GitHub App deliveries cannot carry a Headcount1 browser session. Their
+	// HMAC signature is verified by GitHubWebhook before any processing.
+	r.Post("/github/webhook", api.GitHubWebhook)
 
 	r.Get("/setup-status", func(w http.ResponseWriter, _ *http.Request) {
 		pending, ok, errMsg, warning := setup.Status()
@@ -203,12 +217,18 @@ func (s *Server) Mount(r chi.Router) {
 
 	r.Get("/settings", api.GetSettings)
 	// UpdateSettings mutates the instance-global config (base path, workspace
-	// layout) — operator-only. UploadSSHKey is per-user (see settings.go).
+	// layout, and deployment behavior) — first-registered-user-only. UploadSSHKey
+	// is per-user (see settings.go).
 	r.Group(func(r chi.Router) {
-		r.Use(api.RequireGlobalAdminAPI)
+		r.Use(api.RequireInstanceAdmin)
 		r.Post("/settings", api.UpdateSettings)
 	})
 	r.Post("/settings/ssh", api.UploadSSHKey)
+	r.Route("/github", func(r chi.Router) {
+		r.Get("/status", api.GitHubStatus)
+		r.Get("/callback", api.GitHubCallback)
+		r.Get("/repositories", api.ListGitHubRepositories)
+	})
 	r.Get("/activities", api.ListActivities)
 
 	r.Route("/skills", func(r chi.Router) {
@@ -229,6 +249,7 @@ func (s *Server) Mount(r chi.Router) {
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadProject)
 			r.Get("/", api.GetProject)
+			r.Get("/branches", api.ListProjectBranches)
 			r.Put("/", api.UpdateProject)
 			r.Get("/codegraph", api.GetProjectCodegraph)
 			// Deploy environments (secrets + variables + connectors).
@@ -243,6 +264,9 @@ func (s *Server) Mount(r chi.Router) {
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadTask)
 			r.Get("/", api.GetTask)
+			r.Get("/relations", api.ListTaskRelations)
+			r.Post("/relations", api.CreateTaskRelation)
+			r.Delete("/relations/{relationID}", api.DeleteTaskRelation)
 			r.Put("/", api.UpdateTask)
 			r.Put("/status", api.UpdateTask)
 			r.Get("/runs", api.ListTaskRuns)
@@ -255,6 +279,7 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
+	r.Get("/tool-names", api.GetToolNames)
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
@@ -289,6 +314,8 @@ func (s *Server) Mount(r chi.Router) {
 			r.Use(api.LoadRun)
 			r.Get("/", api.GetRun)
 			r.Get("/children", api.ListChildRuns)
+			r.Get("/download", api.DownloadRunLogs)
+			r.Get("/log/download", api.DownloadRunLog)
 			r.Post("/stop", api.StopRun)
 		})
 	})
@@ -348,11 +375,10 @@ func (s *Server) Mount(r chi.Router) {
 		r.Post("/restore", api.RestoreBackup)
 	})
 
-	// Deploy state, read-only for any signed-in user (the running version +
-	// this server's environment/source). Deploys themselves are triggered by
-	// CI via the public /deploy/webhook, not from here.
+	// Deployment state contains the deployment settings, so it is instance-admin
+	// only. Deploys themselves are triggered by CI via the public webhook.
 	r.Get("/version", api.GetVersion)
-	r.Get("/deploy/status", api.GetDeployStatus)
+	r.With(api.RequireInstanceAdmin).Get("/deploy/status", api.GetDeployStatus)
 
 	r.Route("/mcp-servers", func(r chi.Router) {
 		r.Get("/", api.ListMCPServers)
@@ -363,8 +389,10 @@ func (s *Server) Mount(r chi.Router) {
 			r.Put("/", api.UpdateMCPServer)
 			// Deleting a (shared) MCP server is an owner-only action.
 			r.With(api.RequireTeamOwner).Delete("/", api.DeleteMCPServer)
+			r.With(api.RequireTeamOwner).Post("/install-dependencies", api.InstallMCPServerDependencies)
 			r.Post("/discover", api.DiscoverMCPServerTools)
 			r.Post("/accounts", api.CreateMCPAccount)
+			r.Post("/github-oauth", api.StartMCPGitHubOAuth)
 			r.Post("/google-oauth", api.StartGoogleOAuth)
 			r.Get("/google-oauth", api.PollGoogleOAuth)
 		})

@@ -8,12 +8,13 @@
  */
 
 import * as http from 'http';
-import * as net from 'net';
 import { AddressInfo } from 'net';
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import { loadE2EEnv } from '../helpers/env';
-import { waitForTaskStatus } from '../helpers/wait-for';
+import { waitForTaskStatus as waitForTaskStatusRaw } from '../helpers/wait-for';
+import { resetE2E } from '../helpers/reset';
+import { requireFetchOK } from '../helpers/http';
 import type { ScenarioEntry } from '../fixtures/mock-provider-server';
 
 const env = loadE2EEnv();
@@ -28,8 +29,10 @@ async function startTestServer(html: string): Promise<{ url: string; stop: () =>
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(html);
     });
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve());
+    });
     const addr = server.address() as AddressInfo;
     return {
         url: `http://127.0.0.1:${addr.port}`,
@@ -47,8 +50,10 @@ async function startMultiRouteServer(routes: Record<string, string>): Promise<{
         res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
         res.end(body);
     });
-    const port = await getFreePort();
-    await new Promise<void>((resolve) => server.listen(port, '127.0.0.1', () => resolve()));
+    await new Promise<void>((resolve, reject) => {
+        server.once('error', reject);
+        server.listen(0, '127.0.0.1', () => resolve());
+    });
     const addr = server.address() as AddressInfo;
     return {
         url: `http://127.0.0.1:${addr.port}`,
@@ -56,29 +61,65 @@ async function startMultiRouteServer(routes: Record<string, string>): Promise<{
     };
 }
 
-function getFreePort(): Promise<number> {
-    return new Promise((resolve, reject) => {
-        const srv = net.createServer();
-        srv.unref();
-        srv.on('error', reject);
-        srv.listen(0, '127.0.0.1', () => {
-            const { port } = srv.address() as AddressInfo;
-            srv.close(() => resolve(port));
-        });
-    });
-}
-
 /** Configure the mock LLM provider to run a specific scenario. */
 async function setScenario(request: APIRequestContext, entries: ScenarioEntry[]): Promise<void> {
-    const res = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-        data: { entries },
+    const workerRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+        data: { entries, model: 'e2e-mock-model' },
     });
-    expect(res.ok(), `set-scenario failed: ${await res.text()}`).toBeTruthy();
+    expect(workerRes.ok(), `set worker scenario failed: ${await workerRes.text()}`).toBeTruthy();
+    const orchestratorRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+        data: {
+            model: 'e2e-orchestrator-model',
+            entries: [{
+                tool_call: {
+                    id: 'orch-run-worker',
+                    name: 'run_new_session',
+                    arguments: { agent_name: 'QA', title: 'Execute tool scenario', prompt: 'Execute the assigned tool scenario and finish the task for review.' },
+                },
+            }, {
+                text: 'The worker completed the assigned scenario successfully.',
+            }, {
+                tool_call: {
+                    id: 'orchestrator-finish', name: 'finish_task',
+                    arguments: { summary: 'The delegated tool scenario completed and its evidence was verified.' },
+                },
+            }],
+        },
+    });
+    expect(orchestratorRes.ok(), `set orchestrator scenario failed: ${await orchestratorRes.text()}`).toBeTruthy();
+}
+
+/** Wait until the durable task orchestrator has observed the worker result. */
+async function waitForTaskStatus(
+    request: APIRequestContext,
+    taskId: number,
+    status: string,
+    timeoutMs: number,
+): Promise<void> {
+    await waitForTaskStatusRaw(request, taskId, status, timeoutMs);
+    const deadline = Date.now() + 30_000;
+    let lastRuns: any[] = [];
+    while (Date.now() < deadline) {
+        const taskRes = await request.get(`/api/tasks/${taskId}`);
+        if (taskRes.ok()) {
+            const task = await taskRes.json();
+            const runsRes = await request.get(`/api/runs?company_id=${task.company_id}`);
+            if (runsRes.ok()) {
+                const runs = await runsRes.json() as any[];
+                lastRuns = runs.filter((run) => run.task_id === taskId && run.kind === 'task_orchestrator');
+                if (lastRuns.length > 0 && lastRuns.every((run) => ['completed', 'failed', 'canceled'].includes(run.status))) {
+                    return;
+                }
+            }
+        }
+        await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`task ${taskId} orchestrator did not settle: ${JSON.stringify(lastRuns)}`);
 }
 
 /** Reset the mock LLM provider to default mode and clear recorded requests. */
 async function resetMockProvider(request: APIRequestContext): Promise<void> {
-    await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`);
+    await requireFetchOK(`${env.E2E_MOCK_PROVIDER_URL}/__test/reset`, { method: 'POST' }, 5_000);
 }
 
 /** Return all requests the mock LLM provider has received. */
@@ -122,16 +163,23 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
             api_key: 'test-key',
             provider_type: 'openai',
             default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model',
+            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         },
     });
     expect(provRes.ok(), `create provider: ${await provRes.text()}`).toBeTruthy();
     const provider = await provRes.json();
 
+    const orchestratorRes = await request.put('/api/default-model-settings/task_orchestrator', {
+        data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
+    });
+    expect(orchestratorRes.ok(), `configure task orchestrator: ${await orchestratorRes.text()}`).toBeTruthy();
+
     const agentRes = await request.post('/api/agents', {
         data: {
             company_id: company.id,
-            name: 'Tool Test Agent',
+            name: 'QA',
+            role_key: 'QA',
+            short_name: 'QA',
             model: 'e2e-mock-model',
             provider_id: provider.id,
         },
@@ -158,12 +206,7 @@ async function runTask(
             company_id: companyId,
             sprint_id: sprintId,
             title,
-            task_type: 'implement',
             agent_id: agentId,
-            // Pin the QA config (web_fetch + browser_use): these tests exercise
-            // direct tool execution, not the CEO delegation flow (the default
-            // for root tasks).
-            agent_config_name: 'QA',
         },
     });
     expect(taskRes.ok(), `create task: ${await taskRes.text()}`).toBeTruthy();
@@ -206,7 +249,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
     let sprintId: number;
 
     test.beforeAll(async ({ request }) => {
-        await request.post('/api/e2e/wipe-db');
+        await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
         const ws = await setupWorkspace(request, SHORT);
         companyId = ws.companyId;
         agentId = ws.agentId;
@@ -245,7 +288,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: fetch test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -264,7 +307,9 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
 
     test('web_fetch: handles HTTP errors gracefully', async ({ request }) => {
         // Point fetch at a port where nothing is listening.
-        const deadPort = await getFreePort(); // guaranteed free since we don't bind it
+        // Port 1 is reserved and should be closed in the test environment;
+        // using a fixed closed port avoids a bind-then-close TOCTOU race.
+        const deadPort = 1;
         const deadUrl = `http://127.0.0.1:${deadPort}/no-such-path`;
 
         await setScenario(request, [
@@ -286,7 +331,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         ]);
 
         const taskId = await runTask(request, companyId, agentId, 'web_fetch: connection error', sprintId);
-        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+        await waitForTaskStatus(request, taskId, 'done', 90_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -321,7 +366,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: large body truncation', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -369,7 +414,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: navigate to test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -424,7 +469,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: get_text from selector', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -470,7 +515,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: execute_js', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -521,7 +566,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: get_html', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -592,7 +637,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: click and type', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -639,7 +684,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'browser_use: screenshot', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -679,7 +724,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         ]);
 
         const taskId = await runTask(request, companyId, agentId, 'browser_use: unknown host error', sprintId);
-        await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+        await waitForTaskStatus(request, taskId, 'done', 120_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -725,7 +770,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'dual tool: web_fetch + browser_use', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
+            await waitForTaskStatus(request, taskId, 'done', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -785,7 +830,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -833,7 +878,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -876,7 +921,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -915,7 +960,7 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             ]);
 
             const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text', sprintId);
-            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
+            await waitForTaskStatus(request, taskId, 'done', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);

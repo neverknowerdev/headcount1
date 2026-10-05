@@ -352,6 +352,17 @@ export const AddCompany: React.FC = () => {
                 finalProviderId = providerRes.data.id;
             }
 
+            // Every task now requires an explicit task-orchestrator model. The
+            // onboarding provider is the user's deliberate choice, so make it
+            // the initial control-plane default instead of leaving the first
+            // task blocked on a setting that is invisible during setup.
+            if (finalProviderId && finalProviderModel) {
+                await axios.put('/api/default-model-settings/task_orchestrator', {
+                    provider_id: finalProviderId,
+                    model: finalProviderModel,
+                });
+            }
+
             // 2. Create Company
             const companyRes = await axios.post('/api/companies', { name, short_name: shortName, color });
             const finalCompanyId = companyRes.data.id;
@@ -360,10 +371,14 @@ export const AddCompany: React.FC = () => {
             await axios.post('/api/agents', {
                 company_id: finalCompanyId,
                 name: ceoName,
+                role_key: 'CEO',
+                short_name: 'CEO',
                 description: 'Company CEO',
                 system_prompt: ceoPrompt,
                 model: finalProviderModel,
-                provider_id: finalProviderId
+                provider_id: finalProviderId,
+                chat_type: 'compact_thinking',
+                reasoning_level: 'max'
             });
 
             // Success! Clear localstorage and redirect
