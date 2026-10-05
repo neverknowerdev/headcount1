@@ -204,7 +204,7 @@ test.describe.serial('Headcount1 App', () => {
         await page.reload();
     });
 
-    test('can edit company shortname in settings', async ({ page }) => {
+    test('can edit company name and shortname in settings', async ({ page, request }) => {
         page.on('dialog', dialog => dialog.accept());
         await page.goto('/companies/pw-inc');
 
@@ -212,13 +212,21 @@ test.describe.serial('Headcount1 App', () => {
         await page.click('a:has-text("Settings")');
         await expect(page.getByRole('heading', { name: 'Company Settings' })).toBeVisible();
 
-        // Edit short name
-        const input = page.locator('input').first(); // the shortname input
-        await input.fill('nw');
+        // Edit the full company name and short name together.
+        await page.getByLabel('Company Full Name').fill('Playwright Incorporated');
+        await page.getByLabel('Company Short Name').fill('nw');
         await page.click('button:has-text("Save Settings")');
 
         // Ensure URL changed
         await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
+        await expect(page.getByLabel('Company Full Name')).toHaveValue('Playwright Incorporated');
+
+        const companies = await (await request.get('/api/companies')).json();
+        const company = companies.find((c: any) => c.short_name === 'nw');
+        expect(company?.name).toBe('Playwright Incorporated');
+
+        await page.reload();
+        await expect(page.getByLabel('Company Full Name')).toHaveValue('Playwright Incorporated');
     });
 
     test('can add a second company reusing the existing provider', async ({ page }) => {
@@ -261,7 +269,7 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page.getByRole('heading', { name: 'Dashboard' })).toBeVisible({ timeout: 10000 });
 
         // Verify we are on the second company
-        const companyButtons = page.locator('button[title="Playwright Inc"], button[title="Second Company"]');
+        const companyButtons = page.locator('button[title="Playwright Incorporated"], button[title="Second Company"]');
         await expect(companyButtons).toHaveCount(2);
     });
 });
