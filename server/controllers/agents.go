@@ -127,12 +127,24 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 
 	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 	if agent.Builtin {
-		// Built-in rows are the durable instances of the checked-in catalog. Their
-		// role, prompt, hierarchy, and tool policy are immutable; the company may
-		// only turn the role on or off.
-		if req.Enabled != nil {
-			agent.Enabled = *req.Enabled
+		// Built-in identity stays protected, while prompt and tool settings can be
+		// customized per company. Built-in roles are always available.
+		if req.Description != "" {
+			agent.Description = req.Description
 		}
+		if req.SystemPrompt != "" {
+			agent.SystemPrompt = req.SystemPrompt
+		}
+		if req.AllowedMCPs != "" {
+			agent.AllowedMCPs = allowedMCPs
+		}
+		if req.Permissions != "" {
+			agent.Permissions = req.Permissions
+		}
+		if req.CanUseWorkers != nil {
+			agent.CanUseWorkers = *req.CanUseWorkers
+		}
+		agent.Enabled = true
 		updated, err := api.q.UpdateAgent(r.Context(), agent)
 		if err != nil {
 			api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -276,11 +288,11 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 }
 
 // DeleteAgent removes a custom agent. Built-in agents are durable catalog
-// instances and can only be disabled through UpdateAgent.
+// instances and cannot be deleted.
 func (api *API) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 	agent := api.agentFromCtx(r)
 	if agent.Builtin {
-		api.respondError(w, http.StatusForbidden, "built-in agents cannot be deleted — disable them instead")
+		api.respondError(w, http.StatusForbidden, "built-in agents cannot be deleted")
 		return
 	}
 	if err := api.q.DeleteAgent(r.Context(), agent.ID); err != nil {

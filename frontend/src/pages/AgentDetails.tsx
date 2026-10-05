@@ -181,6 +181,33 @@ export const AgentDetails: React.FC = () => {
         }
     };
 
+    const restoreBuiltinDefaults = async () => {
+        if (!builtinConfig) return;
+        setSaveState('saving');
+        setSaveError(null);
+        const defaults = {
+            ...formData,
+            system_prompt: builtinConfig.prompt,
+            permissions: builtinConfig.permissions || '{}',
+            allowed_mcps: JSON.stringify(builtinConfig.allowed_mcps || []),
+            can_use_workers: !!builtinConfig.can_use_workers,
+        };
+        try {
+            await axios.put(`/api/agents/${id}`, {
+                ...defaults,
+                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+            });
+            setFormData(defaults);
+            await fetchData();
+            setSaveState('saved');
+            setTimeout(() => setSaveState('idle'), 2000);
+        } catch (e: any) {
+            setSaveError(e.response?.data?.error || e.message || 'Restore failed');
+            setSaveState('error');
+        }
+    };
+
     if (!agent) return <div>Loading...</div>;
 
     const builtinConfig = agent.builtin
@@ -224,14 +251,6 @@ export const AgentDetails: React.FC = () => {
                                 <div><p className="text-gray-500 mb-1">Canonical system name</p><code className="font-mono text-gray-900">{canonicalName}</code></div>
                                 <div><p className="text-gray-500 mb-1">Agent slug</p><code className="font-mono text-gray-900">{agentSlug}</code></div>
                             </div>
-                            {builtinConfig?.best_models?.length > 0 && (
-                                <div className="mt-5 pt-4 border-t">
-                                    <p className="text-sm text-gray-500 mb-2">Recommended models for this role</p>
-                                    <div className="flex flex-wrap gap-2">
-                                        {builtinConfig.best_models.map((model: string) => <code key={model} className="rounded bg-indigo-50 px-2 py-1 text-xs text-indigo-700">{model}</code>)}
-                                    </div>
-                                </div>
-                            )}
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div className="bg-white p-4 rounded-lg shadow border">
@@ -656,6 +675,7 @@ export const AgentDetails: React.FC = () => {
                             <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
                                 <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
                             </button>
+                            {agent.builtin && <button type="button" onClick={restoreBuiltinDefaults} disabled={saveState === 'saving'} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60">Restore default</button>}
                             {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
                             {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                         </div>

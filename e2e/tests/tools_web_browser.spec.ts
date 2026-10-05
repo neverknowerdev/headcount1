@@ -144,14 +144,7 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
     expect(compRes.ok(), `create company: ${await compRes.text()}`).toBeTruthy();
     const company = await compRes.json();
 
-    // Tool scenarios launch the custom QA row by the stable role name. The
-    // company also has a protected built-in QA now, so disable only that
-    // seeded row to avoid resolving the scenario to its placeholder model.
-    const seededAgents = await (await request.get(`/api/agents?company_id=${company.id}`)).json();
-    const seededQA = (seededAgents as any[]).find((agent) => agent.builtin && agent.role_key === 'QA');
-    expect(seededQA).toBeTruthy();
-    const disableSeededQA = await request.put(`/api/agents/${seededQA.id}`, { data: { enabled: false } });
-    expect(disableSeededQA.ok(), await disableSeededQA.text()).toBeTruthy();
+    // The custom QA row below explicitly overrides the always-on built-in QA.
 
     const sprintRes = await request.post('/api/sprints', {
         data: {

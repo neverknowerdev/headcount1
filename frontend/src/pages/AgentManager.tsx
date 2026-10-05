@@ -149,7 +149,7 @@ export const AgentManager: React.FC = () => {
         const canonicalName = agent.role_key || template?.canonical_name || agent.name;
         const slug = agent.short_name || template?.slug || '—';
         return (
-            <div key={agent.id} data-testid={`builtin-agent-${agent.id}`} className={`bg-white rounded-lg border shadow-sm ${agent.enabled === false ? 'opacity-60' : ''}`}>
+            <div key={agent.id} data-testid={`builtin-agent-${agent.id}`} className="bg-white rounded-lg border shadow-sm">
                 <div className="flex items-center gap-2 p-4">
                     <button
                         type="button"
@@ -168,7 +168,7 @@ export const AgentManager: React.FC = () => {
                         <span className="block text-base font-bold text-gray-900 break-words">{agent.name}</span>
                         <span className="block text-xs text-gray-500 line-clamp-2">{agent.description}</span>
                     </button>
-                    <AgentToggle agent={agent} onToggle={toggleAgent} />
+                    <span className="shrink-0 rounded-full bg-green-100 px-2 py-1 text-xs font-medium text-green-700">Always enabled</span>
                 </div>
                 {expanded && (
                     <div className="border-t px-5 py-4 space-y-4 text-sm">
@@ -232,7 +232,7 @@ export const AgentManager: React.FC = () => {
                     <div className="flex items-center gap-2 mb-4">
                         <span className="font-semibold text-gray-700">Built-in agents</span>
                         <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{builtinAgents.length}</span>
-                        <span className="text-xs text-gray-400">Protected defaults; enable or disable them as needed</span>
+                        <span className="text-xs text-gray-400">Protected built-in roles</span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {builtinAgents.map(renderBuiltinCard)}

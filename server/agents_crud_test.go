@@ -33,7 +33,7 @@ func setupAgentsRouter(t *testing.T, database *gorm.DB) chi.Router {
 	return withTestUser(t, database, r)
 }
 
-func TestBuiltinAgentCanOnlyBeToggledAndCannotBeDeleted(t *testing.T) {
+func TestBuiltinAgentIsAlwaysEnabledAllowsPromptAndToolUpdatesAndCannotBeDeleted(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
@@ -51,15 +51,26 @@ func TestBuiltinAgentCanOnlyBeToggledAndCannotBeDeleted(t *testing.T) {
 	r.ServeHTTP(deleteW, deleteReq)
 	assert.Equal(t, http.StatusForbidden, deleteW.Code)
 
-	payload, _ := json.Marshal(map[string]any{"enabled": false, "name": "Should Not Change"})
+	payload, _ := json.Marshal(map[string]any{
+		"enabled":         false,
+		"name":            "Should Not Change",
+		"system_prompt":   "Customized prompt",
+		"permissions":     `{"browser_use":"deny"}`,
+		"allowed_mcps":    `["github"]`,
+		"can_use_workers": true,
+	})
 	updateReq := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/agents/%d", builtin.ID), bytes.NewReader(payload))
 	updateW := httptest.NewRecorder()
 	r.ServeHTTP(updateW, updateReq)
 	require.Equal(t, http.StatusOK, updateW.Code)
 	var updated db.Agent
 	require.NoError(t, json.Unmarshal(updateW.Body.Bytes(), &updated))
-	assert.False(t, updated.Enabled)
+	assert.True(t, updated.Enabled)
 	assert.Equal(t, "CEO", updated.Name)
+	assert.Equal(t, "Customized prompt", updated.SystemPrompt)
+	assert.Equal(t, `{"browser_use":"deny"}`, updated.Permissions)
+	assert.Equal(t, `["github"]`, updated.AllowedMCPs)
+	assert.True(t, updated.CanUseWorkers)
 	assert.True(t, updated.Builtin)
 
 	custom, err := q.CreateAgent(context.Background(), db.Agent{

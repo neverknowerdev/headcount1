@@ -38,6 +38,11 @@ func TestEnsureBuiltinAgentsForCompany_IsCompleteAndIdempotent(t *testing.T) {
 		assert.Equal(t, provider.ID, *agent.ProviderID, agent.Name)
 		assert.NotEmpty(t, agent.SystemPrompt, agent.Name)
 	}
+	require.NoError(t, database.Model(&db.Agent{}).Where("company_id = ? AND role_key = ?", company.ID, "CEO").Update("enabled", false).Error)
+	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults, &provider.ID, "test-model"))
+	var restoredCEO db.Agent
+	require.NoError(t, database.Where("company_id = ? AND role_key = ?", company.ID, "CEO").First(&restoredCEO).Error)
+	assert.True(t, restoredCEO.Enabled, "existing built-ins are re-enabled when catalog seeding runs")
 
 	var coder db.Agent
 	require.NoError(t, database.Where("role_key = ?", "Coder").First(&coder).Error)

@@ -392,6 +392,22 @@ func TestDisabledAgentIsExcludedFromDelegationRoster(t *testing.T) {
 	assert.Error(t, err)
 }
 
+func TestCustomAgentOverridesAlwaysOnBuiltinRole(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	builtin := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", Builtin: true, Enabled: true}
+	custom := db.Agent{CompanyID: company.ID, Name: "Test CEO", RoleKey: "CEO", Enabled: true}
+	require.NoError(t, database.Create(&builtin).Error)
+	require.NoError(t, database.Create(&custom).Error)
+
+	resolved, err := NewNativeEngine(database, eventhub.NewHub()).findAgentForRole(context.Background(), company.ID, "CEO")
+	require.NoError(t, err)
+	assert.Equal(t, custom.ID, resolved.ID)
+}
+
 func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

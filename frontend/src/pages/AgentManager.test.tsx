@@ -66,7 +66,7 @@ describe('AgentManager templates', () => {
         }));
     });
 
-    it('shows built-in agents compactly and expands their identity, tools, and model recommendations', async () => {
+    it('shows built-in agents compactly and expands their identity and tools without enable controls', async () => {
         vi.mocked(axios.get).mockImplementation(async (url: string) => {
             if (url === '/api/agent-configs') return { data: [coderTemplate] } as never;
             if (url === '/api/agents?company_id=42') return { data: [{
@@ -100,7 +100,8 @@ describe('AgentManager templates', () => {
         expect(screen.queryByText('openai/gpt-5-codex')).toBeNull();
         expect(screen.queryByText('Built-in', { exact: true })).toBeNull();
         expect(screen.queryByText('openrouter/free', { exact: true })).toBeNull();
-        expect(screen.getByRole('switch', { name: 'Disable Coder' })).toBeTruthy();
+        expect(screen.getByText('Always enabled')).toBeTruthy();
+        expect(screen.queryByRole('switch', { name: /Coder/ })).toBeNull();
         expect(screen.getByRole('button', { name: 'Open edit page →' })).toBeTruthy();
     });
 

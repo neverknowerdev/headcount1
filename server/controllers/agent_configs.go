@@ -20,6 +20,7 @@ type AgentConfigResponse struct {
 	ReasoningLevel string   `json:"reasoning_level"`
 	BestModels     []string `json:"best_models,omitempty"`
 	AllowedTools   []string `json:"allowed_tools,omitempty"`
+	AllowedMCPs    []string `json:"allowed_mcps,omitempty"`
 	Permissions    string   `json:"permissions"`
 	CanUseWorkers  bool     `json:"can_use_workers"`
 }
@@ -41,6 +42,7 @@ func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 			ReasoningLevel: string(cfg.ReasoningLevel),
 			BestModels:     cfg.BestModels,
 			AllowedTools:   cfg.AllowedTools,
+			AllowedMCPs:    cfg.AllowedMCPs,
 			Permissions:    agentdefaults.PermissionsForConfig(cfg),
 			CanUseWorkers:  cfg.CanUseWorkers,
 		})

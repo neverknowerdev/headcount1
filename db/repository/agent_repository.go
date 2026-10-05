@@ -92,7 +92,7 @@ func (q *AgentRepository) EnsureBuiltinAgentsForCompany(ctx context.Context, com
 		if err != nil {
 			return err
 		}
-		updates := map[string]interface{}{"builtin": true}
+		updates := map[string]interface{}{"builtin": true, "enabled": true}
 		if existing.RoleKey == "" {
 			updates["role_key"] = seed.RoleKey
 		}

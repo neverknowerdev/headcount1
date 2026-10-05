@@ -33,12 +33,17 @@ func (e *NativeEngine) findAgentForRole(ctx context.Context, companyID int32, ro
 	if err != nil {
 		return db.Agent{}, fmt.Errorf("list agents for %q: %w", requested, err)
 	}
-	for _, agent := range agents {
-		if !agent.Enabled {
-			continue
-		}
-		if agentconfig.RoleMatches(agent.RoleKey, agent.Name, requested) {
-			return agent, nil
+	// A company-created agent with a matching role is an explicit override of
+	// that built-in role. This keeps custom role workflows usable while built-ins
+	// remain permanently enabled.
+	for _, builtin := range []bool{false, true} {
+		for _, agent := range agents {
+			if !agent.Enabled || agent.Builtin != builtin {
+				continue
+			}
+			if agentconfig.RoleMatches(agent.RoleKey, agent.Name, requested) {
+				return agent, nil
+			}
 		}
 	}
 	return db.Agent{}, fmt.Errorf("no database agent matches %q", requested)
