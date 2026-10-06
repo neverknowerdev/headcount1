@@ -52,10 +52,10 @@ test.describe.serial('Environments and secrets', () => {
             api_key: 'test-key',
             provider_type: 'openai',
             default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model',
+            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
         });
         const orchestratorSetting = await request.put('/api/default-model-settings/task_orchestrator', {
-            data: { provider_id: provider.id, model: 'e2e-mock-model' },
+            data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
         });
         expect(orchestratorSetting.ok(), await orchestratorSetting.text()).toBeTruthy();
         const company = await postJSON(request, '/api/companies', {
@@ -139,7 +139,7 @@ test.describe.serial('Environments and secrets', () => {
                 } } },
             ],
         };
-        await setScenario(scenario);
+        await setTaskScenario(scenario.entries, 'Check the environment secret', 'Run the task using the environment secret and verify the result.');
 
         const task = await postJSON(request, '/api/tasks', {
             company_id: companyId,
@@ -155,8 +155,9 @@ test.describe.serial('Environments and secrets', () => {
         await waitForTaskStatus(request, task.id, 'done', 90_000);
 
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
-        expect(runs.length).toBe(1);
-        const run = await (await request.get(`/api/runs/${runs[0].id}`)).json();
+        const workerRun = runs.find((candidate: any) => candidate.kind === 'agent_session');
+        expect(workerRun).toBeTruthy();
+        const run = await (await request.get(`/api/runs/${workerRun.id}`)).json();
         const logText = JSON.stringify(run.log_entries);
 
         // USABLE: the shell saw the real value (marker only exists as output).
@@ -167,7 +168,7 @@ test.describe.serial('Environments and secrets', () => {
         expect(logText).toContain('[REDACTED:');
 
         // The JSONL trajectory file (full fidelity) is clean too.
-        const runDir = path.join(headcount1Base, 'logs', 'env-co', String(task.id), `run-${runs[0].id}`);
+        const runDir = path.join(headcount1Base, 'logs', 'env-co', String(task.id), `run-${workerRun.id}`);
         const mainLog = fs.readFileSync(path.join(runDir, 'main.jsonl'), 'utf8');
         expect(mainLog).toContain('USE_OK');
         expect(mainLog).not.toContain(DEFAULT_SECRET_VALUE);
@@ -214,7 +215,7 @@ test.describe.serial('Environments and secrets', () => {
                 } } },
             ],
         };
-        await setScenario(scenario);
+        await setTaskScenario(scenario.entries, 'Check environment scoping', 'Verify the task receives only the default environment secret.');
 
         const task = await postJSON(request, '/api/tasks', {
             company_id: companyId,
@@ -230,7 +231,9 @@ test.describe.serial('Environments and secrets', () => {
         await waitForTaskStatus(request, task.id, 'done', 90_000);
 
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
-        const run = await (await request.get(`/api/runs/${runs[0].id}`)).json();
+        const workerRun = runs.find((candidate: any) => candidate.kind === 'agent_session');
+        expect(workerRun).toBeTruthy();
+        const run = await (await request.get(`/api/runs/${workerRun.id}`)).json();
         const logText = JSON.stringify(run.log_entries);
         expect(logText).toContain('STG_ABSENT');
         expect(logText).not.toContain('STG_LEAKED');
@@ -281,6 +284,22 @@ async function setScenario(scenario: unknown): Promise<void> {
         body: JSON.stringify(scenario),
     });
     if (!res.ok) throw new Error(`set-scenario failed: ${res.status}`);
+}
+
+async function setTaskScenario(workerEntries: unknown[], title: string, prompt: string): Promise<void> {
+    await setScenario({ model: 'e2e-mock-model', entries: workerEntries });
+    await setScenario({ model: 'e2e-orchestrator-model', entries: [
+        { tool_call: { id: 'launch-env-runner', name: 'run_new_session', arguments: {
+            agent_name: 'EnvRunner', title, prompt,
+        } } },
+        { text: 'The environment verification worker has started.' },
+        { tool_call: { id: 'env-runner-status-1', name: 'get_session', arguments: { session_id: 2 } } },
+        { tool_call: { id: 'env-runner-status-2', name: 'get_session', arguments: { session_id: 2 } } },
+        { text: 'The environment verification worker completed successfully.' },
+        { tool_call: { id: 'finish-env-task', name: 'finish_task', arguments: {
+            summary: 'The worker verified the environment secret behavior.',
+        } } },
+    ] });
 }
 
 async function postJSON(request: APIRequestContext, url: string, data: unknown): Promise<any> {
