@@ -156,7 +156,9 @@ test.describe.serial('Environments and secrets', () => {
 
         const runs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
         const workerRun = runs.find((candidate: any) => candidate.kind === 'agent_session');
+        const orchestratorRun = runs.find((candidate: any) => candidate.kind === 'task_orchestrator');
         expect(workerRun).toBeTruthy();
+        expect(orchestratorRun).toBeTruthy();
         const run = await (await request.get(`/api/runs/${workerRun.id}`)).json();
         const logText = JSON.stringify(run.log_entries);
 
@@ -168,10 +170,10 @@ test.describe.serial('Environments and secrets', () => {
         expect(logText).toContain('[REDACTED:');
 
         // The JSONL trajectory file (full fidelity) is clean too.
-        const runDir = path.join(headcount1Base, 'logs', 'env-co', String(task.id), `run-${workerRun.id}`);
-        const mainLog = fs.readFileSync(path.join(runDir, 'main.jsonl'), 'utf8');
-        expect(mainLog).toContain('USE_OK');
-        expect(mainLog).not.toContain(DEFAULT_SECRET_VALUE);
+        const runDir = path.join(headcount1Base, 'logs', 'env-co', String(task.id), `run-${orchestratorRun.id}`);
+        const workerLog = fs.readFileSync(path.join(runDir, `session-${workerRun.id}.jsonl`), 'utf8');
+        expect(workerLog).toContain('USE_OK');
+        expect(workerLog).not.toContain(DEFAULT_SECRET_VALUE);
 
         // Strongest guarantee: nothing the SERVER produces for the provider
         // carries the value — the system prompt announces the var NAME only,
