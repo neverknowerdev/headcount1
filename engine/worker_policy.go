@@ -22,14 +22,15 @@ func parseWorkerPolicy(raw string) WorkerPolicy {
 		return policy
 	}
 	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-		return WorkerPolicy{Mode: "inherit"}
+		return WorkerPolicy{Mode: "custom"}
 	}
 	switch policy.Mode {
 	case "deny", "custom":
 		return policy
-	default:
-		policy.Mode = "inherit"
+	case "inherit":
 		return policy
+	default:
+		return WorkerPolicy{Mode: "custom"}
 	}
 }
 
@@ -69,7 +70,7 @@ func deniedFromPermissions(raw string) []string {
 }
 
 func workerMCPAllowed(name, parentAllowedMCPs, workerAllowedMCPs string) bool {
-	if parent := decodeAgentNames(parentAllowedMCPs); len(parent) > 0 && !containsFold(parent, name) {
+	if parent := decodeAgentNames(parentAllowedMCPs); parent != nil && !containsFold(parent, name) {
 		return false
 	}
 	policy := parseWorkerPolicy(workerAllowedMCPs)

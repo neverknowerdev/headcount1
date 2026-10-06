@@ -2,7 +2,10 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"embed"
+	"errors"
+	"fmt"
 	"io/fs"
 	"log"
 	"net"
@@ -24,6 +27,7 @@ import (
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/eventhub"
 	"agent-orchestrator/integration"
+	"agent-orchestrator/pkg/agentdefaults"
 	"agent-orchestrator/pkg/appsettings"
 	"agent-orchestrator/pkg/backup"
 	"agent-orchestrator/pkg/bootkey"
@@ -68,6 +72,32 @@ func main() {
 	// child (Linux Landlock, see engine/aicli/tools), this applies the
 	// filesystem ruleset and execs the shell command in place of the server.
 	tools.MaybeRunSandboxChild()
+	if os.Getenv("HEADCOUNT1_SUPERVISOR_CHILD") != "1" {
+		settings := appsettings.Load()
+		executable, err := os.Executable()
+		if err != nil {
+			log.Printf("fatal supervisor setup error: %v", err)
+			os.Exit(1)
+		}
+		if err := updater.RunSupervisor(context.Background(), executable, os.Args[1:], settings.BasePath); err != nil {
+			log.Printf("fatal supervisor error: %v", err)
+			os.Exit(1)
+		}
+		return
+	}
+	if err := run(); err != nil {
+		if errors.Is(err, updater.ErrUpdateRequested) {
+			os.Exit(updater.UpdateRequestedExitCode)
+		}
+		if errors.Is(err, updater.ErrPreflightPassed) {
+			os.Exit(updater.PreflightPassedExitCode)
+		}
+		log.Printf("fatal startup error: %v", err)
+		os.Exit(1)
+	}
+}
+
+func run() error {
 
 	// Apply the configuration the last deploy delivered from its GitHub
 	// Environment, before anything reads a setting or opens a connection. These
@@ -92,6 +122,8 @@ func main() {
 
 	settings := appsettings.Load()
 	basePath := settings.BasePath
+	currentBuild := updater.VersionInfo{Version: Version, Branch: Branch, CommitHash: CommitHash, BuildDate: BuildDate}
+	upd := updater.NewWithBasePath(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken, basePath)
 
 	// Create the base directory tree (db/, ssh/, uploads/, repos/, ...) so
 	// every subsystem can rely on its root existing.
@@ -108,11 +140,18 @@ func main() {
 	tools.SetHiddenReadDirs([]string{basePath})
 
 	dbConnStr := os.Getenv("DATABASE_URL")
+	requestedSchema := strings.TrimSpace(os.Getenv("HEADCOUNT1_MIGRATION_SCHEMA"))
 
 	var database *gorm.DB
 
 	if strings.HasPrefix(dbConnStr, "postgres://") {
 		log.Println("Connecting to PostgreSQL database")
+		if requestedSchema != "" {
+			if dbConnStr, err = dbmigrations.PostgresSearchPath(dbConnStr, requestedSchema); err != nil {
+				return handleStartupFailure(upd, basePath, nil, "postgres", dbmigrations.Manifest{}, currentBuild, err)
+			}
+			log.Printf("PostgreSQL migration/app queries isolated to schema %s", requestedSchema)
+		}
 		database, err = gorm.Open(postgres.Open(dbConnStr), &gorm.Config{})
 	} else {
 		log.Println("Connecting to SQLite database")
@@ -126,7 +165,7 @@ func main() {
 			}
 			dbDir := filepath.Join(basePath, "db")
 			if err := os.MkdirAll(dbDir, 0755); err != nil {
-				log.Fatalf("Failed to create database directory %s: %v", dbDir, err)
+				return handleStartupFailure(upd, basePath, nil, "sqlite", dbmigrations.Manifest{}, currentBuild, fmt.Errorf("failed to create database directory %s: %w", dbDir, err))
 			}
 			dbConnStr = filepath.Join(dbDir, fileName)
 		}
@@ -135,7 +174,7 @@ func main() {
 	}
 
 	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
+		return handleStartupFailure(upd, basePath, nil, "", dbmigrations.Manifest{}, currentBuild, fmt.Errorf("failed to connect to database: %w", err))
 	}
 
 	// Single in-process connection avoids GORM+SQLite lock churn; WAL covers
@@ -143,9 +182,17 @@ func main() {
 	sqlDB, _ := database.DB()
 	sqlDB.SetMaxOpenConns(1)
 
-	log.Printf("Running embedded Atlas migrations (%s)...", database.Dialector.Name())
-	if err := dbmigrations.Apply(context.Background(), sqlDB, database.Dialector.Name(), Version); err != nil {
-		log.Fatalf("database migration failed: %v", err)
+	dialect := database.Dialector.Name()
+	candidateManifest, err := dbmigrations.BuildManifestForSchema(dialect, requestedSchema)
+	if err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, dbmigrations.Manifest{}, currentBuild, err)
+	}
+	log.Printf("Reconciling embedded Atlas migrations (%s)...", dialect)
+	if err := upd.MarkMigrating(); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
+	if err := dbmigrations.ReconcileWithSchema(context.Background(), sqlDB, dialect, Version, basePath, candidateManifest, requestedSchema); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
 
 	recoverStaleRuns(database)
@@ -171,6 +218,18 @@ func main() {
 			}
 			if err := db.New(database).EnsureDefaultModelSettingsForUser(context.Background(), u.ID); err != nil {
 				log.Printf("Warning: failed to seed default model settings for %s: %v", u.Email, err)
+			}
+		}
+	}
+	// Built-in agents are company-scoped database rows. Re-run this on startup
+	// so upgrades add newly introduced roles to existing companies without
+	// overwriting any row the user has already configured.
+	if companies, err := db.New(database).ListCompanies(context.Background()); err != nil {
+		log.Printf("Warning: failed to list companies for built-in agent seeding: %v", err)
+	} else {
+		for _, company := range companies {
+			if err := db.New(database).EnsureBuiltinAgentsForCompany(context.Background(), company.ID, agentdefaults.Rows(company.ID), nil, ""); err != nil {
+				log.Printf("Warning: failed to seed built-in agents for %s: %v", company.Name, err)
 			}
 		}
 	}
@@ -281,12 +340,14 @@ func main() {
 	go eng.StartWorkspaceCleanupScheduler(context.Background(), 24*time.Hour)
 
 	// Deploys are pushed to this server by CI via the authenticated
-	// /api/deploy/webhook (see the deploy controller); the updater just applies
-	// them (download the release-asset binary, self-replace, graceful restart).
+	// /api/deploy/webhook (see the deploy controller); the updater stages an
+	// immutable release candidate and asks this process to restart into it.
 	// The download token is only needed if the releases repo is private.
-	upd := updater.New(Version, Branch, CommitHash, BuildDate, utils.DeployDownloadToken)
 	log.Printf("Deploy target: env=%s, version=%s, build=%s",
 		utils.CurrentEnv(), Version, upd.Current().DisplayString())
+	if err := upd.MarkStarting(); err != nil {
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
 
 	srv := server.NewServer(database, eng)
 	srv.SetHub(hub)
@@ -322,6 +383,17 @@ func main() {
 	r := chi.NewRouter()
 	r.Use(middleware.Logger)
 	r.Use(middleware.Recoverer)
+	// Supervisor and deployment probes use these unauthenticated, side-effect
+	// free endpoints. Reaching this router means migrations and startup wiring
+	// completed; /api remains the authenticated application surface.
+	r.Get("/healthz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ok"))
+	})
+	r.Get("/readyz", func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("ready"))
+	})
 
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/ping", func(w http.ResponseWriter, r *http.Request) {
@@ -426,6 +498,7 @@ func main() {
 	// the monitor covers stalls that happen while the server remains up.
 	eng.StartLivenessMonitor(ctx, configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", time.Minute), configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute))
 
+	serverErr := make(chan error, 1)
 	go func() {
 		log.Printf("Starting server on port %s", port)
 		// Tolerate a briefly-busy port (see listenWithRetry) instead of dying on
@@ -433,14 +506,32 @@ func main() {
 		// deadline passes.
 		listener, err := listenWithRetry(httpServer.Addr, 10*time.Second)
 		if err != nil {
-			log.Fatalf("server error: %v", err)
+			serverErr <- fmt.Errorf("server listen failed: %w", err)
+			return
+		}
+		if err := upd.MarkPromoted(); err != nil {
+			serverErr <- fmt.Errorf("persist promoted deployment state: %w", err)
+			_ = listener.Close()
+			return
+		}
+		if os.Getenv("HEADCOUNT1_PREFLIGHT_ONLY") == "1" {
+			_ = listener.Close()
+			serverErr <- updater.ErrPreflightPassed
+			return
 		}
 		if err := httpServer.Serve(listener); err != nil && err != http.ErrServerClosed {
-			log.Fatalf("server error: %v", err)
+			serverErr <- fmt.Errorf("server error: %w", err)
 		}
 	}()
 
-	<-ctx.Done()
+	select {
+	case <-ctx.Done():
+	case err := <-serverErr:
+		if errors.Is(err, updater.ErrPreflightPassed) {
+			return err
+		}
+		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
+	}
 	log.Println("Shutting down…")
 
 	// Stop accepting new agent runs and let every run still in flight reach
@@ -494,21 +585,56 @@ func main() {
 	defer cancel()
 	_ = httpServer.Shutdown(shutdownCtx)
 
-	// A deploy replaced our executable on disk (see updater.Deploy): exec it
-	// now, as the very last thing this process does. Everything the new build
+	// A deploy staged a candidate on disk (see updater.Deploy): exec it now, as
+	// the very last thing this process does. Everything the new build
 	// depends on has already happened — in-flight agent runs are drained and
 	// persisted (so its resume scan finds them), the keyring is sealed, and the
 	// listener is closed (so it can bind the port immediately). syscall.Exec
 	// replaces this process image in place, keeping the same PID, so there is
 	// never a window with two servers competing for the port.
 	if execPath, pending := upd.RestartPending(); pending {
+		if os.Getenv("HEADCOUNT1_SUPERVISOR_CHILD") == "1" {
+			log.Printf("Deploy: requesting stable supervisor hand-off to %s", execPath)
+			return updater.ErrUpdateRequested
+		}
 		log.Printf("Deploy: exec into new binary %s", execPath)
 		if err := syscall.Exec(execPath, os.Args, os.Environ()); err != nil {
 			// Exec only returns on failure; the old image is still running but
 			// has already shut down its listener, so there is nothing to serve.
-			log.Fatalf("deploy: exec into new binary failed: %v", err)
+			return fmt.Errorf("deploy: exec into new binary failed: %w", err)
 		}
 	}
+	return nil
+}
+
+func handleStartupFailure(upd *updater.Updater, basePath string, database *sql.DB, dialect string, candidate dbmigrations.Manifest, current updater.VersionInfo, startupErr error) error {
+	var rollbackErr error
+	if database != nil && dialect != "" && len(candidate.Migrations) > 0 {
+		rollbackErr = dbmigrations.RollbackCandidate(context.Background(), database, dialect, basePath, candidate)
+		if rollbackErr != nil {
+			startupErr = fmt.Errorf("%w; candidate migration rollback failed: %v", startupErr, rollbackErr)
+		}
+	}
+	previous, recordErr := upd.RecordStartupFailure(current, startupErr)
+	if recordErr != nil {
+		return fmt.Errorf("%w; could not persist deployment failure: %v", startupErr, recordErr)
+	}
+	if rollbackErr != nil {
+		if err := upd.MarkNeedsManualRecovery(current, startupErr); err != nil {
+			return fmt.Errorf("%w; could not persist manual-recovery state: %v", startupErr, err)
+		}
+	}
+	if previous == "" {
+		return startupErr
+	}
+	if os.Getenv("HEADCOUNT1_SUPERVISOR_CANDIDATE") == "1" {
+		return startupErr
+	}
+	log.Printf("Deploy candidate failed; returning to previous binary %s", previous)
+	if err := syscall.Exec(previous, os.Args, os.Environ()); err != nil {
+		return fmt.Errorf("%w; fallback exec failed: %v", startupErr, err)
+	}
+	return startupErr
 }
 
 func configuredDuration(name string, fallback time.Duration) time.Duration {

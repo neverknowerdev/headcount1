@@ -32,9 +32,10 @@ func TestApplyWorkerToolPolicyCustomUsesAllowlist(t *testing.T) {
 }
 
 func TestWorkerMCPAllowedInheritsAndAppliesDenyOrCustom(t *testing.T) {
-	require.True(t, workerMCPAllowed("github", `[]`, `{"mode":"inherit"}`))
+	require.False(t, workerMCPAllowed("github", `[]`, `{"mode":"inherit"}`))
+	require.True(t, workerMCPAllowed("github", ``, `{"mode":"inherit"}`))
 	require.False(t, workerMCPAllowed("github", `["github"]`, `{"mode":"deny","denied":["github"]}`))
 	require.False(t, workerMCPAllowed("slack", `["github"]`, `{"mode":"inherit"}`))
-	require.True(t, workerMCPAllowed("github", `[]`, `{"mode":"custom","allowed":["github"]}`))
+	require.True(t, workerMCPAllowed("github", ``, `{"mode":"custom","allowed":["github"]}`))
 	require.False(t, workerMCPAllowed("slack", `[]`, `{"mode":"custom","allowed":["github"]}`))
 }

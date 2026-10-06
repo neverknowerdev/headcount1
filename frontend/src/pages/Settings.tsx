@@ -43,7 +43,10 @@ export const Settings: React.FC = () => {
     const isOwner = useIsOwner();
     const isAdmin = user?.is_admin === true;
 
+    const [companyName, setCompanyName] = useState('');
     const [companyShortName, setCompanyShortName] = useState('');
+    const companyFormTarget = useRef<string | null>(null);
+    const companyFormDirty = useRef(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
     const [deleting, setDeleting] = useState(false);
@@ -53,7 +56,15 @@ export const Settings: React.FC = () => {
         const comp = companies.find(c => c.id === selectedCompanyId)
             ?? companies.find(c => c.short_name === routeShortName);
         if (comp) {
-            setCompanyShortName(comp.short_name);
+            const target = `${comp.id}:${routeShortName ?? ''}`;
+            if (companyFormTarget.current !== target) {
+                companyFormTarget.current = target;
+                companyFormDirty.current = false;
+            }
+            if (!companyFormDirty.current) {
+                setCompanyName(comp.name);
+                setCompanyShortName(comp.short_name);
+            }
         }
     }, [selectedCompanyId, companies, location.pathname]);
 
@@ -123,13 +134,18 @@ export const Settings: React.FC = () => {
             const routeShortName = location.pathname.match(/\/companies\/([^/]+)/)?.[1];
             const currentCompany = companies.find(c => c.id === selectedCompanyId)
                 ?? companies.find(c => c.short_name === routeShortName);
-            if (currentCompany && companyShortName !== currentCompany.short_name) {
-                await axios.put(`/api/companies/${currentCompany.id}`, { short_name: companyShortName });
+            if (currentCompany && (companyName !== currentCompany.name || companyShortName !== currentCompany.short_name)) {
+                const updates: { name?: string; short_name?: string } = {};
+                if (companyName !== currentCompany.name) updates.name = companyName;
+                if (companyShortName !== currentCompany.short_name) updates.short_name = companyShortName;
+                await axios.put(`/api/companies/${currentCompany.id}`, updates);
                 const updatedCompanies = companies.map(c =>
-                    c.id === selectedCompanyId ? { ...c, short_name: companyShortName } : c
+                    c.id === currentCompany.id ? { ...c, name: companyName, short_name: companyShortName } : c
                 );
                 setCompanies(updatedCompanies);
-                navigate(`/companies/${companyShortName}/settings`, { replace: true });
+                if (companyShortName !== currentCompany.short_name) {
+                    navigate(`/companies/${companyShortName}/settings`, { replace: true });
+                }
             }
 
             alert('Settings saved!');
@@ -201,17 +217,37 @@ export const Settings: React.FC = () => {
                 <form onSubmit={handleSave} className="space-y-4">
                     <h2 className="text-lg font-medium text-gray-900 border-b pb-2 mb-4">Company Settings</h2>
                     <div>
-                        <label className="block text-sm font-medium text-gray-700 mb-1">
+                        <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="company-name">
+                            Company Full Name
+                        </label>
+                        <input
+                            id="company-name"
+                            type="text"
+                            value={companyName}
+                            onChange={e => {
+                                companyFormDirty.current = true;
+                                setCompanyName(e.target.value);
+                            }}
+                            className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
+                            placeholder="Acme Corporation"
+                        />
+                    </div>
+                    <div>
+                        <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="company-short-name">
                             Company Short Name
                         </label>
                         <p className="text-xs text-gray-500 mb-3">
                             Used as a prefix for Agent CLI runs. Max 2 characters.
                         </p>
-	                            <input
+                        <input
+                            id="company-short-name"
                             type="text"
                             maxLength={2}
                             value={companyShortName}
-                            onChange={e => setCompanyShortName(e.target.value.toLowerCase())}
+                            onChange={e => {
+                                companyFormDirty.current = true;
+                                setCompanyShortName(e.target.value.toLowerCase());
+                            }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border uppercase font-mono"
                             placeholder="ac"
                         />

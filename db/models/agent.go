@@ -7,6 +7,8 @@ type Agent struct {
 	CompanyID      int32        `json:"company_id" gorm:"not null"`
 	Company        Company      `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
 	Name           string       `json:"name" gorm:"not null"`
+	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
+	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
 	RoleKey        string       `json:"role_key" gorm:"index;default:''"`
 	ShortName      string       `json:"short_name" gorm:"default:''"`
 	Description    string       `json:"description"`

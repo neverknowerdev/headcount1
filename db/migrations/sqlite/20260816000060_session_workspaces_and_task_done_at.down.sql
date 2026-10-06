@@ -1,2 +1,2 @@
--- SQLite does not support DROP COLUMN on all supported versions.
--- The down migration is retained for operator documentation.
+ALTER TABLE `runs` DROP COLUMN `workspace_path`;
+ALTER TABLE `tasks` DROP COLUMN `done_at`;
