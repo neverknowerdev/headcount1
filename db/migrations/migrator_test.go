@@ -17,7 +17,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 62)
+			require.Len(t, manifest.Migrations, 63)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
@@ -27,7 +27,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 				require.True(t, ok)
 				require.False(t, migration.Reversible, "data-loss migration %s must require operator recovery", version)
 			}
-			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20260816000062"} {
+			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20260816000062", "20260820000001"} {
 				migration, ok := manifest.Entry(version)
 				require.True(t, ok)
 				require.True(t, migration.Reversible, "schema migration %s should be automatically reversible", version)
@@ -73,6 +73,26 @@ func TestPlanReconciliationFindsCommonPrefix(t *testing.T) {
 	require.Equal(t, "2", plan.CommonVersion)
 	require.Equal(t, []string{"3"}, migrationVersions(plan.Rollback))
 	require.Equal(t, []string{"4"}, migrationVersions(plan.Apply))
+}
+
+func TestPlanReconciliationAcceptsLegacyBaselineMarker(t *testing.T) {
+	candidate := Manifest{Dialect: "postgres", Migrations: []Migration{
+		{Version: "1", AtlasHash: "h1"},
+		{Version: "2", AtlasHash: "h2"},
+		{Version: "3", AtlasHash: "h3"},
+		{Version: "4", AtlasHash: "h4"},
+		{Version: "5", AtlasHash: "h5"},
+	}}
+	applied := []AppliedRevision{
+		{Version: "3", Applied: 0, Total: 0},
+		{Version: "4", Hash: "h4", Applied: 1, Total: 1},
+	}
+
+	plan, err := PlanReconciliation(applied, candidate, Manifest{})
+	require.NoError(t, err)
+	require.Equal(t, "4", plan.CommonVersion)
+	require.Empty(t, plan.Rollback)
+	require.Equal(t, []string{"5"}, migrationVersions(plan.Apply))
 }
 
 func TestPlanReconciliationRejectsChangedHistoryAndIrreversibleRollback(t *testing.T) {
@@ -164,7 +184,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 62, revisions)
+	require.Equal(t, 63, revisions)
 	for _, column := range []string{"mode", "subagents"} {
 		var present int
 		require.NoError(t, database.QueryRow(`SELECT count(*) FROM pragma_table_info('agents') WHERE name = ?`, column).Scan(&present))
@@ -194,7 +214,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 62, revisions)
+	require.Equal(t, 63, revisions)
 
 	_ = database.Close()
 }

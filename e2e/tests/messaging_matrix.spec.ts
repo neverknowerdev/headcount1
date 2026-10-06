@@ -30,6 +30,8 @@ test.describe.serial('orchestrator messaging matrix', () => {
             name: 'Messaging Matrix Co', short_name: 'msg-matrix', color: '#059669',
             description: 'A company used to verify every routed agent conversation.',
         });
+        // A custom agent with the same role takes precedence over the always-on
+        // built-in role for this test's dedicated model.
         const ceo = await postJSON(request, '/api/agents', {
             company_id: company.id, name: 'Matrix CEO', role_key: 'CEO', short_name: 'CEO',
             system_prompt: 'Make the product decision and report the decision.', model: 'e2e-ceo-model', provider_id: provider.id,

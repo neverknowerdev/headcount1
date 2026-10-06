@@ -375,6 +375,39 @@ func TestBuildOrchestratorSystemPromptIncludesTaskContextAndAgentRoster(t *testi
 	}
 }
 
+func TestDisabledAgentIsExcludedFromDelegationRoster(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	disabled := db.Agent{CompanyID: company.ID, Name: "Disabled QA", RoleKey: "QA", Description: "should not be selectable"}
+	require.NoError(t, database.Create(&disabled).Error)
+	require.NoError(t, database.Model(&db.Agent{}).Where("id = ?", disabled.ID).Update("enabled", false).Error)
+	task := db.Task{CompanyID: company.ID, Title: "Task", Company: company}
+	prompt, err := NewNativeEngine(database, eventhub.NewHub()).buildOrchestratorSystemPrompt(context.Background(), task)
+	require.NoError(t, err)
+	assert.NotContains(t, prompt, "Disabled QA")
+	_, err = NewNativeEngine(database, eventhub.NewHub()).findAgentForRole(context.Background(), company.ID, "QA")
+	assert.Error(t, err)
+}
+
+func TestCustomAgentOverridesAlwaysOnBuiltinRole(t *testing.T) {
+	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, err)
+	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
+	company := db.Company{Name: "Acme", ShortName: "ACME"}
+	require.NoError(t, database.Create(&company).Error)
+	builtin := db.Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", Builtin: true, Enabled: true}
+	custom := db.Agent{CompanyID: company.ID, Name: "Test CEO", RoleKey: "CEO", Enabled: true}
+	require.NoError(t, database.Create(&builtin).Error)
+	require.NoError(t, database.Create(&custom).Error)
+
+	resolved, err := NewNativeEngine(database, eventhub.NewHub()).findAgentForRole(context.Background(), company.ID, "CEO")
+	require.NoError(t, err)
+	assert.Equal(t, custom.ID, resolved.ID)
+}
+
 func TestStaleSessionStatusRequestsFreshReportOnce(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open("file:fork-boundary?mode=memory&cache=shared"), &gorm.Config{})
 	require.NoError(t, err)

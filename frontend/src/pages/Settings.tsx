@@ -45,6 +45,8 @@ export const Settings: React.FC = () => {
 
     const [companyName, setCompanyName] = useState('');
     const [companyShortName, setCompanyShortName] = useState('');
+    const companyFormTarget = useRef<string | null>(null);
+    const companyFormDirty = useRef(false);
     const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
     const [deleteConfirmText, setDeleteConfirmText] = useState('');
     const [deleting, setDeleting] = useState(false);
@@ -54,8 +56,15 @@ export const Settings: React.FC = () => {
         const comp = companies.find(c => c.id === selectedCompanyId)
             ?? companies.find(c => c.short_name === routeShortName);
         if (comp) {
-            setCompanyName(comp.name);
-            setCompanyShortName(comp.short_name);
+            const target = `${comp.id}:${routeShortName ?? ''}`;
+            if (companyFormTarget.current !== target) {
+                companyFormTarget.current = target;
+                companyFormDirty.current = false;
+            }
+            if (!companyFormDirty.current) {
+                setCompanyName(comp.name);
+                setCompanyShortName(comp.short_name);
+            }
         }
     }, [selectedCompanyId, companies, location.pathname]);
 
@@ -215,7 +224,10 @@ export const Settings: React.FC = () => {
                             id="company-name"
                             type="text"
                             value={companyName}
-                            onChange={e => setCompanyName(e.target.value)}
+                            onChange={e => {
+                                companyFormDirty.current = true;
+                                setCompanyName(e.target.value);
+                            }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border"
                             placeholder="Acme Corporation"
                         />
@@ -232,7 +244,10 @@ export const Settings: React.FC = () => {
                             type="text"
                             maxLength={2}
                             value={companyShortName}
-                            onChange={e => setCompanyShortName(e.target.value.toLowerCase())}
+                            onChange={e => {
+                                companyFormDirty.current = true;
+                                setCompanyShortName(e.target.value.toLowerCase());
+                            }}
                             className="w-full border-gray-300 rounded-md shadow-sm focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm p-2 border uppercase font-mono"
                             placeholder="ac"
                         />

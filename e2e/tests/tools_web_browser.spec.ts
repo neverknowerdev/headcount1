@@ -144,6 +144,8 @@ async function setupWorkspace(request: APIRequestContext, shortName: string): Pr
     expect(compRes.ok(), `create company: ${await compRes.text()}`).toBeTruthy();
     const company = await compRes.json();
 
+    // The custom QA row below explicitly overrides the always-on built-in QA.
+
     const sprintRes = await request.post('/api/sprints', {
         data: {
             company_id: company.id,

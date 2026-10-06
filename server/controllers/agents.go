@@ -111,6 +111,7 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 		AllowedMCPs    string `json:"allowed_mcps"`
 		Permissions    string `json:"permissions"`
 		CanUseWorkers  *bool  `json:"can_use_workers"`
+		Enabled        *bool  `json:"enabled"`
 		ProviderID     *int32 `json:"provider_id"`
 		ModelGroupID   *int32 `json:"model_group_id"`
 	}
@@ -125,6 +126,33 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	}
 
 	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
+	if agent.Builtin {
+		// Built-in identity stays protected, while prompt and tool settings can be
+		// customized per company. Built-in roles are always available.
+		if req.Description != "" {
+			agent.Description = req.Description
+		}
+		if req.SystemPrompt != "" {
+			agent.SystemPrompt = req.SystemPrompt
+		}
+		if req.AllowedMCPs != "" {
+			agent.AllowedMCPs = allowedMCPs
+		}
+		if req.Permissions != "" {
+			agent.Permissions = req.Permissions
+		}
+		if req.CanUseWorkers != nil {
+			agent.CanUseWorkers = *req.CanUseWorkers
+		}
+		agent.Enabled = true
+		updated, err := api.q.UpdateAgent(r.Context(), agent)
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		api.respondJSON(w, http.StatusOK, updated)
+		return
+	}
 
 	if req.Name != "" {
 		agent.Name = req.Name
@@ -151,6 +179,9 @@ func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	agent.AllowedMCPs = allowedMCPs
 	if req.Permissions != "" {
 		agent.Permissions = req.Permissions
+	}
+	if req.Enabled != nil {
+		agent.Enabled = *req.Enabled
 	}
 	if req.CanUseWorkers != nil {
 		agent.CanUseWorkers = *req.CanUseWorkers
@@ -203,6 +234,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		AllowedMCPs    string `json:"allowed_mcps"`
 		Permissions    string `json:"permissions"`
 		CanUseWorkers  *bool  `json:"can_use_workers"`
+		Enabled        *bool  `json:"enabled"`
 		ProviderID     *int32 `json:"provider_id"`
 		ModelGroupID   *int32 `json:"model_group_id"`
 	}
@@ -238,6 +270,7 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 		CanUseWorkers:  defaultCanUseWorkers(req.RoleKey, req.Name),
 		ProviderID:     req.ProviderID,
 		ModelGroupID:   req.ModelGroupID,
+		Enabled:        req.Enabled == nil || *req.Enabled,
 	}
 	if req.CanUseWorkers != nil {
 		p.CanUseWorkers = *req.CanUseWorkers
@@ -252,6 +285,21 @@ func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	api.logActivity(req.CompanyID, "agent_created", int32(agent.ID), "agent", "")
 
 	api.respondJSON(w, http.StatusCreated, agent)
+}
+
+// DeleteAgent removes a custom agent. Built-in agents are durable catalog
+// instances and cannot be deleted.
+func (api *API) DeleteAgent(w http.ResponseWriter, r *http.Request) {
+	agent := api.agentFromCtx(r)
+	if agent.Builtin {
+		api.respondError(w, http.StatusForbidden, "built-in agents cannot be deleted")
+		return
+	}
+	if err := api.q.DeleteAgent(r.Context(), agent.ID); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]string{"message": "agent deleted"})
 }
 
 func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
