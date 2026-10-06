@@ -30,6 +30,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 	systemPrompt string,
 	logger *logging.ProxyLogger,
 	allCompanyMCP bool,
+	worker bool,
 ) sessionIntegrations {
 	accountIDByName := make(map[string]int32)
 	serverIDByName := make(map[string]int32)
@@ -109,6 +110,9 @@ func (e *NativeEngine) configureSessionIntegrations(
 			registry = registry.Exclude(denied)
 		}
 	}
+	if worker {
+		registry = applyWorkerToolPolicy(registry, agent.Permissions, agent.WorkerPermissions)
+	}
 	systemPrompt += registry.PromptListing()
 
 	var listingCostTotal int
@@ -134,7 +138,7 @@ func (e *NativeEngine) configureSessionIntegrations(
 		allowedMCPs := decodeAgentNames(agent.AllowedMCPs)
 		for _, account := range accounts {
 			server, ok := serverByID[account.MCPServerID]
-			if !ok || server.Transport == "builtin" || (!allCompanyMCP && !mcpAllowed(server.Name, allowedMCPs)) {
+			if !ok || server.Transport == "builtin" || (!allCompanyMCP && !mcpAllowed(server.Name, allowedMCPs)) || (worker && !workerMCPAllowed(server.Name, agent.AllowedMCPs, agent.WorkerAllowedMCPs)) {
 				continue
 			}
 			synthetic := server

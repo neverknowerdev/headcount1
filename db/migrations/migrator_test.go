@@ -17,7 +17,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 63)
+			require.Len(t, manifest.Migrations, 64)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
@@ -27,7 +27,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 				require.True(t, ok)
 				require.False(t, migration.Reversible, "data-loss migration %s must require operator recovery", version)
 			}
-			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20260816000062", "20260820000001"} {
+			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20260816000062", "20260820000001", "20260820000056"} {
 				migration, ok := manifest.Entry(version)
 				require.True(t, ok)
 				require.True(t, migration.Reversible, "schema migration %s should be automatically reversible", version)
@@ -184,7 +184,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 63, revisions)
+	require.Equal(t, 64, revisions)
 	for _, column := range []string{"mode", "subagents"} {
 		var present int
 		require.NoError(t, database.QueryRow(`SELECT count(*) FROM pragma_table_info('agents') WHERE name = ?`, column).Scan(&present))
@@ -214,7 +214,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 63, revisions)
+	require.Equal(t, 64, revisions)
 
 	_ = database.Close()
 }
