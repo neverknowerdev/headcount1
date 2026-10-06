@@ -54,6 +54,10 @@ test.describe.serial('Environments and secrets', () => {
             default_model: 'e2e-mock-model',
             supported_models: 'e2e-mock-model',
         });
+        const orchestratorSetting = await request.put('/api/default-model-settings/task_orchestrator', {
+            data: { provider_id: provider.id, model: 'e2e-mock-model' },
+        });
+        expect(orchestratorSetting.ok(), await orchestratorSetting.text()).toBeTruthy();
         const company = await postJSON(request, '/api/companies', {
             name: 'Env Co', short_name: 'env-co', color: '#0ea5e9',
         });
