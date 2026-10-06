@@ -37,22 +37,25 @@ export const AgentDetails: React.FC = () => {
     const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
 
     const [modelGroups, setModelGroups] = useState<any[]>([]);
+    const [agentConfigs, setAgentConfigs] = useState<any[]>([]);
     const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', chat_type: 'message_history', reasoning_level: '', allowed_mcps: '', permissions: '{}', can_use_workers: false });
 
     const fetchData = useCallback(async () => {
         try {
-            const [agentRes, statsRes, provRes, groupRes, toolNamesRes] = await Promise.all([
+            const [agentRes, statsRes, provRes, groupRes, toolNamesRes, agentConfigRes] = await Promise.all([
                 axios.get(`/api/agents/${id}`),
                 axios.get(`/api/agents/${id}/stats`),
                 axios.get('/api/providers'),
                 axios.get('/api/model-groups'),
-                axios.get('/api/tool-names')
+                axios.get('/api/tool-names'),
+                axios.get('/api/agent-configs')
             ]);
             setAgent(agentRes.data);
             setStats(statsRes.data);
             setProviders(provRes.data || []);
             setModelGroups(groupRes.data || []);
             setToolNames(toolNamesRes.data || []);
+            setAgentConfigs(agentConfigRes.data || []);
             setFormData({
                 name: agentRes.data.name,
                 role_key: agentRes.data.role_key || '',
@@ -178,7 +181,40 @@ export const AgentDetails: React.FC = () => {
         }
     };
 
+    const restoreBuiltinDefaults = async () => {
+        if (!builtinConfig) return;
+        setSaveState('saving');
+        setSaveError(null);
+        const defaults = {
+            ...formData,
+            system_prompt: builtinConfig.prompt,
+            permissions: builtinConfig.permissions || '{}',
+            allowed_mcps: JSON.stringify(builtinConfig.allowed_mcps || []),
+            can_use_workers: !!builtinConfig.can_use_workers,
+        };
+        try {
+            await axios.put(`/api/agents/${id}`, {
+                ...defaults,
+                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
+                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
+            });
+            setFormData(defaults);
+            await fetchData();
+            setSaveState('saved');
+            setTimeout(() => setSaveState('idle'), 2000);
+        } catch (e: any) {
+            setSaveError(e.response?.data?.error || e.message || 'Restore failed');
+            setSaveState('error');
+        }
+    };
+
     if (!agent) return <div>Loading...</div>;
+
+    const builtinConfig = agent.builtin
+        ? agentConfigs.find(config => config.canonical_name === agent.role_key || config.name === agent.role_key || config.name === agent.name)
+        : null;
+    const canonicalName = agent.role_key || agent.name || '—';
+    const agentSlug = agent.short_name || '—';
 
     return (
         <div className="h-full flex flex-col">
@@ -209,6 +245,13 @@ export const AgentDetails: React.FC = () => {
             <div className="flex-1 overflow-y-auto">
                 {activeTab === 'overview' && (
                     <div className="space-y-6">
+                        <div className="bg-white p-6 rounded-lg shadow border" data-testid="agent-identity">
+                            <h3 className="font-bold mb-4">Agent identity</h3>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
+                                <div><p className="text-gray-500 mb-1">Canonical system name</p><code className="font-mono text-gray-900">{canonicalName}</code></div>
+                                <div><p className="text-gray-500 mb-1">Agent slug</p><code className="font-mono text-gray-900">{agentSlug}</code></div>
+                            </div>
+                        </div>
                         <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
                             <div className="bg-white p-4 rounded-lg shadow border">
                                 <p className="text-sm text-gray-500 mb-1">Total Requests</p>
@@ -576,13 +619,13 @@ export const AgentDetails: React.FC = () => {
                         </div>
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Role key</label>
-                                <input type="text" value={formData.role_key} onChange={e => setFormData({...formData, role_key: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. CTO" />
-                                <p className="mt-1 text-xs text-gray-500">Stable database identity used for delegation.</p>
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Canonical system name</label>
+                                <input type="text" value={formData.role_key} disabled={agent.builtin} onChange={e => setFormData({...formData, role_key: e.target.value})} className="w-full border rounded p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
+                                <p className="mt-1 text-xs text-gray-500">Stable identity used for delegation{agent.builtin ? '; built-in value is protected.' : '.'}</p>
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Run short name</label>
-                                <input type="text" value={formData.short_name} onChange={e => setFormData({...formData, short_name: e.target.value})} className="w-full border rounded p-2" placeholder="e.g. CTO" />
+                                <label className="block text-sm font-medium text-gray-700 mb-1">Agent slug</label>
+                                <input type="text" value={formData.short_name} disabled={agent.builtin} onChange={e => setFormData({...formData, short_name: e.target.value})} className="w-full border rounded p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
                             </div>
                         </div>
                         <div>
@@ -632,6 +675,7 @@ export const AgentDetails: React.FC = () => {
                             <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
                                 <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
                             </button>
+                            {agent.builtin && <button type="button" onClick={restoreBuiltinDefaults} disabled={saveState === 'saving'} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60">Restore default</button>}
                             {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
                             {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                         </div>

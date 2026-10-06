@@ -309,10 +309,25 @@ func PlanReconciliation(applied []AppliedRevision, candidate, rollbackManifest M
 		}
 	}
 
+	// A legacy AutoMigrate database adopted by Atlas has a baseline marker for
+	// the last initial-schema migration. Atlas records that marker as 0/0 with
+	// an empty hash, while the candidate manifest still contains every
+	// migration from the beginning. Account for the candidate prefix represented
+	// by that marker before comparing the remaining history.
 	common := 0
-	for common < len(applied) && common < len(candidate.Migrations) {
+	candidateAt := 0
+	if len(applied) > 0 {
+		baseline := applied[0]
+		if baseline.Applied == 0 && baseline.Total == 0 && baseline.Hash == "" {
+			if index := candidate.At(baseline.Version); index >= 0 {
+				common = 1
+				candidateAt = index + 1
+			}
+		}
+	}
+	for common < len(applied) && candidateAt < len(candidate.Migrations) {
 		current := applied[common]
-		target := candidate.Migrations[common]
+		target := candidate.Migrations[candidateAt]
 		if current.Version != target.Version {
 			break
 		}
@@ -320,9 +335,10 @@ func PlanReconciliation(applied []AppliedRevision, candidate, rollbackManifest M
 			return ReconcilePlan{}, &HistoryMismatchError{Version: current.Version, AppliedHash: current.Hash, CandidateHash: target.AtlasHash}
 		}
 		common++
+		candidateAt++
 	}
 
-	plan := ReconcilePlan{Apply: append([]Migration(nil), candidate.Migrations[common:]...)}
+	plan := ReconcilePlan{Apply: append([]Migration(nil), candidate.Migrations[candidateAt:]...)}
 	if common == len(applied) {
 		if common > 0 {
 			plan.CommonVersion = applied[common-1].Version

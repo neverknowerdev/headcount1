@@ -132,11 +132,8 @@ test.describe.serial('full orchestrator lifecycle and recovery', () => {
                 { tool_call: { id: 'cto-workers-4', name: 'worker_list', arguments: {} } },
                 { tool_call: { id: 'cto-spec', name: 'write_artifact', arguments: { filename: 'technical-spec.md', content: '# Routed implementation specification\n\nThe controller owns durable state and routed answers.', description: 'CTO technical specification.' } } },
                 { tool_call: { id: 'cto-status-ready', name: 'report_status', arguments: { status: 'Technical specification written and ready for implementation.' } } },
-                { tool_call: { id: 'cto-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Technical design completed.', result_details: 'The technical specification is stored in technical-spec.md; repository exploration and follow-up worker evidence were incorporated.' } } },
-            ],
-            inbound_entries: [
                 { tool_call: { id: 'cto-answer-architecture', name: 'answer_message', arguments: { message_id: 0, answer: 'Use the event-driven repository boundary and keep the controller as the source of truth.' } } },
-                { tool_call: { id: 'cto-replacement-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Architecture clarification delivered.', result_details: 'The completed CTO design was rehydrated to answer the Coder.' } } },
+                { tool_call: { id: 'cto-finish', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Technical design completed.', result_details: 'The technical specification is stored in technical-spec.md; repository exploration and follow-up worker evidence were incorporated.' } } },
             ],
         });
 
