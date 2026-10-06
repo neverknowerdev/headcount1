@@ -7,6 +7,8 @@ type Agent struct {
 	CompanyID      int32        `json:"company_id" gorm:"not null"`
 	Company        Company      `json:"company" gorm:"foreignKey:CompanyID;constraint:OnDelete:CASCADE;"`
 	Name           string       `json:"name" gorm:"not null"`
+	Builtin        bool         `json:"builtin" gorm:"not null;default:false"`
+	Enabled        bool         `json:"enabled" gorm:"not null;default:true"`
 	RoleKey        string       `json:"role_key" gorm:"index;default:''"`
 	ShortName      string       `json:"short_name" gorm:"default:''"`
 	Description    string       `json:"description"`
@@ -21,7 +23,12 @@ type Agent struct {
 	CanUseWorkers  bool         `json:"can_use_workers" gorm:"not null;default:false"`
 	AllowedMCPs    string       `json:"allowed_mcps" gorm:"type:text;default:''"`
 	Permissions    string       `json:"permissions"`
-	CreatedAt      time.Time    `json:"created_at"`
-	UpdatedAt      time.Time    `json:"updated_at"`
-	Skills         []Skill      `json:"skills" gorm:"many2many:agent_skills;"`
+	// WorkerPermissions and WorkerAllowedMCPs configure the tool/MCP policy
+	// applied when this agent delegates work to a child session. Empty values
+	// mean inherit the parent's effective access.
+	WorkerPermissions string    `json:"worker_permissions" gorm:"type:text;default:''"`
+	WorkerAllowedMCPs string    `json:"worker_allowed_mcps" gorm:"type:text;default:''"`
+	CreatedAt         time.Time `json:"created_at"`
+	UpdatedAt         time.Time `json:"updated_at"`
+	Skills            []Skill   `json:"skills" gorm:"many2many:agent_skills;"`
 }

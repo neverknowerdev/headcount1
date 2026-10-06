@@ -95,7 +95,7 @@ func (api *API) authorizeTaskRefs(r *http.Request, companyID int32, projectID, a
 	}
 	if agentID != nil {
 		agent, err := api.authorizeAgent(r, *agentID)
-		if err != nil || agent.CompanyID != companyID {
+		if err != nil || agent.CompanyID != companyID || !agent.Enabled {
 			return errNotOwned
 		}
 	}

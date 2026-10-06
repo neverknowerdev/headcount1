@@ -51,12 +51,10 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page.getByText('Connection successful!')).toBeVisible();
         await page.click('button:has-text("Next Step")');
 
-        // Step 3: Hire CEO. The form will auto-redirect to /companies/pw-inc once
-        // it has created the provider + company + agent. Wait for that URL so we
-        // don't race against the in-flight POSTs.
-        await expect(page.getByText('Hire your CEO')).toBeVisible();
-        await page.fill('input[type="text"]', 'E2E Agent');
-        await page.click('button:has-text("Finish & Launch")');
+        // Step 3: launch the workspace. The server creates the complete protected
+        // built-in agent catalog alongside the company.
+        await expect(page.getByText('Launch workspace')).toBeVisible();
+        await page.click('button:has-text("Create workspace")');
         await page.waitForURL('**/companies/pw-inc', { timeout: 30_000 });
 
         // Main App View
@@ -134,7 +132,7 @@ test.describe.serial('Headcount1 App', () => {
         await expect(page).toHaveURL(new RegExp(`/companies/pw-inc/tasks/${taskId}$`));
         await expect(page.getByText('PW-INC-1')).toBeVisible();
         await expect(page.getByLabel('Assignee')).toBeVisible();
-        await page.getByLabel('Assignee').selectOption({ label: 'E2E Agent' });
+        await page.getByLabel('Assignee').selectOption({ label: 'CEO' });
         await page.getByLabel('Status').selectOption({ label: 'To Do' });
         await page.click('button:has-text("Save Task")');
 
@@ -206,16 +204,32 @@ test.describe.serial('Headcount1 App', () => {
 
     test('can edit company name and shortname in settings', async ({ page, request }) => {
         page.on('dialog', dialog => dialog.accept());
+        const existingCompanies = await (await request.get('/api/companies')).json();
+        if (!(existingCompanies as any[]).some((company) => company.short_name === 'pw-inc')) {
+            const createCompany = await request.post('/api/companies', {
+                data: { name: 'Playwright Inc', short_name: 'pw-inc', color: '#4f46e5' },
+            });
+            expect(createCompany.ok(), await createCompany.text()).toBeTruthy();
+        }
         await page.goto('/companies/pw-inc');
 
         // Go to settings
         await page.click('a:has-text("Settings")');
         await expect(page.getByRole('heading', { name: 'Company Settings' })).toBeVisible();
+        // The settings inputs hydrate from the company store after navigation.
+        // Wait for that initial state so the async effect cannot overwrite the
+        // edits while the form is being filled.
+        await expect(page.getByLabel('Company Full Name')).toHaveValue('Playwright Inc');
+        await expect(page.getByLabel('Company Short Name')).toHaveValue('pw-inc');
 
         // Edit the full company name and short name together.
         await page.getByLabel('Company Full Name').fill('Playwright Incorporated');
         await page.getByLabel('Company Short Name').fill('nw');
+        const updateCompany = page.waitForResponse(response =>
+            response.request().method() === 'PUT' && /\/api\/companies\/\d+$/.test(response.url())
+        );
         await page.click('button:has-text("Save Settings")');
+        await expect((await updateCompany).ok()).toBeTruthy();
 
         // Ensure URL changed
         await expect(page).toHaveURL(/.*\/companies\/nw\/settings/);
@@ -252,11 +266,10 @@ test.describe.serial('Headcount1 App', () => {
         await page.click('button:has-text("Next Step")');
 
         // Provider setup (step 2) is skipped automatically because a provider is
-        // already configured from the first company — the flow jumps straight to
-        // the CEO step and reuses that provider.
-        await expect(page.getByText('Hire your CEO')).toBeVisible();
-        await page.fill('input[type="text"]', 'Second CEO');
-        await page.click('button:has-text("Finish & Launch")');
+        // already configured from the first company — the complete built-in
+        // catalog is seeded with that provider.
+        await expect(page.getByText('Launch workspace')).toBeVisible();
+        await page.click('button:has-text("Create workspace")');
 
         // AddCompany performs a full-page redirect after creating the CEO.
         // Wait for that redirect to settle before navigating back to the
