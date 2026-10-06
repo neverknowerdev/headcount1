@@ -139,7 +139,7 @@ test.describe.serial('Environments and secrets', () => {
                 } } },
             ],
         };
-        await setTaskScenario(scenario.entries, 'Check the environment secret', 'Run the task using the environment secret and verify the result.');
+        await setTaskScenario(scenario.entries, 'Check the environment secret', 'Run the task using the environment secret and verify the result.', 2);
 
         const task = await postJSON(request, '/api/tasks', {
             company_id: companyId,
@@ -217,7 +217,7 @@ test.describe.serial('Environments and secrets', () => {
                 } } },
             ],
         };
-        await setTaskScenario(scenario.entries, 'Check environment scoping', 'Verify the task receives only the default environment secret.');
+        await setTaskScenario(scenario.entries, 'Check environment scoping', 'Verify the task receives only the default environment secret.', 4);
 
         const task = await postJSON(request, '/api/tasks', {
             company_id: companyId,
@@ -288,15 +288,15 @@ async function setScenario(scenario: unknown): Promise<void> {
     if (!res.ok) throw new Error(`set-scenario failed: ${res.status}`);
 }
 
-async function setTaskScenario(workerEntries: unknown[], title: string, prompt: string): Promise<void> {
+async function setTaskScenario(workerEntries: unknown[], title: string, prompt: string, workerSessionID: number): Promise<void> {
     await setScenario({ model: 'e2e-mock-model', entries: workerEntries });
     await setScenario({ model: 'e2e-orchestrator-model', entries: [
         { tool_call: { id: 'launch-env-runner', name: 'run_new_session', arguments: {
             agent_name: 'EnvRunner', title, prompt,
         } } },
         { text: 'The environment verification worker has started.' },
-        { tool_call: { id: 'env-runner-status-1', name: 'get_session', arguments: { session_id: 2 } } },
-        { tool_call: { id: 'env-runner-status-2', name: 'get_session', arguments: { session_id: 2 } } },
+        { tool_call: { id: 'env-runner-status-1', name: 'get_session', arguments: { session_id: workerSessionID } } },
+        { tool_call: { id: 'env-runner-status-2', name: 'get_session', arguments: { session_id: workerSessionID } } },
         { text: 'The environment verification worker completed successfully.' },
         { tool_call: { id: 'finish-env-task', name: 'finish_task', arguments: {
             summary: 'The worker verified the environment secret behavior.',
