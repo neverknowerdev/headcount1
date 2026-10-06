@@ -204,11 +204,23 @@ test.describe.serial('Headcount1 App', () => {
 
     test('can edit company name and shortname in settings', async ({ page, request }) => {
         page.on('dialog', dialog => dialog.accept());
+        const existingCompanies = await (await request.get('/api/companies')).json();
+        if (!(existingCompanies as any[]).some((company) => company.short_name === 'pw-inc')) {
+            const createCompany = await request.post('/api/companies', {
+                data: { name: 'Playwright Inc', short_name: 'pw-inc', color: '#4f46e5' },
+            });
+            expect(createCompany.ok(), await createCompany.text()).toBeTruthy();
+        }
         await page.goto('/companies/pw-inc');
 
         // Go to settings
         await page.click('a:has-text("Settings")');
         await expect(page.getByRole('heading', { name: 'Company Settings' })).toBeVisible();
+        // The settings inputs hydrate from the company store after navigation.
+        // Wait for that initial state so the async effect cannot overwrite the
+        // edits while the form is being filled.
+        await expect(page.getByLabel('Company Full Name')).toHaveValue('Playwright Inc');
+        await expect(page.getByLabel('Company Short Name')).toHaveValue('pw-inc');
 
         // Edit the full company name and short name together.
         await page.getByLabel('Company Full Name').fill('Playwright Incorporated');

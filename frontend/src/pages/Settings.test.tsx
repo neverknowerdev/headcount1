@@ -1,4 +1,4 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import axios from 'axios';
@@ -47,8 +47,34 @@ describe('Settings deployment panel', () => {
     });
 
     afterEach(() => {
+        cleanup();
         useStore.setState({ user: null, companies: [], selectedCompanyId: null });
         vi.restoreAllMocks();
+    });
+
+    it('preserves unsaved company fields when the company store refreshes', async () => {
+        useStore.setState({
+            user: { id: 1, email: 'admin@test.local', is_admin: true },
+            companies: [{ id: 1, name: 'Acme', short_name: 'ac', color: '#000000' }],
+            selectedCompanyId: 1,
+        });
+        render(
+            <MemoryRouter initialEntries={['/companies/ac/settings']}>
+                <Settings />
+            </MemoryRouter>,
+        );
+
+        const fullName = await screen.findByLabelText('Company Full Name');
+        const shortName = screen.getByLabelText('Company Short Name');
+        fireEvent.change(fullName, { target: { value: 'Edited Acme' } });
+        fireEvent.change(shortName, { target: { value: 'ed' } });
+
+        useStore.setState({
+            companies: [{ id: 1, name: 'Acme', short_name: 'ac', color: '#000000' }],
+        });
+
+        expect((fullName as HTMLInputElement).value).toBe('Edited Acme');
+        expect((shortName as HTMLInputElement).value).toBe('ed');
     });
 
     it('shows the deployment Save button to the admin and persists its values', async () => {
