@@ -47,6 +47,11 @@ export async function startMockDeployServer(): Promise<{ baseUrl: string; stop: 
         // ── introspection ────────────────────────────────────────────────
         if (path.startsWith('/__test/requests')) return json(200, { requests: received });
         if (path.startsWith('/__test/reset')) { received.length = 0; return json(200, { ok: true }); }
+        if (path.startsWith('/__test/shutdown')) {
+            json(200, { status: 'stopping' });
+            setImmediate(() => server.close());
+            return;
+        }
 
         record();
 

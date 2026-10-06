@@ -25,9 +25,9 @@ export function loadE2EEnv(): E2EEnv {
         );
     }
     const data = JSON.parse(fs.readFileSync(envFile, 'utf8'));
-    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_TEST_REPO_URL || !data.E2E_HEADCOUNT1_HOME) {
+    if (!data.E2E_MOCK_PROVIDER_URL || !data.E2E_MOCK_DEPLOY_URL || !data.E2E_TEST_REPO_URL || !data.E2E_HEADCOUNT1_HOME) {
         throw new Error(
-            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL, E2E_TEST_REPO_URL, or E2E_HEADCOUNT1_HOME. ` +
+            `loadE2EEnv: env file at ${envFile} is missing E2E_MOCK_PROVIDER_URL, E2E_MOCK_DEPLOY_URL, E2E_TEST_REPO_URL, or E2E_HEADCOUNT1_HOME. ` +
             `Got: ${JSON.stringify(data)}`,
         );
     }
@@ -35,7 +35,7 @@ export function loadE2EEnv(): E2EEnv {
         E2E_MOCK_PROVIDER_URL: data.E2E_MOCK_PROVIDER_URL,
         E2E_TEST_REPO_URL: data.E2E_TEST_REPO_URL,
         E2E_HEADCOUNT1_HOME: data.E2E_HEADCOUNT1_HOME,
-        E2E_MOCK_DEPLOY_URL: data.E2E_MOCK_DEPLOY_URL || '',
+        E2E_MOCK_DEPLOY_URL: data.E2E_MOCK_DEPLOY_URL,
     };
     return cached;
 }
