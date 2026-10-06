@@ -128,25 +128,6 @@ jobs:
     # production restart.
     # Primary: the whole suite against PostgreSQL. SQLite-only specs
     # (sqlite_backend) self-skip here.
-    - name: Capture task UI screenshots
-      timeout-minutes: 8
-      run: |
-        cd e2e
-        npx playwright test task_views.spec.ts --project=chromium
-      env:
-        E2E_MODE: true
-        DATABASE_URL: postgres://postgres:postgres@localhost:5432/orchestrator?sslmode=disable
-        E2E_TASK_SCREENSHOT_DIR: ${{ runner.temp }}/task-ui-screenshots
-
-    - name: Upload task UI screenshots
-      if: always()
-      uses: actions/upload-artifact@v4
-      with:
-        name: task-ui-screenshots
-        path: ${{ runner.temp }}/task-ui-screenshots/
-        if-no-files-found: ignore
-        retention-days: 30
-
     - name: Run Playwright tests (PostgreSQL — primary)
       timeout-minutes: 15
       run: |
