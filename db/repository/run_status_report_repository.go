@@ -7,6 +7,7 @@ import (
 	"time"
 
 	. "agent-orchestrator/db/models"
+	"agent-orchestrator/pkg/secrets/redact"
 	"gorm.io/gorm"
 )
 
@@ -17,6 +18,7 @@ func NewRunStatusReportRepository(db *gorm.DB) *RunStatusReportRepository {
 }
 
 func (r *RunStatusReportRepository) RecordRunStatusReport(ctx context.Context, runID int32, status string, messageID int64) error {
+	status = redact.Scrub(status)
 	now := time.Now()
 	eventTaskID := int32(0)
 	var currentRun Run

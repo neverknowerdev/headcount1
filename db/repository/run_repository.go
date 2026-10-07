@@ -7,6 +7,7 @@ import (
 	"time"
 
 	. "agent-orchestrator/db/models"
+	"agent-orchestrator/pkg/secrets/redact"
 	"gorm.io/gorm"
 )
 
@@ -40,6 +41,7 @@ func (q *RunRepository) CreateRun(ctx context.Context, r Run) (Run, error) {
 }
 
 func (q *RunRepository) UpdateRunLog(ctx context.Context, id int32, content string, status string) error {
+	content = redact.Scrub(content)
 	var r Run
 	err := q.db.WithContext(ctx).First(&r, id).Error
 	if err != nil {
@@ -149,6 +151,7 @@ func (q *RunRepository) UpdateRunLogFilePath(ctx context.Context, id int32, file
 }
 
 func (q *RunRepository) AppendRunLogEntry(ctx context.Context, id int32, entry map[string]interface{}) error {
+	entry = redact.ScrubEntry(entry)
 	entryJSON, err := json.Marshal(entry)
 	if err != nil {
 		return err
@@ -462,6 +465,8 @@ func (q *RunRepository) AddRunTokenStats(ctx context.Context, runID int32, delta
 // UpdateRunResult stores the short description and detailed explanation produced
 // by the finish_task_execution tool call at the end of a run.
 func (q *RunRepository) UpdateRunResult(ctx context.Context, runID int32, description, explanation string) error {
+	description = redact.Scrub(description)
+	explanation = redact.Scrub(explanation)
 	return q.db.WithContext(ctx).Model(&Run{}).Where("id = ?", runID).
 		Updates(map[string]interface{}{
 			"result_description": description,

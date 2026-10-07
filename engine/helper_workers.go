@@ -16,9 +16,9 @@ import (
 
 const maxActiveHelperWorkers = 4
 
-func (e *NativeEngine) buildWorkerSessionTools(ctx context.Context, task db.Task, run db.Run, agent db.Agent, provider db.LLMProvider, model, workspace string, readOnlyDirs []string, logger *logging.ProxyLogger) *sessionToolState {
+func (e *NativeEngine) buildWorkerSessionTools(ctx context.Context, task db.Task, run db.Run, agent db.Agent, provider db.LLMProvider, model, workspace string, readOnlyDirs []string, logger *logging.ProxyLogger, envSecrets map[string]string) *sessionToolState {
 	state := &sessionToolState{}
-	state.registry = tools.NewWorkerRegistry(workspace, readOnlyDirs, tools.WorkerCallbacks{
+	state.registry = tools.NewWorkerRegistryWithEnv(workspace, readOnlyDirs, envSecrets, tools.WorkerCallbacks{
 		ReportStatus: func(statusCtx context.Context, status string, messageID int64) error {
 			if err := e.q.RecordRunStatusReport(statusCtx, run.ID, status, messageID); err != nil {
 				return err
@@ -95,6 +95,7 @@ func (e *NativeEngine) prepareWorkerEnvironment(ctx context.Context, task *db.Ta
 		environment.cleanups = append(environment.cleanups, func() { _ = logger.Close() })
 		_ = e.q.UpdateRunLogFilePath(ctx, run.ID, logger.FilePath())
 	}
+	environment.envSecrets, environment.envSecretNames = e.loadEnvironmentSecrets(ctx, company.ID, environment.logger)
 	if run.WorkspacePath != environment.workspacePath {
 		run.WorkspacePath = environment.workspacePath
 		if err := e.q.UpdateRunWorkspacePath(ctx, run.ID, environment.workspacePath); err != nil {

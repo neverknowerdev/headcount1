@@ -15,6 +15,9 @@ type CheckpointPhase = models.CheckpointPhase
 type Comment = models.Comment
 type Company = models.Company
 type DefaultModelSetting = models.DefaultModelSetting
+type Environment = models.Environment
+type EnvironmentSecret = models.EnvironmentSecret
+type EnvironmentConnector = models.EnvironmentConnector
 type GitHubConnection = models.GitHubConnection
 type GitHubIdentity = models.GitHubIdentity
 type GitHubOAuthState = models.GitHubOAuthState
@@ -55,6 +58,12 @@ type User = models.User
 type UserGitCredential = models.UserGitCredential
 type WebAuthnCredential = models.WebAuthnCredential
 type WebAuthnSession = models.WebAuthnSession
+
+const DefaultEnvironmentName = models.DefaultEnvironmentName
+const EnvEntrySecret = models.EnvEntrySecret
+const EnvEntryVariable = models.EnvEntryVariable
+const ConnectorVercel = models.ConnectorVercel
+const ConnectorGitHub = models.ConnectorGitHub
 
 const CheckpointPhaseAfterTools = models.CheckpointPhaseAfterTools
 const CheckpointPhaseBeforeTools = models.CheckpointPhaseBeforeTools

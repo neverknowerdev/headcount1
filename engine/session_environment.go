@@ -15,20 +15,22 @@ import (
 )
 
 type sessionEnvironment struct {
-	company       db.Company
-	rootTask      db.Task
-	rootRunID     int32
-	rootTaskID    int32
-	groupMode     bool
-	provider      db.LLMProvider
-	model         string
-	workspacePath string
-	readOnlyDirs  []string
-	artifactDir   string
-	logger        *logging.ProxyLogger
-	gitProject    bool
-	gitManager    *gitpkg.GitManager
-	cleanups      []func()
+	company        db.Company
+	rootTask       db.Task
+	rootRunID      int32
+	rootTaskID     int32
+	groupMode      bool
+	provider       db.LLMProvider
+	model          string
+	workspacePath  string
+	readOnlyDirs   []string
+	artifactDir    string
+	logger         *logging.ProxyLogger
+	gitProject     bool
+	gitManager     *gitpkg.GitManager
+	envSecrets     map[string]string
+	envSecretNames []string
+	cleanups       []func()
 }
 
 func (environment *sessionEnvironment) close() {
@@ -151,5 +153,6 @@ func (e *NativeEngine) prepareSessionEnvironment(
 	}
 	environment.artifactDir = manager.Paths().TaskArtifactsDir(company.ShortName, environment.rootTaskID)
 	environment.readOnlyDirs = append(environment.readOnlyDirs, environment.artifactDir)
+	environment.envSecrets, environment.envSecretNames = e.loadEnvironmentSecrets(ctx, company.ID, environment.logger)
 	return environment, run, nil
 }

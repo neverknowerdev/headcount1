@@ -17,6 +17,8 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"sync"
+
+	"agent-orchestrator/pkg/secrets/redact"
 )
 
 // TokenHeader carries the per-run token on gateway proxy calls.
@@ -47,6 +49,9 @@ func (r *Registry) Issue(runID int32) string {
 		return ""
 	}
 	token := "rt_" + base64.RawURLEncoding.EncodeToString(b)
+	// A gateway token is a live bearer credential for a tenant's LLM
+	// providers — keep it out of any logged request/response history.
+	redact.Register("gateway-token", token)
 	h := hashToken(token)
 	r.mu.Lock()
 	defer r.mu.Unlock()

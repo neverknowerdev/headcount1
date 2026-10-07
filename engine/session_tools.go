@@ -52,9 +52,10 @@ func (e *NativeEngine) buildSessionTools(
 	rootTaskID int32,
 	logger *logging.ProxyLogger,
 	mode string,
+	envSecrets map[string]string,
 ) *sessionToolState {
 	state := &sessionToolState{
-		registry:    tools.DefaultRegistry(workspacePath, readOnlyDirs...),
+		registry:    tools.DefaultRegistryWithEnv(workspacePath, envSecrets, readOnlyDirs...),
 		gatewayAuth: runGatewayAuth{runID: run.ID},
 	}
 	// Forked orchestrator sessions are started from a pre-created Run and may

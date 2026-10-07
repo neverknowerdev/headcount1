@@ -3,6 +3,7 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { ArrowLeft, GitBranch, Save, CheckCircle2, AlertCircle, Loader2, ExternalLink, Search, Pencil } from 'lucide-react';
+import { ProjectEnvironments } from '../components/ProjectEnvironments';
 
 type GitHubRepository = {
   id: number;
@@ -311,6 +312,9 @@ export const ProjectSettings: React.FC = () => {
           </button>
 		</div>}
       </form>
+
+      {/* Deploy environments: secrets/variables + Vercel/GitHub connectors */}
+      {project && <ProjectEnvironments projectId={project.id} />}
     </div>
   );
 };
