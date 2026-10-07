@@ -11,6 +11,16 @@ export interface TaskNode<T extends HierarchyTask> {
   orphanParentId?: number;
 }
 
+export function sortTasksByUpdated<T extends HierarchyTask & { updated_at?: string }>(tasks: T[]): T[] {
+  return [...tasks].sort((left, right) => {
+    const leftTimestamp = left.updated_at ? Date.parse(left.updated_at) : Number.NEGATIVE_INFINITY;
+    const rightTimestamp = right.updated_at ? Date.parse(right.updated_at) : Number.NEGATIVE_INFINITY;
+    const leftUpdated = Number.isFinite(leftTimestamp) ? leftTimestamp : Number.NEGATIVE_INFINITY;
+    const rightUpdated = Number.isFinite(rightTimestamp) ? rightTimestamp : Number.NEGATIVE_INFINITY;
+    return (rightUpdated - leftUpdated) || (right.id - left.id);
+  });
+}
+
 /** Builds a stable forest. Missing parents become visible roots and cycles are
  * broken at the smallest id in each cycle, so malformed data cannot hide work. */
 export function buildTaskForest<T extends HierarchyTask>(tasks: T[]): TaskNode<T>[] {

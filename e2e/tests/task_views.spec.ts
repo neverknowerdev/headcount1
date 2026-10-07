@@ -62,6 +62,12 @@ test.describe.serial('Task views', () => {
         expect(agentResponse.ok(), await agentResponse.text()).toBeTruthy();
         agentID = (await agentResponse.json()).id;
 
+        // Create the related top-level task first so the root is newer even
+        // when SQLite timestamps share a one-second precision.
+        related = await createTask(request, company.id, names.related, { sprint_id: sprintID });
+        const doneResponse = await request.put(`/api/tasks/${related.id}`, { data: { status: 'done' } });
+        expect(doneResponse.ok(), await doneResponse.text()).toBeTruthy();
+
         root = await createTask(request, company.id, names.root, { sprint_id: sprintID });
         child = await createTask(request, company.id, names.child, {
             parent_id: root.id, project_id: projectID, sprint_id: sprintID, agent_id: agentID, priority: 'High',
@@ -69,11 +75,7 @@ test.describe.serial('Task views', () => {
         grandchild = await createTask(request, company.id, names.grandchild, {
             parent_id: child.id, project_id: projectID, sprint_id: sprintID, due_date: '2026-10-20T00:00:00Z',
         });
-        related = await createTask(request, company.id, names.related, { sprint_id: sprintID });
         otherRoot = await createTask(request, otherCompany.id, names.otherRoot, { sprint_id: otherSprintID });
-
-        const doneResponse = await request.put(`/api/tasks/${related.id}`, { data: { status: 'done' } });
-        expect(doneResponse.ok(), await doneResponse.text()).toBeTruthy();
 
         const relation = await request.post(`/api/tasks/${root.id}/relations`, {
             data: { type: 'related_to', task_id: related.id },
@@ -81,8 +83,22 @@ test.describe.serial('Task views', () => {
         expect(relation.ok(), await relation.text()).toBeTruthy();
     });
 
-    test('keeps the board as the default and renders, collapses, and navigates a three-level hierarchy', async ({ page, request }) => {
+    test('defaults to hierarchy and renders, collapses, and navigates a three-level task tree', async ({ page, request }) => {
         await page.setViewportSize({ width: 1680, height: 1000 });
+        // The task list and task records use the real backend. Only the runs
+        // summary is fixture-backed here because no public API can safely
+        // create a historical execution run without starting agent work.
+        await page.route(url => {
+            const parsed = new URL(url);
+            return parsed.pathname === '/api/runs' && parsed.searchParams.get('company_id') === String(company.id);
+        }, route => route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify([{
+                id: 9001, task_id: root.id, agent_id: 9001, kind: 'agent_session', status: 'completed',
+                started_at: '2026-10-01T12:00:00Z', agent: { id: 9001, name: 'Execution Agent' },
+            }]),
+        }));
         const websocketConnected = page.waitForEvent('websocket', { timeout: 10_000 });
         const hierarchyRequest = page.waitForRequest(request =>
             request.url().includes(`/api/tasks?company_id=${company.id}`) &&
@@ -90,13 +106,38 @@ test.describe.serial('Task views', () => {
         );
         await page.goto(`/companies/${company.short_name}/tasks`);
 
-        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'true');
-        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'false');
+        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'false');
         await expect(page.getByText(names.root, { exact: true })).toBeVisible();
-        await expect(page.getByText(names.child, { exact: true })).toBeHidden();
-        await screenshotIfRequested(page, 'task-board-default');
+        const tree = page.getByTestId('task-hierarchy');
+        await expect(tree).toBeVisible();
+        await expect(row(page, root)).toBeVisible();
+        await expect(row(page, child)).toBeVisible();
+        await expect(row(page, grandchild)).toBeVisible();
+        await expect(row(page, child)).toHaveAttribute('data-depth', '1');
+        await expect(row(page, grandchild)).toHaveAttribute('data-depth', '2');
+        const initialRowOrder = await tree.locator('[data-testid^="task-row-"]').evaluateAll(rows =>
+            rows.map(element => element.getAttribute('data-testid')),
+        );
+        expect(initialRowOrder.indexOf(`task-row-${root.id}`)).toBeLessThan(initialRowOrder.indexOf(`task-row-${related.id}`));
+        await screenshotIfRequested(page, 'task-hierarchy');
         const requestedTasks = await hierarchyRequest;
         expect(new URL(requestedTasks.url()).searchParams.get('include_subtasks')).toBe('true');
+
+        const settingsButton = page.getByRole('button', { name: 'Display settings', exact: true });
+        await settingsButton.click();
+        const settings = page.getByRole('dialog', { name: 'Display settings' });
+        await expect(settings.getByRole('checkbox', { name: 'Agent', exact: true })).toBeChecked();
+        await page.keyboard.press('Escape');
+        await expect(row(page, root)).toContainText('Unassigned');
+        await expect(row(page, root)).toContainText('Execution Agent');
+        await expect(row(page, child)).toContainText('Researcher');
+
+        await page.getByRole('button', { name: 'Board', exact: true }).click();
+        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByText(names.root, { exact: true })).toBeVisible();
+        await expect(page.getByText(names.child, { exact: true })).toBeHidden();
+        await screenshotIfRequested(page, 'task-board');
 
         // Board cards continue to support keyboard drag and drop. Move the
         // root from Backlog to Blocked (not an executable queue state) and
@@ -122,7 +163,6 @@ test.describe.serial('Task views', () => {
         await expect(page.getByText(names.root, { exact: true })).toBeVisible({ timeout: 10_000 });
 
         await page.getByRole('button', { name: 'Hierarchy', exact: true }).click();
-        const tree = page.getByTestId('task-hierarchy');
         await expect(tree).toBeVisible();
         await expect(row(page, root)).toBeVisible();
         await expect(row(page, child)).toBeVisible();
@@ -186,6 +226,35 @@ test.describe.serial('Task views', () => {
         await expect(tree).toBeVisible();
     });
 
+    test('migrates v1 board preferences, then preserves an explicit v2 board choice after reload', async ({ page }) => {
+        await page.addInitScript(({ key, columns }) => {
+            // Playwright init scripts run again on reload; only seed the
+            // legacy value once so the v2 preference can be tested after.
+            if (localStorage.getItem(key) === null) {
+                localStorage.setItem(key, JSON.stringify({ version: 1, view: 'board', columns }));
+            }
+        }, {
+            key: `tasks-view-v1-${company.id}`,
+            columns: ['status', 'assignee', 'project', 'relations', 'taskId', 'updated'],
+        });
+        await page.goto(`/companies/${company.short_name}/tasks`);
+        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'false');
+        await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible();
+        await expect(page.getByRole('columnheader', { name: 'Status', exact: true })).toBeVisible();
+        await expect(page.getByRole('columnheader', { name: 'Project', exact: true })).toBeVisible();
+        await expect(page.getByRole('columnheader', { name: 'Sprint', exact: true })).toHaveCount(0);
+
+        await page.getByRole('button', { name: 'Board', exact: true }).click();
+        await expect.poll(() => page.evaluate(key => {
+            const saved = JSON.parse(localStorage.getItem(key) || 'null');
+            return saved?.version === 2 ? saved.view : null;
+        }, `tasks-view-v1-${company.id}`)).toBe('board');
+        await page.reload();
+        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'false');
+    });
+
     test('persists view and display columns by company and remains usable on mobile', async ({ page }) => {
         await page.goto(`/companies/${company.short_name}/tasks`);
         await page.getByRole('button', { name: 'Hierarchy', exact: true }).click();
@@ -232,20 +301,25 @@ test.describe.serial('Task views', () => {
         await expect(row(page, grandchild)).toContainText('Oct 20');
 
         // Preferences are scoped to a company: the second company starts with
-        // its default board and column choices.
+        // its default hierarchy and column choices.
         await page.getByTitle('Other Hierarchy E2E', { exact: true }).click();
         await page.waitForURL(`**/companies/${otherCompany.short_name}`);
         await page.getByRole('link', { name: 'Tasks', exact: true }).click();
         await page.waitForURL(`**/companies/${otherCompany.short_name}/tasks`);
-        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'true');
-        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'false');
+        await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByRole('button', { name: 'Board', exact: true })).toHaveAttribute('aria-pressed', 'false');
         await expect(page.getByText(names.otherRoot, { exact: true })).toBeVisible();
+        await page.getByRole('button', { name: 'Display settings', exact: true }).click();
+        await expect(page.getByRole('dialog', { name: 'Display settings' }).getByRole('checkbox', { name: 'Agent', exact: true })).toBeChecked();
+        await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible();
+        await page.keyboard.press('Escape');
 
         await page.getByTitle('Hierarchy E2E', { exact: true }).click();
         await page.waitForURL(`**/companies/${company.short_name}`);
         await page.getByRole('link', { name: 'Tasks', exact: true }).click();
         await page.waitForURL(`**/companies/${company.short_name}/tasks`);
         await expect(page.getByRole('button', { name: 'Hierarchy', exact: true })).toHaveAttribute('aria-pressed', 'true');
+        await expect(page.getByRole('columnheader', { name: 'Agent', exact: true })).toBeVisible();
         await expect(page.getByRole('columnheader', { name: 'Sprint', exact: true })).toBeVisible();
         await expect(page.getByRole('columnheader', { name: 'Status', exact: true })).toHaveCount(0);
 
@@ -311,5 +385,5 @@ async function screenshotIfRequested(page: Page, name: string): Promise<void> {
     const directory = process.env.E2E_TASK_SCREENSHOT_DIR;
     if (!directory) return;
     fs.mkdirSync(directory, { recursive: true });
-    await page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true });
+    await page.screenshot({ path: path.join(directory, `${name}.png`), fullPage: true, animations: 'disabled' });
 }

@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { buildTaskForest, getSearchVisibility } from './taskHierarchy';
+import { buildTaskForest, getSearchVisibility, sortTasksByUpdated } from './taskHierarchy';
 
 const tasks = [
   { id: 10, title: 'Root work', ref_key: 'APP-10', parent_id: null },
@@ -35,5 +35,15 @@ describe('task hierarchy helpers', () => {
     expect([...result.expandedIds].sort()).toEqual([10, 11]);
     expect(getSearchVisibility(tasks, 'nothing').visibleIds?.size).toBe(0);
     expect(getSearchVisibility(tasks, '').visibleIds).toBeNull();
+  });
+
+  it('sorts tasks by updated time descending with id descending for ties and missing timestamps last', () => {
+    const sorted = sortTasksByUpdated([
+      { id: 1, title: 'Older', updated_at: '2026-01-01T10:00:00Z' },
+      { id: 3, title: 'Newer tie', updated_at: '2026-01-02T10:00:00Z' },
+      { id: 2, title: 'Newer', updated_at: '2026-01-02T10:00:00Z' },
+      { id: 4, title: 'Missing timestamp' },
+    ]);
+    expect(sorted.map(task => task.id)).toEqual([3, 2, 1, 4]);
   });
 });

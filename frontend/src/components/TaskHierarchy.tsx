@@ -1,7 +1,7 @@
 import React, { useMemo, useState } from 'react';
 import { ChevronDown, ChevronRight, Circle, CircleCheck, CircleDashed, Link2 } from 'lucide-react';
 import { Link } from 'react-router-dom';
-import { buildTaskForest, getSearchVisibility, type HierarchyTask, type TaskNode } from '../utils/taskHierarchy';
+import { buildTaskForest, getSearchVisibility, sortTasksByUpdated, type HierarchyTask, type TaskNode } from '../utils/taskHierarchy';
 import { COLUMN_LABELS, DISPLAY_ORDER, type TaskColumn } from '../utils/taskColumns';
 
 export interface BoardTask extends HierarchyTask {
@@ -24,6 +24,7 @@ export interface TaskHierarchyProps {
   projects: { id: number; name: string }[];
   sprints: { id: number; name: string }[];
   agents: { id: number; name: string }[];
+  executionAgents: Map<number, string>;
   search: string;
   taskHref: (id: number) => string;
 }
@@ -69,8 +70,9 @@ function relativeUpdated(value?: string) {
   return formatter.format(Math.round(seconds / 604800), 'week');
 }
 
-export const TaskHierarchy: React.FC<TaskHierarchyProps> = ({ tasks, prefix, columns, projects, sprints, agents, search, taskHref }) => {
-  const forest = useMemo(() => buildTaskForest(tasks), [tasks]);
+export const TaskHierarchy: React.FC<TaskHierarchyProps> = ({ tasks, prefix, columns, projects, sprints, agents, executionAgents, search, taskHref }) => {
+  const orderedTasks = useMemo(() => sortTasksByUpdated(tasks), [tasks]);
+  const forest = useMemo(() => buildTaskForest(orderedTasks), [orderedTasks]);
   const { visibleIds, expandedIds: searchExpanded } = useMemo(() => getSearchVisibility(tasks, search), [tasks, search]);
   const [collapsedIds, setCollapsedIds] = useState<Set<number>>(() => new Set());
   const projectNames = useMemo(() => new Map(projects.map(item => [item.id, item.name])), [projects]);
@@ -151,6 +153,7 @@ export const TaskHierarchy: React.FC<TaskHierarchyProps> = ({ tasks, prefix, col
                 ? agentNames.get(task.agent_id) ?? `Agent #${task.agent_id}`
                 : <span className="text-slate-400">Unassigned</span>
             )}
+            {column === 'agent' && (executionAgents.get(task.id) ?? <span className="text-slate-400">Not started</span>)}
             {column === 'project' && (
               task.project_id
                 ? projectNames.get(task.project_id) ?? `Project #${task.project_id}`

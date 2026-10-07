@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from 'react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import axios from 'axios';
 import { useParams, useNavigate } from 'react-router-dom';
 import { useStore } from '../store';
@@ -8,32 +8,44 @@ import { Plus, Settings, LockKeyhole, ArrowUpRight, Link2, Search, ListTree, Col
 import { TaskModal } from '../components/TaskModal';
 import { TaskHierarchy, type BoardTask } from '../components/TaskHierarchy';
 import { COLUMN_LABELS, DISPLAY_ORDER, type TaskColumn } from '../utils/taskColumns';
+import { latestExecutionAgents, type TaskExecutionRun } from '../utils/taskExecutionAgents';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { useCoalescedCallback } from '../utils/useCoalescedCallback';
+import { sortTasksByUpdated } from '../utils/taskHierarchy';
 
 const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'blocked', 'depends-on-task', 'in-review', 'done'];
 const STATUS_LABELS: Record<string, string> = {
     backlog: 'Backlog', 'to-do': 'To Do', refinement: 'Refinement', 'in-progress': 'In Progress',
     blocked: 'Blocked', 'depends-on-task': 'Depends on Task', 'in-review': 'In Review', done: 'Done',
 };
-const DEFAULT_COLUMNS: TaskColumn[] = ['status', 'assignee', 'project', 'relations', 'taskId', 'updated'];
+const DEFAULT_COLUMNS: TaskColumn[] = ['status', 'assignee', 'agent', 'project', 'relations', 'taskId', 'updated'];
 type TaskView = 'hierarchy' | 'board';
 interface Project { id: number; name: string }
 interface Sprint { id: number; name: string }
 interface Agent { id: number; name: string }
-interface SavedViewSettings { version: 1; view: TaskView; columns: TaskColumn[] }
+interface SavedViewSettings { version: 2; view: TaskView; columns: TaskColumn[] }
 
 function settingsStorageKey(companyId: number | null) { return `tasks-view-v1-${companyId ?? 'none'}`; }
 function readViewSettings(companyId: number | null): SavedViewSettings {
     try {
         const parsed = JSON.parse(localStorage.getItem(settingsStorageKey(companyId)) || 'null');
-        if (parsed?.version === 1) {
-            const view: TaskView = parsed.view === 'hierarchy' ? 'hierarchy' : 'board';
+        if (parsed?.version === 2) {
+            const view: TaskView = parsed.view === 'board' ? 'board' : 'hierarchy';
             const columns: TaskColumn[] = Array.isArray(parsed.columns) ? (parsed.columns as unknown[]).filter((c): c is TaskColumn => DISPLAY_ORDER.includes(c as TaskColumn)) : DEFAULT_COLUMNS;
-            return { version: 1, view, columns: Array.from(new Set<TaskColumn>(columns)) };
+            return { version: 2, view, columns: Array.from(new Set<TaskColumn>(columns)) };
+        }
+        if (parsed?.version === 1) {
+            const legacyColumns: TaskColumn[] = Array.isArray(parsed.columns)
+                ? (parsed.columns as unknown[]).filter((c): c is TaskColumn => DISPLAY_ORDER.includes(c as TaskColumn))
+                : DEFAULT_COLUMNS.filter(column => column !== 'agent');
+            return {
+                version: 2,
+                view: 'hierarchy',
+                columns: Array.from(new Set<TaskColumn>([...legacyColumns, 'agent'])),
+            };
         }
     } catch { /* use defaults when storage is unavailable or invalid */ }
-    return { version: 1, view: 'board', columns: DEFAULT_COLUMNS };
+    return { version: 2, view: 'hierarchy', columns: DEFAULT_COLUMNS };
 }
 
 const FilterMenu: React.FC<{ label: string; options: { id: number; name: string }[]; selected: number[]; onChange: (ids: number[]) => void }> = ({ label, options, selected, onChange }) => {
@@ -76,7 +88,9 @@ export const ProjectBoard: React.FC = () => {
   const [projects, setProjects] = useState<Project[]>([]);
   const [sprints, setSprints] = useState<Sprint[]>([]);
   const [agents, setAgents] = useState<Agent[]>([]);
+  const [executionAgents, setExecutionAgents] = useState<Map<number, string>>(() => new Map());
   const [metadataCompanyId, setMetadataCompanyId] = useState<number | null>(null);
+  const [executionAgentsCompanyId, setExecutionAgentsCompanyId] = useState<number | null>(null);
   const [dataCompanyId, setDataCompanyId] = useState<number | null>(null);
   const [selectedProjectIds, setSelectedProjectIds] = useState<number[]>([]);
   const [selectedSprintIds, setSelectedSprintIds] = useState<number[]>([]);
@@ -102,6 +116,7 @@ export const ProjectBoard: React.FC = () => {
     setTasks([]);
     setDataCompanyId(null);
     setMetadataCompanyId(null);
+    setExecutionAgentsCompanyId(null);
     setLoading(true);
   }, [selectedCompanyId]);
   useEffect(() => {
@@ -126,6 +141,19 @@ export const ProjectBoard: React.FC = () => {
     } catch (e) { console.error(e); }
   }, [selectedCompanyId]);
 
+  const fetchExecutionAgents = useCallback(async () => {
+    if (!selectedCompanyId) return;
+    const companyId = selectedCompanyId;
+    try {
+      const response = await axios.get(`/api/runs?company_id=${companyId}`);
+      if (useStore.getState().selectedCompanyId !== companyId) return;
+      setExecutionAgents(latestExecutionAgents((response.data || []) as TaskExecutionRun[]));
+      setExecutionAgentsCompanyId(companyId);
+    } catch (error) {
+      console.error('Could not load task execution agents', error);
+    }
+  }, [selectedCompanyId]);
+
   // Only the newest request can update this view, including on filter changes.
   const fetchSeqRef = useRef(0);
   const fetchTasks = useCallback(async () => {
@@ -148,13 +176,22 @@ export const ProjectBoard: React.FC = () => {
   }, [selectedCompanyId, selectedProjectIds, selectedSprintIds, showArchived]);
 
   const scheduleFetchTasks = useCoalescedCallback(fetchTasks);
+  const scheduleFetchExecutionAgents = useCoalescedCallback(fetchExecutionAgents);
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Fetch company metadata when its scope changes.
   useEffect(() => { fetchFiltersData(); }, [fetchFiltersData]);
+  // eslint-disable-next-line react-hooks/set-state-in-effect -- Fetch execution agents when company context changes.
+  useEffect(() => { fetchExecutionAgents(); }, [fetchExecutionAgents]);
   // eslint-disable-next-line react-hooks/set-state-in-effect -- Fetch task data when filters change.
   useEffect(() => { fetchTasks(); }, [fetchTasks]);
   useWebSocket(wsUrl(), (msg) => {
     if (msg.type === 'task_updated' || msg.type === 'task_created') scheduleFetchTasks();
-  }, { onConnect: fetchTasks });
+    if (['run_started', 'run_ended', 'run_paused', 'run_status'].includes(msg.type)) scheduleFetchExecutionAgents();
+  }, {
+    onConnect: () => {
+      fetchTasks();
+      fetchExecutionAgents();
+    },
+  });
 
   const updateTaskStatus = async (id: number, status: string) => {
     try { await axios.put(`/api/tasks/${id}`, { status }); }
@@ -170,8 +207,14 @@ export const ProjectBoard: React.FC = () => {
       }
   };
 
-  const viewTasks = dataCompanyId === selectedCompanyId ? tasks : [];
-  const visibleTasks = viewTasks.filter(task => !search || `${task.title} ${task.ref_key ?? ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase()));
+  const viewTasks = useMemo(
+    () => dataCompanyId === selectedCompanyId ? sortTasksByUpdated(tasks) : [],
+    [dataCompanyId, selectedCompanyId, tasks],
+  );
+  const visibleTasks = useMemo(
+    () => viewTasks.filter(task => !search || `${task.title} ${task.ref_key ?? ''}`.toLocaleLowerCase().includes(search.trim().toLocaleLowerCase())),
+    [search, viewTasks],
+  );
   const visibleRoots = visibleTasks.filter(task => task.parent_id == null);
   const view = settings.view;
   const changeView = (nextView: TaskView) => setSettings(current => ({ ...current, view: nextView }));
@@ -186,6 +229,7 @@ export const ProjectBoard: React.FC = () => {
   }, [settingsOpen]);
 
   const filterDataReady = metadataCompanyId === selectedCompanyId;
+  const executionAgentsReady = executionAgentsCompanyId === selectedCompanyId;
   // Keep an already rendered company's tree mounted while filters or websocket
   // refreshes are in flight so row expansion and keyboard focus survive.
   const showLoading = selectedCompanyId != null && dataCompanyId !== selectedCompanyId;
@@ -345,6 +389,7 @@ export const ProjectBoard: React.FC = () => {
           projects={filterDataReady ? projects : []}
           sprints={filterDataReady ? sprints : []}
           agents={filterDataReady ? agents : []}
+          executionAgents={executionAgentsReady ? executionAgents : new Map()}
           search={search}
           taskHref={id => `/companies/${shortName}/tasks/${id}`}
         />
