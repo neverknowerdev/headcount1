@@ -44,7 +44,7 @@ export const Sidebar: React.FC = () => {
 
 
   return (
-    <div className="w-64 bg-white border-r flex flex-col h-full">
+    <div className="w-12 shrink-0 bg-white border-r flex flex-col h-full sm:w-64">
       <div className="flex-1 overflow-y-auto py-4">
         <nav className="space-y-1 px-2">
           {navItems.map((item) => {
@@ -61,19 +61,21 @@ export const Sidebar: React.FC = () => {
               <Link
                 key={item.label}
                 to={item.path}
+                aria-label={item.label}
+                title={item.label}
                 className={`${
                   isActive
                     ? 'bg-indigo-50 text-indigo-600'
                     : 'text-gray-600 hover:bg-gray-50 hover:text-gray-900'
-                } group flex items-center px-2 py-2 text-sm font-medium rounded-md`}
+                  } group flex items-center justify-center px-2 py-2 text-sm font-medium rounded-md sm:justify-start`}
               >
                 <item.icon
                   className={`${
                     isActive ? 'text-indigo-600' : 'text-gray-400 group-hover:text-gray-500'
-                  } mr-3 flex-shrink-0 h-5 w-5`}
+                  } h-5 w-5 flex-shrink-0 sm:mr-3`}
                   aria-hidden="true"
                 />
-                {item.label}
+                <span className="sr-only sm:not-sr-only">{item.label}</span>
               </Link>
             );
           })}

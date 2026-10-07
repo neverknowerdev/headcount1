@@ -21,15 +21,15 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
     const fetchInitialData = async () => {
       try {
         const res = await axios.get('/api/companies');
-        const comps = res.data || [];
+        const comps: Array<{ id: number; name: string; short_name: string; color: string }> = res.data || [];
         setCompanies(comps);
 
         if (comps.length > 0) {
             // Check if URL has companies/:id
-            const match = location.pathname.match(/\/companies\/([^\/]+)/);
+            const match = location.pathname.match(/\/companies\/([^/]+)/);
             if (match) {
                 const urlShortName = match[1];
-                const compExists = comps.find((c: any) => c.short_name === urlShortName);
+                const compExists = comps.find((company) => company.short_name === urlShortName);
                 if (compExists) {
                      setSelectedCompanyId(compExists.id);
                 } else {
@@ -76,10 +76,10 @@ const LayoutContent: React.FC<LayoutProps> = ({ children }) => {
   }
 
   return (
-    <div className="h-screen flex overflow-hidden bg-gray-50">
+    <div className="h-screen flex min-w-0 overflow-hidden bg-gray-50">
       <CompanySwitcher />
       <Sidebar />
-      <main className="flex-1 overflow-y-auto p-8">
+      <main className="min-w-0 flex-1 overflow-y-auto p-2 sm:p-8">
         {children}
       </main>
     </div>

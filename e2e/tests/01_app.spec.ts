@@ -109,7 +109,7 @@ test.describe.serial('Headcount1 App', () => {
         // Add Task
         await page.click('button:has-text("New Task")');
         await page.fill('input[placeholder="Task title"]', 'Write E2E Tests');
-        await page.getByLabel('Sprint').selectOption({ label: 'E2E Sprint' });
+        await page.getByLabel('Sprint', { exact: true }).selectOption({ label: 'E2E Sprint' });
         await page.click('button:has-text("Create Task")');
 
         // The UI navigation can render before the task POST is visible to a
