@@ -218,6 +218,12 @@ test.describe.serial('Workflow: restart and crash recovery', () => {
             expect(runs[0].status).toBe('completed');
             expect(runs[0].attempt).toBe(1);
             // The tool calls pending at the pause ran after the restart, once.
+            // What the tools answered is what the model was told next.
+            const told = ((await mockState()).completions as any[])
+                .filter((entry) => entry.phase === 'executor' && JSON.stringify(entry.body.messages).includes(name))
+                .flatMap((entry) => entry.body.messages.filter((message: any) => message.role === 'tool').map((message: any) => String(message.content)));
+            const files = fs.readdirSync(runs[0].workspace_path);
+            expect(files, `tool results: ${JSON.stringify(told)}`).toEqual(expect.arrayContaining(['one.txt', 'runs.log']));
             expect(fs.readFileSync(path.join(runs[0].workspace_path, 'one.txt'), 'utf8')).toBe(`${name}: one`);
             expect(fs.readFileSync(path.join(runs[0].workspace_path, 'runs.log'), 'utf8').trim().split('\n')).toEqual(['run']);
             expect((await subtaskOf(taskId)).result_summary).toBe(`${name} survived the restart.`);
