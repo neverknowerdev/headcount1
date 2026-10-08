@@ -80,6 +80,31 @@ func TestCommitMessageDoesNotDuplicateHeadcount1CoAuthor(t *testing.T) {
 	require.Equal(t, original, commitMessageWithHeadcount1Attribution(original))
 }
 
+// A server has no git identity of its own. Without one git refuses to commit,
+// so the commit is made as Headcount1.
+func TestCommitInWorktreeCommitsWithoutAConfiguredIdentity(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	t.Setenv("XDG_CONFIG_HOME", filepath.Join(home, ".config"))
+	t.Setenv("GIT_CONFIG_GLOBAL", filepath.Join(home, "no-gitconfig"))
+	t.Setenv("GIT_CONFIG_NOSYSTEM", "1")
+
+	directory := t.TempDir()
+	require.NoError(t, exec.Command("git", "init", directory).Run())
+	require.NoError(t, os.WriteFile(filepath.Join(directory, "change.txt"), []byte("change\n"), 0o644))
+
+	manager := NewGitManager(directory, "")
+	require.NoError(t, manager.CommitInWorktree(context.Background(), directory, "Add a change"))
+
+	identity, err := exec.Command("git", "-C", directory, "log", "-1", "--format=%an <%ae> / %cn <%ce>").Output()
+	require.NoError(t, err)
+	require.Equal(t, "headcount1.ai <headcount1@headcount1.ai> / headcount1.ai <headcount1@headcount1.ai>\n", string(identity))
+
+	status, err := exec.Command("git", "-C", directory, "status", "--porcelain").Output()
+	require.NoError(t, err)
+	require.Empty(t, strings.TrimSpace(string(status)))
+}
+
 func TestCommitInWorktreeWritesHeadcount1CoAuthorTrailer(t *testing.T) {
 	directory := t.TempDir()
 	command := exec.Command("git", "init")

@@ -16,7 +16,12 @@ type GitManager struct {
 	httpToken  string
 }
 
-const headcount1CoAuthorTrailer = "Co-authored-by: headcount1.ai <headcount1@headcount1.ai>"
+const (
+	headcount1AuthorName  = "headcount1.ai"
+	headcount1AuthorEmail = "headcount1@headcount1.ai"
+)
+
+const headcount1CoAuthorTrailer = "Co-authored-by: " + headcount1AuthorName + " <" + headcount1AuthorEmail + ">"
 
 // commitMessageWithHeadcount1Attribution adds the standard Git co-author
 // trailer to commits created by Headcount1. GitHub renders this trailer as a
@@ -431,7 +436,17 @@ func (g *GitManager) CommitInWorktree(ctx context.Context, worktreeDir, message 
 		return nil
 	}
 
-	if _, err := run("commit", "-m", commitMessageWithHeadcount1Attribution(message)); err != nil {
+	// A server usually has no git identity of its own, and git refuses to
+	// commit without one. Whatever is not configured falls back to Headcount1.
+	args := []string{}
+	if name, _ := run("config", "user.name"); strings.TrimSpace(name) == "" {
+		args = append(args, "-c", "user.name="+headcount1AuthorName)
+	}
+	if email, _ := run("config", "user.email"); strings.TrimSpace(email) == "" {
+		args = append(args, "-c", "user.email="+headcount1AuthorEmail)
+	}
+	args = append(args, "commit", "-m", commitMessageWithHeadcount1Attribution(message))
+	if _, err := run(args...); err != nil {
 		return err
 	}
 	return nil
