@@ -72,7 +72,11 @@ func TestTasksThatAreNotStartedOrAreFinishedAreIdle(t *testing.T) {
 }
 
 func TestGate(t *testing.T) {
-	queued := func(mode, taskType string, prerequisites ...string) Snapshot {
+	queued := func(mode, taskType string, statuses ...string) Snapshot {
+		var prerequisites []Prerequisite
+		for _, status := range statuses {
+			prerequisites = append(prerequisites, Prerequisite{Status: status, Type: models.TaskTypeCoding})
+		}
 		return Snapshot{Task: Task{ID: 2, Type: taskType, Mode: mode, Status: models.TaskStatusTodo,
 			SmartStepsUsed: 9, AdjustCyclesUsed: 2, AttemptsUsed: 1}, Prerequisites: prerequisites, Model: ModelReady, Now: testNow}
 	}
@@ -412,6 +416,53 @@ func TestExecutionResolves(t *testing.T) {
 	})
 }
 
+// Work that builds on reviewed implementation starts when the review accepts
+// it. A review that asked for changes finished its own job, but the work it
+// reviewed is not accepted yet.
+func TestGateHoldsWorkBackUntilTheReviewItDependsOnAccepts(t *testing.T) {
+	review := func(verdict string, round int) Prerequisite {
+		return Prerequisite{Status: models.TaskStatusDone, Type: models.TaskTypeReview, Verdict: verdict, ReviewRound: round}
+	}
+	implementation := Prerequisite{Status: models.TaskStatusDone, Type: models.TaskTypeCoding}
+	dependent := func(parentType string, prerequisites ...Prerequisite) Snapshot {
+		return Snapshot{Task: Task{ID: 5, Depth: 1, Type: models.TaskTypeCoding, ParentType: parentType, Mode: models.TaskModeDirect,
+			Status: models.TaskStatusDependsOnTask}, Prerequisites: prerequisites, Model: ModelReady, Now: testNow}
+	}
+
+	t.Run("an approving review lets it start", func(t *testing.T) {
+		tr := requireApply(t, Evaluate(dependent(models.TaskTypeCoding, implementation, review(models.TaskVerdictApproved, 0)), DefaultBudgets))
+		assert.Equal(t, models.TaskStatusInProgress, tr.Fields["status"])
+	})
+	t.Run("a review that asked for changes keeps it waiting for the fix round", func(t *testing.T) {
+		s := dependent(models.TaskTypeCoding, implementation, review(models.TaskVerdictChangesRequested, 0))
+		assert.Equal(t, Idle, Evaluate(s, DefaultBudgets).Kind)
+		s.Task.Status = models.TaskStatusTodo
+		assert.Equal(t, map[string]interface{}{"status": models.TaskStatusDependsOnTask}, requireApply(t, Evaluate(s, DefaultBudgets)).Fields)
+	})
+	t.Run("with no fix round left it is canceled, so the parent can re-plan", func(t *testing.T) {
+		last := review(models.TaskVerdictChangesRequested, DefaultBudgets.MaxReviewRounds)
+		tr := requireApply(t, Evaluate(dependent(models.TaskTypeCoding, implementation, last), DefaultBudgets))
+		assert.Equal(t, models.TaskStatusCanceled, tr.Fields["status"])
+		assert.Equal(t, models.TaskResultPrerequisiteFailed, tr.Fields["result_reason"])
+		assert.Contains(t, tr.Steps[0].Result, "a review this one depends on requested changes")
+	})
+	t.Run("where the engine runs no fix rounds it is canceled at once", func(t *testing.T) {
+		tr := requireApply(t, Evaluate(dependent(models.TaskTypeGeneral, review(models.TaskVerdictChangesRequested, 0)), DefaultBudgets))
+		assert.Equal(t, models.TaskStatusCanceled, tr.Fields["status"])
+	})
+	t.Run("the fix for a review starts because that review asked for changes", func(t *testing.T) {
+		s := dependent(models.TaskTypeCoding, review(models.TaskVerdictChangesRequested, 0))
+		s.Task.ReviewRound = 1
+		assert.Equal(t, models.TaskStatusInProgress, requireApply(t, Evaluate(s, DefaultBudgets)).Fields["status"])
+	})
+	t.Run("a failed prerequisite cancels it whatever a review said", func(t *testing.T) {
+		failed := Prerequisite{Status: models.TaskStatusFailed, Type: models.TaskTypeCoding}
+		tr := requireApply(t, Evaluate(dependent(models.TaskTypeCoding, review(models.TaskVerdictChangesRequested, 0), failed), DefaultBudgets))
+		assert.Equal(t, models.TaskStatusCanceled, tr.Fields["status"])
+		assert.Contains(t, tr.Steps[0].Result, "did not succeed")
+	})
+}
+
 func TestEngineRunsTheReviewLoopForCoding(t *testing.T) {
 	implementation := Child{ID: 2, Title: "Schema", Type: models.TaskTypeCoding, Status: models.TaskStatusDone, OriginStepID: 10}
 	rejecting := func(id int32, round int, dependsOn int32) Child {
@@ -441,6 +492,32 @@ func TestEngineRunsTheReviewLoopForCoding(t *testing.T) {
 		assert.Equal(t, []string{fix.Key}, review.DependsOnKeys, "the new review follows the fix")
 		assert.Equal(t, "Review: Schema", review.Title)
 		assert.Equal(t, []string{models.StepReviewRound}, stepKinds(tr))
+		assert.Equal(t, []Redirect{{FromID: 3, ToKey: review.Key}}, tr.Redirects, "what waited for the first review waits for the new one")
+	})
+	t.Run("the fix round starts at once, while other work is still running", func(t *testing.T) {
+		running := Child{ID: 8, Title: "Docs", Type: models.TaskTypeGeneral, Status: models.TaskStatusInProgress, OriginStepID: 10}
+		tr := requireApply(t, Evaluate(executing(models.TaskTypeCoding, implementation, rejecting(3, 0, 2), running), DefaultBudgets))
+		require.Len(t, tr.NewTasks, 2)
+		assert.NotContains(t, tr.Fields, "phase")
+	})
+	t.Run("work that waits for the review does not count as its fix", func(t *testing.T) {
+		waiting := Child{ID: 9, Title: "API", Type: models.TaskTypeCoding, Status: models.TaskStatusDependsOnTask, OriginStepID: 10, DependsOn: []int32{2, 3}}
+		tr := requireApply(t, Evaluate(executing(models.TaskTypeCoding, implementation, rejecting(3, 0, 2), waiting), DefaultBudgets))
+		require.Len(t, tr.NewTasks, 2, "the review is still unanswered")
+		assert.Equal(t, 1, tr.NewTasks[0].ReviewRound)
+	})
+	t.Run("with a fix under way it waits for the rest", func(t *testing.T) {
+		fix := Child{ID: 4, Type: models.TaskTypeCoding, Status: models.TaskStatusInProgress, ReviewRound: 1, OriginStepID: 11, DependsOn: []int32{3}}
+		assert.Equal(t, Idle, Evaluate(executing(models.TaskTypeCoding, implementation, rejecting(3, 0, 2), fix), DefaultBudgets).Kind)
+	})
+	t.Run("a second round is named after the work, not after the first fix", func(t *testing.T) {
+		second := rejecting(5, 1, 4)
+		second.Title = "Review: Schema"
+		fix := Child{ID: 4, Title: "Address review findings (round 1): Schema", Type: models.TaskTypeCoding, Status: models.TaskStatusDone, ReviewRound: 1, OriginStepID: 11, DependsOn: []int32{3}}
+		tr := requireApply(t, Evaluate(executing(models.TaskTypeCoding, implementation, rejecting(3, 0, 2), fix, second), DefaultBudgets))
+		require.Len(t, tr.NewTasks, 2)
+		assert.Equal(t, "Address review findings (round 2): Schema", tr.NewTasks[0].Title)
+		assert.Equal(t, "Review: Schema", tr.NewTasks[1].Title)
 	})
 	t.Run("a review already being fixed is not fixed twice", func(t *testing.T) {
 		fix := Child{ID: 4, Type: models.TaskTypeCoding, Status: models.TaskStatusDone, ReviewRound: 1, OriginStepID: 11, DependsOn: []int32{3}}
@@ -575,7 +652,7 @@ func TestApplyCreateTasks(t *testing.T) {
 
 		assert.Equal(t, RoleCoder, drafts["db"].Role, "the default executor role")
 		assert.Equal(t, "CTO", drafts["api"].Role, "a named role is kept")
-		assert.Equal(t, []string{"db"}, drafts["api"].DependsOnKeys)
+		assert.Equal(t, []string{"db", "review:db"}, drafts["api"].DependsOnKeys, "work that builds on implementation waits for its review to accept it")
 		assert.Contains(t, drafts["db"].Instructions, "add table")
 		assert.Contains(t, drafts["db"].Instructions, "Done when:\nmigrates")
 		assert.Equal(t, models.TaskModeDirect, drafts["db"].Mode)
@@ -595,6 +672,7 @@ func TestApplyCreateTasks(t *testing.T) {
 		tr := ApplyAction(s, DefaultBudgets, parse(t, s, ToolCreateTasks, planArgs), planArgs)
 		assert.Len(t, tr.NewTasks, 4)
 		assert.Empty(t, byKey(tr)["db"].Role)
+		assert.Equal(t, []string{"db"}, byKey(tr)["api"].DependsOnKeys)
 	})
 	t.Run("from adjust it returns to execute", func(t *testing.T) {
 		s := managedRoot(models.TaskTypeGeneral, models.TaskPhaseAdjust)
@@ -626,6 +704,68 @@ func TestApplyRetryTasks(t *testing.T) {
 
 	_, err := ParseAction(models.TaskPhaseAdjust, ToolRetryTasks, json.RawMessage(`{"task_ids":[8],"instructions":"x",`+oneDecision+`}`), s.ToolContext(DefaultBudgets))
 	require.Error(t, err, "a task that succeeded cannot be retried")
+}
+
+// A new attempt at implementation is new code. The review of the attempt that
+// failed was canceled with it and covers none of it.
+func TestApplyRetryTasksReviewsNewImplementation(t *testing.T) {
+	failedPlan := func(taskType string) Snapshot {
+		return managedRoot(taskType, models.TaskPhaseAdjust).with(func(s *Snapshot) {
+			s.Children = []Child{
+				{ID: 2, Title: "Schema", Instructions: "add table\n\nDone when:\nmigrates", Type: models.TaskTypeCoding, Role: RoleCoder,
+					Status: models.TaskStatusFailed, OriginStepID: 10},
+				{ID: 3, Title: "Review: Schema", Type: models.TaskTypeReview, Role: RoleQA,
+					Status: models.TaskStatusCanceled, OriginStepID: 10, DependsOn: []int32{2}},
+				{ID: 4, Title: "API", Instructions: "add route", Type: models.TaskTypeCoding, Role: RoleCoder,
+					Status: models.TaskStatusCanceled, OriginStepID: 10, DependsOn: []int32{2, 3}},
+				{ID: 5, Title: "Review: API", Type: models.TaskTypeReview, Role: RoleQA,
+					Status: models.TaskStatusCanceled, OriginStepID: 10, DependsOn: []int32{4}},
+			}
+		})
+	}
+	retry := func(t *testing.T, s Snapshot, ids string) map[string]TaskDraft {
+		args := `{"task_ids":[` + ids + `],"instructions":"use a migration",` + oneDecision + `}`
+		tr := ApplyAction(s, DefaultBudgets, parse(t, s, ToolRetryTasks, args), args)
+		assert.Equal(t, models.TaskWaitSubtasks, tr.Fields["waiting_on"], "the parent waits for the reviews as for any subtask")
+		drafts := map[string]TaskDraft{}
+		for _, draft := range tr.NewTasks {
+			drafts[draft.Key] = draft
+		}
+		require.Len(t, drafts, len(tr.NewTasks), "every draft has its own key")
+		return drafts
+	}
+
+	t.Run("a retried coding task gets a review of its own", func(t *testing.T) {
+		drafts := retry(t, failedPlan(models.TaskTypeCoding), "2")
+		require.Len(t, drafts, 2)
+		review := drafts["review:retry-2"]
+		assert.Equal(t, models.TaskTypeReview, review.Type)
+		assert.Equal(t, RoleQA, review.Role)
+		assert.Equal(t, "Review: Schema", review.Title)
+		assert.Equal(t, []string{"retry-2"}, review.DependsOnKeys)
+		assert.Contains(t, review.Instructions, "add table")
+		assert.Contains(t, review.Instructions, "use a migration", "the reviewer judges against what the new attempt was told")
+	})
+	t.Run("tasks retried together keep their order and wait for the new review", func(t *testing.T) {
+		drafts := retry(t, failedPlan(models.TaskTypeCoding), "2,3,4,5")
+		require.Len(t, drafts, 4, "two attempts and a review for each; the canceled reviews are replaced, not run again")
+		assert.Empty(t, drafts["retry-2"].DependsOnKeys)
+		assert.Equal(t, []string{"retry-2", "review:retry-2"}, drafts["retry-4"].DependsOnKeys)
+		assert.Equal(t, []string{"retry-4"}, drafts["review:retry-4"].DependsOnKeys)
+	})
+	t.Run("a retried fix is reviewed in its own round, under the name of the work", func(t *testing.T) {
+		s := managedRoot(models.TaskTypeCoding, models.TaskPhaseAdjust).with(func(s *Snapshot) {
+			s.Children = []Child{{ID: 6, Title: "Address review findings (round 1): Schema", Instructions: "add the index", Type: models.TaskTypeCoding,
+				Role: RoleCoder, Status: models.TaskStatusFailed, ReviewRound: 1, OriginStepID: 11, DependsOn: []int32{3}}}
+		})
+		drafts := retry(t, s, "6")
+		assert.Empty(t, drafts["retry-6"].DependsOnKeys)
+		assert.Equal(t, 1, drafts["review:retry-6"].ReviewRound)
+		assert.Equal(t, "Review: Schema", drafts["review:retry-6"].Title)
+	})
+	t.Run("where implementation is not reviewed, a retry is only the task", func(t *testing.T) {
+		assert.Len(t, retry(t, failedPlan(models.TaskTypeGeneral), "2"), 1)
+	})
 }
 
 func TestApplyFinishAdjustmentGoesToVerify(t *testing.T) {

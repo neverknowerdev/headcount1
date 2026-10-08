@@ -44,12 +44,24 @@ func (d *workflowDriver) load(ctx context.Context, taskID int32) (*loadedTask, e
 
 	switch task.Status {
 	case models.TaskStatusTodo, models.TaskStatusDependsOnTask:
-		blockers, err := d.q.ListBlockingDependencies(ctx, task.ID)
+		prerequisites, err := d.q.ListPrerequisites(ctx, task.ID)
 		if err != nil {
 			return nil, err
 		}
-		for _, blocker := range blockers {
-			s.Prerequisites = append(s.Prerequisites, blocker.Status)
+		for _, prerequisite := range prerequisites {
+			s.Prerequisites = append(s.Prerequisites, workflow.Prerequisite{
+				Status: prerequisite.Status, Type: prerequisite.TaskType,
+				Verdict: prerequisite.ResultVerdict, ReviewRound: prerequisite.ReviewRound,
+			})
+		}
+		if task.ParentID != nil && len(prerequisites) > 0 {
+			// Whether a review that asked for changes gets a fix round is the
+			// parent's workflow's business.
+			parent, err := d.q.GetTask(ctx, *task.ParentID)
+			if err != nil {
+				return nil, err
+			}
+			s.Task.ParentType = parent.TaskType
 		}
 	case models.TaskStatusInProgress, models.TaskStatusBlocked:
 	default:

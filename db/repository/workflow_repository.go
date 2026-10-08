@@ -225,6 +225,19 @@ func (w *WorkflowTx) CreateSubtask(child Task, dependsOn []int32) (Task, error) 
 	return created, nil
 }
 
+// RedirectDependents makes every task that depends on one task depend on
+// another instead, leaving the tasks in except as they are. Both are children
+// of the guarded task, and the new prerequisite was created by this step, so
+// no cycle can come of it.
+func (w *WorkflowTx) RedirectDependents(fromTaskID, toTaskID int32, except []int32) error {
+	query := w.tx.Model(&TaskRelation{}).
+		Where("target_task_id = ? AND kind = ?", fromTaskID, TaskRelationDependsOn)
+	if len(except) > 0 {
+		query = query.Where("source_task_id NOT IN ?", except)
+	}
+	return query.Update("target_task_id", toTaskID).Error
+}
+
 // CreateComment posts a comment as part of the step (a question to the human).
 func (w *WorkflowTx) CreateComment(comment Comment) (Comment, error) {
 	err := w.tx.Create(&comment).Error

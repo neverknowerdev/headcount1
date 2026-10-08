@@ -16,9 +16,11 @@ type Task struct {
 	IsRoot bool
 	Depth  int
 	Type   string
-	Mode   string
-	Status string
-	Phase  string
+	// ParentType is the type of the task this one is a subtask of.
+	ParentType string
+	Mode       string
+	Status     string
+	Phase      string
 
 	WaitingOn string
 	WaitUntil *time.Time
@@ -49,6 +51,33 @@ type Child struct {
 	Question     bool
 	// DependsOn lists the siblings this child waits for.
 	DependsOn []int32
+}
+
+// Prerequisite is a task another one depends on.
+type Prerequisite struct {
+	Status      string
+	Type        string
+	Verdict     string
+	ReviewRound int
+}
+
+// requestedChanges reports whether a finished review asked for changes. Its
+// own work succeeded, but what it reviewed has not been accepted.
+func requestedChanges(taskType, status, verdict string) bool {
+	return taskType == models.TaskTypeReview && status == models.TaskStatusDone && verdict == models.TaskVerdictChangesRequested
+}
+
+// answersReview reports whether a task is the fix for a review of the given
+// round: the one task that starts because the review asked for changes.
+func answersReview(taskType string, reviewRound, ofReviewRound int) bool {
+	return taskType == models.TaskTypeCoding && reviewRound == ofReviewRound+1
+}
+
+// fixRoundFollows reports whether the engine answers a review that asked for
+// changes with a fix and a new review of its own: only where the parent's
+// workflow reviews implementation, and only up to the limit of rounds.
+func fixRoundFollows(parentType string, reviewRound int, b Budgets) bool {
+	return TemplateFor(parentType).ReviewImplementation && reviewRound < b.MaxReviewRounds
 }
 
 // Run is the executor session a direct task waits on.
@@ -104,8 +133,8 @@ const (
 // Snapshot is everything Evaluate needs to know about a task at one moment.
 type Snapshot struct {
 	Task Task
-	// Prerequisites are the statuses of the tasks this one depends on.
-	Prerequisites []string
+	// Prerequisites are the tasks this one depends on.
+	Prerequisites []Prerequisite
 	Children      []Child
 	// Run is the session named by the task's run, if any.
 	Run *Run
@@ -178,6 +207,16 @@ type Transition struct {
 	// CancelDescendants, when set, cancels every unfinished task beneath this
 	// one with that reason, in the same transaction.
 	CancelDescendants string
+	// Redirects move the tasks that wait for one subtask over to another.
+	Redirects []Redirect
+}
+
+// Redirect makes every task that depends on an existing subtask depend on a
+// draft of the same transition instead. The drafts themselves are left as
+// they are: the fix for a review goes on depending on that review.
+type Redirect struct {
+	FromID int32
+	ToKey  string
 }
 
 func (t *Transition) set(column string, value interface{}) *Transition {
@@ -252,7 +291,7 @@ func Evaluate(s Snapshot, b Budgets) Next {
 	task := s.Task
 	switch task.Status {
 	case models.TaskStatusTodo, models.TaskStatusDependsOnTask:
-		return gate(s)
+		return gate(s, b)
 	case models.TaskStatusBlocked, models.TaskStatusInProgress:
 		// Handled below. A root is blocked exactly while it waits on a human
 		// or an operator; its waits resolve the same way as any other's.
@@ -322,23 +361,40 @@ func Evaluate(s Snapshot, b Budgets) Next {
 	}
 }
 
-// gate decides whether a queued task may start.
-func gate(s Snapshot) Next {
+// gate decides whether a queued task may start. A subtask builds on what it
+// depends on, so that work must not only have finished but have been accepted:
+// a review that asked for changes holds its dependents back until the review
+// of the fix accepts it.
+func gate(s Snapshot, b Budgets) Next {
 	task := s.Task
+	cancel := func(why string) Next {
+		// The work this task builds on will never arrive.
+		t := (&Transition{}).ready().
+			set("status", models.TaskStatusCanceled).
+			set("result_reason", models.TaskResultPrerequisiteFailed).
+			set("phase", "").
+			step(Step{Kind: models.StepFinished, Result: "canceled: " + why})
+		return apply(t)
+	}
 	blocked := false
-	for _, status := range s.Prerequisites {
-		if unsuccessful(status) {
-			// The work this task builds on will never arrive.
-			t := (&Transition{}).ready().
-				set("status", models.TaskStatusCanceled).
-				set("result_reason", models.TaskResultPrerequisiteFailed).
-				set("phase", "").
-				step(Step{Kind: models.StepFinished, Result: "canceled: a task this one depends on did not succeed"})
-			return apply(t)
+	for _, prerequisite := range s.Prerequisites {
+		if unsuccessful(prerequisite.Status) {
+			return cancel("a task this one depends on did not succeed")
 		}
-		if status != models.TaskStatusDone {
+		if prerequisite.Status != models.TaskStatusDone {
 			blocked = true
+			continue
 		}
+		if task.IsRoot || !requestedChanges(prerequisite.Type, prerequisite.Status, prerequisite.Verdict) ||
+			answersReview(task.Type, task.ReviewRound, prerequisite.ReviewRound) {
+			continue
+		}
+		if !fixRoundFollows(task.ParentType, prerequisite.ReviewRound, b) {
+			return cancel("a review this one depends on requested changes")
+		}
+		// The parent starts a fix round and makes this task wait for the
+		// review of the fix instead.
+		blocked = true
 	}
 	if blocked {
 		if task.Status == models.TaskStatusDependsOnTask {
@@ -509,16 +565,21 @@ func reportDetails(report *Report) string {
 	return strings.TrimSpace(b.String())
 }
 
-// resolveSubtasks decides what a managed task does once the subtasks it was
-// waiting on have all finished.
+// resolveSubtasks decides what a managed task does about the subtasks it is
+// waiting on. A review that asked for changes is answered at once, while other
+// subtasks may still be running; everything else waits until all have finished.
 func resolveSubtasks(s Snapshot, b Budgets) Next {
 	task := s.Task
+	pending := false
 	for _, child := range s.Children {
 		if !isTerminal(child.Status) {
-			return idle()
+			pending = true
 		}
 	}
 	if task.Phase != models.TaskPhaseExecute {
+		if pending {
+			return idle()
+		}
 		// The subtasks were questions; their answers go into the next prompt.
 		return apply((&Transition{}).ready().
 			step(Step{Kind: models.StepSubtaskFinished, Phase: task.Phase, Result: "answers received"}))
@@ -526,7 +587,9 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 
 	// Only work that the last re-plan has not already dealt with counts.
 	var work []Child
+	byID := make(map[int32]Child, len(s.Children))
 	for _, child := range s.Children {
+		byID[child.ID] = child
 		if !child.Question && child.OriginStepID >= s.HandledStepID {
 			work = append(work, child)
 		}
@@ -534,20 +597,22 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 	template := TemplateFor(task.Type)
 
 	// A review that asked for changes and has no fix yet: the engine runs the
-	// fix-and-review-again round itself, up to the limit.
+	// fix-and-review-again round itself, up to the limit. Other tasks may
+	// depend on the same review; only its fix counts as an answer to it.
 	addressed := map[int32]bool{}
 	for _, child := range work {
 		for _, dependency := range child.DependsOn {
-			addressed[dependency] = true
+			if review, ok := byID[dependency]; ok && answersReview(child.Type, child.ReviewRound, review.ReviewRound) {
+				addressed[dependency] = true
+			}
 		}
 	}
 	var rejected, exhausted []Child
 	for _, child := range work {
-		if child.Type != models.TaskTypeReview || child.Status != models.TaskStatusDone ||
-			child.ResultVerdict != models.TaskVerdictChangesRequested || addressed[child.ID] {
+		if !requestedChanges(child.Type, child.Status, child.ResultVerdict) || addressed[child.ID] {
 			continue
 		}
-		if template.ReviewImplementation && child.ReviewRound < b.MaxReviewRounds {
+		if fixRoundFollows(task.Type, child.ReviewRound, b) {
 			rejected = append(rejected, child)
 		} else {
 			exhausted = append(exhausted, child)
@@ -557,29 +622,36 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 		t := (&Transition{}).wait(models.TaskWaitSubtasks, "")
 		for _, review := range rejected {
 			round := review.ReviewRound + 1
-			fixKey := fmt.Sprintf("fix-%d", review.ID)
+			fixKey, reviewKey := fmt.Sprintf("fix-%d", review.ID), fmt.Sprintf("review-%d", review.ID)
+			subject := reviewSubject(review.Title)
 			t.NewTasks = append(t.NewTasks,
 				TaskDraft{
 					Key:   fixKey,
-					Title: fmt.Sprintf("Address review findings (round %d): %s", round, strings.TrimPrefix(review.Title, "Review: ")),
+					Title: fmt.Sprintf("%s (round %d): %s", fixTitlePrefix, round, subject),
 					Instructions: "A review of earlier work requested changes. Make them.\n\nReview findings:\n" + review.ResultSummary +
 						"\n\nRead the review's full report for details before you start.",
 					Type: models.TaskTypeCoding, Mode: models.TaskModeDirect, Role: template.ExecutorRole,
 					ReviewRound: round, DependsOnIDs: []int32{review.ID},
 				},
 				TaskDraft{
-					Key:   fmt.Sprintf("review-%d", review.ID),
-					Title: "Review: " + strings.TrimPrefix(review.Title, "Review: "),
+					Key:   reviewKey,
+					Title: reviewTitlePrefix + subject,
 					Instructions: "Review the changes made in response to the earlier review findings below. Confirm each finding is resolved and nothing else regressed.\n\nEarlier findings:\n" +
 						review.ResultSummary,
 					Type: models.TaskTypeReview, Mode: models.TaskModeDirect, Role: template.ReviewerRole,
 					ReviewRound: round, DependsOnKeys: []string{fixKey},
 				})
+			// Whatever else was waiting for this review to accept the work now
+			// waits for the review of the fix.
+			t.Redirects = append(t.Redirects, Redirect{FromID: review.ID, ToKey: reviewKey})
 			id := review.ID
 			t.step(Step{Kind: models.StepReviewRound, Phase: task.Phase, RefTaskID: &id,
 				Result: fmt.Sprintf("review requested changes; starting fix round %d", round)})
 		}
 		return apply(t)
+	}
+	if pending {
+		return idle()
 	}
 
 	failed := len(exhausted) > 0
@@ -607,6 +679,35 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 	return apply((&Transition{}).ready().
 		set("phase", models.TaskPhaseVerify).
 		step(Step{Kind: models.StepPhaseEntered, Phase: models.TaskPhaseVerify, Result: "all subtasks succeeded"}))
+}
+
+const (
+	reviewTitlePrefix = "Review: "
+	fixTitlePrefix    = "Address review findings"
+)
+
+// reviewSubject is what a review or a fix is about: its title without the
+// words the engine put in front, so that later rounds do not stack them.
+func reviewSubject(title string) string {
+	title = strings.TrimPrefix(title, reviewTitlePrefix)
+	if rest, ok := strings.CutPrefix(title, fixTitlePrefix+" (round "); ok {
+		if _, subject, found := strings.Cut(rest, "): "); found {
+			return subject
+		}
+	}
+	return title
+}
+
+// reviewOf is the review the engine adds after a piece of implementation.
+func reviewOf(template Template, key, title, instructions string, round int) TaskDraft {
+	return TaskDraft{
+		Key:   "review:" + key,
+		Title: reviewTitlePrefix + reviewSubject(title),
+		Instructions: "Review the work of the task you depend on against its instructions and done-when below. Check the actual changes, run what can be run, and report a verdict with specific findings.\n\nInstructions given:\n" +
+			instructions,
+		Type: models.TaskTypeReview, Mode: models.TaskModeDirect, Role: template.ReviewerRole,
+		ReviewRound: round, DependsOnKeys: []string{key},
+	}
 }
 
 // SpecItem is one checkable line of a definition of done or test plan, in the
@@ -702,6 +803,14 @@ func ApplyAction(s Snapshot, b Budgets, action Action, arguments string) *Transi
 		advance()
 
 	case CreateTasks:
+		// Every piece of implementation is reviewed before the plan moves on;
+		// a managed subtask verifies itself instead.
+		reviewed := map[string]bool{}
+		for _, planned := range a.Tasks {
+			if template.ReviewImplementation && planned.Type == models.TaskTypeCoding && !planned.Managed {
+				reviewed[planned.Key] = true
+			}
+		}
 		for _, planned := range a.Tasks {
 			mode := models.TaskModeDirect
 			if planned.Managed {
@@ -714,26 +823,26 @@ func ApplyAction(s Snapshot, b Budgets, action Action, arguments string) *Transi
 					role = template.ReviewerRole
 				}
 			}
+			// Work that builds on reviewed implementation waits for the review
+			// to accept it, not only for the implementation to be written.
+			dependsOn := append([]string(nil), planned.DependsOn...)
+			for _, key := range planned.DependsOn {
+				if reviewed[key] {
+					dependsOn = append(dependsOn, "review:"+key)
+				}
+			}
+			instructions := planned.Instructions + "\n\nDone when:\n" + planned.DoneWhen
 			t.NewTasks = append(t.NewTasks, TaskDraft{
 				Key:           planned.Key,
 				Title:         planned.Title,
-				Instructions:  planned.Instructions + "\n\nDone when:\n" + planned.DoneWhen,
+				Instructions:  instructions,
 				Type:          planned.Type,
 				Mode:          mode,
 				Role:          role,
-				DependsOnKeys: planned.DependsOn,
+				DependsOnKeys: dependsOn,
 			})
-			if template.ReviewImplementation && planned.Type == models.TaskTypeCoding && !planned.Managed {
-				// Every piece of implementation is reviewed before the plan
-				// moves on; a managed subtask verifies itself instead.
-				t.NewTasks = append(t.NewTasks, TaskDraft{
-					Key:   "review:" + planned.Key,
-					Title: "Review: " + planned.Title,
-					Instructions: "Review the work of the task you depend on against its instructions and done-when below. Check the actual changes, run what can be run, and report a verdict with specific findings.\n\nInstructions given:\n" +
-						planned.Instructions + "\n\nDone when:\n" + planned.DoneWhen,
-					Type: models.TaskTypeReview, Mode: models.TaskModeDirect, Role: template.ReviewerRole,
-					DependsOnKeys: []string{planned.Key},
-				})
+			if reviewed[planned.Key] {
+				t.NewTasks = append(t.NewTasks, reviewOf(template, planned.Key, planned.Title, instructions, 0))
 			}
 		}
 		t.set("phase", models.TaskPhaseExecute).wait(models.TaskWaitSubtasks, "").
@@ -744,17 +853,59 @@ func ApplyAction(s Snapshot, b Budgets, action Action, arguments string) *Transi
 		for _, child := range s.Children {
 			byID[child.ID] = child
 		}
+		retried := make(map[int32]bool, len(a.TaskIDs))
+		for _, id := range a.TaskIDs {
+			retried[id] = true
+		}
+		// A new attempt at implementation is new code: it is reviewed like the
+		// first one was. The review of the earlier attempt does not cover it,
+		// so that review is replaced rather than run again beside the new one.
+		reviewed := func(child Child) bool {
+			return template.ReviewImplementation && child.Type == models.TaskTypeCoding
+		}
+		replaced := func(child Child) bool {
+			if child.Type != models.TaskTypeReview {
+				return false
+			}
+			for _, dependency := range child.DependsOn {
+				if retried[dependency] && reviewed(byID[dependency]) {
+					return true
+				}
+			}
+			return false
+		}
+		key := func(id int32) string { return fmt.Sprintf("retry-%d", id) }
 		for _, id := range a.TaskIDs {
 			original := byID[id]
+			if replaced(original) {
+				continue
+			}
+			// Tasks retried together keep their order: what waited for an
+			// earlier attempt waits for the new one, and for its review.
+			var dependsOn []string
+			for _, dependency := range original.DependsOn {
+				if !retried[dependency] || replaced(byID[dependency]) {
+					continue
+				}
+				dependsOn = append(dependsOn, key(dependency))
+				if reviewed(byID[dependency]) {
+					dependsOn = append(dependsOn, "review:"+key(dependency))
+				}
+			}
+			instructions := original.Instructions + "\n\nThis is a new attempt at a task that did not succeed before. Do this differently:\n" + a.Instructions
 			t.NewTasks = append(t.NewTasks, TaskDraft{
-				Key:          fmt.Sprintf("retry-%d", id),
-				Title:        original.Title,
-				Instructions: original.Instructions + "\n\nThis is a new attempt at a task that did not succeed before. Do this differently:\n" + a.Instructions,
-				Type:         original.Type,
-				Mode:         models.TaskModeDirect,
-				Role:         original.Role,
-				ReviewRound:  original.ReviewRound,
+				Key:           key(id),
+				Title:         original.Title,
+				Instructions:  instructions,
+				Type:          original.Type,
+				Mode:          models.TaskModeDirect,
+				Role:          original.Role,
+				ReviewRound:   original.ReviewRound,
+				DependsOnKeys: dependsOn,
 			})
+			if reviewed(original) {
+				t.NewTasks = append(t.NewTasks, reviewOf(template, key(id), original.Title, instructions, original.ReviewRound))
+			}
 		}
 		t.set("phase", models.TaskPhaseExecute).wait(models.TaskWaitSubtasks, "").
 			step(Step{Kind: models.StepPhaseEntered, Phase: models.TaskPhaseExecute})

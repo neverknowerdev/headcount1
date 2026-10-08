@@ -253,7 +253,7 @@ func toolSpec(name string, c ToolContext) ToolSpec {
 	case ToolRetryTasks:
 		return ToolSpec{
 			Name:        name,
-			Description: "Run failed or canceled tasks again as new attempts, with revised instructions. Use it when the task was right but its instructions or approach were not.",
+			Description: "Run failed or canceled tasks again as new attempts, with revised instructions. Use it when the task was right but its instructions or approach were not. Tasks retried together keep the order they had, so name a failed task and the tasks that were canceled because of it in one call.",
 			Parameters: object(map[string]string{
 				"task_ids":     `{"type":"array","items":{"type":"integer"},"minItems":1,"description":"IDs of the failed tasks to attempt again."}`,
 				"instructions": text("What to do differently this time. Added to each task's original instructions."),

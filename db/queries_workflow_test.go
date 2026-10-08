@@ -94,6 +94,7 @@ var workflowRepositoryTests = []struct {
 	{"TaskLeaseIsExclusiveUntilItExpires", workflowTaskLeaseIsExclusiveUntilItExpires},
 	{"TaskLeaseHasOneWinnerUnderContention", workflowTaskLeaseHasOneWinnerUnderContention},
 	{"WorkflowTransitionCommitsAStepAsOneUnit", workflowWorkflowTransitionCommitsAStepAsOneUnit},
+	{"RedirectDependentsMovesWaitingTasksToANewPrerequisite", workflowRedirectDependentsMovesWaitingTasksToANewPrerequisite},
 	{"WorkflowTransitionWritesNothingWhenItFails", workflowWorkflowTransitionWritesNothingWhenItFails},
 	{"WorkflowTransitionRejectsAStaleView", workflowWorkflowTransitionRejectsAStaleView},
 	{"WorkflowTransitionCanReleaseTheLeaseWithTheNewState", workflowWorkflowTransitionCanReleaseTheLeaseWithTheNewState},
@@ -299,6 +300,58 @@ func workflowWorkflowTransitionCommitsAStepAsOneUnit(t *testing.T, f workflowFix
 	require.Len(t, decisions, 1)
 	require.Equal(t, models.DecisionKindDecision, decisions[0].Kind)
 	require.Equal(t, step.ID, *decisions[0].StepID)
+}
+
+// When a review asks for changes, what waited for it waits for the review of
+// the fix instead; the fix itself goes on following the review it answers.
+func workflowRedirectDependentsMovesWaitingTasksToANewPrerequisite(t *testing.T, f workflowFixture) {
+	ctx := context.Background()
+	_, err := f.q.AcquireTaskLease(ctx, f.root.ID, "driver", time.Minute)
+	require.NoError(t, err)
+	root := f.reload(t, f.root.ID)
+	child := func(title string) Task {
+		return Task{Title: title, Status: TaskStatusTodo, Mode: models.TaskModeDirect, TaskType: models.TaskTypeCoding}
+	}
+
+	var schema, review, api, fix, secondReview Task
+	err = f.q.WorkflowTransition(ctx, GuardFor(root, "driver"), func(tx *WorkflowTx) error {
+		var txErr error
+		if schema, txErr = tx.CreateSubtask(child("schema"), nil); txErr != nil {
+			return txErr
+		}
+		if review, txErr = tx.CreateSubtask(child("review"), []int32{schema.ID}); txErr != nil {
+			return txErr
+		}
+		api, txErr = tx.CreateSubtask(child("api"), []int32{schema.ID, review.ID})
+		return txErr
+	})
+	require.NoError(t, err)
+
+	err = f.q.WorkflowTransition(ctx, GuardFor(f.reload(t, f.root.ID), "driver"), func(tx *WorkflowTx) error {
+		var txErr error
+		if fix, txErr = tx.CreateSubtask(child("fix"), []int32{review.ID}); txErr != nil {
+			return txErr
+		}
+		if secondReview, txErr = tx.CreateSubtask(child("second review"), []int32{fix.ID}); txErr != nil {
+			return txErr
+		}
+		return tx.RedirectDependents(review.ID, secondReview.ID, []int32{fix.ID, secondReview.ID})
+	})
+	require.NoError(t, err)
+
+	prerequisitesOf := func(taskID int32) []int32 {
+		tasks, err := f.q.ListPrerequisites(ctx, taskID)
+		require.NoError(t, err)
+		ids := make([]int32, 0, len(tasks))
+		for _, task := range tasks {
+			ids = append(ids, task.ID)
+		}
+		return ids
+	}
+	require.ElementsMatch(t, []int32{schema.ID, secondReview.ID}, prerequisitesOf(api.ID))
+	require.Equal(t, []int32{review.ID}, prerequisitesOf(fix.ID))
+	require.Equal(t, []int32{schema.ID}, prerequisitesOf(review.ID))
+	require.Equal(t, []int32{fix.ID}, prerequisitesOf(secondReview.ID))
 }
 
 func workflowWorkflowTransitionWritesNothingWhenItFails(t *testing.T, f workflowFixture) {

@@ -43,7 +43,7 @@ Smart models think and decide; cheap models do the work. A task moves through an
 | **Refine** | smart model | Works out what must be done, resolves open questions, writes the specification and the definition of done. |
 | **Design**, **Test plan** | smart model, as CTO and QA Lead | Coding tasks only: the technical design, then the test scenarios. |
 | **Plan** | smart model | Splits the work into small subtasks, each with its own check, and says which must wait for which. |
-| **Execute** | cheap model | Each subtask runs as an executor session with the full tool set and reports back: done, failed, or cannot be completed, and why. Coding subtasks are reviewed; a review that asks for changes triggers a fix and a second review without involving the smart model. |
+| **Execute** | cheap model | Each subtask runs as an executor session with the full tool set and reports back: done, failed, or cannot be completed, and why. Coding subtasks are reviewed, including new attempts at ones that failed; a review that asks for changes triggers a fix and a second review without involving the smart model. Work that depends on a coding subtask starts only once its review has accepted it. |
 | **Adjust** | smart model | Only when something failed or the plan has to change: re-plans with the full picture, including every decision made so far. |
 | **Verify** | smart model | Checks the result against the definition of done. A task that passes waits **in review** for a person. |
 

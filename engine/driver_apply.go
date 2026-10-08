@@ -274,6 +274,21 @@ func (d *workflowDriver) apply(ctx context.Context, l *loadedTask, tr *workflow.
 			created[draft.Key] = saved.ID
 			c.newTasks = append(c.newTasks, saved)
 		}
+		if len(tr.Redirects) > 0 {
+			drafted := make([]int32, 0, len(created))
+			for _, id := range created {
+				drafted = append(drafted, id)
+			}
+			for _, redirect := range tr.Redirects {
+				to, ok := created[redirect.ToKey]
+				if !ok {
+					return fmt.Errorf("redirect to unknown draft %q", redirect.ToKey)
+				}
+				if err := tx.RedirectDependents(redirect.FromID, to, drafted); err != nil {
+					return err
+				}
+			}
+		}
 
 		if tr.CancelDescendants != "" {
 			canceled, err := tx.CancelDescendants(tr.CancelDescendants)

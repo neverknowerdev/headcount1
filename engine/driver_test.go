@@ -583,6 +583,151 @@ func TestDriverCodingTaskUsesRolesAndRunsTheReviewLoopItself(t *testing.T) {
 	assert.Contains(t, kindsOf(f.steps(root.ID)), "review_round")
 }
 
+// Work that builds on a piece of implementation must build on the accepted
+// one. If the schema's review asks for a change, the API waits for the fix and
+// its review instead of being written, and approved, against the old schema.
+func TestDriverHoldsDependentWorkUntilTheReviewAccepts(t *testing.T) {
+	f := newDriverFixture(t)
+	root := f.root(models.TaskTypeCoding)
+	schemaReviews := 0
+	f.executor = func(task db.Task) (workflow.Report, bool) {
+		if task.TaskType != models.TaskTypeReview {
+			return workflow.Report{Status: workflow.ReportDone, Summary: "implemented " + task.Title}, true
+		}
+		if task.Title == "Review: Schema" {
+			if schemaReviews++; schemaReviews == 1 {
+				return workflow.Report{Status: workflow.ReportDone, Summary: "user_id must be a UUID", Verdict: models.TaskVerdictChangesRequested}, true
+			}
+		}
+		return workflow.Report{Status: workflow.ReportDone, Summary: "accepted", Verdict: models.TaskVerdictApproved}, true
+	}
+	f.provider.push(
+		call(workflow.ToolFinishRefinement, finishRefinementArgs),
+		call(workflow.ToolFinishDesign, `{"design":"A users table and an API over it",`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishTestPlan, `{"test_scenarios":["a user can be fetched"],`+oneDecisionArg+`}`),
+		call(workflow.ToolCreateTasks, `{"tasks":[
+			{"key":"db","title":"Schema","instructions":"add the users table","done_when":"migrates","type":"coding"},
+			{"key":"api","title":"API","instructions":"serve users","done_when":"tests pass","type":"coding","depends_on":["db"]}],`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishVerification, passArgs),
+	)
+
+	f.run(root.ID)
+
+	require.Equal(t, db.TaskStatusInReview, f.task(root.ID).Status)
+	require.Len(t, f.provider.served(), 5, "the fix round cost no smart call")
+	byTitle := map[string][]db.Task{}
+	for _, child := range f.children(root.ID) {
+		byTitle[child.Title] = append(byTitle[child.Title], child)
+		assert.Equal(t, db.TaskStatusDone, child.Status, child.Title)
+	}
+	require.Len(t, f.children(root.ID), 6, "schema, its review, the fix, its review, then the API and its review")
+	schema, api := byTitle["Schema"][0], byTitle["API"][0]
+	firstReview, secondReview := byTitle["Review: Schema"][0], byTitle["Review: Schema"][1]
+	fix := byTitle["Address review findings (round 1): Schema"][0]
+
+	position := map[int32]int{}
+	for i, id := range f.started {
+		position[id] = i
+	}
+	assert.Less(t, position[firstReview.ID], position[fix.ID])
+	assert.Less(t, position[fix.ID], position[secondReview.ID])
+	assert.Less(t, position[secondReview.ID], position[api.ID], "the API was written only after the corrected schema was accepted")
+
+	prerequisites, err := f.q.ListPrerequisites(context.Background(), api.ID)
+	require.NoError(t, err)
+	ids := []int32{}
+	for _, prerequisite := range prerequisites {
+		ids = append(ids, prerequisite.ID)
+	}
+	assert.ElementsMatch(t, []int32{schema.ID, secondReview.ID}, ids, "the API now waits on the review that accepted the schema")
+	fixPrerequisites, err := f.q.ListPrerequisites(context.Background(), fix.ID)
+	require.NoError(t, err)
+	require.Len(t, fixPrerequisites, 1)
+	assert.Equal(t, firstReview.ID, fixPrerequisites[0].ID, "the fix still follows the review it answers")
+}
+
+// When the fix rounds run out, what waited for the review is canceled rather
+// than left waiting, and the smart model re-plans with the whole picture.
+func TestDriverCancelsDependentWorkWhenTheReviewNeverAccepts(t *testing.T) {
+	f := newDriverFixture(t)
+	root := f.root(models.TaskTypeCoding)
+	f.executor = func(task db.Task) (workflow.Report, bool) {
+		if task.Title == "Review: Schema" {
+			return workflow.Report{Status: workflow.ReportDone, Summary: "still wrong", Verdict: models.TaskVerdictChangesRequested}, true
+		}
+		return workflow.Report{Status: workflow.ReportDone, Summary: "done: " + task.Title, Verdict: models.TaskVerdictApproved}, true
+	}
+	f.provider.push(
+		call(workflow.ToolFinishRefinement, finishRefinementArgs),
+		call(workflow.ToolFinishDesign, `{"design":"A users table and an API over it",`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishTestPlan, `{"test_scenarios":["a user can be fetched"],`+oneDecisionArg+`}`),
+		call(workflow.ToolCreateTasks, `{"tasks":[
+			{"key":"db","title":"Schema","instructions":"add the users table","done_when":"migrates","type":"coding"},
+			{"key":"api","title":"API","instructions":"serve users","done_when":"tests pass","type":"coding","depends_on":["db"]}],`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishAdjustment, `{"reason":"the schema is acceptable as it is",`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishVerification, passArgs),
+	)
+
+	f.run(root.ID)
+
+	require.Equal(t, db.TaskStatusInReview, f.task(root.ID).Status)
+	for _, child := range f.children(root.ID) {
+		if child.Title != "API" && child.Title != "Review: API" {
+			continue
+		}
+		assert.Equal(t, db.TaskStatusCanceled, child.Status, child.Title)
+		assert.NotContains(t, f.started, child.ID, "nothing was built on a schema that was never accepted")
+	}
+	assert.Contains(t, f.provider.userPrompt(4), "still requests changes")
+}
+
+// A retried coding task is new code. The review of the failed attempt was
+// canceled with it, so the new attempt gets a review of its own and the plan
+// does not move on until that review has accepted it.
+func TestDriverReviewsARetriedCodingTask(t *testing.T) {
+	f := newDriverFixture(t)
+	root := f.root(models.TaskTypeCoding)
+	attempts, reviewed := 0, []string{}
+	f.executor = func(task db.Task) (workflow.Report, bool) {
+		if task.TaskType == models.TaskTypeReview {
+			reviewed = append(reviewed, task.Description)
+			return workflow.Report{Status: workflow.ReportDone, Summary: "accepted", Verdict: models.TaskVerdictApproved}, true
+		}
+		if attempts++; attempts == 1 {
+			return workflow.Report{Status: workflow.ReportFailed, Summary: "the library has no SAML support"}, true
+		}
+		return workflow.Report{Status: workflow.ReportDone, Summary: "implemented " + task.Title}, true
+	}
+	f.provider.push(
+		call(workflow.ToolFinishRefinement, finishRefinementArgs),
+		call(workflow.ToolFinishDesign, `{"design":"Add a SAML handler",`+oneDecisionArg+`}`),
+		call(workflow.ToolFinishTestPlan, `{"test_scenarios":["valid assertion logs in"],`+oneDecisionArg+`}`),
+		call(workflow.ToolCreateTasks, `{"tasks":[{"key":"h","title":"SAML handler","instructions":"write it","done_when":"tests pass","type":"coding"}],`+oneDecisionArg+`}`),
+		// The first subtask is the implementation; it fails and is retried.
+		call(workflow.ToolRetryTasks, fmt.Sprintf(`{"task_ids":[%d],"instructions":"use the other library",`+oneDecisionArg+`}`, root.ID+1)),
+		call(workflow.ToolFinishVerification, passArgs),
+	)
+
+	f.run(root.ID)
+
+	require.Equal(t, db.TaskStatusInReview, f.task(root.ID).Status)
+	children := f.children(root.ID)
+	require.Len(t, children, 4, "the failed attempt and its canceled review, then the new attempt and its review")
+	failed := children[:2]
+	require.Equal(t, db.TaskStatusFailed, failed[0].Status)
+	require.Equal(t, db.TaskStatusCanceled, failed[1].Status, "the review of the failed attempt never ran")
+	retry, review := children[2], children[3]
+	assert.Equal(t, models.TaskTypeCoding, retry.TaskType)
+	assert.Equal(t, models.TaskTypeReview, review.TaskType)
+	assert.Equal(t, "Review: SAML handler", review.Title)
+	assert.Equal(t, f.agents["QA"].ID, *review.AgentID)
+	assert.Equal(t, db.TaskStatusDone, review.Status)
+	assert.Equal(t, models.TaskVerdictApproved, review.ResultVerdict)
+	require.Len(t, reviewed, 1, "exactly the new code was reviewed")
+	assert.Contains(t, reviewed[0], "use the other library")
+	assert.Equal(t, []int32{failed[0].ID, retry.ID, review.ID}, f.started, "verification came after the review")
+}
+
 func TestDriverAdjustsAfterAFailureUsingTheDecisionTree(t *testing.T) {
 	f := newDriverFixture(t)
 	root := f.root(models.TaskTypeGeneral)
