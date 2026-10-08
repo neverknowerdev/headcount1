@@ -78,6 +78,9 @@ export interface ReceivedRequest {
     path: string;
     body: unknown;
     timestamp: number;
+    /** The conversation the request said it belongs to, and who sent it. */
+    session?: string;
+    userAgent?: string;
     /** For a completion: the phase it was recognised as and the reply it got. */
     phase?: string;
     reply?: ScenarioEntry;
@@ -344,7 +347,10 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
             if (!handleTestRoutes(req, res, body, state)) json(res, 404, { error: 'not_found', path: url });
             return;
         }
-        const record: ReceivedRequest = { method: req.method || '', path: url, body, timestamp: Date.now() };
+        const record: ReceivedRequest = {
+            method: req.method || '', path: url, body, timestamp: Date.now(),
+            session: String(req.headers['x-opencode-session'] || ''), userAgent: String(req.headers['user-agent'] || ''),
+        };
         state.received.push(record);
 
         if (url === '/v1/models' && req.method === 'GET') {

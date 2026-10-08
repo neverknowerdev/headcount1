@@ -3,7 +3,9 @@ import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { ArrowLeft, Save } from 'lucide-react';
 import { UsagePanel } from '../components/UsagePanel';
-import { errorMessage, formatDateTime } from '../lib/workflow';
+import { RunTree } from '../components/RunTree';
+import type { RunTreeData } from '../components/RunTree';
+import { errorMessage } from '../lib/workflow';
 
 interface Agent {
     id: number;
@@ -15,15 +17,6 @@ interface Agent {
     system_prompt: string;
     builtin: boolean;
     enabled: boolean;
-}
-
-interface AgentRun {
-    id: number;
-    task_id: number;
-    name?: string;
-    title?: string;
-    status: string;
-    started_at?: string;
 }
 
 interface RoleConfig {
@@ -38,7 +31,7 @@ export const AgentDetails: React.FC = () => {
     const { id, shortName } = useParams<{ id: string; shortName: string }>();
     const [agent, setAgent] = useState<Agent | null>(null);
     const [roles, setRoles] = useState<RoleConfig[]>([]);
-    const [runs, setRuns] = useState<AgentRun[]>([]);
+    const [sessions, setSessions] = useState<RunTreeData>({ runs: [], tasks: [] });
     const [activeTab, setActiveTab] = useState('role');
     const [form, setForm] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '' });
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
@@ -58,12 +51,12 @@ export const AgentDetails: React.FC = () => {
 
     useEffect(() => {
         let current = true;
-        Promise.all([axios.get(`/api/agents/${id}`), axios.get('/api/agent-configs'), axios.get(`/api/agents/${id}/runs`)])
+        Promise.all([axios.get(`/api/agents/${id}`), axios.get('/api/agent-configs'), axios.get(`/api/agents/${id}/runs?tree=true`)])
             .then(([agentRes, rolesRes, runsRes]) => {
                 if (!current) return;
                 applyAgent(agentRes.data);
                 setRoles(rolesRes.data || []);
-                setRuns(runsRes.data || []);
+                setSessions({ runs: runsRes.data?.runs || [], tasks: runsRes.data?.tasks || [] });
             })
             .catch(e => console.error(e));
         return () => { current = false; };
@@ -172,19 +165,8 @@ export const AgentDetails: React.FC = () => {
                 )}
 
                 {activeTab === 'sessions' && (
-                    <div className="overflow-hidden rounded-lg border bg-white">
-                        {runs.length === 0 ? (
-                            <p className="p-4 text-sm italic text-gray-500">This role has not run an executor session yet.</p>
-                        ) : (
-                            runs.map(run => (
-                                <Link key={run.id} to={`/companies/${shortName}/run-logs/${run.id}`} className="flex items-center gap-3 border-t border-gray-100 px-4 py-2 text-sm first:border-t-0 hover:bg-gray-50">
-                                    <span className="font-mono text-xs text-gray-500">{run.name || `#${run.id}`}</span>
-                                    <span className="min-w-0 flex-1 truncate">{run.title || `Task #${run.task_id}`}</span>
-                                    <span className="text-xs text-gray-500">{run.status}</span>
-                                    <span className="text-xs text-gray-400">{formatDateTime(run.started_at)}</span>
-                                </Link>
-                            ))
-                        )}
+                    <div className="rounded-lg border bg-white p-4" data-testid="agent-sessions">
+                        <RunTree data={sessions} companyPath={`/companies/${shortName}`} emptyText="This role has not run an executor session yet." />
                     </div>
                 )}
             </div>

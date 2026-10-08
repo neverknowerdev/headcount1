@@ -111,6 +111,24 @@ export interface LLMCall {
     created_at: string;
 }
 
+export interface TaskErrorGroup {
+    kind: string;
+    message: string;
+    count: number;
+    first_at: string;
+    last_at: string;
+    provider?: string;
+    model?: string;
+    tier?: string;
+    call_id?: number;
+    tasks: { id: number; ref_key: string; title: string }[];
+}
+
+export interface TaskErrorReport {
+    total: number;
+    groups: TaskErrorGroup[];
+}
+
 export const TASK_TYPES: { value: string; label: string; hint: string }[] = [
     { value: 'general', label: 'General', hint: 'Anything that is not mainly research, code or a review.' },
     { value: 'research', label: 'Research', hint: 'Find something out and report it. Nothing is changed.' },
@@ -180,6 +198,7 @@ export const RESULT_REASONS: Record<string, string> = {
     reported_failure: 'the executor reported a failure',
     cannot_complete: 'it could not be completed with what is available',
     run_error: 'the executor session crashed',
+    model_error: 'the model could not be called',
     budget_exhausted: 'it ran out of attempts',
     prerequisite_failed: 'a task it depends on did not succeed',
     stopped: 'it was stopped',

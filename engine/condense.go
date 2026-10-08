@@ -65,7 +65,7 @@ func (d *workflowDriver) condense(ctx context.Context, l *loadedTask, phase stri
 	usage.Purpose = "compress"
 	condensed := map[string]string{}
 	for _, section := range prompt.Overflow {
-		if text := d.compress(ctx, l.task.CompanyID, cheap, usage, section); text != "" {
+		if text := d.compress(ctx, l.task, cheap, usage, section); text != "" {
 			condensed[section.Name] = text
 		}
 	}
@@ -78,7 +78,7 @@ func (d *workflowDriver) condense(ctx context.Context, l *loadedTask, phase stri
 
 // compress asks the cheap model for a shorter rendering of one section. It
 // returns nothing if the call fails or the answer is no shorter.
-func (d *workflowDriver) compress(ctx context.Context, companyID int32, target modelTarget, usage callContext, section workflow.Overflow) string {
+func (d *workflowDriver) compress(ctx context.Context, task db.Task, target modelTarget, usage callContext, section workflow.Overflow) string {
 	apiKey, err := secrets.Default().Decrypt(target.Provider.ApiKeyEncrypted)
 	if err != nil {
 		return ""
@@ -89,8 +89,9 @@ func (d *workflowDriver) compress(ctx context.Context, companyID int32, target m
 		return ""
 	}
 	client := d.newClient(target.Provider.BaseUrl, apiKey, target.Model)
+	client.SessionID = taskSession(task)
 	if target.viaGateway() {
-		token, revoke := runtokens.Default().IssueCompany(companyID)
+		token, revoke := runtokens.Default().IssueCompany(task.CompanyID)
 		defer revoke()
 		client.ExtraHeaders = map[string]string{runtokens.TokenHeader: token}
 	}

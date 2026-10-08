@@ -41,6 +41,11 @@ var ErrMaxTurns = errors.New("agent loop exceeded max turns without a final answ
 // resumes exactly where this one left off.
 var ErrPaused = errors.New("agent run paused")
 
+// ErrModelCall is returned (wrapped, with the provider's error) when a model
+// request got no answer. The session did nothing wrong; its model could not
+// be reached or refused the call.
+var ErrModelCall = errors.New("LLM call failed")
+
 // PauseRequested is polled once per turn, right after that turn's LLM
 // response has fully arrived and before any of its tool calls execute — the
 // one point in the loop where nothing is in flight and the conversation is
@@ -362,7 +367,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, pause 
 			if a.onModelCall != nil {
 				a.onModelCall(ModelCall{Err: err, Duration: time.Since(callStarted), Sequence: a.conversationSequence})
 			}
-			return "", history, fmt.Errorf("turn %d: LLM call failed: %w", turn, err)
+			return "", history, fmt.Errorf("turn %d: %w: %w", turn, ErrModelCall, err)
 		}
 		callDuration := time.Since(callStarted)
 

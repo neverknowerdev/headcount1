@@ -18,7 +18,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 70)
+			require.Len(t, manifest.Migrations, 71)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
@@ -28,7 +28,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 				require.True(t, ok)
 				require.False(t, migration.Reversible, "data-loss migration %s must require operator recovery", version)
 			}
-			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20261007000002", "20261007000003", "20261007000004"} {
+			for _, version := range []string{"20260816000056", "20260816000060", "20260816000061", "20261007000002", "20261007000003", "20261007000004", "20261008000001"} {
 				migration, ok := manifest.Entry(version)
 				require.True(t, ok)
 				require.True(t, migration.Reversible, "schema migration %s should be automatically reversible", version)
@@ -185,7 +185,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 70, revisions)
+	require.Equal(t, 71, revisions)
 	for _, column := range []string{"mode", "subagents", "model", "provider_id", "model_group_id", "chat_type", "permissions", "can_use_workers"} {
 		var present int
 		require.NoError(t, database.QueryRow(`SELECT count(*) FROM pragma_table_info('agents') WHERE name = ?`, column).Scan(&present))
@@ -223,7 +223,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 70, revisions)
+	require.Equal(t, 71, revisions)
 
 	_ = database.Close()
 }
@@ -302,7 +302,7 @@ func runWorkflowMigrationsRoundTrip(t *testing.T, r roundTripDB) {
 		migration.Reversible = true
 		rollback = append(rollback, migration)
 	}
-	require.Len(t, rollback, 7)
+	require.Len(t, rollback, 8)
 	require.NoError(t, ApplyDownWithSchema(ctx, database, r.dialect, rollback, r.schema))
 
 	require.Equal(t, 63, count(`SELECT count(*) FROM atlas_schema_revisions`))
@@ -322,7 +322,7 @@ func runWorkflowMigrationsRoundTrip(t *testing.T, r roundTripDB) {
 	require.Error(t, err, "the pre-workflow purpose domain must be restored")
 
 	require.NoError(t, ApplyWithSchema(ctx, database, r.dialect, "test", r.schema))
-	require.Equal(t, 70, count(`SELECT count(*) FROM atlas_schema_revisions`))
+	require.Equal(t, 71, count(`SELECT count(*) FROM atlas_schema_revisions`))
 	rows, err := database.Query(`SELECT id, root_task_id, depth, task_type, mode FROM tasks ORDER BY id`)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -392,7 +392,7 @@ func runCleanSlateDataMigration(t *testing.T, r roundTripDB) {
 		migration.Reversible = true
 		rollback = append(rollback, migration)
 	}
-	require.Len(t, rollback, 2)
+	require.Len(t, rollback, 3)
 	require.NoError(t, ApplyDownWithSchema(ctx, database, r.dialect, rollback, r.schema))
 
 	exec(`INSERT INTO users (id, email) VALUES (1, 'owner@example.com')`)

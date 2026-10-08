@@ -90,6 +90,9 @@ type Run struct {
 	// VaultLocked is set when the session ended because the model's API key
 	// was sealed. That is not the task's failure and not an attempt.
 	VaultLocked bool
+	// ModelFailure is true when the session ended because its model could
+	// not be called: the provider refused, was unreachable, or ran out.
+	ModelFailure bool
 }
 
 // Run statuses the workflow distinguishes.
@@ -143,9 +146,16 @@ type Snapshot struct {
 	// HandledStepID is the newest step in which an adjust decision dealt with
 	// failed subtasks; subtasks created before it have been dealt with.
 	HandledStepID int64
+	// SettledStepID is the newest step at which a person responded to the
+	// task: answered it or ran it again. Subtasks created before it that could
+	// not run have already been brought to them.
+	SettledStepID int64
 	// InspectsUsed counts read-only calls since the current phase began.
 	InspectsUsed int
-	Model        ModelStatus
+	// QuestionRounds counts the times questions were asked since the current
+	// phase began or a person last responded, whichever is later.
+	QuestionRounds int
+	Model          ModelStatus
 	// ModelDetail explains a model that is not ready, for the user.
 	ModelDetail string
 	// WorkspaceFree is true when no other task holds the tree's worktree.
@@ -281,7 +291,31 @@ func (s Snapshot) ToolContext(b Budgets) ToolContext {
 			failed = append(failed, child.ID)
 		}
 	}
-	return ToolContext{Budgets: b, InspectsUsed: s.InspectsUsed, Roles: s.Roles, Depth: s.Task.Depth, FailedSubtasks: failed}
+	// What has been asked already, and whether asking again could help: a
+	// question that got an answer, or a considered "cannot be answered", is
+	// settled. One whose executor never ran or crashed may be put again.
+	var asked []AskedQuestion
+	for _, child := range s.Children {
+		if !child.Question {
+			continue
+		}
+		settled := child.Status == models.TaskStatusDone ||
+			child.ResultReason == models.TaskResultReportedFailure || child.ResultReason == models.TaskResultCannotComplete
+		asked = append(asked, AskedQuestion{TaskID: child.ID, Question: questionOf(child.Instructions),
+			Settled: settled, Answered: child.Status == models.TaskStatusDone, Pending: !isTerminal(child.Status)})
+	}
+	return ToolContext{Budgets: b, InspectsUsed: s.InspectsUsed, QuestionRounds: s.QuestionRounds, Asked: asked,
+		Roles: s.Roles, Depth: s.Task.Depth, FailedSubtasks: failed}
+}
+
+// questionContextMark separates a question from the context given with it in
+// the instructions of the subtask that answers it.
+const questionContextMark = "\n\nContext:\n"
+
+// questionOf is the question a question subtask was created to answer.
+func questionOf(instructions string) string {
+	question, _, _ := strings.Cut(instructions, questionContextMark)
+	return strings.TrimSpace(question)
 }
 
 // Evaluate decides what should happen to a task next. It is the whole state
@@ -448,6 +482,31 @@ func escalate(s Snapshot, reason string, decisions []DecisionInput) *Transition 
 		step(Step{Kind: models.StepHumanQuestion, Phase: task.Phase, Result: t.AskHuman})
 }
 
+// modelUnavailable stops a managed task whose work cannot run because a model
+// cannot be called. No plan fixes that, so the smart model is not asked to
+// find one: a subtask passes the problem up unchanged, and a root stops what
+// is still running beneath it and tells the human, staying in the phase it
+// was in so it carries on from there once they reply.
+func modelUnavailable(s Snapshot, detail string) *Transition {
+	task := s.Task
+	t := &Transition{CancelDescendants: models.TaskResultStopped}
+	if !task.IsRoot {
+		return t.ready().
+			set("status", models.TaskStatusFailed).
+			set("result_reason", models.TaskResultModelError).
+			set("result_summary", detail).
+			set("phase", "").
+			step(Step{Kind: models.StepFinished, Phase: task.Phase, Result: "failed: " + detail})
+	}
+	t.AskHuman = "I had to stop: " + detail + "\n\n" +
+		"This is a problem with the model or its provider, not with the task, so I did not try to work around it. " +
+		"Check the model under LLM Providers → Default Models, then reply here and I will continue from where I stopped."
+	return t.wait(models.TaskWaitHuman, detail).
+		set("status", models.TaskStatusBlocked).
+		set("attempts_used", 0).
+		step(Step{Kind: models.StepHumanQuestion, Phase: task.Phase, Result: t.AskHuman})
+}
+
 // startRun begins an executor session for a direct task.
 func startRun(s Snapshot, b Budgets) Next {
 	task := s.Task
@@ -537,11 +596,21 @@ func resolveRun(s Snapshot, b Budgets) Next {
 		problem = run.Error
 	}
 	done.step(Step{Kind: models.StepRunFinished, Phase: task.Phase, RunID: runID, Error: problem})
+	reason := models.TaskResultRunError
+	if run != nil && run.ModelFailure {
+		// The model, not the task, is what failed. Starting again at once
+		// meets the same refusal; a pause lets a rate limit or an outage pass.
+		reason = models.TaskResultModelError
+		if task.AttemptsUsed < b.MaxExecutorAttempts {
+			return apply(done.wait(models.TaskWaitBackoff, "retrying after a model error").
+				set("wait_until", s.Now.Add(b.backoff(task.AttemptsUsed))))
+		}
+	}
 	if task.AttemptsUsed < b.MaxExecutorAttempts {
 		return apply(done)
 	}
 	done.set("status", models.TaskStatusFailed).
-		set("result_reason", models.TaskResultRunError).
+		set("result_reason", reason).
 		set("result_summary", problem).
 		set("phase", "").
 		step(Step{Kind: models.StepFinished, Phase: task.Phase, Result: "failed: " + problem})
@@ -576,13 +645,20 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 			pending = true
 		}
 	}
+	// A subtask that could not run because its model cannot be called says
+	// the same of every other one. Stop here rather than let each find out.
+	for _, child := range s.Children {
+		if child.ResultReason == models.TaskResultModelError && child.OriginStepID > s.SettledStepID {
+			return apply(modelUnavailable(s, child.ResultSummary))
+		}
+	}
 	if task.Phase != models.TaskPhaseExecute {
 		if pending {
 			return idle()
 		}
-		// The subtasks were questions; their answers go into the next prompt.
+		// The subtasks were questions; what came back goes into the next prompt.
 		return apply((&Transition{}).ready().
-			step(Step{Kind: models.StepSubtaskFinished, Phase: task.Phase, Result: "answers received"}))
+			step(Step{Kind: models.StepSubtaskFinished, Phase: task.Phase, Result: questionOutcome(s.Children)}))
 	}
 
 	// Only work that the last re-plan has not already dealt with counts.
@@ -681,6 +757,41 @@ func resolveSubtasks(s Snapshot, b Budgets) Next {
 		step(Step{Kind: models.StepPhaseEntered, Phase: models.TaskPhaseVerify, Result: "all subtasks succeeded"}))
 }
 
+// questionOutcome says what came of the questions asked last: how many were
+// answered and how many were not. A question nobody could answer is not an
+// answer.
+func questionOutcome(children []Child) string {
+	var last int64
+	for _, child := range children {
+		if child.Question && child.OriginStepID > last {
+			last = child.OriginStepID
+		}
+	}
+	asked, answered := 0, 0
+	for _, child := range children {
+		if !child.Question || child.OriginStepID != last {
+			continue
+		}
+		asked++
+		if child.Status == models.TaskStatusDone {
+			answered++
+		}
+	}
+	switch {
+	case asked == 0:
+		return "nothing was asked"
+	case answered == asked && asked == 1:
+		return "the question was answered"
+	case answered == asked:
+		return fmt.Sprintf("all %d questions were answered", asked)
+	case answered == 0 && asked == 1:
+		return "the question could not be answered"
+	case answered == 0:
+		return fmt.Sprintf("none of the %d questions could be answered", asked)
+	}
+	return fmt.Sprintf("%d of %d questions were answered; %d could not be", answered, asked, asked-answered)
+}
+
 const (
 	reviewTitlePrefix = "Review: "
 	fixTitlePrefix    = "Address review findings"
@@ -770,7 +881,7 @@ func ApplyAction(s Snapshot, b Budgets, action Action, arguments string) *Transi
 		for i, question := range a.Questions {
 			instructions := question.Question
 			if question.Context != "" {
-				instructions += "\n\nContext:\n" + question.Context
+				instructions += questionContextMark + question.Context
 			}
 			t.NewTasks = append(t.NewTasks, TaskDraft{
 				Key:          fmt.Sprintf("q%d", i+1),
@@ -962,6 +1073,9 @@ const (
 	// and are not counted against it: it waits until the cause is fixed.
 	FailureVaultLocked
 	FailureNotConfigured
+	// FailureModel: the model could not be called at all. Retried like a
+	// transient failure, but when the retries run out no re-plan can help.
+	FailureModel
 )
 
 // ApplyFailure is the transition for a smart call that produced no answer.
@@ -977,7 +1091,12 @@ func ApplyFailure(s Snapshot, b Budgets, kind FailureKind, message string) *Tran
 	}
 	failures := task.AttemptsUsed + 1
 	if failures >= b.MaxSmartFailures {
-		t := escalate(s, fmt.Sprintf("the model failed %d times in a row: %s", failures, message), nil)
+		var t *Transition
+		if kind == FailureModel {
+			t = modelUnavailable(s, fmt.Sprintf("the model that decides what to do could not be called %d times in a row: %s", failures, message))
+		} else {
+			t = escalate(s, fmt.Sprintf("the model failed %d times in a row: %s", failures, message), nil)
+		}
 		t.Steps = append([]Step{{Kind: models.StepSmartError, Phase: task.Phase, Error: message}}, t.Steps...)
 		return t
 	}

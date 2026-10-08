@@ -156,6 +156,11 @@ func TestExecutorRunsADirectTaskAndReports(t *testing.T) {
 	require.NoError(t, err, "the journal is in the same folder")
 
 	requests := x.provider.servedBy(cheapModel)
+	// Every turn of the session carries the same conversation ID.
+	for _, session := range x.provider.sessions {
+		assert.Regexp(t, `^`+cheapModel+` hc1-[0-9a-f]{32}$`, session)
+		assert.Equal(t, x.provider.sessions[0], session)
+	}
 	require.Len(t, requests, 2)
 	system := requests[0].Messages[0].Content
 	assert.True(t, strings.HasPrefix(system, "You are the Coder agent."))

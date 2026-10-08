@@ -42,6 +42,8 @@ type UsageFilter struct {
 	WorkflowPhase string
 	From          *time.Time
 	To            *time.Time
+	// FailedOnly keeps the calls that did not produce a usable answer.
+	FailedOnly bool
 }
 
 // UsageTotals aggregates a set of calls.
@@ -115,6 +117,9 @@ WITH RECURSIVE subtree(id) AS (
 	}
 	if f.To != nil {
 		query = query.Where("llm_calls.created_at < ?", *f.To)
+	}
+	if f.FailedOnly {
+		query = query.Where("llm_calls.status <> ?", LLMCallOK)
 	}
 	return query
 }

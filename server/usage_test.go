@@ -109,9 +109,15 @@ func newUsageFixture(t *testing.T) *usageFixture {
 	r.Get("/usage", api.GetUsage)
 	r.Get("/usage/calls", api.ListUsageCalls)
 	r.Get("/usage/calls/{id}", api.GetUsageCall)
+	r.Get("/runs", api.ListCompanyRuns)
+	r.Route("/agents/{id}", func(r chi.Router) {
+		r.Use(api.LoadAgent)
+		r.Get("/runs", api.ListAgentRuns)
+	})
 	r.Route("/tasks/{id}", func(r chi.Router) {
 		r.Use(api.LoadTask)
 		r.Get("/usage", api.GetTaskUsage)
+		r.Get("/errors", api.ListTaskErrors)
 	})
 	f.router = withTestUser(t, database, r)
 	return f
@@ -195,6 +201,132 @@ func TestTaskUsageRollsUpItsSubtasks(t *testing.T) {
 	require.Equal(t, int64(300), report.Totals.PromptTokens)
 	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/tasks/%d/usage", f.research.ID), &report))
 	require.Equal(t, int64(90), report.Totals.PromptTokens)
+}
+
+// Sessions are listed with the tasks they belong to and every task above
+// those, so a list of sessions can be shown as the tasks are arranged. The
+// task at the top of a tree runs no session itself and is found only that way.
+func TestRunListsComeWithTheTaskTreeAboveThem(t *testing.T) {
+	f := newUsageFixture(t)
+	ctx := context.Background()
+	q := db.New(f.database)
+	deeper, err := q.CreateTask(ctx, db.Task{CompanyID: f.company.ID, Title: "look deeper", ParentID: &f.research.ID})
+	require.NoError(t, err)
+	other, err := q.CreateTask(ctx, db.Task{CompanyID: f.company.ID, Title: "unrelated"})
+	require.NoError(t, err)
+	second := db.Run{TaskID: deeper.ID, AgentID: f.run.AgentID, Status: "failed", Name: "ACME-1-1-1-CODER-1", StartedAt: time.Now()}
+	require.NoError(t, f.database.Create(&second).Error)
+	elsewhere := db.Run{TaskID: other.ID, AgentID: f.run.AgentID, Status: "completed", StartedAt: time.Now()}
+	require.NoError(t, f.database.Create(&elsewhere).Error)
+
+	type tree struct {
+		Runs []struct {
+			ID         int32 `json:"id"`
+			TaskID     int32 `json:"task_id"`
+			LogEntries []any `json:"log_entries"`
+		} `json:"runs"`
+		Tasks []struct {
+			ID       int32  `json:"id"`
+			ParentID *int32 `json:"parent_id"`
+			Title    string `json:"title"`
+		} `json:"tasks"`
+	}
+	titles := func(got tree) map[string]bool {
+		out := map[string]bool{}
+		for _, task := range got.Tasks {
+			out[task.Title] = true
+		}
+		return out
+	}
+
+	var all tree
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/runs?company_id=%d&tree=true", f.company.ID), &all))
+	require.Len(t, all.Runs, 3)
+	require.Equal(t, map[string]bool{"root": true, "look it up": true, "look deeper": true, "unrelated": true}, titles(all),
+		"the root is there although it ran no session")
+	for _, run := range all.Runs {
+		require.Empty(t, run.LogEntries, "a list carries no transcripts")
+	}
+
+	var under tree
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/runs?company_id=%d&tree=true&subtree_of=%d", f.company.ID, f.research.ID), &under))
+	require.Len(t, under.Runs, 2, "the task's own session and the one beneath it")
+	require.Equal(t, map[string]bool{"root": true, "look it up": true, "look deeper": true}, titles(under))
+
+	var byAgent tree
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/agents/%d/runs?tree=true", f.run.AgentID), &byAgent))
+	require.Len(t, byAgent.Runs, 3)
+	require.Len(t, byAgent.Tasks, 4)
+
+	// Without tree=true a list stays a plain list.
+	var plain []map[string]any
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/runs?company_id=%d", f.company.ID), &plain))
+	require.Len(t, plain, 3)
+}
+
+// What went wrong anywhere beneath a task is listed on that task: the same
+// error counted once however often it came, with where it happened and a call
+// to open. An executor's own "this failed" is a result and is not an error.
+func TestTaskErrorsGroupWhatWentWrongInTheWholeTree(t *testing.T) {
+	f := newUsageFixture(t)
+	ctx := context.Background()
+	q := db.New(f.database)
+	other, err := q.CreateTask(ctx, db.Task{CompanyID: f.company.ID, Title: "look elsewhere", ParentID: &f.root.ID})
+	require.NoError(t, err)
+	crashed, err := q.CreateTask(ctx, db.Task{CompanyID: f.company.ID, Title: "ran out of turns", ParentID: &f.root.ID})
+	require.NoError(t, err)
+	require.NoError(t, f.database.Model(&db.Task{}).Where("id = ?", crashed.ID).
+		Updates(map[string]interface{}{"status": "failed", "result_reason": "run_error", "result_summary": "the session ended without reporting a result"}).Error)
+	require.NoError(t, f.database.Model(&db.Task{}).Where("id = ?", other.ID).
+		Updates(map[string]interface{}{"status": "failed", "result_reason": "cannot_complete", "result_summary": "the page does not exist"}).Error)
+
+	refusal := "turn 0: LLM call failed: LLM error [model_group_exhausted]: Request is missing x-opencode-session"
+	day := time.Date(2026, 10, 3, 9, 0, 0, 0, time.UTC)
+	var last db.LLMCall
+	for i, taskID := range []int32{f.research.ID, other.ID, f.research.ID} {
+		id := taskID
+		last, err = q.RecordLLMCall(ctx, db.LLMCall{CompanyID: f.company.ID, RootTaskID: &f.root.ID, TaskID: &id, Tier: "cheap", Phase: "execute",
+			ProviderName: "Deepseek V4 Flash", RequestedModel: "deepseek-v4-flash", Status: "error", Error: refusal, CreatedAt: day.Add(time.Duration(i) * time.Minute)})
+		require.NoError(t, err)
+	}
+
+	var report struct {
+		Total  int `json:"total"`
+		Groups []struct {
+			Kind, Message, Provider, Model, Tier string
+			Count                                int
+			CallID                               int64     `json:"call_id"`
+			FirstAt                              time.Time `json:"first_at"`
+			LastAt                               time.Time `json:"last_at"`
+			Tasks                                []struct {
+				ID    int32
+				Title string
+			}
+		}
+	}
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/tasks/%d/errors", f.root.ID), &report))
+	require.Equal(t, 5, report.Total, "three refusals, the earlier timeout and the crashed session")
+	require.Len(t, report.Groups, 3)
+
+	refused := report.Groups[1]
+	require.Equal(t, "model_call", refused.Kind)
+	require.Equal(t, "LLM error [model_group_exhausted]: Request is missing x-opencode-session", refused.Message, "without the wrapping that differs per session")
+	require.Equal(t, 3, refused.Count)
+	require.Equal(t, "Deepseek V4 Flash", refused.Provider)
+	require.Equal(t, "deepseek-v4-flash", refused.Model)
+	require.Equal(t, last.ID, refused.CallID, "the most recent occurrence opens as a log")
+	require.Equal(t, day, refused.FirstAt.UTC())
+	require.Equal(t, day.Add(2*time.Minute), refused.LastAt.UTC())
+	require.Len(t, refused.Tasks, 2, "each task is named once")
+
+	require.Equal(t, "session", report.Groups[0].Kind, "the newest error comes first")
+	require.Equal(t, "the session ended without reporting a result", report.Groups[0].Message)
+	require.Equal(t, crashed.ID, report.Groups[0].Tasks[0].ID)
+	require.Equal(t, "timeout", report.Groups[2].Message)
+
+	// A subtask's own page lists only what happened beneath it.
+	require.Equal(t, http.StatusOK, f.get(fmt.Sprintf("/tasks/%d/errors", other.ID), &report))
+	require.Equal(t, 1, report.Total)
 }
 
 // Any usage row expands to the calls behind it, and each call opens as a log.

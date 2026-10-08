@@ -8,6 +8,7 @@ import (
 
 	"agent-orchestrator/db"
 	"agent-orchestrator/db/models"
+	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/workflow"
 	"agent-orchestrator/pkg/secrets"
 
@@ -160,6 +161,21 @@ func (t modelTarget) vaultLocked() bool {
 		}
 	}
 	return true
+}
+
+// modelFailurePrefix begins the stored reason of a session that ended because
+// its model could not be called, which is how the workflow tells such a
+// session from one that crashed on its own.
+const modelFailurePrefix = "the model could not be called: "
+
+// modelFailureDetail is that reason for a failed model call: what the
+// provider said, without the loop's own wrapping.
+func modelFailureDetail(err error) string {
+	cause := err.Error()
+	if _, after, found := strings.Cut(cause, aicli.ErrModelCall.Error()+": "); found {
+		cause = after
+	}
+	return modelFailurePrefix + cause
 }
 
 const vaultLockedDetail = "the owner of this model's API key is signed out: sign in to continue"

@@ -103,8 +103,15 @@ func (d *workflowDriver) load(ctx context.Context, taskID int32) (*loadedTask, e
 		}
 		phaseStart := phaseStartStep(l.steps)
 		for _, step := range l.steps {
+			if step.Kind == models.StepHumanAnswer || step.Kind == models.StepRerun {
+				s.SettledStepID = step.ID
+				s.QuestionRounds = 0
+			}
 			if step.Kind != models.StepSmartCall {
 				continue
+			}
+			if step.ID > phaseStart && step.ToolName == workflow.ToolAskQuestions {
+				s.QuestionRounds++
 			}
 			if step.Phase == models.TaskPhaseAdjust && handlesFailures(step.ToolName) {
 				s.HandledStepID = step.ID
@@ -187,6 +194,7 @@ func workflowRun(run db.Run) *workflow.Run {
 		// failed, stale, and anything else that is not alive.
 		view.Status = workflow.RunFailed
 		view.VaultLocked = view.Error == vaultLockedDetail
+		view.ModelFailure = strings.HasPrefix(view.Error, modelFailurePrefix)
 	}
 	if strings.TrimSpace(run.Report) != "" {
 		var report workflow.Report

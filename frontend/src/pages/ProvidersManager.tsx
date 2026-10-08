@@ -4,6 +4,7 @@ import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { ModelGroups } from '../components/ModelGroups';
 import { DefaultModelSettings } from '../components/DefaultModelSettings';
+import { ClassifierNotice } from '../components/ClassifierNotice';
 
 // Renders a provider's model list truncated to one line, with an expand
 // toggle that only appears once the list actually overflows that line —
@@ -58,6 +59,8 @@ export const ProvidersManager: React.FC = () => {
     // purpose to "Session's own model" server-side, and this makes the UI
     // reflect it immediately.
     const [modelGroupsVersion, setModelGroupsVersion] = useState(0);
+    // Bumped whenever a Default Models slot is saved.
+    const [slotsVersion, setSlotsVersion] = useState(0);
 
     // Built-in providers (OpenRouter/OpenCode free models) get a simplified
     // "Activate" flow instead of the generic edit modal — their model list
@@ -139,6 +142,13 @@ export const ProvidersManager: React.FC = () => {
             setSelectedPresetKey('custom');
         }
         setIsModalOpen(true);
+    };
+
+    // The classifier is added like any preset provider; this opens the form
+    // with it already chosen, so all that is left to enter is the key.
+    const connectClassifier = () => {
+        handleOpenModal();
+        setSelectedPresetKey('typesafe');
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -374,6 +384,16 @@ export const ProvidersManager: React.FC = () => {
                 </button>
             </div>
 
+            <ClassifierNotice refreshSignal={`${slotsVersion}/${providers.length}`}>
+                {providers.some(p => p.provider_type === 'typesafe') ? (
+                    <span className="text-xs">Choose it in the Classifier slot under Default Models and save.</span>
+                ) : (
+                    <button type="button" onClick={connectClassifier} data-testid="connect-classifier" className="rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700">
+                        Connect TypeSafe (Jev)
+                    </button>
+                )}
+            </ClassifierNotice>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {providers.map(p => (
                     <div key={p.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden ${p.builtin && !p.enabled ? 'opacity-60' : ''}`}>
@@ -463,7 +483,12 @@ export const ProvidersManager: React.FC = () => {
 
             <ModelGroups providers={providers} onChange={() => setModelGroupsVersion(v => v + 1)} />
 
-            <DefaultModelSettings providers={providers} refreshSignal={modelGroupsVersion} />
+            <DefaultModelSettings
+                providers={providers}
+                refreshSignal={modelGroupsVersion}
+                onConnectClassifier={connectClassifier}
+                onSaved={() => setSlotsVersion(v => v + 1)}
+            />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
@@ -515,7 +540,9 @@ export const ProvidersManager: React.FC = () => {
                                         placeholder="sk-..."
                                     />
                                     <p className="text-xs text-gray-500 mt-2">
-                                        The base URL and available models are discovered automatically once the key is saved.
+                                        {selectedPresetKey === 'typesafe'
+                                            ? 'Jev is a classifier, not a language model: it is used only in the Classifier slot under Default Models, which is filled for you once the key is saved. Get a key at typesafe.ai.'
+                                            : 'The base URL and available models are discovered automatically once the key is saved.'}
                                     </p>
                                     {presetError && (
                                         <p className="text-sm text-red-600 mt-3">{presetError}</p>

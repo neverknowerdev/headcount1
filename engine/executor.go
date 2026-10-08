@@ -197,6 +197,7 @@ func (s *executorSession) execute(ctx context.Context, resumed bool) (status, me
 		return "failed", "could not read the model's API key: " + err.Error()
 	}
 	client := s.e.driver.newClient(s.target.Provider.BaseUrl, apiKey, s.target.Model)
+	client.SessionID = runSession(s.run)
 	if s.target.viaGateway() {
 		token := runtokens.Default().Issue(s.run.ID)
 		defer runtokens.Default().Revoke(s.run.ID)
@@ -249,6 +250,10 @@ func (s *executorSession) execute(ctx context.Context, resumed bool) (status, me
 	case ctx.Err() != nil:
 		s.outcome("canceled", "stopped", "")
 		return "canceled", "stopped"
+	case s.report == nil && errors.Is(runErr, aicli.ErrModelCall):
+		detail := modelFailureDetail(runErr)
+		s.outcome("failed", "model_error", detail)
+		return "failed", detail
 	case s.report == nil && runErr != nil:
 		s.outcome("failed", "error", runErr.Error())
 		return "failed", runErr.Error()

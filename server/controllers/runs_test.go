@@ -47,7 +47,14 @@ func TestDownloadTaskLogsArchivesTheTaskTree(t *testing.T) {
 	require.NoError(t, os.MkdirAll(rootDir, 0o755))
 	require.NoError(t, os.MkdirAll(childDir, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(rootDir, "task.jsonl"), []byte("root journal\n"), 0o644))
-	require.NoError(t, os.WriteFile(filepath.Join(childDir, "run-5.jsonl"), []byte("child session\n"), 0o644))
+	// The session the child's log belongs to, under the name it goes by.
+	agent := db.Agent{CompanyID: company.ID, Name: "Coder"}
+	require.NoError(t, database.Create(&agent).Error)
+	session := db.Run{TaskID: child.ID, AgentID: agent.ID, Status: "completed", Name: child.RefKey + "-CODER-1"}
+	require.NoError(t, database.Create(&session).Error)
+	sessionFile := fmt.Sprintf("run-%d.jsonl", session.ID)
+	require.NoError(t, os.WriteFile(filepath.Join(childDir, sessionFile), []byte("child session\n"), 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(childDir, "run-999.jsonl"), []byte("a session nobody knows\n"), 0o644))
 
 	api := NewAPI(database, nil, nil)
 	download := func(task db.Task) map[string]string {
@@ -73,11 +80,18 @@ func TestDownloadTaskLogsArchivesTheTaskTree(t *testing.T) {
 		return contents
 	}
 
+	// The archive is laid out as the tasks are in the app: a folder per task
+	// named by its key, a subtask's inside its parent's, and each session
+	// under the name it is shown by.
 	require.Equal(t, map[string]string{
-		fmt.Sprintf("task-%d/task.jsonl", root.ID):   "root journal\n",
-		fmt.Sprintf("task-%d/run-5.jsonl", child.ID): "child session\n",
+		root.RefKey + "/task.jsonl":                                      "root journal\n",
+		root.RefKey + "/" + child.RefKey + "/" + session.Name + ".jsonl": "child session\n",
+		root.RefKey + "/" + child.RefKey + "/run-999.jsonl":              "a session nobody knows\n",
 	}, download(root))
-	require.Equal(t, map[string]string{"run-5.jsonl": "child session\n"}, download(child))
+	require.Equal(t, map[string]string{
+		child.RefKey + "/" + session.Name + ".jsonl": "child session\n",
+		child.RefKey + "/run-999.jsonl":              "a session nobody knows\n",
+	}, download(child))
 
 	// A task that never ran has nothing to download.
 	idle, err := q.CreateTask(context.Background(), db.Task{CompanyID: company.ID, Title: "idle"})

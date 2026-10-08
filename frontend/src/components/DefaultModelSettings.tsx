@@ -39,7 +39,16 @@ const toFormValue = (s: any): ProviderOrGroupValue => ({
     model: s?.model || '',
 });
 
-export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: number }> = ({ providers, refreshSignal }) => {
+interface DefaultModelSettingsProps {
+    providers: any[];
+    refreshSignal?: number;
+    // Opens the form for connecting a classifier provider.
+    onConnectClassifier?: () => void;
+    // Called after a slot is saved.
+    onSaved?: () => void;
+}
+
+export const DefaultModelSettings: React.FC<DefaultModelSettingsProps> = ({ providers, refreshSignal, onConnectClassifier, onSaved }) => {
     const [settings, setSettings] = useState<any[]>([]);
     const [modelGroups, setModelGroups] = useState<any[]>([]);
     const [forms, setForms] = useState<Record<string, ProviderOrGroupValue>>({});
@@ -67,10 +76,11 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
     // refreshSignal changes whenever a model group is created/edited/deleted
     // elsewhere on the page, so a slot pointed at a deleted group shows as
     // unset immediately (the backend already reset it via an ON DELETE SET
-    // NULL foreign key) instead of only after a page reload.
+    // NULL foreign key) instead of only after a page reload. A provider
+    // added or removed can fill or empty a slot too.
     useEffect(() => {
         fetchAll();
-    }, [fetchAll, refreshSignal]);
+    }, [fetchAll, refreshSignal, providers.length]);
 
     const handleSave = async (purpose: string) => {
         setSavingPurpose(purpose);
@@ -86,6 +96,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
             setSavedPurpose(purpose);
             setTimeout(() => setSavedPurpose(p => (p === purpose ? null : p)), 2000);
             fetchAll();
+            onSaved?.();
         } catch (e: any) {
             setError(e.response?.data?.error || 'Save failed');
         } finally {
@@ -94,6 +105,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
     };
 
     if (settings.length === 0) return null;
+
 
     return (
         <div className="space-y-4">
@@ -114,7 +126,7 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                     const isClassifierSlot = s.purpose === 'classifier';
                     const slotProviders = providers.filter(p => (p.provider_type === 'typesafe') === isClassifierSlot);
                     return (
-                        <div key={s.purpose} data-testid={`model-slot-${s.purpose}`} className={`bg-white p-6 rounded-lg border shadow-sm space-y-3 ${info.required && unset ? 'border-amber-300' : ''}`}>
+                        <div key={s.purpose} data-testid={`model-slot-${s.purpose}`} className={`bg-white p-6 rounded-lg border shadow-sm space-y-3 ${(info.required || isClassifierSlot) && unset ? 'border-amber-300' : ''}`}>
                             <div>
                                 <h3 className="text-lg font-bold text-gray-900">{info.title}</h3>
                                 {info.description && <p className="text-sm text-gray-600 mt-1">{info.description}</p>}
@@ -128,7 +140,13 @@ export const DefaultModelSettings: React.FC<{ providers: any[]; refreshSignal?: 
                                 onChange={v => setForms(f => ({ ...f, [s.purpose]: v }))}
                             />
                             {isClassifierSlot && slotProviders.length === 0 && (
-                                <p className="text-xs text-gray-500">No classifier provider yet. Add “TypeSafe (Jev classifier)” from the provider presets above to use this slot.</p>
+                                <p className="text-xs text-gray-600">
+                                    No classifier is connected yet.{' '}
+                                    {onConnectClassifier ? (
+                                        <button type="button" onClick={onConnectClassifier} className="font-medium text-indigo-600 underline hover:text-indigo-800">Connect TypeSafe (Jev)</button>
+                                    ) : 'Add “TypeSafe (Jev classifier)” under Add Provider.'}
+                                    {' '}It needs only an API key from typesafe.ai; this slot is then filled for you.
+                                </p>
                             )}
                             <div className="flex items-center gap-3 pt-1">
                                 <button

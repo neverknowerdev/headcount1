@@ -23,6 +23,9 @@ type Budgets struct {
 	// MaxInspectsPerPhase caps read-only tool calls (decision tree, execution
 	// state) before the model must act.
 	MaxInspectsPerPhase int
+	// MaxQuestionRoundsPerPhase caps how often a task may send out questions
+	// in one phase before it must decide with what it has or ask the human.
+	MaxQuestionRoundsPerPhase int
 	// MaxManagedDepth is the deepest level at which a subtask may itself be
 	// driven by a smart model; below it subtasks are always direct.
 	MaxManagedDepth int
@@ -47,18 +50,19 @@ type Budgets struct {
 
 // DefaultBudgets are the limits used in production.
 var DefaultBudgets = Budgets{
-	MaxSmartSteps:            40,
-	MaxAdjustCycles:          3,
-	MaxSmartFailures:         3,
-	MaxInspectsPerPhase:      4,
-	MaxManagedDepth:          2,
-	MaxQuestionsPerStep:      8,
-	MaxTasksPerStep:          12,
-	MaxExecutorAttempts:      2,
-	MaxExecutorTurns:         150,
-	MaxReviewRounds:          2,
-	CheckpointEveryToolCalls: 12,
-	SmartBackoff:             30 * time.Second,
+	MaxSmartSteps:             40,
+	MaxAdjustCycles:           3,
+	MaxSmartFailures:          3,
+	MaxInspectsPerPhase:       4,
+	MaxQuestionRoundsPerPhase: 3,
+	MaxManagedDepth:           2,
+	MaxQuestionsPerStep:       8,
+	MaxTasksPerStep:           12,
+	MaxExecutorAttempts:       2,
+	MaxExecutorTurns:          150,
+	MaxReviewRounds:           2,
+	CheckpointEveryToolCalls:  12,
+	SmartBackoff:              30 * time.Second,
 }
 
 // backoff is the wait before retrying after the nth consecutive failure

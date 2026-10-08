@@ -86,6 +86,7 @@ Changes:
 		return "", err
 	}
 	client := s.e.driver.newClient(target.Provider.BaseUrl, apiKey, target.Model)
+	client.SessionID = runSession(s.run)
 	if target.viaGateway() {
 		token, revoke := runtokens.Default().IssueCompany(s.task.CompanyID)
 		defer revoke()

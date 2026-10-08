@@ -3,6 +3,7 @@ import { Link } from 'react-router-dom';
 import { PhaseChip, TaskTypeBadge } from './PhaseChip';
 import { phaseLabel, statusLabel } from '../lib/workflow';
 import type { Decision, Task } from '../lib/workflow';
+import type { RunRow } from './RunTree';
 
 const STATUS_DOT: Record<string, string> = {
     done: 'bg-green-500',
@@ -57,13 +58,22 @@ interface TreeProps {
     // With decisions the tree shows what was decided on each task instead of
     // each task's progress.
     decisions?: Decision[];
+    // The executor sessions of the tasks in the tree, listed under the task
+    // each one worked on.
+    runs?: RunRow[];
 }
 
 // TaskTree draws a task and the subtasks its workflow created, nested the way
 // they were delegated. Given decisions, it becomes the decision tree: every
 // choice, assumption and dead end under the task that made it.
-export const TaskTree: React.FC<TreeProps> = ({ tasks, companyPath, decisions }) => {
+export const TaskTree: React.FC<TreeProps> = ({ tasks, companyPath, decisions, runs }) => {
     if (tasks.length === 0) return null;
+    const runsByTask = new Map<number, RunRow[]>();
+    for (const run of runs || []) {
+        if (!runsByTask.has(run.task_id)) runsByTask.set(run.task_id, []);
+        runsByTask.get(run.task_id)!.push(run);
+    }
+    for (const list of runsByTask.values()) list.sort((a, b) => a.id - b.id);
     const byParent = childrenOf(tasks);
     const byID = new Map(tasks.map(task => [task.id, task]));
     const superseded = new Set((decisions || []).map(d => d.supersedes_id).filter((id): id is number => id != null));
@@ -107,6 +117,16 @@ export const TaskTree: React.FC<TreeProps> = ({ tasks, companyPath, decisions })
                 )}
                 {!decisions && !isRoot && task.result_summary && (
                     <p className="mb-1 ml-4 whitespace-pre-wrap text-xs text-gray-600">{task.result_summary}</p>
+                )}
+                {!decisions && (runsByTask.get(task.id)?.length || 0) > 0 && (
+                    <p className="mb-1 ml-4 flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-gray-500" data-testid="tree-task-sessions">
+                        <span>Sessions:</span>
+                        {runsByTask.get(task.id)!.map(run => (
+                            <Link key={run.id} to={`${companyPath}/run-logs/${run.id}`} className={`font-mono hover:underline ${run.status === 'failed' ? 'text-red-600' : 'text-indigo-700'}`}>
+                                {run.name || `#${run.id}`}{run.status !== 'completed' ? ` (${run.status})` : ''}
+                            </Link>
+                        ))}
+                    </p>
                 )}
                 {decisions && (decisionsByTask.get(task.id)?.length || 0) > 0 && (
                     <ul className="mb-1 ml-4 space-y-1">

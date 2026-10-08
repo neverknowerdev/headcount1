@@ -65,6 +65,93 @@ func toRunResponse(run db.Run) RunResponse {
 	return resp
 }
 
+// runTask is a task as a list of sessions shows it: enough to name it, say
+// how it stands and place it under its parent.
+type runTask struct {
+	ID           int32  `json:"id"`
+	ParentID     *int32 `json:"parent_id"`
+	RootTaskID   int32  `json:"root_task_id"`
+	RefKey       string `json:"ref_key"`
+	Title        string `json:"title"`
+	TaskType     string `json:"task_type"`
+	Status       string `json:"status"`
+	Phase        string `json:"phase"`
+	WaitingOn    string `json:"waiting_on"`
+	WaitDetail   string `json:"wait_detail"`
+	ResultReason string `json:"result_reason"`
+}
+
+// runTree is a set of sessions together with the tasks they belong to and
+// every task above those, so they can be shown as the tasks are arranged:
+// a top-level task, its subtasks beneath it, each with its own sessions.
+type runTree struct {
+	Runs  []RunResponse `json:"runs"`
+	Tasks []runTask     `json:"tasks"`
+}
+
+// withTasksAbove loads the tasks of some sessions and their ancestors. A
+// managed task has no sessions of its own, so the tasks at the top of a tree
+// are found only by walking up from the ones that do.
+func (api *API) withTasksAbove(runs []RunResponse) (runTree, error) {
+	tree := runTree{Runs: runs, Tasks: []runTask{}}
+	loaded := map[int32]bool{}
+	var wanted []int32
+	for _, run := range runs {
+		if !loaded[run.TaskID] {
+			loaded[run.TaskID] = true
+			wanted = append(wanted, run.TaskID)
+		}
+	}
+	for len(wanted) > 0 {
+		var batch []runTask
+		if err := api.db.Model(&db.Task{}).Where("id IN ?", wanted).Find(&batch).Error; err != nil {
+			return tree, err
+		}
+		tree.Tasks = append(tree.Tasks, batch...)
+		wanted = wanted[:0]
+		for _, task := range batch {
+			if task.ParentID != nil && !loaded[*task.ParentID] {
+				loaded[*task.ParentID] = true
+				wanted = append(wanted, *task.ParentID)
+			}
+		}
+	}
+	return tree, nil
+}
+
+// respondRuns answers a list of sessions: as a plain list, or with tree=true
+// together with the tasks they sit under.
+func (api *API) respondRuns(w http.ResponseWriter, r *http.Request, runs []db.Run) {
+	out := make([]RunResponse, 0, len(runs))
+	for _, run := range runs {
+		out = append(out, toRunResponse(run))
+	}
+	if r.URL.Query().Get("tree") != "true" {
+		api.respondJSON(w, http.StatusOK, out)
+		return
+	}
+	tree, err := api.withTasksAbove(out)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, tree)
+}
+
+// runOverview narrows a query to what a list of sessions shows.
+// log_content/log_entries are full transcripts (megabytes for long sessions)
+// and are only rendered on the Run Log Details page, so they are left out to
+// keep lists fast as history grows; the Task and Agent preloads are trimmed
+// to the handful of fields a list renders.
+func runOverview(tx *gorm.DB) *gorm.DB {
+	return tx.
+		Omit("log_content", "log_entries").
+		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
+		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") })
+}
+
+// ListCompanyRuns lists a company's executor sessions, newest first.
+// subtree_of narrows them to one task and everything beneath it.
 func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 	compIDStr := r.URL.Query().Get("company_id")
 	if compIDStr == "" {
@@ -77,40 +164,33 @@ func (api *API) ListCompanyRuns(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Fetch all tasks for company
 	var taskIDs []int32
-	api.db.Table("tasks").Where("company_id = ?", compID).Pluck("id", &taskIDs)
-
+	if under := r.URL.Query().Get("subtree_of"); under != "" {
+		topID, _ := strconv.Atoi(under)
+		subtree, err := api.q.ListTaskSubtree(r.Context(), int32(topID))
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		for _, task := range subtree {
+			if task.CompanyID == int32(compID) {
+				taskIDs = append(taskIDs, task.ID)
+			}
+		}
+	} else {
+		api.db.Table("tasks").Where("company_id = ?", compID).Pluck("id", &taskIDs)
+	}
 	if len(taskIDs) == 0 {
-		api.respondJSON(w, http.StatusOK, []interface{}{})
+		api.respondRuns(w, r, nil)
 		return
 	}
 
-	// The list view only needs overview info: log_content/log_entries are
-	// full transcripts (can be megabytes for long sessions) and are only
-	// ever rendered on the Run Log Details page, so they're omitted here to
-	// keep the list fast and responsive as run history grows. Task/Agent
-	// preloads are similarly trimmed to the handful of fields the list
-	// actually renders.
 	var runs []db.Run
-	err := api.db.
-		Omit("log_content", "log_entries").
-		Preload("Task", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "ref_key", "title") }).
-		Preload("Agent", func(tx *gorm.DB) *gorm.DB { return tx.Select("id", "name") }).
-		Where("task_id IN ?", taskIDs).
-		Order("started_at desc").
-		Find(&runs).Error
-
-	if err != nil {
+	if err := runOverview(api.db).Where("task_id IN ?", taskIDs).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
-	out := make([]RunResponse, 0, len(runs))
-	for _, run := range runs {
-		out = append(out, toRunResponse(run))
-	}
-	api.respondJSON(w, http.StatusOK, out)
+	api.respondRuns(w, r, runs)
 }
 
 func (api *API) GetRun(w http.ResponseWriter, r *http.Request) {

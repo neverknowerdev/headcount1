@@ -23,7 +23,7 @@ type clientFactory func(baseURL, apiKey, model string) *aicli.Client
 // validated tool call. The request carries the complete prompt; nothing is
 // kept between calls. The result lists every provider round trip, also when
 // an error is returned, so the caller can account for all of them.
-func callOnce(ctx context.Context, newClient clientFactory, companyID int32, target modelTarget, request aicli.ChatRequest, validate func(aicli.ToolCall) error) (*aicli.OneShotResult, error) {
+func callOnce(ctx context.Context, newClient clientFactory, companyID int32, session string, target modelTarget, request aicli.ChatRequest, validate func(aicli.ToolCall) error) (*aicli.OneShotResult, error) {
 	apiKey, err := secrets.Default().Decrypt(target.Provider.ApiKeyEncrypted)
 	if errors.Is(err, secrets.ErrLocked) {
 		return nil, errVaultLocked
@@ -32,6 +32,7 @@ func callOnce(ctx context.Context, newClient clientFactory, companyID int32, tar
 		return nil, fmt.Errorf("decrypt provider key: %w", err)
 	}
 	client := newClient(target.Provider.BaseUrl, apiKey, target.Model)
+	client.SessionID = session
 	if target.viaGateway() {
 		// A step belongs to a company but to no run, so it authenticates to
 		// the in-process gateway with a token of its own, valid for this call.

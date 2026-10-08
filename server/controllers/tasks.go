@@ -614,9 +614,10 @@ func (api *API) ListTaskDecisions(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, decisions)
 }
 
-// DownloadTaskLogs streams a task's logs as a zip: its journal, its executor
-// sessions and its decisions, and for a top-level task those of every task
-// beneath it.
+// DownloadTaskLogs sends everything recorded for a task and the tasks beneath
+// it as one archive, laid out as the tasks are in the app: a folder per task
+// named by its key (GL-18, with GL-18-1 inside it), holding its journal, its
+// decisions and its executor sessions under the names the sessions go by.
 func (api *API) DownloadTaskLogs(w http.ResponseWriter, r *http.Request) {
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
 	company, err := api.q.GetCompany(r.Context(), task.CompanyID)
@@ -624,48 +625,82 @@ func (api *API) DownloadTaskLogs(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
-	paths := filesystem.NewPaths(LoadSettings().BasePath)
-	logDir := paths.TaskLogsDir(company.ShortName, task.RootTaskID)
-	if task.RootTaskID != task.ID {
-		logDir = paths.TaskJournalDir(company.ShortName, task.RootTaskID, task.ID)
-	}
-	var files []string
-	err = filepath.WalkDir(logDir, func(path string, entry os.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return walkErr
-		}
-		if !entry.IsDir() {
-			files = append(files, path)
-		}
-		return nil
-	})
-	if err != nil && !os.IsNotExist(err) {
-		api.respondError(w, http.StatusInternalServerError, "failed to read the task's logs")
+	tree, err := api.q.ListTaskSubtree(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
+	}
+	folder := func(member db.Task) string {
+		if member.RefKey != "" {
+			return member.RefKey
+		}
+		return fmt.Sprintf("task-%d", member.ID)
+	}
+	// Each task's folder sits inside its parent's.
+	byID := make(map[int32]db.Task, len(tree))
+	ids := make([]int32, 0, len(tree))
+	for _, member := range tree {
+		byID[member.ID] = member
+		ids = append(ids, member.ID)
+	}
+	var location func(member db.Task) string
+	location = func(member db.Task) string {
+		if member.ID == task.ID || member.ParentID == nil {
+			return folder(member)
+		}
+		parent, ok := byID[*member.ParentID]
+		if !ok {
+			return folder(member)
+		}
+		return location(parent) + "/" + folder(member)
+	}
+	var runs []db.Run
+	if err := api.db.Select("id", "name").Where("task_id IN ?", ids).Find(&runs).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sessionNames := make(map[string]string, len(runs))
+	for _, run := range runs {
+		if run.Name != "" {
+			sessionNames[fmt.Sprintf("run-%d.jsonl", run.ID)] = run.Name + ".jsonl"
+		}
+	}
+
+	type logFile struct{ path, name string }
+	var files []logFile
+	paths := filesystem.NewPaths(LoadSettings().BasePath)
+	for _, member := range tree {
+		dir := paths.TaskJournalDir(company.ShortName, member.RootTaskID, member.ID)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // a task that never started has no folder
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if session, ok := sessionNames[name]; ok {
+				name = session
+			}
+			files = append(files, logFile{path: filepath.Join(dir, entry.Name()), name: location(member) + "/" + name})
+		}
 	}
 	if len(files) == 0 {
 		api.respondError(w, http.StatusNotFound, "the task has no logs")
 		return
 	}
 
-	name := fmt.Sprintf("task-%d-logs.zip", task.ID)
-	if task.RefKey != "" {
-		name = task.RefKey + "-logs.zip"
-	}
 	w.Header().Set("Content-Type", "application/zip")
-	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", name))
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", folder(task)+"-logs.zip"))
 	zw := zip.NewWriter(w)
 	defer zw.Close()
-	for _, path := range files {
-		rel, err := filepath.Rel(logDir, path)
+	for _, entry := range files {
+		file, err := os.Open(entry.path)
 		if err != nil {
 			return
 		}
-		file, err := os.Open(path)
-		if err != nil {
-			return
-		}
-		writer, err := zw.Create(filepath.ToSlash(rel))
+		writer, err := zw.Create(entry.name)
 		if err != nil {
 			file.Close()
 			return

@@ -392,6 +392,8 @@ func outcome(status, reason string) string {
 		return "failed"
 	case models.TaskResultRunError:
 		return "the executor crashed"
+	case models.TaskResultModelError:
+		return "never ran"
 	case models.TaskResultBudgetExhausted:
 		return "gave up"
 	case models.TaskResultPrerequisiteFailed:

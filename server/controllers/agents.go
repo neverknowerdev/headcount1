@@ -134,13 +134,9 @@ func (api *API) DeleteAgent(w http.ResponseWriter, r *http.Request) {
 func (api *API) ListAgentRuns(w http.ResponseWriter, r *http.Request) {
 	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 	var runs []db.Run
-	if err := api.db.Where("agent_id = ?", agent.ID).Order("started_at desc").Find(&runs).Error; err != nil {
+	if err := runOverview(api.db).Where("agent_id = ?", agent.ID).Order("started_at desc").Find(&runs).Error; err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	out := make([]RunResponse, 0, len(runs))
-	for _, run := range runs {
-		out = append(out, toRunResponse(run))
-	}
-	api.respondJSON(w, http.StatusOK, out)
+	api.respondRuns(w, r, runs)
 }

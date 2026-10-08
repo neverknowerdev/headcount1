@@ -61,6 +61,9 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
         env.E2E_MODE = 'true';
         env.PORT = port;
         env.E2E_HEADCOUNT1_HOME = e2eHome;
+        // A refused model call is retried after a pause. Tests of that path
+        // should not sit through the production wait.
+        env.HEADCOUNT1_MODEL_BACKOFF = env.HEADCOUNT1_MODEL_BACKOFF || '1s';
 
         console.log(`[globalSetup] starting server via ${binary}`);
         const child = spawn(binary, [], {

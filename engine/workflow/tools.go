@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode"
 
 	"agent-orchestrator/db/models"
 )
@@ -47,6 +48,26 @@ type ToolContext struct {
 	Depth int
 	// FailedSubtasks are the IDs retry_tasks may name.
 	FailedSubtasks []int32
+	// QuestionRounds counts the times questions were asked in this phase.
+	QuestionRounds int
+	// Asked are the questions this task has already put to its subtasks.
+	Asked []AskedQuestion
+}
+
+// AskedQuestion is a question already put, and what became of it.
+type AskedQuestion struct {
+	TaskID   int32
+	Question string
+	// Settled: it was answered, or an executor looked and reported that it
+	// cannot be. Asking it again would get the same result.
+	Settled  bool
+	Answered bool
+	// Pending: the subtask answering it has not finished.
+	Pending bool
+}
+
+func (c ToolContext) questionRoundsLeft() bool {
+	return c.QuestionRounds < c.Budgets.MaxQuestionRoundsPerPhase
 }
 
 func (c ToolContext) inspectsLeft() bool {
@@ -88,6 +109,11 @@ func ToolsFor(phase string, c ToolContext) []ToolSpec {
 			continue
 		}
 		if name == ToolRetryTasks && len(c.FailedSubtasks) == 0 {
+			continue
+		}
+		if name == ToolAskQuestions && !c.questionRoundsLeft() {
+			// Enough rounds of questions: decide with what is known, or ask
+			// the human.
 			continue
 		}
 		specs = append(specs, toolSpec(name, c))
@@ -502,6 +528,25 @@ func ParseAction(phase, tool string, arguments json.RawMessage, c ToolContext) (
 			default:
 				return nil, fmt.Errorf("questions[%d].kind must be research or review", i)
 			}
+			for j := 0; j < i; j++ {
+				if sameQuestion(a.Questions[i].Question, a.Questions[j].Question) {
+					return nil, fmt.Errorf("questions[%d] repeats questions[%d]; ask each thing once", i, j)
+				}
+			}
+			for _, asked := range c.Asked {
+				if !asked.Settled && !asked.Pending || !sameQuestion(a.Questions[i].Question, asked.Question) {
+					continue
+				}
+				outcome := "an executor looked into it and reported that it cannot be answered with what is available"
+				switch {
+				case asked.Pending:
+					outcome = "it is still being answered"
+				case asked.Answered:
+					outcome = "it was answered"
+				}
+				return nil, fmt.Errorf("questions[%d] was already asked (task %d) and %s. Do not ask it again: "+
+					"use that result, ask something different, or put it to the human", i, asked.TaskID, outcome)
+			}
 		}
 		return a, validateDecisions(a.Decisions, false)
 	case ToolAskHuman:
@@ -757,4 +802,37 @@ func validatePlannedTasks(tasks []PlannedTask, c ToolContext) error {
 		}
 	}
 	return nil
+}
+
+// sameQuestion reports whether two questions ask the same thing: equal once
+// case, punctuation and spacing are ignored, or sharing most of their words.
+// Models rephrase a question they have asked before far more often than they
+// repeat it letter for letter. In practice rewordings share well over 0.6 of
+// their words and different questions about one task under 0.3, so the line
+// is drawn where neither is close.
+func sameQuestion(a, b string) bool {
+	wordsA, wordsB := questionWords(a), questionWords(b)
+	if len(wordsA) == 0 || len(wordsB) == 0 {
+		return false
+	}
+	shared := 0
+	for word := range wordsA {
+		if wordsB[word] {
+			shared++
+		}
+	}
+	union := len(wordsA) + len(wordsB) - shared
+	return float64(shared)/float64(union) >= sameQuestionOverlap
+}
+
+const sameQuestionOverlap = 0.6
+
+func questionWords(text string) map[string]bool {
+	words := map[string]bool{}
+	for _, word := range strings.FieldsFunc(strings.ToLower(text), func(r rune) bool {
+		return !unicode.IsLetter(r) && !unicode.IsDigit(r)
+	}) {
+		words[word] = true
+	}
+	return words
 }

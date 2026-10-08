@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/classifier"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/secrets"
@@ -94,6 +95,15 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.HasApiKey = p.ApiKeyEncrypted != ""
+	if p.ProviderType == classifier.ProviderType {
+		// A classifier has one use. Connecting one puts it to that use unless
+		// another is already chosen, so adding the key is the whole setup.
+		if slot, err := api.q.GetDefaultModelSetting(r.Context(), uid, db.PurposeClassifier); err == nil && slot.ProviderID == nil {
+			if _, err := api.q.UpdateDefaultModelSetting(r.Context(), uid, db.PurposeClassifier, &p.ID, p.DefaultModel, nil); err == nil {
+				api.engine.NotifyCredentialsChanged()
+			}
+		}
+	}
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -351,6 +361,10 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		}
 
 		clientReq.Header.Set("Content-Type", "application/json")
+		// What every real call carries; a provider that insists on a session
+		// would otherwise fail the test and then work in use.
+		clientReq.Header.Set("User-Agent", aicli.UserAgent)
+		clientReq.Header.Set(aicli.SessionHeader, aicli.SessionID("connection-test/", reqUrl, "/", time.Now().UnixNano()))
 		if isAnthropic {
 			clientReq.Header.Set("x-api-key", apiKey)
 			clientReq.Header.Set("anthropic-version", "2023-06-01")

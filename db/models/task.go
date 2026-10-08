@@ -69,6 +69,9 @@ const (
 	TaskResultBudgetExhausted    = "budget_exhausted"
 	TaskResultPrerequisiteFailed = "prerequisite_failed"
 	TaskResultStopped            = "stopped"
+	// TaskResultModelError: the model that should have done the work could not
+	// be called. The task itself was never attempted.
+	TaskResultModelError = "model_error"
 )
 
 // Verdict of a review task. A review that finds problems still finishes done;

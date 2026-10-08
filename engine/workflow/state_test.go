@@ -2,6 +2,7 @@ package workflow
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,6 +331,24 @@ func TestDirectTaskResolvesItsRun(t *testing.T) {
 		assert.Nil(t, tr.Fields["run_id"])
 		assert.True(t, tr.ReleaseWorkspace)
 	})
+	t.Run("a session whose model could not be called waits before it tries again", func(t *testing.T) {
+		run := &Run{ID: 9, Status: RunFailed, Error: "the model could not be called: missing header", ModelFailure: true}
+		s := waitingOnRun(models.TaskTypeCoding, run).with(func(s *Snapshot) { s.Task.AttemptsUsed = 1 })
+		tr := requireApply(t, Evaluate(s, DefaultBudgets))
+		assert.Equal(t, models.TaskWaitBackoff, tr.Fields["waiting_on"])
+		assert.Equal(t, testNow.Add(DefaultBudgets.SmartBackoff), tr.Fields["wait_until"])
+		assert.NotContains(t, tr.Fields, "status")
+		assert.True(t, tr.ReleaseWorkspace)
+		assert.Equal(t, []string{models.StepRunFinished}, stepKinds(tr))
+	})
+	t.Run("when it still cannot be called the task fails for that reason, not as a crash", func(t *testing.T) {
+		run := &Run{ID: 9, Status: RunFailed, Error: "the model could not be called: missing header", ModelFailure: true}
+		s := waitingOnRun(models.TaskTypeCoding, run).with(func(s *Snapshot) { s.Task.AttemptsUsed = DefaultBudgets.MaxExecutorAttempts })
+		tr := requireApply(t, Evaluate(s, DefaultBudgets))
+		assert.Equal(t, models.TaskStatusFailed, tr.Fields["status"])
+		assert.Equal(t, models.TaskResultModelError, tr.Fields["result_reason"])
+		assert.Equal(t, "the model could not be called: missing header", tr.Fields["result_summary"])
+	})
 	t.Run("a stopped session cancels the task", func(t *testing.T) {
 		tr := requireApply(t, Evaluate(waitingOnRun(models.TaskTypeCoding, &Run{ID: 9, Status: RunCanceled}), DefaultBudgets))
 		assert.Equal(t, models.TaskStatusCanceled, tr.Fields["status"])
@@ -460,6 +479,157 @@ func TestGateHoldsWorkBackUntilTheReviewItDependsOnAccepts(t *testing.T) {
 		tr := requireApply(t, Evaluate(dependent(models.TaskTypeCoding, review(models.TaskVerdictChangesRequested, 0), failed), DefaultBudgets))
 		assert.Equal(t, models.TaskStatusCanceled, tr.Fields["status"])
 		assert.Contains(t, tr.Steps[0].Result, "did not succeed")
+	})
+}
+
+// A subtask that could not run because its model cannot be called is not a
+// result to plan around. The smart model is not asked what to do about it;
+// the work stops and the human is told.
+func TestAModelThatCannotBeCalledStopsTheWorkAndGoesToTheHuman(t *testing.T) {
+	const detail = "the model could not be called: Request is missing x-opencode-session"
+	unreachable := Child{ID: 19, Type: models.TaskTypeResearch, Status: models.TaskStatusFailed, Question: true,
+		ResultReason: models.TaskResultModelError, ResultSummary: detail, OriginStepID: 2}
+	running := Child{ID: 20, Type: models.TaskTypeResearch, Status: models.TaskStatusInProgress, Question: true, OriginStepID: 2}
+	asking := func(phase string, children ...Child) Snapshot {
+		return managedRoot(models.TaskTypeGeneral, phase).with(func(s *Snapshot) {
+			s.Task.WaitingOn = models.TaskWaitSubtasks
+			s.Children = children
+		})
+	}
+
+	t.Run("a root stops what is still running and asks, without leaving its phase", func(t *testing.T) {
+		tr := requireApply(t, Evaluate(asking(models.TaskPhaseRefine, unreachable, running), DefaultBudgets))
+		assert.Equal(t, models.TaskStatusBlocked, tr.Fields["status"])
+		assert.Equal(t, models.TaskWaitHuman, tr.Fields["waiting_on"])
+		assert.Equal(t, detail, tr.Fields["wait_detail"])
+		assert.NotContains(t, tr.Fields, "phase", "it carries on from where it stopped")
+		assert.Equal(t, models.TaskResultStopped, tr.CancelDescendants, "the other subtasks would only fail the same way")
+		assert.Contains(t, tr.AskHuman, "x-opencode-session")
+		assert.Contains(t, tr.AskHuman, "Default Models")
+		assert.Equal(t, []string{models.StepHumanQuestion}, stepKinds(tr))
+	})
+	t.Run("the same in execution: no re-plan is asked for", func(t *testing.T) {
+		work := unreachable
+		work.Question = false
+		tr := requireApply(t, Evaluate(asking(models.TaskPhaseExecute, work), DefaultBudgets))
+		assert.Equal(t, models.TaskWaitHuman, tr.Fields["waiting_on"])
+		assert.NotContains(t, tr.Fields, "phase")
+	})
+	t.Run("a managed subtask passes the problem up as it is", func(t *testing.T) {
+		s := asking(models.TaskPhasePlan, unreachable)
+		s.Task.IsRoot, s.Task.Depth = false, 1
+		tr := requireApply(t, Evaluate(s, DefaultBudgets))
+		assert.Equal(t, models.TaskStatusFailed, tr.Fields["status"])
+		assert.Equal(t, models.TaskResultModelError, tr.Fields["result_reason"])
+		assert.Equal(t, detail, tr.Fields["result_summary"])
+		assert.Empty(t, tr.AskHuman)
+	})
+	t.Run("once the human has replied, the old failure is not raised again", func(t *testing.T) {
+		s := asking(models.TaskPhaseRefine, unreachable)
+		s.SettledStepID = 5
+		tr := requireApply(t, Evaluate(s, DefaultBudgets))
+		assert.Empty(t, tr.AskHuman)
+		assertReady(t, tr)
+		assert.Equal(t, "the question could not be answered", tr.Steps[0].Result)
+	})
+	t.Run("a smart model that cannot be called does the same instead of moving to adjust", func(t *testing.T) {
+		s := managedRoot(models.TaskTypeGeneral, models.TaskPhasePlan).with(func(s *Snapshot) { s.Task.AttemptsUsed = DefaultBudgets.MaxSmartFailures - 1 })
+		tr := ApplyFailure(s, DefaultBudgets, FailureModel, "HTTP 401")
+		assert.Equal(t, models.TaskWaitHuman, tr.Fields["waiting_on"])
+		assert.NotContains(t, tr.Fields, "phase")
+		assert.Contains(t, tr.AskHuman, "could not be called 3 times in a row: HTTP 401")
+		assert.Equal(t, []string{models.StepSmartError, models.StepHumanQuestion}, stepKinds(tr))
+
+		s.Task.IsRoot = false
+		tr = ApplyFailure(s, DefaultBudgets, FailureModel, "HTTP 401")
+		assert.Equal(t, models.TaskResultModelError, tr.Fields["result_reason"], "its parent then stops too, rather than re-planning")
+	})
+}
+
+// What came back from questions is reported as it is: a question nobody could
+// answer is not an answer.
+func TestQuestionsThatWereNotAnsweredAreNotReportedAsAnswers(t *testing.T) {
+	question := func(id int32, status string, origin int64) Child {
+		return Child{ID: id, Type: models.TaskTypeResearch, Status: status, Question: true, OriginStepID: origin,
+			ResultReason: map[string]string{models.TaskStatusFailed: models.TaskResultCannotComplete}[status]}
+	}
+	outcome := func(children ...Child) string {
+		s := managedRoot(models.TaskTypeGeneral, models.TaskPhaseRefine).with(func(s *Snapshot) {
+			s.Task.WaitingOn = models.TaskWaitSubtasks
+			s.Children = children
+		})
+		tr := requireApply(t, Evaluate(s, DefaultBudgets))
+		require.Equal(t, []string{models.StepSubtaskFinished}, stepKinds(tr))
+		return tr.Steps[0].Result
+	}
+	done, failed := models.TaskStatusDone, models.TaskStatusFailed
+	assert.Equal(t, "all 2 questions were answered", outcome(question(3, done, 2), question(4, done, 2)))
+	assert.Equal(t, "1 of 3 questions were answered; 2 could not be", outcome(question(3, done, 2), question(4, failed, 2), question(5, failed, 2)))
+	assert.Equal(t, "none of the 2 questions could be answered", outcome(question(3, failed, 2), question(4, failed, 2)))
+	assert.Equal(t, "the question was answered", outcome(question(3, failed, 2), question(6, done, 9)), "only the questions asked last count")
+}
+
+// A model that keeps sending out the same questions gets nowhere and spends a
+// subtask on each. A question that was settled may not be put again, and the
+// rounds of questions in one phase are limited.
+func TestQuestionsAreNotAskedTwiceOrWithoutEnd(t *testing.T) {
+	asked := func(change func(*Child)) Snapshot {
+		child := Child{ID: 19, Type: models.TaskTypeResearch, Status: models.TaskStatusDone, Question: true, OriginStepID: 2,
+			Instructions: "What does 'launch' mean for this project? (e.g., public release, deployment to production, marketing launch, etc.)\n\nContext:\nClarify the target state."}
+		change(&child)
+		return managedRoot(models.TaskTypeGeneral, models.TaskPhaseRefine).with(func(s *Snapshot) { s.Children = []Child{child} })
+	}
+	ask := func(s Snapshot, questions ...string) error {
+		items := make([]string, 0, len(questions))
+		for _, question := range questions {
+			encoded, _ := json.Marshal(question)
+			items = append(items, `{"question":`+string(encoded)+`}`)
+		}
+		_, err := ParseAction(s.Task.Phase, ToolAskQuestions, json.RawMessage(`{"questions":[`+strings.Join(items, ",")+`]}`), s.ToolContext(DefaultBudgets))
+		return err
+	}
+	reworded := "What does 'launch' mean for this project? (e.g., public release, internal deployment, marketing launch, etc.)"
+
+	t.Run("an answered question, reworded, is refused with what became of it", func(t *testing.T) {
+		err := ask(asked(func(*Child) {}), reworded)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "already asked (task 19) and it was answered")
+	})
+	t.Run("so is one an executor reported it cannot answer", func(t *testing.T) {
+		err := ask(asked(func(c *Child) { c.Status, c.ResultReason = models.TaskStatusFailed, models.TaskResultCannotComplete }), reworded)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "cannot be answered with what is available")
+		assert.Contains(t, err.Error(), "put it to the human")
+	})
+	t.Run("and one that is still being answered", func(t *testing.T) {
+		require.Error(t, ask(asked(func(c *Child) { c.Status = models.TaskStatusInProgress }), reworded))
+	})
+	t.Run("a question whose executor never got to run may be asked again", func(t *testing.T) {
+		for _, reason := range []string{models.TaskResultModelError, models.TaskResultRunError, models.TaskResultStopped} {
+			s := asked(func(c *Child) { c.Status, c.ResultReason = models.TaskStatusFailed, reason })
+			require.NoError(t, ask(s, reworded), reason)
+		}
+	})
+	t.Run("a different question is fine", func(t *testing.T) {
+		require.NoError(t, ask(asked(func(*Child) {}), "Which technology stack does the project use?"))
+	})
+	t.Run("one call may not ask the same thing twice", func(t *testing.T) {
+		err := ask(managedRoot(models.TaskTypeGeneral, models.TaskPhaseRefine), reworded, "What does launch mean for this project (public release, deployment to production, marketing launch, etc)?")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "repeats questions[0]")
+	})
+	t.Run("after the allowed rounds the tool is no longer offered", func(t *testing.T) {
+		names := func(rounds int) []string {
+			s := managedRoot(models.TaskTypeGeneral, models.TaskPhaseRefine).with(func(s *Snapshot) { s.QuestionRounds = rounds })
+			var out []string
+			for _, tool := range ToolsFor(s.Task.Phase, s.ToolContext(DefaultBudgets)) {
+				out = append(out, tool.Name)
+			}
+			return out
+		}
+		assert.Contains(t, names(DefaultBudgets.MaxQuestionRoundsPerPhase-1), ToolAskQuestions)
+		assert.Equal(t, []string{ToolAskHuman, ToolFinishRefinement}, names(DefaultBudgets.MaxQuestionRoundsPerPhase),
+			"what is left is to decide with what is known or to ask the human")
 	})
 }
 

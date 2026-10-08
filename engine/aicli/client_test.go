@@ -34,6 +34,32 @@ func okChatResponse() map[string]any {
 	}
 }
 
+// Some providers refuse a request that does not say which conversation it
+// belongs to, and ask clients not to arrive under an HTTP library's name.
+func TestComplete_SendsTheSessionAndIdentifiesItself(t *testing.T) {
+	var got http.Header
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got = r.Header.Clone()
+		_ = json.NewEncoder(w).Encode(okChatResponse())
+	}))
+	defer srv.Close()
+
+	client := newRetryTestClient(srv)
+	client.SessionID = aicli.SessionID("run/", 7, "/", 1700000000)
+	_, _, err := client.Complete(context.Background(), aicli.ChatRequest{})
+	require.NoError(t, err)
+	assert.Equal(t, client.SessionID, got.Get(aicli.SessionHeader))
+	assert.Equal(t, aicli.UserAgent, got.Get("User-Agent"))
+
+	assert.Equal(t, client.SessionID, aicli.SessionID("run/", 7, "/", 1700000000), "the same conversation always has the same ID")
+	assert.NotEqual(t, client.SessionID, aicli.SessionID("run/", 8, "/", 1700000000))
+
+	client.SessionID = ""
+	_, _, err = client.Complete(context.Background(), aicli.ChatRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, got.Get(aicli.SessionHeader))
+}
+
 func TestComplete_RetriesOn5xxThenSucceeds(t *testing.T) {
 	var calls int32
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -60,12 +60,18 @@ type Options struct {
 	// StaleAfter is how long an executor session may go without a heartbeat
 	// before it is taken for dead.
 	StaleAfter time.Duration
+	// ModelBackoff is the pause after a model could not be called before it
+	// is tried again; it doubles with each further failure in a row.
+	ModelBackoff time.Duration
 }
 
 // Start begins moving tasks: it resumes the executor sessions a planned
 // restart paused, then runs the driver until ctx ends. The driver's first
 // sweep picks up every task the previous process left unfinished.
 func (e *NativeEngine) Start(ctx context.Context, options Options) {
+	if options.ModelBackoff > 0 {
+		e.driver.budgets.SmartBackoff = options.ModelBackoff
+	}
 	if options.SweepInterval > 0 {
 		e.driver.sweepInterval = options.SweepInterval
 	}

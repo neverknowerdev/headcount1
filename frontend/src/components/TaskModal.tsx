@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw, ArrowLeft, MoreHorizontal, Square, Play } from 'lucide-react';
+import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw, ArrowLeft, MoreHorizontal, Square, Play, Download } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -14,10 +14,12 @@ import { useWebSocket, wsUrl } from '../useWebSocket';
 import { PhaseChip, TaskTypeBadge } from './PhaseChip';
 import { TaskJournal } from './TaskJournal';
 import { TaskTree } from './TaskTree';
+import { TaskErrors } from './TaskErrors';
+import type { RunRow } from './RunTree';
 import { UsagePanel } from './UsagePanel';
 import { ProviderOrGroupSelect } from './ProviderOrGroupSelect';
 import { TASK_TYPES, RESULT_REASONS, canStopTask, errorMessage, isTaskRunning, statusLabel } from '../lib/workflow';
-import type { Decision, Task, TaskStep } from '../lib/workflow';
+import type { Decision, Task, TaskErrorReport, TaskStep } from '../lib/workflow';
 import { pairQuestions } from '../utils/questions';
 
 // parseSpecItems decodes a structured acceptance-criteria / test-cases item
@@ -61,7 +63,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [steps, setSteps] = useState<TaskStep[]>([]);
     const [tree, setTree] = useState<Task[]>([]);
     const [decisions, setDecisions] = useState<Decision[]>([]);
-    const [tab, setTab] = useState<'activity' | 'workflow' | 'decisions' | 'usage'>('activity');
+    const [tab, setTab] = useState<'activity' | 'workflow' | 'decisions' | 'errors' | 'usage'>('activity');
+    const [errors, setErrors] = useState<TaskErrorReport | null>(null);
+    // The sessions of every task beneath this one, for the subtask tree.
+    const [treeRuns, setTreeRuns] = useState<RunRow[]>([]);
     const [usageRefresh, setUsageRefresh] = useState(0);
     // One draft per question the workflow asked, so each is answered on its own.
     const [answers, setAnswers] = useState<Record<number, string>>({});
@@ -148,13 +153,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const fetchActivity = useCallback(async () => {
         if (!taskId) return;
         try {
-            const [commentsRes, runsRes, artifactsRes, stepsRes, treeRes, decisionsRes] = await Promise.all([
+            const [commentsRes, runsRes, artifactsRes, stepsRes, treeRes, decisionsRes, errorsRes] = await Promise.all([
                 axios.get(`/api/comments?task_id=${taskId}`),
                 axios.get(`/api/tasks/${taskId}/runs`),
                 axios.get(`/api/tasks/${taskId}/artifacts`),
                 axios.get(`/api/tasks/${taskId}/steps`),
                 axios.get(`/api/tasks/${taskId}/tree`),
                 axios.get(`/api/tasks/${taskId}/decisions?subtree=true`),
+                axios.get(`/api/tasks/${taskId}/errors`),
             ]);
             setComments(commentsRes.data || []);
             setRuns(runsRes.data || []);
@@ -162,11 +168,23 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             setSteps(stepsRes.data || []);
             setTree(treeRes.data || []);
             setDecisions(decisionsRes.data || []);
+            setErrors(errorsRes.data || null);
             setUsageRefresh(n => n + 1);
         } catch (e) {
             console.error(e);
         }
     }, [taskId]);
+
+    // The sessions beneath the task change whenever its tree or its usage does.
+    const companyId = task?.company_id;
+    useEffect(() => {
+        if (!taskId || !companyId) return;
+        let current = true;
+        axios.get(`/api/runs?company_id=${companyId}&subtree_of=${taskId}`)
+            .then(res => { if (current) setTreeRuns(Array.isArray(res.data) ? res.data : []); })
+            .catch(() => {});
+        return () => { current = false; };
+    }, [taskId, companyId, usageRefresh, tree.length]);
 
     useEffect(() => {
         if (!taskId) return;
@@ -261,10 +279,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         if ((msg.type === 'task_updated' || msg.type === 'task_created') && msg.payload.id !== taskId
             && (msg.payload.root_task_id === task?.root_task_id || tree.some(member => member.id === msg.payload.id || member.id === msg.payload.parent_id))) {
             axios.get(`/api/tasks/${taskId}/tree`).then(res => setTree(res.data || [])).catch(() => {});
+            // A subtask that failed or was stopped may have met an error.
+            if (['failed', 'canceled'].includes(msg.payload.status)) {
+                axios.get(`/api/tasks/${taskId}/errors`).then(res => setErrors(res.data || null)).catch(() => {});
+            }
         }
         if (msg.type === 'task_step' && msg.payload.task_id === taskId && msg.payload.step) {
             const step: TaskStep = msg.payload.step;
             setSteps(prev => prev.some(existing => existing.id === step.id) ? prev : [...prev, step]);
+            if (step.kind === 'smart_error' || step.kind === 'run_finished' || step.kind === 'human_question') {
+                axios.get(`/api/tasks/${taskId}/errors`).then(res => setErrors(res.data || null)).catch(() => {});
+            }
             if (step.kind === 'smart_call' || step.kind === 'run_finished') {
                 axios.get(`/api/tasks/${taskId}/decisions?subtree=true`).then(res => setDecisions(res.data || [])).catch(() => {});
                 setUsageRefresh(n => n + 1);
@@ -482,6 +507,14 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             {taskId && (
                 <div className="ml-auto flex shrink-0 items-center gap-2">
                     {actionError && <span className="max-w-xs text-xs text-red-600">{actionError}</span>}
+                    <a
+                        href={`/api/tasks/${taskId}/logs/download`}
+                        data-testid="task-download-logs"
+                        title="Everything recorded for this task and its subtasks: journals, executor sessions and decisions"
+                        className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                        <Download size={14} /> Logs
+                    </a>
                     {canStopTask(task) && (
                         <button type="button" onClick={handleStop} disabled={isStopping} data-testid="task-stop" className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50">
                             <Square size={14} /> {isStopping ? 'Stopping…' : 'Stop'}
@@ -705,6 +738,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     ['activity', 'Activity'],
                                     ['workflow', `Workflow${tree.length > 1 ? ` (${tree.length - 1})` : ''}`],
                                     ['decisions', `Decisions${decisions.length ? ` (${decisions.length})` : ''}`],
+                                    ['errors', `Errors${errors?.total ? ` (${errors.total})` : ''}`],
                                     ['usage', 'Usage'],
                                 ] as const).map(([key, label]) => (
                                     <button
@@ -714,7 +748,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         aria-selected={tab === key}
                                         data-testid={`task-tab-${key}`}
                                         onClick={() => setTab(key)}
-                                        className={`-mb-px border-b-2 pb-2 font-semibold ${tab === key ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                                        className={`-mb-px border-b-2 pb-2 font-semibold ${tab === key ? 'border-indigo-500 text-indigo-600' : key === 'errors' && errors?.total ? 'border-transparent text-red-600 hover:text-red-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
                                     >
                                         {label}
                                     </button>
@@ -725,13 +759,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             <div className="mt-4 space-y-5" data-testid="task-workflow">
                                 <div>
                                     <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Subtasks</h3>
-                                    <TaskTree tasks={tree} companyPath={companyPath} />
+                                    <TaskTree tasks={tree} companyPath={companyPath} runs={treeRuns} />
                                 </div>
                                 <div>
-                                    <div className="mb-2 flex items-center justify-between">
-                                        <h3 className="text-xs font-semibold uppercase tracking-wide text-gray-500">Journal</h3>
-                                        <a href={`/api/tasks/${taskId}/logs/download`} className="text-xs text-indigo-600 hover:underline">⬇ Download logs</a>
-                                    </div>
+                                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Journal</h3>
                                     <TaskJournal taskId={taskId} steps={steps} companyPath={companyPath} />
                                 </div>
                             </div>
@@ -739,6 +770,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         {taskId && tab === 'decisions' && (
                             <div className="mt-4" data-testid="task-decisions">
                                 <TaskTree tasks={tree} companyPath={companyPath} decisions={decisions} />
+                            </div>
+                        )}
+                        {taskId && tab === 'errors' && (
+                            <div className="mt-4" data-testid="task-errors">
+                                <TaskErrors report={errors} companyPath={companyPath} />
                             </div>
                         )}
                         {taskId && tab === 'usage' && task && (

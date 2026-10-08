@@ -6,6 +6,10 @@ import { PhaseChip } from './PhaseChip';
 import { TaskTree } from './TaskTree';
 import { TaskJournal } from './TaskJournal';
 import { UsagePanel } from './UsagePanel';
+import { RunTree } from './RunTree';
+import type { RunTask } from './RunTree';
+import { TaskErrors } from './TaskErrors';
+import { ClassifierNotice } from './ClassifierNotice';
 import type { Decision, Task, TaskStep } from '../lib/workflow';
 
 vi.mock('axios', () => ({ default: { get: vi.fn() } }));
@@ -189,5 +193,130 @@ describe('UsagePanel', () => {
         await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/usage/calls/77'));
         expect(log.textContent).toContain('Executor call · small');
         expect(await within(log).findByText('second answer')).toBeTruthy();
+    });
+});
+
+describe('RunTree', () => {
+    const runTask = (fields: Partial<RunTask>): RunTask => ({
+        id: 1, root_task_id: 18, ref_key: '', title: '', task_type: 'research', status: 'failed', phase: '', waiting_on: '', wait_detail: '', ...fields,
+    });
+    const data = {
+        tasks: [
+            runTask({ id: 19, parent_id: 18, ref_key: 'GL-18-1', title: 'What is the project name?' }),
+            runTask({ id: 18, ref_key: 'GL-18', title: 'Research current project', task_type: 'general', status: 'blocked', phase: 'refine', waiting_on: 'human' }),
+            runTask({ id: 20, parent_id: 18, ref_key: 'GL-18-2', title: 'Which stack is used?', status: 'done' }),
+            runTask({ id: 7, root_task_id: 7, ref_key: 'GL-7', title: 'An older task', status: 'done' }),
+        ],
+        runs: [
+            { id: 68, task_id: 19, name: 'GL-18-1-CEO-1', status: 'failed', started_at: '2026-10-08T19:49:53Z', ended_at: '2026-10-08T19:49:55Z', agent_name: 'CEO' },
+            { id: 74, task_id: 19, name: 'GL-18-1-CEO-2', status: 'failed', attempt: 2, started_at: '2026-10-08T19:49:56Z', ended_at: '2026-10-08T19:49:58Z', agent_name: 'CEO' },
+            { id: 69, task_id: 20, name: 'GL-18-2-CEO-1', status: 'completed', started_at: '2026-10-08T19:49:53Z', ended_at: '2026-10-08T19:50:53Z', agent_name: 'CEO' },
+            { id: 3, task_id: 7, name: 'GL-7-CODER-1', status: 'completed', started_at: '2026-10-01T10:00:00Z', ended_at: '2026-10-01T10:05:00Z', agent_name: 'Coder' },
+        ],
+    };
+    const renderTree = () => render(<MemoryRouter><RunTree data={data} companyPath="/companies/gl" /></MemoryRouter>);
+
+    it('puts sessions under their task and tasks under their parent, the latest tree first', () => {
+        renderTree();
+        const rows = screen.getAllByTestId('run-tree-task');
+        expect(rows.map(row => row.getAttribute('data-depth'))).toEqual(['0', '1', '1', '0']);
+        expect(rows[0].textContent).toContain('GL-18');
+        expect(rows[0].textContent).toContain('Research current project');
+        expect(rows[3].textContent).toContain('GL-7');
+        // The top-level task ran no session itself; its line counts what ran beneath it.
+        expect(within(rows[0]).getAllByTestId('run-tree-tally')[0].textContent).toBe('3 sessions · 2 failed');
+        expect(within(rows[0]).getByTestId('phase-chip').textContent).toContain('waiting for your answer');
+    });
+
+    it('shows a small tree open to its sessions, each a link to its log', () => {
+        renderTree();
+        expect(screen.getByText('GL-18-1-CEO-1').closest('a')?.getAttribute('href')).toBe('/companies/gl/run-logs/68');
+        expect(screen.getByText('attempt 2')).toBeTruthy();
+        fireEvent.click(screen.getByLabelText('Collapse GL-18-1'));
+        expect(screen.queryByText('GL-18-1-CEO-1')).toBeNull();
+        fireEvent.click(screen.getByLabelText('Collapse GL-18'));
+        expect(screen.queryByText('GL-18-1')).toBeNull();
+    });
+
+    it('keeps the subtasks of a large tree closed until asked, with their tallies in view', () => {
+        const tasks = [runTask({ id: 18, ref_key: 'GL-18', title: 'Research current project', status: 'blocked' })];
+        const runs = [];
+        for (let i = 1; i <= 20; i++) {
+            tasks.push(runTask({ id: 100 + i, parent_id: 18, ref_key: `GL-18-${i}`, title: `Question ${i}` }));
+            runs.push({ id: 200 + i, task_id: 100 + i, name: `GL-18-${i}-CEO-1`, status: 'failed' });
+        }
+        render(<MemoryRouter><RunTree data={{ tasks, runs }} companyPath="/companies/gl" /></MemoryRouter>);
+        expect(screen.getAllByTestId('run-tree-task')).toHaveLength(21);
+        expect(screen.queryAllByTestId('run-card')).toHaveLength(0);
+        expect(screen.getAllByTestId('run-tree-tally')[0].textContent).toBe('20 sessions · 20 failed');
+        fireEvent.click(screen.getByLabelText('Expand GL-18-3'));
+        expect(screen.getByText('GL-18-3-CEO-1')).toBeTruthy();
+    });
+
+    it('says so when nothing has run', () => {
+        render(<MemoryRouter><RunTree data={{ runs: [], tasks: [] }} companyPath="/companies/gl" emptyText="Nothing yet." /></MemoryRouter>);
+        expect(screen.getByText('Nothing yet.')).toBeTruthy();
+    });
+});
+
+describe('TaskTree sessions', () => {
+    it('lists each subtask\'s sessions under it', () => {
+        const root = task({ id: 1, title: 'Ship login', ref_key: 'A-1' });
+        const child = task({ id: 2, parent_id: 1, depth: 1, title: 'Implement', ref_key: 'A-1-1', mode: 'direct', status: 'failed' });
+        render(
+            <MemoryRouter>
+                <TaskTree tasks={[root, child]} companyPath="/companies/acme" runs={[
+                    { id: 9, task_id: 2, name: 'A-1-1-CODER-1', status: 'failed' },
+                    { id: 10, task_id: 2, name: 'A-1-1-CODER-2', status: 'completed' },
+                ]} />
+            </MemoryRouter>,
+        );
+        const sessions = screen.getByTestId('tree-task-sessions');
+        expect(sessions.textContent).toBe('Sessions:A-1-1-CODER-1 (failed)A-1-1-CODER-2');
+        expect(within(sessions).getByText('A-1-1-CODER-1 (failed)').getAttribute('href')).toBe('/companies/acme/run-logs/9');
+    });
+});
+
+describe('TaskErrors', () => {
+    it('shows one error once, with how often it came and where', () => {
+        render(
+            <MemoryRouter>
+                <TaskErrors companyPath="/companies/gl" report={{ total: 54, groups: [{
+                    kind: 'model_call', message: 'Request is missing x-opencode-session', count: 54,
+                    first_at: '2026-10-08T19:49:53Z', last_at: '2026-10-08T19:54:26Z',
+                    provider: 'Deepseek V4 Flash', model: 'deepseek-v4-flash', tier: 'cheap', call_id: 501,
+                    tasks: [{ id: 19, ref_key: 'GL-18-1', title: 'What is the project name?' }, { id: 20, ref_key: 'GL-18-2', title: 'Which stack?' }],
+                }] }} />
+            </MemoryRouter>,
+        );
+        expect(screen.getAllByTestId('task-error')).toHaveLength(1);
+        expect(screen.getByTestId('task-error-count').textContent).toBe('54 times');
+        expect(screen.getByTestId('task-error-message').textContent).toBe('Request is missing x-opencode-session');
+        expect(screen.getByText('A model could not be called')).toBeTruthy();
+        expect(screen.getByText('GL-18-1').getAttribute('href')).toBe('/companies/gl/tasks/19');
+        expect(screen.getByTestId('task-error').textContent).toContain('Deepseek V4 Flash · deepseek-v4-flash · cheap tier');
+    });
+
+    it('says so when nothing went wrong', () => {
+        render(<MemoryRouter><TaskErrors companyPath="/companies/gl" report={{ total: 0, groups: [] }} /></MemoryRouter>);
+        expect(screen.getByTestId('task-errors-empty')).toBeTruthy();
+    });
+});
+
+describe('ClassifierNotice', () => {
+    it('warns when no classifier is set and offers what it was given to fix it', async () => {
+        vi.mocked(axios.get).mockResolvedValue({ data: [{ purpose: 'smart', provider_id: 1 }, { purpose: 'classifier', provider_id: null }] } as never);
+        render(<ClassifierNotice><button>Connect TypeSafe (Jev)</button></ClassifierNotice>);
+        const warning = await screen.findByTestId('classifier-warning');
+        expect(warning.textContent).toContain('No classifier is set');
+        expect(warning.textContent).toContain('Tasks still run, on fixed rules');
+        expect(within(warning).getByText('Connect TypeSafe (Jev)')).toBeTruthy();
+    });
+
+    it('is silent once one is chosen', async () => {
+        vi.mocked(axios.get).mockResolvedValue({ data: [{ purpose: 'classifier', provider_id: 4 }] } as never);
+        render(<ClassifierNotice />);
+        await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/default-model-settings'));
+        expect(screen.queryByTestId('classifier-warning')).toBeNull();
     });
 });

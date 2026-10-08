@@ -49,7 +49,7 @@ func (d *workflowDriver) smartStep(ctx context.Context, l *loadedTask, next work
 		_, err := workflow.ParseAction(next.Phase, call.Function.Name, json.RawMessage(call.Function.Arguments), toolContext)
 		return err
 	}
-	result, callErr := callOnce(callCtx, d.newClient, task.CompanyID, l.target, request, validate)
+	result, callErr := callOnce(callCtx, d.newClient, task.CompanyID, taskSession(task), l.target, request, validate)
 	leaseLost := callCtx.Err() != nil && ctx.Err() == nil
 	stopRenewing()
 
@@ -68,10 +68,15 @@ func (d *workflowDriver) smartStep(ctx context.Context, l *loadedTask, next work
 			extras.recordUsage(nil)
 			return nil, extras, fmt.Errorf("smart step interrupted: %w", callErr)
 		}
-		kind := workflow.FailureTransient
+		// A model that answered badly may do better next time; one that
+		// could not be called at all is a different kind of trouble.
+		kind := workflow.FailureModel
 		message := callErr.Error()
-		if errors.Is(callErr, errVaultLocked) {
+		switch {
+		case errors.Is(callErr, errVaultLocked):
 			kind, message = workflow.FailureVaultLocked, vaultLockedDetail
+		case errors.Is(callErr, aicli.ErrNoToolCall):
+			kind = workflow.FailureTransient
 		}
 		return workflow.ApplyFailure(l.snapshot, d.budgets, kind, message), extras, nil
 	}

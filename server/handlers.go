@@ -255,6 +255,7 @@ func (s *Server) Mount(r chi.Router) {
 			r.Get("/steps/{stepID}", api.GetTaskStep)
 			r.Get("/decisions", api.ListTaskDecisions)
 			r.Get("/usage", api.GetTaskUsage)
+			r.Get("/errors", api.ListTaskErrors)
 			r.Get("/logs/download", api.DownloadTaskLogs)
 			r.Get("/artifacts", api.ListTaskArtifacts)
 			r.Get("/artifacts/download", api.DownloadTaskArtifacts)

@@ -494,6 +494,7 @@ func run() error {
 		eng.Start(ctx, engine.Options{
 			SweepInterval: configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", 30*time.Second),
 			StaleAfter:    configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute),
+			ModelBackoff:  configuredDuration("HEADCOUNT1_MODEL_BACKOFF", 0),
 		})
 	}()
 

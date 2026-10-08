@@ -48,6 +48,8 @@ type fakeProvider struct {
 	mu       sync.Mutex
 	scripts  map[string][]scriptedReply
 	requests []aicli.ChatRequest
+	// sessions holds the conversation ID each request arrived with.
+	sessions []string
 	// tokens reported per answered request, so the ledger can be checked
 	// against what the provider says it charged.
 	promptTokens, completionTokens int
@@ -123,6 +125,7 @@ func (p *fakeProvider) serve(w http.ResponseWriter, r *http.Request) {
 	_ = json.Unmarshal(body, &request)
 	p.mu.Lock()
 	p.requests = append(p.requests, request)
+	p.sessions = append(p.sessions, request.Model+" "+r.Header.Get(aicli.SessionHeader))
 	p.inFlight[request.Model]++
 	if p.inFlight[request.Model] > p.peak[request.Model] {
 		p.peak[request.Model] = p.inFlight[request.Model]
@@ -205,7 +208,10 @@ type driverFixture struct {
 	// executor decides how a direct task's session ends. Returning false
 	// leaves the session running, as if it had not finished yet.
 	executor func(task db.Task) (workflow.Report, bool)
-	started  []int32
+	// modelDown, when set, is the provider's refusal every executor session
+	// meets instead of running.
+	modelDown string
+	started   []int32
 }
 
 const oneDecisionArg = `"decisions":[{"title":"t","decision":"d","rationale":"r"}]`
@@ -278,6 +284,12 @@ func (f *driverFixture) newDriver() *workflowDriver {
 	}
 	d.startExecutor = func(task db.Task, run db.Run) {
 		f.started = append(f.started, task.ID)
+		if f.modelDown != "" {
+			require.NoError(f.t, f.database.Model(&db.Run{}).Where("id = ?", run.ID).Updates(map[string]interface{}{
+				"status": "failed", "log_content": modelFailureDetail(fmt.Errorf("turn 0: %w: %s", aicli.ErrModelCall, f.modelDown)), "ended_at": time.Now()}).Error)
+			d.Enqueue(task.ID)
+			return
+		}
 		report, finished := f.executor(task)
 		if !finished {
 			return
@@ -412,6 +424,12 @@ func TestDriverRunsAResearchTaskFromStartToReview(t *testing.T) {
 		assert.Len(t, request.Messages, 2, "request %d is one system and one user message: no history", i)
 		assert.Equal(t, aicli.ToolChoiceRequired, request.ToolChoice)
 		assert.Equal(t, "smart-model", request.Model)
+	}
+	// Every step of the task belongs to one conversation, and says so.
+	require.Len(t, f.provider.sessions, 4)
+	assert.Regexp(t, `^smart-model hc1-[0-9a-f]{32}$`, f.provider.sessions[0])
+	for _, session := range f.provider.sessions {
+		assert.Equal(t, f.provider.sessions[0], session)
 	}
 	assert.Contains(t, f.provider.systemPrompt(0), "You are the CEO agent.")
 	assert.Contains(t, f.provider.systemPrompt(0), "Phase: refinement.")
@@ -852,6 +870,78 @@ func TestDriverAsksTheHumanAndWaitsAcrossARestart(t *testing.T) {
 	assert.Equal(t, plain.ID, *answers[1].CommentID, "the journal records which comment answered")
 }
 
+// What happened on staging: the provider refused every executor call. Each
+// question came back as "not answered", and the smart model asked them all
+// again, round after round. A model that cannot be called is now told to the
+// human after one batch, with nothing asked of the smart model in between.
+func TestDriverStopsAndTellsTheHumanWhenExecutorsCannotCallTheirModel(t *testing.T) {
+	f := newDriverFixture(t)
+	root := f.root(models.TaskTypeGeneral)
+	now := time.Now()
+	f.driver.now = func() time.Time { return now }
+	f.modelDown = "Request is missing x-opencode-session and cannot be routed efficiently"
+	askThree := call(workflow.ToolAskQuestions, `{"questions":[
+		{"question":"What is the project name and its goals?"},
+		{"question":"Which technology stack is used?"},
+		{"question":"What does launch mean here?"}]}`)
+	f.provider.push(askThree)
+
+	f.run(root.ID)
+	questions := f.children(root.ID)
+	require.Len(t, questions, 3)
+	for _, question := range questions {
+		assert.Equal(t, models.TaskWaitBackoff, question.WaitingOn, "a refused call is retried after a pause, not at once")
+		assert.Equal(t, db.TaskStatusInProgress, question.Status)
+	}
+	assert.Equal(t, models.TaskWaitSubtasks, f.task(root.ID).WaitingOn)
+
+	// The pause passes; the first question to try again is refused again.
+	now = now.Add(time.Minute)
+	f.run(questions[0].ID)
+
+	blocked := f.task(root.ID)
+	assert.Equal(t, db.TaskStatusBlocked, blocked.Status)
+	assert.Equal(t, models.TaskWaitHuman, blocked.WaitingOn)
+	assert.Equal(t, models.TaskPhaseRefine, blocked.Phase)
+	assert.Contains(t, blocked.WaitDetail, "x-opencode-session")
+	var asked db.Comment
+	require.NoError(t, f.database.First(&asked, *blocked.WaitRef).Error)
+	assert.Contains(t, asked.Content, "the model could not be called: Request is missing x-opencode-session")
+	assert.Contains(t, asked.Content, "Default Models")
+
+	questions = f.children(root.ID)
+	assert.Equal(t, db.TaskStatusFailed, questions[0].Status)
+	assert.Equal(t, models.TaskResultModelError, questions[0].ResultReason)
+	for _, question := range questions[1:] {
+		assert.Equal(t, db.TaskStatusCanceled, question.Status, "the others were stopped instead of each failing the same way")
+	}
+	assert.Len(t, f.started, 4, "three first attempts and one second attempt; no further sessions")
+	require.Len(t, f.provider.served(), 1, "the smart model was not asked to plan around a model that is down")
+	assert.NotContains(t, kindsOf(f.steps(root.ID)), models.StepSubtaskFinished, "nothing was reported as answered")
+
+	// The human fixes the model and says so. The task carries on in the same
+	// phase, and the questions that never ran may be asked again.
+	f.modelDown = ""
+	f.provider.push(askThree, call(workflow.ToolFinishRefinement, finishRefinementArgs),
+		call(workflow.ToolAskHuman, `{"question":"Shall I go on to the plan?","why":"the test ends here"}`))
+	require.NoError(t, f.database.Create(&db.Comment{TaskID: root.ID, AuthorType: "human", Content: "Fixed the provider, go on.", ReplyToID: &asked.ID}).Error)
+	f.run(root.ID)
+
+	require.Len(t, f.children(root.ID), 6)
+	for _, question := range f.children(root.ID)[3:] {
+		assert.Equal(t, db.TaskStatusDone, question.Status)
+	}
+	assert.Contains(t, f.provider.userPrompt(1), "Fixed the provider, go on.")
+	journal := f.steps(root.ID)
+	var outcomes []string
+	for _, step := range journal {
+		if step.Kind == models.StepSubtaskFinished {
+			outcomes = append(outcomes, step.Result)
+		}
+	}
+	assert.Equal(t, []string{"all 3 questions were answered"}, outcomes)
+}
+
 func TestDriverBacksOffThenEscalatesWhenTheModelKeepsFailing(t *testing.T) {
 	f := newDriverFixture(t)
 	root := f.root(models.TaskTypeResearch)
@@ -884,10 +974,10 @@ func TestDriverBacksOffThenEscalatesWhenTheModelKeepsFailing(t *testing.T) {
 	escalated := f.task(root.ID)
 	assert.Equal(t, db.TaskStatusBlocked, escalated.Status)
 	assert.Equal(t, models.TaskWaitHuman, escalated.WaitingOn)
-	assert.Equal(t, models.TaskPhaseAdjust, escalated.Phase)
+	assert.Equal(t, models.TaskPhaseRefine, escalated.Phase, "a model that cannot be called is not a plan gone wrong")
 	var question db.Comment
 	require.NoError(t, f.database.First(&question, *escalated.WaitRef).Error)
-	assert.Contains(t, question.Content, "failed 3 times in a row")
+	assert.Contains(t, question.Content, "could not be called 3 times in a row")
 
 	totals := f.usage(db.UsageFilter{TaskID: &root.ID})
 	assert.Equal(t, int64(3), totals.Calls)
