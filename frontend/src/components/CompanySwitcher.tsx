@@ -33,16 +33,17 @@ export const CompanySwitcher: React.FC = () => {
     };
 
     return (
-        <div className="w-16 bg-gray-900 flex flex-col items-center py-4 h-full">
-            <div className="flex flex-col items-center space-y-4">
+        <div className="w-12 shrink-0 bg-gray-900 flex flex-col items-center py-3 h-full sm:w-16 sm:py-4">
+            <div className="flex flex-col items-center space-y-3 sm:space-y-4">
                 {companies.map(company => (
                     <button
                         key={company.id}
+                        aria-label={company.name}
                         onClick={() => {
                             setSelectedCompanyId(company.id);
                             navigate(`/companies/${company.short_name}`);
                         }}
-                        className={`w-12 h-12 rounded-full flex items-center justify-center text-white font-bold transition-transform hover:scale-105 ${selectedCompanyId === company.id ? 'ring-4 ring-white ring-opacity-50' : ''}`}
+                        className={`grid size-9 place-items-center rounded-full text-xs font-bold text-white transition-transform hover:scale-105 sm:size-12 sm:text-base ${selectedCompanyId === company.id ? 'ring-4 ring-white ring-opacity-50' : ''}`}
                         style={{ backgroundColor: company.color || '#4f46e5' }}
                         title={company.name}
                     >
@@ -55,7 +56,8 @@ export const CompanySwitcher: React.FC = () => {
                         <div className="w-8 border-t border-gray-700 my-2"></div>
                         <button
                             onClick={() => navigate('/add-company')}
-                            className="w-12 h-12 rounded-full bg-gray-800 text-gray-400 hover:text-white hover:bg-gray-700 flex items-center justify-center transition-colors"
+                            aria-label="Add Workspace"
+                            className="grid size-9 place-items-center rounded-full bg-gray-800 text-gray-400 transition-colors hover:bg-gray-700 hover:text-white sm:size-12"
                             title="Add Workspace"
                         >
                             <Plus size={24} />
@@ -69,7 +71,8 @@ export const CompanySwitcher: React.FC = () => {
                 <div className="relative mt-auto">
                     <button
                         onClick={() => setMenuOpen(o => !o)}
-                        className={`w-12 h-12 rounded-full bg-purple-600 text-white font-bold flex items-center justify-center transition-transform hover:scale-105 ${menuOpen ? 'ring-4 ring-white ring-opacity-50' : ''}`}
+                        aria-label={`Account menu for ${user.email}`}
+                        className={`grid size-9 place-items-center rounded-full bg-purple-600 text-white font-bold transition-transform hover:scale-105 sm:size-12 ${menuOpen ? 'ring-4 ring-white ring-opacity-50' : ''}`}
                         title={user.email}
                     >
                         <User size={22} />
