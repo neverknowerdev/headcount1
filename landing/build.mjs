@@ -2,7 +2,7 @@
 import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 
-const APP_URL = 'https://app.headcount1.io';
+const APP_URL = 'https://app.headcount1.ai';
 const GITHUB_URL = 'https://github.com/neverknowerdev/headcount1';
 const TITLE = 'headcount1 — hire an AI company';
 const DESCRIPTION = 'headcount1 staffs your project with a CEO, a CTO, coders, QA, designers and marketers. They plan, build and verify the work themselves and route every step to the best-value model.';
