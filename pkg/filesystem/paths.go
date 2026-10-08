@@ -90,8 +90,11 @@ func (p Paths) CompanyLogsDir(companyShortName string) string {
 func (p Paths) TaskLogsDir(companyShortName string, rootTaskID int32) string {
 	return filepath.Join(p.CompanyLogsDir(companyShortName), fmt.Sprintf("%d", rootTaskID))
 }
-func (p Paths) RunLogsDir(companyShortName string, rootTaskID, rootRunID int32) string {
-	return filepath.Join(p.TaskLogsDir(companyShortName, rootTaskID), fmt.Sprintf("run-%d", rootRunID))
+
+// TaskJournalDir holds one task's own logs inside its tree's folder: the
+// journal of its workflow steps, its executor sessions and its decisions.
+func (p Paths) TaskJournalDir(companyShortName string, rootTaskID, taskID int32) string {
+	return filepath.Join(p.TaskLogsDir(companyShortName, rootTaskID), fmt.Sprintf("task-%d", taskID))
 }
 
 func (p Paths) SkillsDir() string { return filepath.Join(p.Base, "skills") }

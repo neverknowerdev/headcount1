@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/classifier"
 )
 
 // openCodeZenKnownFree lists OpenCode Zen model IDs known to be free even
@@ -143,6 +144,34 @@ func (genericPresetDiscoverer) FetchModels(ctx context.Context, client *http.Cli
 var presetDiscoverers = map[string]PresetDiscoverer{
 	db.ProviderPresetOpenCodeGo: genericPresetDiscoverer{},
 	db.ProviderPresetMiniMax:    genericPresetDiscoverer{},
+	db.ProviderPresetTypeSafe:   classifierDiscoverer{},
+}
+
+// classifierDiscoverer handles TypeSafe, which is not a chat provider and
+// lists no models: it checks the key with one question and offers the alias
+// of the current classifier model.
+type classifierDiscoverer struct{}
+
+func (classifierDiscoverer) FetchModels(ctx context.Context, client *http.Client, baseURL, apiKey string) ([]string, error) {
+	if apiKey == "" {
+		return nil, errors.New("an API key is required")
+	}
+	if err := CheckClassifier(ctx, client, baseURL, apiKey, classifier.DefaultModel); err != nil {
+		return nil, err
+	}
+	return []string{classifier.DefaultModel}, nil
+}
+
+// CheckClassifier asks a classifier endpoint one trivial question, to find
+// out whether the key and the address work.
+func CheckClassifier(ctx context.Context, client *http.Client, baseURL, apiKey, model string) error {
+	jev := classifier.New(baseURL, apiKey, model)
+	if client != nil {
+		jev.HTTP = client
+	}
+	jev.Backoff = nil
+	_, _, err := jev.Ask(ctx, "The sky is blue.", map[string]classifier.Question{"check": classifier.Noul("Does the text mention a colour?")})
+	return err
 }
 
 // presetDefaultPriority optionally names a preset's preferred default

@@ -98,27 +98,12 @@ type ProxyLogger struct {
 	writeErr      error
 }
 
-func NewProxyLogger(basePath, companyShortName string, taskID int32, runID int32) (*ProxyLogger, error) {
-	return NewProxyLoggerWithHub(basePath, companyShortName, taskID, runID, nil, nil)
-}
-
-func NewProxyLoggerWithHub(basePath, companyShortName string, taskID int32, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
-	logDir := filesystem.NewPaths(basePath).TaskLogsDir(companyShortName, taskID)
-	logFile := filepath.Join(logDir, fmt.Sprintf("run-%d.jsonl", runID))
-	return newProxyLoggerAt(basePath, logDir, logFile, runID, hub, q)
-}
-
-// NewSessionLoggerWithHub creates a logger for an execution session. All
-// sessions of one main run are grouped in a folder named after the root run:
-// logs/{company}/{rootTaskID}/run-{rootRunID}/. The root session logs to
-// main.jsonl; each delegated child session gets its own session-{runID}.jsonl.
-func NewSessionLoggerWithHub(basePath, companyShortName string, rootTaskID, rootRunID, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
-	logDir := filesystem.NewPaths(basePath).RunLogsDir(companyShortName, rootTaskID, rootRunID)
-	fileName := "main.jsonl"
-	if runID != rootRunID {
-		fileName = fmt.Sprintf("session-%d.jsonl", runID)
-	}
-	return newProxyLoggerAt(basePath, logDir, filepath.Join(logDir, fileName), runID, hub, q)
+// NewTaskRunLogger creates the logger of one executor session. Its file
+// lives in the task's own log folder, next to the task's journal and
+// decisions: logs/{company}/{rootTaskID}/task-{taskID}/run-{runID}.jsonl.
+func NewTaskRunLogger(basePath, companyShortName string, rootTaskID, taskID, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
+	logDir := filesystem.NewPaths(basePath).TaskJournalDir(companyShortName, rootTaskID, taskID)
+	return newProxyLoggerAt(basePath, logDir, filepath.Join(logDir, fmt.Sprintf("run-%d.jsonl", runID)), runID, hub, q)
 }
 
 func newProxyLoggerAt(basePath, logDir, logFile string, runID int32, hub interface{ BroadcastEvent(string, interface{}) }, q *db.Queries) (*ProxyLogger, error) {
@@ -324,106 +309,6 @@ func (l *ProxyLogger) LogResponse(model, providerName string, statusCode int, re
 	}))
 }
 
-func (l *ProxyLogger) LogStreamResponse(model, providerName string, content, reasoningContent string, toolCalls []map[string]interface{}, rawBody []byte, usage Usage) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	// Build a structured response from the streaming result
-	respData := map[string]interface{}{}
-	if content != "" {
-		respData["content"] = content
-	}
-	if reasoningContent != "" {
-		respData["reasoning"] = reasoningContent
-	}
-	if len(toolCalls) > 0 {
-		respData["tool_calls"] = toolCalls
-	}
-	if usage.PromptTokens > 0 || usage.CompletionTokens > 0 || usage.TotalTokens > 0 {
-		respData["tokens"] = map[string]int{
-			"prompt":     usage.PromptTokens,
-			"completion": usage.CompletionTokens,
-			"total":      usage.TotalTokens,
-			"reasoning":  usage.ReasoningTokens,
-			"cached":     usage.CachedTokens,
-		}
-	}
-	if len(rawBody) > 0 {
-		// Forward the unmodified provider response (raw SSE stream) so
-		// the original wire traffic stays inspectable (e.g. for providers
-		// that emit things we don't have explicit fields for).
-		respData["raw"] = string(rawBody)
-	}
-	respBytes, _ := json.Marshal(respData)
-	l.logEntry(l.makeEntry("response", string(respBytes), map[string]interface{}{
-		"model":       model,
-		"provider":    providerName,
-		"status_code": 200,
-	}))
-
-	// Also emit a separate tool_call entry for each tool call so they
-	// appear as their own rows in the log viewer (with their own icons
-	// and per-tool token counts).
-	for _, tc := range toolCalls {
-		name, _ := tc["name"].(string)
-		if name == "" {
-			name = "unknown"
-		}
-		argsJSON, _ := json.Marshal(tc["arguments"])
-		inTokens := tokens.EstimateBytes(argsJSON)
-		extra := map[string]interface{}{
-			"tool_name":     name,
-			"input_tokens":  inTokens,
-			"output_tokens": inTokens, // backwards-compat alias used by the UI today
-		}
-		if id, _ := tc["id"].(string); id != "" {
-			extra["tool_call_id"] = id
-		}
-		l.logEntry(l.makeEntry("tool_call", string(argsJSON), extra))
-	}
-
-	// Inject the actual prompt_tokens into the engine's "request" entry. The
-	// engine logs the request BEFORE the LLM is called, so the exact count
-	// is only known after this response comes back. This avoids needing the
-	// rough char-based estimate in the engine.
-	if l.q != nil && usage.PromptTokens > 0 && l.runID > 0 {
-		runID := l.runID
-		tokens := usage.PromptTokens
-		go func() {
-			for i := 0; i < 3; i++ {
-				err := l.q.UpdateLastRequestEntryTokens(context.Background(), runID, tokens)
-				if err == nil {
-					break
-				}
-				fmt.Printf("UpdateLastRequestEntryTokens error (attempt %d): %v\n", i+1, err)
-				time.Sleep(100 * time.Millisecond)
-			}
-		}()
-	}
-
-	// Roll up per-run aggregates.
-	if l.q != nil && l.runID > 0 {
-		runID := l.runID
-		delta := db.RunTokenStats{
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			ReasoningTokens:  usage.ReasoningTokens,
-			ToolInputTokens:  usage.ToolInputTokens,
-			CachedTokens:     usage.CachedTokens,
-		}
-		go func() {
-			for i := 0; i < 3; i++ {
-				err := l.q.AddRunTokenStats(context.Background(), runID, delta)
-				if err == nil {
-					break
-				}
-				fmt.Printf("AddRunTokenStats error (attempt %d): %v\n", i+1, err)
-				time.Sleep(100 * time.Millisecond)
-			}
-		}()
-	}
-}
-
 // LogToolResultsFromRequest walks the OpenAI chat-completions messages
 // array in an LLM request body and emits a tool_response log entry for
 // every role:"tool" message it finds. The AI SDK includes each tool's
@@ -614,107 +499,15 @@ func (l *ProxyLogger) recentToolCalls(n int) []toolCallSnapshot {
 	return out
 }
 
-func (l *ProxyLogger) LogError(model, agentName, providerName string, err error) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.logEntry(l.makeEntry("error", fmt.Sprintf("[%s] %s: %s", agentName, model, err.Error()), map[string]interface{}{
-		"model":      model,
-		"agent_name": agentName,
-		"provider":   providerName,
-	}))
-}
-
-// LogStall records a stream stall: writes to the file, broadcasts a
-// dedicated "run_stalled" WebSocket event (separate from "run_log" so the
-// frontend can react immediately), and persists an error entry.
-func (l *ProxyLogger) LogStall(model, agentName, providerName string, stallDuration time.Duration) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	msg := fmt.Sprintf("LLM stream stalled: no data for %v", stallDuration)
-	l.logEntry(l.makeEntry("error", msg, map[string]interface{}{
-		"model":          model,
-		"agent_name":     agentName,
-		"provider":       providerName,
-		"stall_duration": stallDuration.String(),
-	}))
-
-	if l.hub != nil && l.runID > 0 {
-		l.hub.BroadcastEvent("run_stalled", map[string]interface{}{
-			"run_id":         l.runID,
-			"stall_duration": stallDuration.String(),
-			"message":        msg,
-		})
-	}
-}
-
-// LogSessionStarted records that a delegated child session began. The entry
-// carries the child run id so the Run Log UI can render an expandable nested
-// session block, and the file line points at the child's session log file.
-func (l *ProxyLogger) LogSessionStarted(childRunID, childTaskID int32, agentName, title, logFile string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	content, _ := json.Marshal(map[string]interface{}{
-		"run_id":     childRunID,
-		"task_id":    childTaskID,
-		"agent_name": agentName,
-		"title":      title,
-	})
-	l.logEntry(l.makeEntry("session_started", string(content), map[string]interface{}{
-		"run_id":     childRunID,
-		"task_id":    childTaskID,
-		"agent_name": agentName,
-		"title":      title,
-		"log_file":   logFile,
-	}))
-}
-
-// LogSessionEnded records that a delegated child session finished.
-func (l *ProxyLogger) LogSessionEnded(childRunID int32, status, result string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	content, _ := json.Marshal(map[string]interface{}{
-		"run_id": childRunID,
-		"status": status,
-		"result": result,
-	})
-	l.logEntry(l.makeEntry("session_ended", string(content), map[string]interface{}{
-		"run_id": childRunID,
-		"status": status,
-	}))
-}
-
-// LogModelSwitch records a model-group failover: the request to
-// fromProvider/fromModel failed (or was rate limited) and the router is
-// retrying with toProvider/toModel. Rendered as its own row in the Run Log.
-func (l *ProxyLogger) LogModelSwitch(fromProvider, fromModel, toProvider, toModel, reason string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	msg := fmt.Sprintf("Model switch: %s @ %s → %s @ %s (%s)", fromModel, fromProvider, toModel, toProvider, reason)
-	l.logEntry(l.makeEntry("model_switch", msg, map[string]interface{}{
-		"from_provider": fromProvider,
-		"from_model":    fromModel,
-		"to_provider":   toProvider,
-		"to_model":      toModel,
-		"reason":        reason,
-	}))
-}
-
 // LogOutcome writes the final entry of a run's log: how the session ended.
 // This is the label that makes the JSONL file usable as a training
 // trajectory without joining the DB:
 //   - status: the run's mechanical result (completed / failed / canceled)
-//   - endReason: how the loop terminated — finish_task (agent called the
-//     terminal tool on its own), finish_task_forced (only after the engine's
-//     follow-up nudge), no_finish (ended without ever calling it), max_turns,
-//     error, canceled
-//   - taskStatus: the agent's own verdict passed to finish_task
-//     (done / in-review / blocked), empty if it never called it
-//   - summary: the agent's finish_status one-liner, or the error message
+//   - endReason: how the loop terminated: the executor reported with
+//     finish_work, ended without reporting, hit an error, or was canceled
+//   - taskStatus: the outcome the executor reported (done / failed /
+//     cannot_complete), empty if it never reported
+//   - summary: the summary of its report, or the error message
 //
 // run_id/task_id/agent_name are embedded so each log file is self-describing.
 func (l *ProxyLogger) LogOutcome(status, endReason, taskStatus, agentName string, taskID int32, summary string) {
@@ -741,15 +534,6 @@ func (l *ProxyLogger) LogInfo(msg string) {
 	defer l.mu.Unlock()
 
 	l.logEntry(l.makeEntry("info", msg, nil))
-}
-
-// LogErrorMsg writes a plain error string to the log file and persists an
-// "error" entry. Used by the NativeEngine when there is no model/agent context.
-func (l *ProxyLogger) LogErrorMsg(msg string) {
-	l.mu.Lock()
-	defer l.mu.Unlock()
-
-	l.logEntry(l.makeEntry("error", msg, nil))
 }
 
 // Close drains the persistence queue (so every broadcast entry is also in the

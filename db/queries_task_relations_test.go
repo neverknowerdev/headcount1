@@ -70,8 +70,7 @@ func TestTaskRelationsRejectCyclesAndCrossCompany(t *testing.T) {
 func TestBlockingDependenciesUpdateWithTargetStatus(t *testing.T) {
 	q, _, prerequisite, dependent, _ := relationFixture(t)
 	ctx := context.Background()
-	prerequisite.Status = TaskStatusInProgress
-	_, err := q.UpdateTask(ctx, prerequisite)
+	_, err := q.UpdateTaskFields(ctx, prerequisite.ID, map[string]interface{}{"status": TaskStatusInProgress})
 	require.NoError(t, err)
 	_, err = q.CreateTaskRelation(ctx, TaskRelation{SourceTaskID: dependent.ID, TargetTaskID: prerequisite.ID, Kind: TaskRelationDependsOn})
 	require.NoError(t, err)

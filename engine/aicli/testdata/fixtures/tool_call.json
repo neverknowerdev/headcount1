@@ -16,8 +16,8 @@
                 "id": "call_fixture_001",
                 "type": "function",
                 "function": {
-                  "name": "finish_task",
-                  "arguments": "{\"task_status\":\"in-review\",\"finish_status\":\"Task completed and ready for review\"}"
+                  "name": "finish_work",
+                  "arguments": "{\"status\":\"done\",\"summary\":\"Implemented and verified.\"}"
                 }
               }
             ]
@@ -44,7 +44,7 @@
           "index": 0,
           "message": {
             "role": "assistant",
-            "content": "Task status has been updated to in-review. All done."
+            "content": "The work is reported as done."
           },
           "finish_reason": "stop"
         }

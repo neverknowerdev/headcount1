@@ -1,5 +1,6 @@
 // Package runtokens issues short-lived bearer tokens that authenticate agent
-// runs to the in-process LLM gateway. The gateway's machine routes cannot use
+// runs — and the stateless workflow steps made on a company's behalf — to the
+// in-process LLM gateway. The gateway's machine routes cannot use
 // session cookies (the caller is an agent loop, not a browser), and leaving
 // them open would let anyone who can reach the port spend tenants' stored
 // LLM credentials. Instead the engine mints a token when a run starts and
@@ -26,10 +27,13 @@ type Registry struct {
 	mu     sync.Mutex
 	byHash map[string]int32 // sha256(token) → run ID
 	byRun  map[int32]string // run ID → sha256(token), for revocation
+	// companyByHash holds tokens for model calls that belong to a company but
+	// to no run: the stateless workflow steps. sha256(token) → company ID.
+	companyByHash map[string]int32
 }
 
 func NewRegistry() *Registry {
-	return &Registry{byHash: map[string]int32{}, byRun: map[int32]string{}}
+	return &Registry{byHash: map[string]int32{}, byRun: map[int32]string{}, companyByHash: map[string]int32{}}
 }
 
 // defaultRegistry is shared between the engine (issuer) and the gateway
@@ -78,6 +82,39 @@ func (r *Registry) Revoke(runID int32) {
 		delete(r.byHash, h)
 		delete(r.byRun, runID)
 	}
+}
+
+// IssueCompany mints a token for one model call made on a company's behalf
+// outside any run, and returns it with the function that revokes it. Several
+// may be live for one company at once (parallel steps), so each is revoked
+// individually by its issuer rather than by company.
+func (r *Registry) IssueCompany(companyID int32) (string, func()) {
+	b := make([]byte, 32)
+	if _, err := rand.Read(b); err != nil {
+		return "", func() {}
+	}
+	token := "ct_" + base64.RawURLEncoding.EncodeToString(b)
+	h := hashToken(token)
+	r.mu.Lock()
+	r.companyByHash[h] = companyID
+	r.mu.Unlock()
+	return token, func() {
+		r.mu.Lock()
+		delete(r.companyByHash, h)
+		r.mu.Unlock()
+	}
+}
+
+// ValidateCompany resolves a presented company token to its company ID.
+func (r *Registry) ValidateCompany(token string) (int32, bool) {
+	if token == "" {
+		return 0, false
+	}
+	h := hashToken(token)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	companyID, ok := r.companyByHash[h]
+	return companyID, ok
 }
 
 func hashToken(token string) string {

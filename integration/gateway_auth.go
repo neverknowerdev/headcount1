@@ -10,11 +10,13 @@ import (
 )
 
 // gatewayPrincipal is who authenticated a gateway request: an agent run (via
-// an engine-issued run token) or a logged-in user (via the session cookie).
-// Exactly one field is set.
+// an engine-issued run token), a stateless workflow step acting for a company
+// (via an engine-issued company token), or a logged-in user (via the session
+// cookie). Exactly one field is set.
 type gatewayPrincipal struct {
-	runID  int32
-	userID int32
+	runID     int32
+	companyID int32
+	userID    int32
 }
 
 type principalCtxKey struct{}
@@ -31,11 +33,18 @@ func (g *LLMGateway) SetRunTokenValidator(validate func(token string) (int32, bo
 	g.validateRunToken = validate
 }
 
+// SetCompanyTokenValidator lets the gateway accept engine-issued company
+// tokens: the credential of a stateless workflow step, which belongs to a
+// company but to no run. Wired once from main.go.
+func (g *LLMGateway) SetCompanyTokenValidator(validate func(token string) (int32, bool)) {
+	g.validateCompanyToken = validate
+}
+
 // requireGatewayAuth gates the machine routes. Three outcomes:
 //   - engine-issued run token → run principal; an X-Run-ID header, if present,
 //     must name the same run (a token for run A can't write into run B's log);
 //   - session cookie → user principal; handlers additionally verify the user
-//     may use the addressed provider/agent/group (the URLs are shown in the
+//     may use the addressed group (the URLs are shown in the
 //     UI as OpenAI-compatible endpoints, so same-browser use keeps working);
 //   - neither → 401.
 //
@@ -50,6 +59,18 @@ func (g *LLMGateway) requireGatewayAuth(next http.Handler) http.Handler {
 
 		if token := r.Header.Get(runtokens.TokenHeader); token != "" {
 			runID, ok := g.validateRunToken(token)
+			if !ok && g.validateCompanyToken != nil {
+				if companyID, companyOK := g.validateCompanyToken(token); companyOK {
+					// A step is not a run, so it has no run log to write into.
+					if parseRunID(r) != 0 {
+						http.Error(w, "a company token cannot name a run", http.StatusForbidden)
+						return
+					}
+					ctx := context.WithValue(r.Context(), principalCtxKey{}, gatewayPrincipal{companyID: companyID})
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
+			}
 			if !ok {
 				http.Error(w, "invalid or expired run token", http.StatusUnauthorized)
 				return
@@ -88,7 +109,7 @@ func (g *LLMGateway) requireGatewayAuth(next http.Handler) http.Handler {
 // Every gateway request is bound to a tenant, whether it authenticated with a
 // session cookie (a user) or a run token (an agent run owned by a company). The
 // addressed resource is resolved from a client-supplied, globally-unique id/slug
-// (`X-Provider-ID`, `/proxy/group/{slug}`, `/proxy/agent/{id}`), so it must be
+// (`/proxy/group/{slug}`), so it must be
 // re-checked against the principal's tenant here — an issuer-time check is not
 // enough because the target is chosen by the client at request time. A zero
 // principal (no field set) means enforcement is off (local/test).
@@ -139,39 +160,18 @@ func (g *LLMGateway) userOwnedResourceAllowed(r *http.Request, ownerUserID *int3
 		}
 		company, ok := g.companyOfRun(r.Context(), p.runID)
 		return ok && g.companyGrantsUser(r.Context(), company, *ownerUserID)
+	case p.companyID != 0:
+		// Same rule as a run, with the company named directly by the token.
+		if ownerUserID == nil {
+			return true
+		}
+		company, err := g.q.GetCompany(r.Context(), p.companyID)
+		return err == nil && g.companyGrantsUser(r.Context(), company, *ownerUserID)
 	default:
 		return true // enforcement off
 	}
-}
-
-func (g *LLMGateway) mayUseProvider(r *http.Request, provider db.LLMProvider) bool {
-	// An ownerless, non-builtin provider that still carries a stored credential
-	// is not a genuinely shared resource — the only ownerless providers meant to
-	// be usable across tenants are the builtin catalog entries. Don't let an
-	// arbitrary run spend a stray ownerless key. (Providers created via the API
-	// always carry a UserID, so this only bites legacy/imported rows.)
-	if p := principalFrom(r.Context()); p.runID != 0 &&
-		provider.UserID == nil && !provider.Builtin && provider.ApiKeyEncrypted != "" {
-		return false
-	}
-	return g.userOwnedResourceAllowed(r, provider.UserID)
 }
 
 func (g *LLMGateway) mayUseGroup(r *http.Request, group db.ModelGroup) bool {
 	return g.userOwnedResourceAllowed(r, group.UserID)
-}
-
-func (g *LLMGateway) mayUseAgent(r *http.Request, agent db.Agent) bool {
-	p := principalFrom(r.Context())
-	switch {
-	case p.userID != 0:
-		company, err := g.q.GetCompany(r.Context(), agent.CompanyID)
-		return err == nil && g.companyGrantsUser(r.Context(), company, p.userID)
-	case p.runID != 0:
-		// The addressed agent must belong to the same company as the run.
-		company, ok := g.companyOfRun(r.Context(), p.runID)
-		return ok && company.ID == agent.CompanyID
-	default:
-		return true // enforcement off
-	}
 }

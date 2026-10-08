@@ -57,6 +57,14 @@ func (t *staticCompletionTransport) RoundTrip(*http.Request) (*http.Response, er
 
 // liveCredentials returns (baseURL, apiKey, model) from environment variables
 // used for real-provider recording runs. Returns empty strings when not set.
+// runAgent runs a session from a system prompt and one user message to its
+// end and returns what the model said last.
+func runAgent(agent *aicli.Agent, ctx context.Context, systemPrompt, userMessage string) (string, error) {
+	history := aicli.BuildHistory(systemPrompt, []aicli.Message{{Role: "user", Content: userMessage}})
+	result, _, err := agent.RunWithHistory(ctx, history, nil)
+	return result, err
+}
+
 func liveCredentials() (baseURL, apiKey, model string) {
 	return os.Getenv("TEST_LLM_BASE_URL"),
 		os.Getenv("TEST_LLM_API_KEY"),
@@ -107,7 +115,7 @@ func TestAgentSimpleChat(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "", "What is 2+2?")
+	result, err := runAgent(agent, context.Background(), "", "What is 2+2?")
 	require.NoError(t, err)
 	assert.Equal(t, "4", result)
 }
@@ -118,15 +126,15 @@ func TestAgentToolCall(t *testing.T) {
 	fixturePath := filepath.Join("testdata", "fixtures", "tool_call.json")
 	client := newTestClient(t, fixturePath)
 
-	// Track whether finish_task was called.
+	// Track whether finish_work was called.
 	var finishCalled atomic.Bool
-	var capturedStatus string
+	var captured tools.WorkReport
 
 	reg := aicli.NewRegistry()
-	reg.Register(tools.NewFinishTask(false, func(ctx context.Context, result tools.FinishTaskResult) error {
+	reg.Register(tools.NewWorkReport(false, func(ctx context.Context, report tools.WorkReport) (string, error) {
 		finishCalled.Store(true)
-		capturedStatus = result.Status
-		return nil
+		captured = report
+		return "Report received.", nil
 	}))
 
 	agent := aicli.New(aicli.Config{
@@ -136,12 +144,13 @@ func TestAgentToolCall(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "You are an agent.", "Complete the task and update its status.")
+	result, err := runAgent(agent, context.Background(), "You are an agent.", "Complete the task and update its status.")
 	require.NoError(t, err)
 
-	assert.True(t, finishCalled.Load(), "finish_task should have been called")
-	assert.Equal(t, "in-review", capturedStatus)
-	assert.Contains(t, result, "in-review")
+	assert.True(t, finishCalled.Load(), "finish_work should have been called")
+	assert.Equal(t, "done", captured.Status)
+	assert.Equal(t, "Implemented and verified.", captured.Summary)
+	assert.Contains(t, result, "reported as done")
 }
 
 // TestAgentReadFileTool verifies that the agent can invoke read_file and
@@ -162,7 +171,7 @@ func TestAgentReadFileTool(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "", "Read hello.txt and tell me what it says.")
+	result, err := runAgent(agent, context.Background(), "", "Read hello.txt and tell me what it says.")
 	require.NoError(t, err)
 	assert.Contains(t, result, "hello world")
 }
@@ -250,7 +259,7 @@ func TestAgentPauseSkippedWhenRunFinishing(t *testing.T) {
 // boundary with every callable runtime tool. A single assistant response
 // contains all tool calls; pausing immediately after that response must run
 // none of them. Resuming the JSON-compatible in-memory history must execute
-// each call exactly once, preserve the full prefix, and stop at finish_task
+// each call exactly once, preserve the full prefix, and stop at finish_work
 // without asking the model for a duplicate follow-up turn.
 func TestAgentPauseResumeAtMinimumToolBoundary(t *testing.T) {
 	toolNames := []aicli.ToolName{
@@ -261,15 +270,11 @@ func TestAgentPauseResumeAtMinimumToolBoundary(t *testing.T) {
 		aicli.ToolGrep,
 		aicli.ToolWebFetch,
 		aicli.ToolBrowserUse,
-		aicli.ToolFinishTask,
+		aicli.ToolFinishWork,
+		aicli.ToolCheckpoint,
 		aicli.ToolWriteArtifact,
 		aicli.ToolListArtifacts,
 		aicli.ToolReadArtifact,
-		aicli.ToolCreateSubtask,
-		aicli.ToolAskTaskOwner,
-		aicli.ToolCreateTask,
-		aicli.ToolAskHuman,
-		aicli.ToolReportStatus,
 		aicli.ToolCallMCP,
 		aicli.ToolDiscoverMCP,
 	}
@@ -314,7 +319,7 @@ func TestAgentPauseResumeAtMinimumToolBoundary(t *testing.T) {
 		Registry:      reg,
 		ProviderName:  "test-provider",
 		AgentName:     "test-agent",
-		TerminalTools: []string{string(aicli.ToolFinishTask)},
+		TerminalTools: []string{string(aicli.ToolFinishWork)},
 	})
 
 	initial := aicli.BuildHistory("system prompt", []aicli.Message{{Role: "user", Content: "exercise every tool"}})
@@ -372,7 +377,7 @@ func TestAgentRetryOn429(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "", "What is 2+2?")
+	result, err := runAgent(agent, context.Background(), "", "What is 2+2?")
 	require.NoError(t, err)
 	assert.Equal(t, "4", result)
 }
@@ -544,7 +549,7 @@ func TestAgentWriteFileTool(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "", "Write 'task completed' to result.txt.")
+	result, err := runAgent(agent, context.Background(), "", "Write 'task completed' to result.txt.")
 	require.NoError(t, err)
 	assert.Contains(t, result, "result.txt")
 
@@ -615,7 +620,7 @@ func TestAgentWithLiveProvider(t *testing.T) {
 		AgentName:    "test-agent",
 	})
 
-	result, err := agent.Run(context.Background(), "", "Reply with just the number 42, nothing else.")
+	result, err := runAgent(agent, context.Background(), "", "Reply with just the number 42, nothing else.")
 	require.NoError(t, err)
 	t.Logf("Live provider response: %q", result)
 	assert.True(t, strings.Contains(result, "42"), "expected response to contain 42, got: %s", result)

@@ -53,3 +53,43 @@ func TestTokensAreDistinctAcrossRuns(t *testing.T) {
 		t.Fatal("token b must map to run 2")
 	}
 }
+
+func TestCompanyTokensValidateAndRevokeIndividually(t *testing.T) {
+	r := NewRegistry()
+	first, revokeFirst := r.IssueCompany(4)
+	second, revokeSecond := r.IssueCompany(4)
+	if !strings.HasPrefix(first, "ct_") || first == second {
+		t.Fatalf("company tokens must be distinct ct_ tokens, got %q and %q", first, second)
+	}
+	for _, token := range []string{first, second} {
+		if companyID, ok := r.ValidateCompany(token); !ok || companyID != 4 {
+			t.Fatalf("company token must validate to its company, got %d, %v", companyID, ok)
+		}
+	}
+
+	revokeFirst()
+	if _, ok := r.ValidateCompany(first); ok {
+		t.Fatal("revoked company token must not validate")
+	}
+	if _, ok := r.ValidateCompany(second); !ok {
+		t.Fatal("revoking one company token must leave the company's other tokens valid")
+	}
+	revokeSecond()
+	if _, ok := r.ValidateCompany(second); ok {
+		t.Fatal("revoked company token must not validate")
+	}
+}
+
+func TestRunAndCompanyTokensAreNotInterchangeable(t *testing.T) {
+	r := NewRegistry()
+	runToken := r.Issue(9)
+	companyToken, revoke := r.IssueCompany(9)
+	defer revoke()
+
+	if _, ok := r.ValidateCompany(runToken); ok {
+		t.Fatal("a run token must not validate as a company token")
+	}
+	if _, ok := r.Validate(companyToken); ok {
+		t.Fatal("a company token must not validate as a run token")
+	}
+}

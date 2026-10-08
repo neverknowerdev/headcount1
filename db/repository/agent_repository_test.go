@@ -21,13 +21,11 @@ func TestEnsureBuiltinAgentsForCompany_IsCompleteAndIdempotent(t *testing.T) {
 
 	company := db.Company{Name: "Acme"}
 	require.NoError(t, database.Create(&company).Error)
-	provider := db.LLMProvider{Name: "Test", BaseUrl: "https://example.test", DefaultModel: "test-model", ApiKeyEncrypted: ""}
-	require.NoError(t, database.Create(&provider).Error)
 	q := db.New(database)
 	defaults := agentdefaults.Rows(company.ID)
 	require.Len(t, defaults, 13)
-	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults, &provider.ID, "test-model"))
-	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults, &provider.ID, "test-model"))
+	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults))
+	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults))
 
 	agents, err := q.ListAgentsByCompany(context.Background(), company.ID)
 	require.NoError(t, err)
@@ -35,19 +33,18 @@ func TestEnsureBuiltinAgentsForCompany_IsCompleteAndIdempotent(t *testing.T) {
 	for _, agent := range agents {
 		assert.True(t, agent.Builtin, agent.Name)
 		assert.True(t, agent.Enabled, agent.Name)
-		assert.Equal(t, provider.ID, *agent.ProviderID, agent.Name)
-		assert.NotEmpty(t, agent.SystemPrompt, agent.Name)
+		assert.Equal(t, "You are the "+agent.Name+" agent.", agent.SystemPrompt)
 	}
-	require.NoError(t, database.Model(&db.Agent{}).Where("company_id = ? AND role_key = ?", company.ID, "CEO").Update("enabled", false).Error)
-	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults, &provider.ID, "test-model"))
-	var restoredCEO db.Agent
-	require.NoError(t, database.Where("company_id = ? AND role_key = ?", company.ID, "CEO").First(&restoredCEO).Error)
-	assert.True(t, restoredCEO.Enabled, "existing built-ins are re-enabled when catalog seeding runs")
 
-	var coder db.Agent
-	require.NoError(t, database.Where("role_key = ?", "Coder").First(&coder).Error)
-	assert.Contains(t, coder.Permissions, "browser_use")
-	assert.NotContains(t, coder.Permissions, "write\\\":\\\"deny")
+	// A company's own additions to a built-in role survive later seeding, and a
+	// built-in that was switched off is switched back on.
+	require.NoError(t, database.Model(&db.Agent{}).Where("company_id = ? AND role_key = ?", company.ID, "CEO").
+		Updates(map[string]interface{}{"enabled": false, "system_prompt": "You are the CEO agent. We sell boats."}).Error)
+	require.NoError(t, q.EnsureBuiltinAgentsForCompany(context.Background(), company.ID, defaults))
+	var ceo db.Agent
+	require.NoError(t, database.Where("company_id = ? AND role_key = ?", company.ID, "CEO").First(&ceo).Error)
+	assert.True(t, ceo.Enabled, "existing built-ins are re-enabled when catalog seeding runs")
+	assert.Equal(t, "You are the CEO agent. We sell boats.", ceo.SystemPrompt)
 }
 
 func TestDeleteAgentRepositoryRemovesOnlyRequestedRow(t *testing.T) {

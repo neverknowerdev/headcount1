@@ -39,6 +39,9 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		AuthorID   *int32 `json:"author_id"`
 		Content    string `json:"content"`
 		RunAgent   bool   `json:"run_agent"`
+		// ReplyToID names the question this comment answers, when a task asked
+		// more than one.
+		ReplyToID *int32 `json:"reply_to_id"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
@@ -49,11 +52,25 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "task not found")
 		return
 	}
+	if req.ReplyToID != nil {
+		// A reply must answer a question asked in this task's own tree.
+		question, err := api.q.GetComment(r.Context(), *req.ReplyToID)
+		if err != nil || question.CommentType != "ask_user" {
+			api.respondError(w, http.StatusNotFound, "question not found")
+			return
+		}
+		asked, err := api.q.GetTask(r.Context(), question.TaskID)
+		if err != nil || asked.RootTaskID != authTask.RootTaskID {
+			api.respondError(w, http.StatusNotFound, "question not found")
+			return
+		}
+	}
 	p := db.Comment{
 		TaskID:     req.TaskID,
 		AuthorType: req.AuthorType,
 		Content:    req.Content,
 		AuthorID:   req.AuthorID,
+		ReplyToID:  req.ReplyToID,
 	}
 
 	comment, err := api.q.CreateComment(r.Context(), p)
@@ -63,18 +80,11 @@ func (api *API) CreateComment(w http.ResponseWriter, r *http.Request) {
 	}
 	api.hub.BroadcastEventForCompany(authTask.CompanyID, "comment_created", comment)
 	if req.AuthorType == "human" {
-		// Human replies are a control-plane signal, not a new manual run. The
-		// native engine correlates the reply with the durable ask_user comment,
-		// unblocks the task, resumes gated sessions, and wakes the orchestrator.
-		if handler, ok := api.engine.(interface {
-			HandleHumanReply(context.Context, int32) error
-		}); ok {
-			if err := handler.HandleHumanReply(r.Context(), req.TaskID); err != nil {
-				// The comment is already durable. Do not turn a successful human
-				// reply into a 500 (which invites duplicate answers); the waiting
-				// session/watchdog can retry the idempotent control-plane transition.
-				log.Printf("human reply transition pending for task %d: %v", req.TaskID, err)
-			}
+		// The comment may answer a question a task in this tree is waiting on.
+		// It is already stored, so a failure here is not the request's: the
+		// workflow looks for the answer again on its own.
+		if err := api.engine.HandleHumanReply(r.Context(), req.TaskID); err != nil {
+			log.Printf("human reply not yet picked up for task %d: %v", req.TaskID, err)
 		}
 	}
 

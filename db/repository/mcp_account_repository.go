@@ -174,9 +174,6 @@ func (q *MCPAccountRepository) UpdateMCPAccount(ctx context.Context, a MCPAccoun
 }
 func (q *MCPAccountRepository) DeleteMCPAccount(ctx context.Context, id int32) error {
 	return q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
-		if err := tx.Where("mcp_account_id = ?", id).Delete(&AgentMCPAccount{}).Error; err != nil {
-			return err
-		}
 		if err := tx.Where("mcp_account_id = ?", id).Delete(&GitHubConnection{}).Error; err != nil {
 			return err
 		}
@@ -195,10 +192,5 @@ func (q *MCPAccountRepository) ListMCPAccountsForServer(ctx context.Context, ser
 	for i := range accounts {
 		accounts[i].HasToken = accounts[i].AuthTokenEncrypted != ""
 	}
-	return accounts, err
-}
-func (q *MCPAccountRepository) ListMCPAccountsForAgent(ctx context.Context, agentID int32) ([]MCPAccount, error) {
-	var accounts []MCPAccount
-	err := q.db.WithContext(ctx).Joins("JOIN agent_mcp_accounts ON agent_mcp_accounts.mcp_account_id = mcp_accounts.id").Where("agent_mcp_accounts.agent_id = ? AND agent_mcp_accounts.enabled = ?", agentID, true).Find(&accounts).Error
 	return accounts, err
 }

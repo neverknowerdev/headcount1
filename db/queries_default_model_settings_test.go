@@ -11,11 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured verifies both
-// known purposes get an unconfigured row on first call (falling back to the
-// calling session's own LLM), and that a second call never overwrites a
-// purpose a user has since configured.
-func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) {
+// TestEnsureDefaultModelSettings_SeedsEverySlotUnconfigured verifies every
+// model slot gets an unconfigured row on first call, and that a second call
+// never overwrites a slot a user has since configured.
+func TestEnsureDefaultModelSettings_SeedsEverySlotUnconfigured(t *testing.T) {
 	database := setupModelGroupTestDB(t)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 	q := db.New(database)
@@ -27,7 +26,7 @@ func TestEnsureDefaultModelSettings_SeedsBothPurposesUnconfigured(t *testing.T) 
 
 	require.NoError(t, q.EnsureDefaultModelSettingsForUser(ctx, uid))
 
-	for _, purpose := range []string{db.PurposeCommitMessages, db.PurposeTaskOrchestrator, db.PurposeHelperWorker} {
+	for _, purpose := range []string{db.PurposeSmart, db.PurposeCheap, db.PurposeClassifier, db.PurposeCommitMessages} {
 		s, err := q.GetDefaultModelSetting(ctx, uid, purpose)
 		require.NoError(t, err, "purpose %q should exist", purpose)
 		assert.Nil(t, s.ProviderID)

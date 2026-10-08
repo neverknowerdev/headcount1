@@ -32,14 +32,17 @@ import (
 //	    tasks/{id}/attachments.json
 //	    tasks/{id}/artifacts.json
 //	    tasks/{id}/runs/{runID}.json
+//	    tasks/{id}/steps.json
+//	    tasks/{id}/decisions.json
+//	    usage.json
 //
 // IDs are exported verbatim and preserved on restore (restore wipes the
 // tables first), so cross-entity references and on-disk paths that embed
 // IDs (logs/{company}/{taskID}/..., uploads/{taskID}/...) stay valid.
 //
 // Deliberately not exported: provider_presets (reseeded at startup),
-// model_request_stats and proxy_request_logs (high-volume request
-// telemetry), run_log_entries-style derived data (rebuilt from JSONL logs).
+// model_request_stats (high-volume request telemetry), run_log_entries-style
+// derived data (rebuilt from JSONL logs).
 
 type row = map[string]interface{}
 
@@ -113,9 +116,6 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 		{"default_model_settings", "default-model-settings.json"},
 		{"mcp_servers", "mcp-servers.json"},
 		{"mcp_accounts", "mcp-accounts.json"},
-		{"agent_mcp_servers", "agent-mcp-servers.json"},
-		{"agent_mcp_accounts", "agent-mcp-accounts.json"},
-		{"agent_mcp_tool_filters", "agent-mcp-tool-filters.json"},
 		{"activity_logs", "activity-logs.json"},
 	}
 	for _, g := range globals {
@@ -134,7 +134,7 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 
 	// Pre-read company-scoped and task-scoped tables, then group in memory.
 	byCompany := map[string]map[int64][]row{} // table -> companyID -> rows
-	for _, table := range []string{"agents", "sprints", "skills", "projects", "tasks"} {
+	for _, table := range []string{"agents", "sprints", "skills", "projects", "tasks", "llm_calls"} {
 		rows, err := readTable(database, table)
 		if err != nil {
 			log.Printf("Warning: backup: failed to read table %s: %v", table, err)
@@ -148,7 +148,7 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 		byCompany[table] = grouped
 	}
 	byTask := map[string]map[int64][]row{} // table -> taskID -> rows
-	for _, table := range []string{"comments", "attachments", "artifacts", "runs"} {
+	for _, table := range []string{"comments", "attachments", "artifacts", "runs", "task_steps", "decisions"} {
 		rows, err := readTable(database, table)
 		if err != nil {
 			log.Printf("Warning: backup: failed to read table %s: %v", table, err)
@@ -181,6 +181,9 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 		if skills := byCompany["skills"][cid]; len(skills) > 0 {
 			write(path.Join(dir, "skills.json"), marshalRows(skills))
 		}
+		if calls := byCompany["llm_calls"][cid]; len(calls) > 0 {
+			write(path.Join(dir, "usage.json"), marshalRows(calls))
+		}
 		for _, p := range byCompany["projects"][cid] {
 			projName, _ := p["name"].(string)
 			if projName == "" {
@@ -203,6 +206,12 @@ func exportEntities(tw *tar.Writer, database *gorm.DB) (int, error) {
 			}
 			for _, r := range byTask["runs"][tid] {
 				write(path.Join(taskDir, "runs", fmt.Sprintf("%d.json", toID(r))), marshalRow(r))
+			}
+			if rows := byTask["task_steps"][tid]; len(rows) > 0 {
+				write(path.Join(taskDir, "steps.json"), marshalRows(rows))
+			}
+			if rows := byTask["decisions"][tid]; len(rows) > 0 {
+				write(path.Join(taskDir, "decisions.json"), marshalRows(rows))
 			}
 		}
 	}

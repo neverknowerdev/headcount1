@@ -116,16 +116,11 @@ func TestPostgresQuerySurface(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, int64(2), counts["search_code"], "ON CONFLICT increment must accumulate")
 
-	// ── Codegraph assignments + tool filters (raw INSERT with bool=false) ──
-	require.NoError(t, q.SetAgentMCPToolFilters(ctx, agent.ID, []db.AgentMCPToolFilter{
-		{AgentID: agent.ID, MCPServerID: srv.ID, ToolName: "search_code", Enabled: false},
-	}), "SetAgentMCPToolFilters")
-	filters, err := q.GetAgentMCPToolFilters(ctx, agent.ID)
+	// ── Run report: a plain column update on the session row ──────────────
+	require.NoError(t, q.UpdateRunReport(ctx, run.ID, `{"status":"done","summary":"ok"}`, "ok", ""))
+	reported, err := q.GetRun(ctx, run.ID)
 	require.NoError(t, err)
-	require.Equal(t, false, filters[srv.ID]["search_code"], "Enabled=false must persist")
-
-	// ── Run key uniqueness query (LIKE with a suffix wildcard) ────────────
-	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "working", 1))
+	require.Contains(t, reported.Report, `"status":"done"`)
 
 	_ = user
 }

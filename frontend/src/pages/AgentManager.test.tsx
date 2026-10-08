@@ -1,5 +1,5 @@
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { MemoryRouter } from 'react-router-dom';
 import axios from 'axios';
 import { AgentManager } from './AgentManager';
@@ -14,18 +14,20 @@ vi.mock('axios', () => ({
     },
 }));
 
-const coderTemplate = {
+const coder = {
+    id: 8,
     name: 'Coder',
-    canonical_name: 'Coder',
-    slug: 'CODER',
+    role_key: 'Coder',
+    short_name: 'CODER',
+    builtin: true,
+    enabled: true,
     description: 'Implements code.',
-    prompt: 'Implement the approved specification.',
-    best_models: ['openai/gpt-5-codex', 'anthropic/claude-sonnet-4'],
-    allowed_tools: ['read', 'write'],
-    permissions: '{"browser_use":"deny"}',
+    system_prompt: 'You are the Coder agent.',
 };
 
-describe('AgentManager templates', () => {
+describe('AgentManager', () => {
+    afterEach(cleanup);
+
     beforeEach(() => {
         vi.clearAllMocks();
         useStore.setState({
@@ -33,14 +35,11 @@ describe('AgentManager templates', () => {
             companies: [],
             selectedCompanyId: 42,
         });
-        vi.mocked(axios.get).mockImplementation(async (url: string) => {
-            if (url === '/api/agent-configs') return { data: [coderTemplate] } as never;
-            return { data: [] } as never;
-        });
+        vi.mocked(axios.get).mockResolvedValue({ data: [] } as never);
         vi.mocked(axios.post).mockResolvedValue({ data: { id: 7 } } as never);
     });
 
-    it('copies a selected template prompt and tool settings into the create form', async () => {
+    it('creates a custom agent as a role with a one-line prompt', async () => {
         render(
             <MemoryRouter initialEntries={['/companies/acme/agents']}>
                 <AgentManager />
@@ -48,38 +47,39 @@ describe('AgentManager templates', () => {
         );
 
         fireEvent.click(await screen.findByRole('button', { name: '+ Add agent' }));
-        const templateSelect = await screen.findByTestId('agent-template');
-        fireEvent.change(templateSelect, { target: { value: 'Coder' } });
-
-        expect((screen.getByLabelText('System prompt') as HTMLTextAreaElement).value).toBe(coderTemplate.prompt);
-        expect(screen.getByText('Copied the template prompt and 2 tool settings. You can edit the prompt below.')).toBeTruthy();
-
-        fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Implementation assistant' } });
+        // An agent is a role: no template, model, tool or MCP choices.
+        expect(screen.queryByTestId('agent-template')).toBeNull();
+        fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Boat expert' } });
         fireEvent.click(screen.getByRole('button', { name: 'Create agent' }));
 
         await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/agents', {
             company_id: 42,
-            name: 'Implementation assistant',
+            name: 'Boat expert',
             description: '',
-            system_prompt: coderTemplate.prompt,
-            permissions: coderTemplate.permissions,
+            system_prompt: 'You are the Boat expert agent.',
         }));
     });
 
-    it('shows built-in agents compactly and expands their identity and tools without enable controls', async () => {
+    it('keeps the prompt a person wrote for a custom agent', async () => {
+        render(
+            <MemoryRouter initialEntries={['/companies/acme/agents']}>
+                <AgentManager />
+            </MemoryRouter>,
+        );
+
+        fireEvent.click(await screen.findByRole('button', { name: '+ Add agent' }));
+        fireEvent.change(screen.getByLabelText(/Name/), { target: { value: 'Boat expert' } });
+        fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'You know everything about boats.' } });
+        fireEvent.click(screen.getByRole('button', { name: 'Create agent' }));
+
+        await waitFor(() => expect(axios.post).toHaveBeenCalledWith('/api/agents', expect.objectContaining({
+            system_prompt: 'You know everything about boats.',
+        })));
+    });
+
+    it('shows built-in roles compactly and expands to their prompt, without enable controls or tool lists', async () => {
         vi.mocked(axios.get).mockImplementation(async (url: string) => {
-            if (url === '/api/agent-configs') return { data: [coderTemplate] } as never;
-            if (url === '/api/agents?company_id=42') return { data: [{
-                id: 8,
-                name: 'Coder',
-                role_key: 'Coder',
-                short_name: 'CODER',
-                builtin: true,
-                enabled: true,
-                model: 'openrouter/free',
-                description: 'Implements code.',
-                system_prompt: 'Implement the approved specification.',
-            }] } as never;
+            if (url === '/api/agents?company_id=42') return { data: [coder] } as never;
             return { data: [] } as never;
         });
 
@@ -90,34 +90,21 @@ describe('AgentManager templates', () => {
         );
 
         expect(await screen.findByTestId('builtin-agent-8')).toBeTruthy();
-        expect(screen.queryByText('Implement the approved specification.')).toBeNull();
+        expect(screen.queryByText('You are the Coder agent.')).toBeNull();
         fireEvent.click(screen.getByRole('button', { name: 'Expand Coder' }));
 
-        expect(screen.getByText('Canonical system name')).toBeTruthy();
-        expect(screen.getByText('CODER')).toBeTruthy();
-        expect(screen.getByText('read')).toBeTruthy();
-        expect(screen.getByText('write')).toBeTruthy();
-        expect(screen.queryByText('openai/gpt-5-codex')).toBeNull();
-        expect(screen.queryByText('Built-in', { exact: true })).toBeNull();
-        expect(screen.queryByText('openrouter/free', { exact: true })).toBeNull();
+        expect(screen.getByText('You are the Coder agent.')).toBeTruthy();
+        expect(screen.queryByText('Available tools')).toBeNull();
         expect(screen.getByText('Always enabled')).toBeTruthy();
         expect(screen.queryByRole('switch', { name: /Coder/ })).toBeNull();
-        expect(screen.getByRole('button', { name: 'Open edit page →' })).toBeTruthy();
+        expect(screen.getByRole('button', { name: 'Edit prompt, see usage →' })).toBeTruthy();
     });
 
     it('deletes a custom agent but does not render a delete action for built-ins', async () => {
         vi.mocked(axios.get).mockImplementation(async (url: string) => {
-            if (url === '/api/agent-configs') return { data: [coderTemplate] } as never;
             if (url === '/api/agents?company_id=42') return { data: [
-                {
-                    id: 8, name: 'Coder', role_key: 'Coder', short_name: 'CODER', builtin: true,
-                    enabled: true, model: 'openrouter/free', description: 'Implements code.',
-                    system_prompt: 'Implement the approved specification.',
-                },
-                {
-                    id: 9, name: 'Research helper', builtin: false, enabled: true,
-                    model: 'custom-model', system_prompt: 'Research carefully.',
-                },
+                coder,
+                { id: 9, name: 'Research helper', builtin: false, enabled: true, system_prompt: 'Research carefully.' },
             ] } as never;
             return { data: [] } as never;
         });

@@ -27,8 +27,7 @@ func (q *ArtifactRepository) GetArtifact(ctx context.Context, id int32) (Artifac
 }
 
 // ListArtifactsByTaskTree returns the artifacts of a task and all its
-// subtasks, so orchestrator sessions see everything their delegations
-// produced.
+// subtasks: every session in a task tree sees what the others produced.
 func (q *ArtifactRepository) ListArtifactsByTaskTree(ctx context.Context, taskID int32) ([]Artifact, error) {
 	// Walk the whole subtree level by level: delegation can nest (e.g.
 	// CEO → CTO → Coder), and artifacts are shared across the full tree.

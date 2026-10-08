@@ -80,10 +80,6 @@ func (q *TaskRelationRepository) DeleteTaskRelation(ctx context.Context, relatio
 	return q.db.WithContext(ctx).Delete(&TaskRelation{}, relationID).Error
 }
 
-func (q *TaskRelationRepository) DeleteTaskRelationsForTask(ctx context.Context, taskID int32) error {
-	return q.db.WithContext(ctx).Where("source_task_id = ? OR target_task_id = ?", taskID, taskID).Delete(&TaskRelation{}).Error
-}
-
 func (q *TaskRelationRepository) GetTaskRelation(ctx context.Context, relationID int32) (TaskRelation, error) {
 	var relation TaskRelation
 	err := q.db.WithContext(ctx).First(&relation, relationID).Error
@@ -113,17 +109,6 @@ func (q *TaskRelationRepository) ListDependentTasks(ctx context.Context, prerequ
 		Joins("JOIN task_relations tr ON tr.source_task_id = tasks.id").
 		Where("tr.target_task_id = ? AND tr.kind = ?", prerequisiteTaskID, TaskRelationDependsOn).
 		Order("tasks.id asc").Find(&tasks).Error
-	return tasks, err
-}
-
-// ListQueuedTasksForReconciliation returns tasks which were explicitly queued
-// but do not currently have an active run. It is used at boot to recover a
-// crash window between a status commit and launching the next task.
-func (q *TaskRelationRepository) ListQueuedTasksForReconciliation(ctx context.Context) ([]Task, error) {
-	var tasks []Task
-	err := q.db.WithContext(ctx).
-		Where("status IN ? AND run_id IS NULL", []string{TaskStatusTodo, TaskStatusInProgress, TaskStatusDependsOnTask}).
-		Order("id asc").Find(&tasks).Error
 	return tasks, err
 }
 

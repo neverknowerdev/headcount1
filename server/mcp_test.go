@@ -40,23 +40,7 @@ func setupMCPRouter(t *testing.T, database *gorm.DB) chi.Router {
 		r.Put("/", api.UpdateMCPServer)
 		r.Delete("/", api.DeleteMCPServer)
 	})
-	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
-		r.Use(api.LoadAgent)
-		r.Get("/", api.GetAgentMCPServers)
-		r.Put("/", api.SetAgentMCPServers)
-	})
 	return withTestUser(t, database, r)
-}
-
-func seedMCPTestCompany(t *testing.T, database *gorm.DB) db.Company {
-	t.Helper()
-	q := db.New(database)
-	c, err := q.CreateCompany(context.Background(), "Test Co")
-	require.NoError(t, err)
-	// Owned by the fixture user so authorize* checks pass.
-	uid := testSeedUserID(t, q)
-	require.NoError(t, database.Model(&c).Update("user_id", uid).Error)
-	return c
 }
 
 func TestMCPServerCRUD(t *testing.T) {
@@ -138,45 +122,6 @@ func TestMCPServer_CannotDeleteBuiltin(t *testing.T) {
 	w := httptest.NewRecorder()
 	r.ServeHTTP(w, req)
 	assert.Equal(t, http.StatusForbidden, w.Code)
-}
-
-func TestAgentMCPAssignments(t *testing.T) {
-	database := setupMCPTestDB(t)
-	r := setupMCPRouter(t, database)
-	company := seedMCPTestCompany(t, database)
-
-	// Create MCP server (global, no company).
-	q := db.New(database)
-	srv, err := q.CreateMCPServer(context.Background(), db.MCPServer{
-		Name: "test", Transport: "http", URL: "http://localhost", Enabled: true,
-	})
-	require.NoError(t, err)
-
-	// Create agent.
-	agent, err := q.CreateAgent(context.Background(), db.Agent{
-		CompanyID: company.ID, Name: "TestAgent", SystemPrompt: "...",
-	})
-	require.NoError(t, err)
-
-	// Assign MCP server to agent.
-	assignments := []db.AgentMCPServer{{MCPServerID: srv.ID, Enabled: true}}
-	payload, _ := json.Marshal(assignments)
-	req := httptest.NewRequest(http.MethodPut, fmt.Sprintf("/agents/%d/mcp-servers", agent.ID), bytes.NewReader(payload))
-	req.Header.Set("Content-Type", "application/json")
-	w := httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-
-	// List assignments.
-	req = httptest.NewRequest(http.MethodGet, fmt.Sprintf("/agents/%d/mcp-servers", agent.ID), nil)
-	w = httptest.NewRecorder()
-	r.ServeHTTP(w, req)
-	assert.Equal(t, http.StatusOK, w.Code)
-	var result []db.AgentMCPServer
-	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &result))
-	assert.Len(t, result, 1)
-	assert.Equal(t, srv.ID, result[0].MCPServerID)
-	assert.True(t, result[0].Enabled)
 }
 
 func TestMCPServer_CreateRequiresNameAndTransport(t *testing.T) {

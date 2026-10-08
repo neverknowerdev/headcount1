@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/classifier"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
@@ -310,6 +311,24 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 
 	url := strings.TrimSpace(baseUrl)
+
+	// A classifier endpoint speaks neither chat format: it is tested with a
+	// question of its own kind.
+	if providerType == classifier.ProviderType || strings.Contains(strings.ToLower(url), "typesafe.ai") {
+		model := strings.TrimSpace(req.Model)
+		if model == "" {
+			model = classifier.DefaultModel
+		}
+		if err := llmdiscovery.CheckClassifier(r.Context(), &http.Client{Timeout: 20 * time.Second}, url, apiKey, model); err != nil {
+			api.respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "log": err.Error()})
+			return
+		}
+		api.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "ok", "provider_type": classifier.ProviderType, "url": url,
+			"model": model, "log": "The classifier answered a test question.",
+		})
+		return
+	}
 
 	// Helper to make request
 	makeRequest := func(reqUrl string, isAnthropic bool, model string) (int, string, string, error) {

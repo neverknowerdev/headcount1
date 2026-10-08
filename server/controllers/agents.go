@@ -2,72 +2,11 @@ package endpoints
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/engine/agentconfig"
-	"agent-orchestrator/engine/aicli"
 )
-
-func defaultCanUseWorkers(roleKey, name string) bool {
-	for _, cfg := range agentconfig.BuiltinConfigs() {
-		if agentconfig.RoleMatches(roleKey, name, cfg.Name) {
-			return cfg.CanUseWorkers
-		}
-	}
-	return false
-}
-
-func normalizeAllowedMCPs(raw string) (string, error) {
-	raw = strings.TrimSpace(raw)
-	if raw == "" {
-		return "", nil // empty means all enabled MCPs
-	}
-	var names []string
-	if err := json.Unmarshal([]byte(raw), &names); err != nil {
-		return "", fmt.Errorf("allowed_mcps must be a JSON array of server names")
-	}
-	seen := make(map[string]struct{}, len(names))
-	for i, name := range names {
-		name = strings.TrimSpace(name)
-		if name == "" {
-			return "", fmt.Errorf("allowed_mcps[%d] must not be empty", i)
-		}
-		if _, ok := seen[name]; ok {
-			return "", fmt.Errorf("allowed_mcps contains duplicate server %q", name)
-		}
-		seen[name] = struct{}{}
-		names[i] = name
-	}
-	encoded, err := json.Marshal(names)
-	if err != nil {
-		return "", err
-	}
-	return string(encoded), nil
-}
-
-// authorizeAgentBindings verifies the provider and model group an agent is
-// bound to belong to the caller. Providers/groups are per-user and keyed by
-// sequential int32, and secrets.Decrypt routes by the owner embedded in the
-// ciphertext — so without this check an agent could point at another tenant's
-// provider_id and spend their API key. Nil bindings are fine (agent falls back
-// to the owner's default models).
-func (api *API) authorizeAgentBindings(r *http.Request, providerID, modelGroupID *int32) error {
-	if providerID != nil {
-		if _, err := api.authorizeProvider(r, *providerID); err != nil {
-			return err
-		}
-	}
-	if modelGroupID != nil {
-		if _, err := api.authorizeModelGroup(r, *modelGroupID); err != nil {
-			return err
-		}
-	}
-	return nil
-}
 
 func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 	compID, err := strconv.Atoi(r.URL.Query().Get("company_id"))
@@ -87,214 +26,86 @@ func (api *API) ListAgents(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, agents)
 }
 
-// GetToolNames returns the canonical native tool names used by the custom
-// agent permissions UI. Keeping the list server-owned prevents frontend and
-// runtime tool names from drifting apart.
-func (api *API) GetToolNames(w http.ResponseWriter, _ *http.Request) {
-	api.respondJSON(w, http.StatusOK, aicli.ConfigurableToolNames())
-}
-
 func (api *API) GetAgent(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, api.agentFromCtx(r)) // loaded + authorized by LoadAgent
 }
 
+// UpdateAgent edits an agent's role. A built-in agent keeps its identity and
+// stays enabled; its description and prompt are the company's to change.
 func (api *API) UpdateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		Name              string  `json:"name"`
-		RoleKey           string  `json:"role_key"`
-		ShortName         string  `json:"short_name"`
-		Description       string  `json:"description"`
-		SystemPrompt      string  `json:"system_prompt"`
-		Model             string  `json:"model"`
-		ChatType          string  `json:"chat_type"`
-		ReasoningLevel    string  `json:"reasoning_level"`
-		AllowedMCPs       string  `json:"allowed_mcps"`
-		Permissions       string  `json:"permissions"`
-		WorkerPermissions *string `json:"worker_permissions"`
-		WorkerAllowedMCPs *string `json:"worker_allowed_mcps"`
-		CanUseWorkers     *bool   `json:"can_use_workers"`
-		Enabled           *bool   `json:"enabled"`
-		ProviderID        *int32  `json:"provider_id"`
-		ModelGroupID      *int32  `json:"model_group_id"`
+		Name         string `json:"name"`
+		RoleKey      string `json:"role_key"`
+		ShortName    string `json:"short_name"`
+		Description  string `json:"description"`
+		SystemPrompt string `json:"system_prompt"`
+		Enabled      *bool  `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
 		return
 	}
-	allowedMCPs, err := normalizeAllowedMCPs(req.AllowedMCPs)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
 
 	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
 	if agent.Builtin {
-		// Built-in identity stays protected, while prompt and tool settings can be
-		// customized per company. Built-in roles are always available.
 		if req.Description != "" {
 			agent.Description = req.Description
 		}
-		if req.SystemPrompt != "" {
-			agent.SystemPrompt = req.SystemPrompt
-		}
-		if req.AllowedMCPs != "" {
-			agent.AllowedMCPs = allowedMCPs
-		}
-		if req.Permissions != "" {
-			agent.Permissions = req.Permissions
-		}
-		if req.CanUseWorkers != nil {
-			agent.CanUseWorkers = *req.CanUseWorkers
-		}
-		if req.WorkerPermissions != nil {
-			agent.WorkerPermissions = *req.WorkerPermissions
-		}
-		if req.WorkerAllowedMCPs != nil {
-			agent.WorkerAllowedMCPs = *req.WorkerAllowedMCPs
-		}
 		agent.Enabled = true
-		updated, err := api.q.UpdateAgent(r.Context(), agent)
-		if err != nil {
-			api.respondError(w, http.StatusInternalServerError, err.Error())
-			return
+	} else {
+		if req.Name != "" {
+			agent.Name = req.Name
 		}
-		api.respondJSON(w, http.StatusOK, updated)
-		return
+		if req.RoleKey != "" {
+			agent.RoleKey = req.RoleKey
+		}
+		if req.ShortName != "" {
+			agent.ShortName = req.ShortName
+		}
+		agent.Description = req.Description
+		if req.Enabled != nil {
+			agent.Enabled = *req.Enabled
+		}
 	}
-
-	if req.Name != "" {
-		agent.Name = req.Name
-	}
-	if req.RoleKey != "" {
-		agent.RoleKey = req.RoleKey
-	}
-	if req.ShortName != "" {
-		agent.ShortName = req.ShortName
-	}
-	agent.Description = req.Description
 	if req.SystemPrompt != "" {
 		agent.SystemPrompt = req.SystemPrompt
 	}
-	if req.Model != "" {
-		agent.Model = req.Model
-	}
-	if req.ChatType != "" {
-		agent.ChatType = req.ChatType
-	}
-	if req.ReasoningLevel != "" {
-		agent.ReasoningLevel = req.ReasoningLevel
-	}
-	agent.AllowedMCPs = allowedMCPs
-	if req.Permissions != "" {
-		agent.Permissions = req.Permissions
-	}
-	if req.WorkerPermissions != nil {
-		agent.WorkerPermissions = *req.WorkerPermissions
-	}
-	if req.WorkerAllowedMCPs != nil {
-		agent.WorkerAllowedMCPs = *req.WorkerAllowedMCPs
-	}
-	if req.Enabled != nil {
-		agent.Enabled = *req.Enabled
-	}
-	if req.CanUseWorkers != nil {
-		agent.CanUseWorkers = *req.CanUseWorkers
-	}
-	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
-		api.respondError(w, http.StatusNotFound, "provider or model group not found")
-		return
-	}
-	agent.ProviderID = req.ProviderID
-	agent.ModelGroupID = req.ModelGroupID
 
 	updated, err := api.q.UpdateAgent(r.Context(), agent)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-
 	api.respondJSON(w, http.StatusOK, updated)
-}
-
-func (api *API) GetAgentStats(w http.ResponseWriter, r *http.Request) {
-	agent := api.agentFromCtx(r) // loaded + authorized by LoadAgent
-
-	var stats struct {
-		TotalRequests    int `json:"total_requests"`
-		TotalTokens      int `json:"total_tokens"`
-		PromptTokens     int `json:"prompt_tokens"`
-		CompletionTokens int `json:"completion_tokens"`
-	}
-
-	api.db.Model(&db.ProxyRequestLog{}).
-		Where("agent_id = ?", agent.ID).
-		Select("count(*) as total_requests, sum(total_tokens) as total_tokens, sum(prompt_tokens) as prompt_tokens, sum(completion_tokens) as completion_tokens").
-		Scan(&stats)
-
-	api.respondJSON(w, http.StatusOK, stats)
 }
 
 func (api *API) CreateAgent(w http.ResponseWriter, r *http.Request) {
 	var req struct {
-		CompanyID         int32  `json:"company_id"`
-		Name              string `json:"name"`
-		RoleKey           string `json:"role_key"`
-		ShortName         string `json:"short_name"`
-		Description       string `json:"description"`
-		SystemPrompt      string `json:"system_prompt"`
-		Model             string `json:"model"`
-		ChatType          string `json:"chat_type"`
-		ReasoningLevel    string `json:"reasoning_level"`
-		AllowedMCPs       string `json:"allowed_mcps"`
-		Permissions       string `json:"permissions"`
-		WorkerPermissions string `json:"worker_permissions"`
-		WorkerAllowedMCPs string `json:"worker_allowed_mcps"`
-		CanUseWorkers     *bool  `json:"can_use_workers"`
-		Enabled           *bool  `json:"enabled"`
-		ProviderID        *int32 `json:"provider_id"`
-		ModelGroupID      *int32 `json:"model_group_id"`
+		CompanyID    int32  `json:"company_id"`
+		Name         string `json:"name"`
+		RoleKey      string `json:"role_key"`
+		ShortName    string `json:"short_name"`
+		Description  string `json:"description"`
+		SystemPrompt string `json:"system_prompt"`
+		Enabled      *bool  `json:"enabled"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
-		return
-	}
-	allowedMCPs, err := normalizeAllowedMCPs(req.AllowedMCPs)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if _, err := api.authorizeCompany(r, req.CompanyID); err != nil {
 		api.respondError(w, http.StatusNotFound, "company not found")
 		return
 	}
-	if err := api.authorizeAgentBindings(r, req.ProviderID, req.ModelGroupID); err != nil {
-		api.respondError(w, http.StatusNotFound, "provider or model group not found")
-		return
-	}
-	p := db.Agent{
-		CompanyID:         req.CompanyID,
-		Name:              req.Name,
-		RoleKey:           req.RoleKey,
-		ShortName:         req.ShortName,
-		SystemPrompt:      req.SystemPrompt,
-		Description:       req.Description,
-		Model:             req.Model,
-		ChatType:          req.ChatType,
-		ReasoningLevel:    req.ReasoningLevel,
-		AllowedMCPs:       allowedMCPs,
-		Permissions:       req.Permissions,
-		WorkerPermissions: req.WorkerPermissions,
-		WorkerAllowedMCPs: req.WorkerAllowedMCPs,
-		CanUseWorkers:     defaultCanUseWorkers(req.RoleKey, req.Name),
-		ProviderID:        req.ProviderID,
-		ModelGroupID:      req.ModelGroupID,
-		Enabled:           req.Enabled == nil || *req.Enabled,
-	}
-	if req.CanUseWorkers != nil {
-		p.CanUseWorkers = *req.CanUseWorkers
-	}
-
-	agent, err := api.q.CreateAgent(r.Context(), p)
+	agent, err := api.q.CreateAgent(r.Context(), db.Agent{
+		CompanyID:    req.CompanyID,
+		Name:         req.Name,
+		RoleKey:      req.RoleKey,
+		ShortName:    req.ShortName,
+		SystemPrompt: req.SystemPrompt,
+		Description:  req.Description,
+		Enabled:      req.Enabled == nil || *req.Enabled,
+	})
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return

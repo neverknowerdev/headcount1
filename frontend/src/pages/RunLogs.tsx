@@ -1,9 +1,8 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
 import { useStore } from '../store';
 import { TokenStatsBar } from '../components/RunLogViewer';
-import { buildAgentStats } from '../utils/runStats';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { getRunAgentName } from '../utils/runDisplay';
 
@@ -81,14 +80,6 @@ export const RunLogs: React.FC = () => {
                 return;
             }
             setRuns((prev) => prev.map(r => r.id === runId ? { ...r, status } : r));
-        } else if (msg.type === 'run_status') {
-            const runId = msg.payload.run_id;
-            const status = msg.payload.status;
-            if (!runs.some(r => r.id === runId)) {
-                fetchRuns();
-                return;
-            }
-            setRuns((prev) => prev.map(r => r.id === runId ? { ...r, latest_reported_status: status } : r));
         }
     }, {
         enabled: !!selectedCompanyId,
@@ -97,50 +88,27 @@ export const RunLogs: React.FC = () => {
         onConnect: fetchRuns,
     });
 
-    // Grouping is derived once per runs update rather than per-row during
-    // render: childrenByParent feeds the "sessions" list and count badge,
-    // descendantsByRoot feeds the whole-tree per-agent token breakdown.
-    const { rootRuns, childrenByParent, descendantsByRoot } = useMemo(() => {
-        const childrenByParent = new Map<number, any[]>();
-        const descendantsByRoot = new Map<number, any[]>();
-        runs.forEach((r: any) => {
-            if (r.parent_run_id) {
-                if (!childrenByParent.has(r.parent_run_id)) childrenByParent.set(r.parent_run_id, []);
-                childrenByParent.get(r.parent_run_id)!.push(r);
-            }
-            const rootId = r.root_run_id || r.id;
-            if (!descendantsByRoot.has(rootId)) descendantsByRoot.set(rootId, []);
-            descendantsByRoot.get(rootId)!.push(r);
-        });
-        const rootRuns = runs.filter((r: any) => !r.parent_run_id);
-        return { rootRuns, childrenByParent, descendantsByRoot };
-    }, [runs]);
-
     return (
         <div className="h-full flex flex-col">
-            <h1 className="text-2xl font-bold mb-6">Run Logs</h1>
+            <div className="mb-6">
+                <h1 className="text-2xl font-bold">Run Logs</h1>
+                <p className="text-sm text-gray-500">Executor sessions: the cheap-model runs that do a task's work. A task's decisions are in its own journal.</p>
+            </div>
             <div className="flex-1 bg-white p-6 rounded-lg shadow border overflow-y-auto">
                 {runs.length === 0 ? (
                     <div className="text-gray-500 italic flex items-center justify-center h-full font-mono text-sm">
-                        {loading ? 'Loading runs…' : 'No agent runs recorded yet...'}
+                        {loading ? 'Loading runs…' : 'No executor sessions recorded yet...'}
                     </div>
                 ) : (
                     <div className="space-y-3">
-                        {rootRuns.map((r: any) => {
+                        {runs.map((r: any) => {
                             const ts = r.token_stats || {};
                             const total = ts.total_tokens || 0;
-                            const children = childrenByParent.get(r.id) || [];
-                            const descendants = (descendantsByRoot.get(r.id) || []).filter((d: any) => d.id !== r.id);
-                            const agentStats = descendants.length > 0 ? buildAgentStats(r, descendants) : undefined;
-                            const isOrchestrator = r.task?.orchestrator_run_id === r.id || (r.parent_run_id == null && String(r.name || '').endsWith('-orchestrator'));
                             return (
-                            <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="root-run-card">
+                            <details key={r.id} className="bg-gray-50 border rounded-lg overflow-hidden text-sm" data-testid="run-card">
                                 <summary className="px-4 py-3 font-semibold cursor-pointer text-indigo-700 flex justify-between items-center gap-2 flex-wrap hover:bg-gray-100">
                                     <span>
-                                        {isOrchestrator ? 'Task Orchestrator' : `Run ${r.name || `#${r.id}`}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'}{r.title ? ` · ${r.title}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
-                                        {children.length > 0 && (
-                                            <span className="ml-2 text-xs bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full">{children.length} session{children.length > 1 ? 's' : ''}</span>
-                                        )}
+                                        {r.name || `#${r.id}`} for Task {r.task?.ref_key || `#${r.task_id}`} by {getRunAgentName(r) || '—'}{r.title ? ` · ${r.title}` : ''} ({r.status}) - {(() => { const d = new Date(r.started_at); return d.getFullYear() > 1 ? d.toLocaleString() : (r.ended_at ? new Date(r.ended_at).toLocaleString() : '...'); })()}
                                     </span>
                                     <div className="flex items-center gap-2">
                                         {total > 0 && (
@@ -160,12 +128,9 @@ export const RunLogs: React.FC = () => {
                                     <div className="grid grid-cols-2 sm:grid-cols-4 gap-3">
                                         <InfoItem label="Status" value={<span className="capitalize">{r.status}</span>} />
                                         <InfoItem label="Agent" value={getRunAgentName(r) || '—'} />
-                                        {r.title && <InfoItem label="Session purpose" value={r.title} />}
+                                        <InfoItem label="Task" value={<Link to={`/companies/${shortName}/tasks/${r.task_id}`} className="text-indigo-600 hover:underline">{r.task?.title || `#${r.task_id}`}</Link>} />
                                         <InfoItem label="Started" value={formatDateTime(r.started_at)} />
                                         <InfoItem label="Duration" value={formatDuration(r.started_at, r.ended_at)} />
-                                        {r.latest_reported_status && (
-                                            <InfoItem className="col-span-2 sm:col-span-4" label="Current Activity" value={<span className="text-violet-700">{r.latest_reported_status}</span>} />
-                                        )}
                                     </div>
 
                                     {r.result_description && (
@@ -178,26 +143,7 @@ export const RunLogs: React.FC = () => {
                                     {total > 0 && (
                                         <div>
                                             <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Token Usage</p>
-                                            <TokenStatsBar stats={r.token_stats} messages={[]} agentStats={agentStats} />
-                                        </div>
-                                    )}
-
-                                    {children.length > 0 && (
-                                        <div>
-                                            <p className="text-[11px] uppercase tracking-wide text-gray-400 mb-1">Sessions ({children.length})</p>
-                                            <div className="flex flex-col gap-1">
-                                                {children.map((c: any) => (
-                                                    <Link
-                                                        key={c.id}
-                                                        to={`/companies/${shortName}/run-logs/${c.id}`}
-                                                        data-testid="child-session-link"
-                                                        className="text-xs bg-white border rounded px-2 py-1 hover:bg-gray-100 flex items-center justify-between gap-2"
-                                                    >
-                                                        <span className="truncate">{c.name || `#${c.id}`} {getRunAgentName(c) ? `· ${getRunAgentName(c)}` : ''}</span>
-                                                        <span className="text-gray-500 capitalize shrink-0">{c.status}</span>
-                                                    </Link>
-                                                ))}
-                                            </div>
+                                            <TokenStatsBar stats={r.token_stats} messages={[]} />
                                         </div>
                                     )}
 

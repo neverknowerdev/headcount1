@@ -8,17 +8,13 @@ import { Plus, Settings, LockKeyhole, ArrowUpRight, Link2 } from 'lucide-react';
 import { TaskModal } from '../components/TaskModal';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { useCoalescedCallback } from '../utils/useCoalescedCallback';
+import { PhaseChip, TaskTypeBadge } from '../components/PhaseChip';
+import { errorMessage, statusLabel } from '../lib/workflow';
 
 const STATUSES = ['backlog', 'to-do', 'in-progress', 'blocked', 'depends-on-task', 'in-review', 'done'];
-const STATUS_LABELS: Record<string, string> = {
-    backlog: 'Backlog',
-    'to-do': 'To Do',
-    'in-progress': 'In Progress',
-    blocked: 'Blocked',
-    'depends-on-task': 'Depends on Task',
-    'in-review': 'In Review',
-    done: 'Done',
-};
+// The columns a person may drop a task into. The others say what the workflow
+// is doing with a task and only the workflow moves a task there.
+const HUMAN_STATUSES = ['backlog', 'to-do', 'in-review', 'done'];
 
 interface Task {
     id: number;
@@ -26,6 +22,11 @@ interface Task {
     description: string;
     status: string;
     priority: string;
+    task_type: string;
+    phase: string;
+    waiting_on: string;
+    wait_detail: string;
+    result_reason?: string;
     ref_key?: string;
     parent_id?: number | null;
     relation_summary?: {
@@ -59,6 +60,7 @@ export const ProjectBoard: React.FC = () => {
 
   const [tasks, setTasks] = useState<Task[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [moveError, setMoveError] = useState('');
 
   const fetchFiltersData = useCallback(async () => {
     if (!selectedCompanyId) return;
@@ -119,20 +121,25 @@ export const ProjectBoard: React.FC = () => {
     onConnect: fetchTasks,
   });
 
+  // Moving a card asks the workflow for the move: "to do" starts or reruns the
+  // task, the others place a task that is at rest. A task that is running
+  // refuses, and the card goes back.
   const updateTaskStatus = async (id: number, status: string) => {
+    setMoveError('');
     try {
       await axios.put(`/api/tasks/${id}`, { status });
     } catch (e) {
       console.error(e);
-      fetchTasks(); // rollback on error
+      setMoveError(errorMessage(e, 'The task could not be moved.'));
     }
+    fetchTasks();
   };
 
   const onDragEnd = (result: DropResult) => {
       if (!result.destination) return;
 
       const { source, destination, draggableId } = result;
-      if (destination.droppableId === 'depends-on-task') return;
+      if (!HUMAN_STATUSES.includes(destination.droppableId)) return;
       if (source.droppableId !== destination.droppableId) {
           // Optimistic UI update
           setTasks(prev => prev.map(t =>
@@ -195,6 +202,13 @@ export const ProjectBoard: React.FC = () => {
         </div>
       </div>
 
+      {moveError && (
+        <div className="mb-3 flex items-center justify-between rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="board-move-error">
+          <span>{moveError}</span>
+          <button onClick={() => setMoveError('')} className="text-xs text-amber-700 hover:underline">Dismiss</button>
+        </div>
+      )}
+
       <div className="flex-1 overflow-x-auto overflow-y-hidden">
         <DragDropContext onDragEnd={onDragEnd}>
             <div className="flex gap-4 min-w-max pb-4 h-full items-start">
@@ -202,14 +216,14 @@ export const ProjectBoard: React.FC = () => {
                 <div key={status} className="w-72 bg-gray-100 rounded-lg flex flex-col max-h-full">
                 <div className="p-3 border-b border-gray-200">
                     <h3 className="font-semibold text-gray-700 uppercase text-xs tracking-wider flex justify-between">
-                        {STATUS_LABELS[status] || status}
+                        {statusLabel(status)}
                         <span className="bg-gray-200 text-gray-600 px-2 py-0.5 rounded-full text-xs">
                             {tasks.filter(t => t.status === status).length}
                         </span>
                     </h3>
                 </div>
 
-                <Droppable droppableId={status}>
+                <Droppable droppableId={status} isDropDisabled={!HUMAN_STATUSES.includes(status)}>
                     {(provided, snapshot) => (
                     <div
                         ref={provided.innerRef}
@@ -227,6 +241,10 @@ export const ProjectBoard: React.FC = () => {
                                         className={`bg-white p-4 rounded-md border shadow-sm ${snapshot.isDragging ? 'shadow-lg ring-2 ring-indigo-500 border-transparent' : 'hover:border-indigo-300'} transition-shadow cursor-grab`}
                                     >
                                         <p className="font-medium text-sm text-gray-900">{task.title}</p>
+                                        <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                            <TaskTypeBadge type={task.task_type} />
+                                            <PhaseChip task={task} />
+                                        </div>
                                         {task.relation_summary?.blocked_by?.length ? (
                                             <div className="mt-2 flex items-center gap-1 text-[11px] text-amber-700 truncate" title={task.relation_summary.blocked_by.map(item => item.title).join(', ')}>
                                                 <LockKeyhole size={12} className="shrink-0" />

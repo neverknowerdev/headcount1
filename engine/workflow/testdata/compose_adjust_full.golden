@@ -1,0 +1,101 @@
+=== SYSTEM ===
+You are the CTO agent.
+
+You are working inside a task workflow. Your part is to think and decide; other agents do the work.
+
+How this works:
+- You see one prompt and answer with exactly one tool call. Nothing you write outside the tool call is kept, and you will not remember this step later: whatever must survive goes into the tool's fields.
+- You cannot read files, run commands or browse. When you need a fact, ask for it with `ask_questions`; researchers who can do all of that will find it and report back, including when it cannot be found and why.
+- Everything known so far is in this prompt: the task, what has been decided, and what came back from the work you delegated.
+- Record your decisions in the `decisions` field of your answer: what you chose, why, and what you ruled out. A later step, possibly not yours, will rely on them to understand how the task got where it is.
+
+Be concrete. Prefer a reasonable assumption, recorded as one, over a question about a detail. Ask the human only for what research cannot settle and what changes the outcome.
+
+Phase: adjustment.
+
+Something did not go to plan: work failed, a review kept asking for changes, verification did not pass, or the task was handed back to you. Goal: work out why, and decide what to do differently.
+
+Look at what failed and at the decisions that led there; read reports in full or the decision tree if the summaries are not enough. Then act: delegate new or corrected work with `create_tasks`, try failed tasks again differently with `retry_tasks`, go to verification with `finish_adjustment` if the results are sufficient as they stand, or `escalate` if no plan can meet the definition of done. Do not repeat an approach already recorded as a dead end.
+
+=== USER ===
+## Task
+
+HC1-12 — Add single sign-on
+Type: coding
+
+Customers want to log in with their company identity provider.
+
+This is part of a larger task:
+HC1-3 — Enterprise readiness: make the product sellable to large companies.
+
+## Why you are here
+
+Verification failed: fix the callback.
+Also failing: task 33 failed (reported_failure); task 34 canceled (prerequisite_failed).
+
+## Specification
+
+Support SAML login against Okta and Azure AD.
+Existing password login must keep working.
+
+## Definition of done
+
+1. A user can log in through Okta [NOT met]
+   500 on the callback
+2. Password login still works [met]
+   seen in the test run
+
+## Technical design
+
+Add a SAML handler behind /auth/saml; store IdP metadata per company.
+
+## Test scenarios
+
+1. A valid assertion logs the user in
+
+## Answers from the human
+
+You asked: Which identity providers matter first?
+They answered: Okta, then Azure AD.
+
+## Answers to your questions
+
+Q (task 21): How is authentication implemented today?
+A: Passkeys only, in server/controllers/auth_webauthn.go.
+
+Q (task 22): Is there a SAML library already vendored?
+NOT ANSWERED (could not be completed): go.mod has none; could not determine whether one is acceptable to add.
+
+Q (task 23): Do the auth tests pass on main?
+Verdict: approved
+All 41 pass.
+
+## Delegated work
+
+- Task 31: HC1-12-4 SAML handler [coding, Coder] — DONE
+  Handler added with signature validation.
+- Task 32: HC1-12-5 Review: SAML handler [review, QA] — DONE, verdict: changes_requested
+  after: 31
+  Callback returns 500 when the assertion has no NameID.
+  No test covers it.
+- Task 33: HC1-12-6 Metadata storage [coding, Coder] — FAILED
+  Migration conflicts with an existing column.
+- Task 34: HC1-12-7 Admin UI [coding] — NOT STARTED: A TASK IT DEPENDS ON DID NOT SUCCEED
+  after: 33
+- Task 20: HC1-12-2 First attempt at the handler [coding] — THE EXECUTOR CRASHED (already dealt with by an earlier re-plan)
+
+## Decisions so far
+
+HC1-12 Add single sign-on
+  #4 [decision] Use SAML, not OIDC — both target IdPs support it
+  #7 [dead_end] crewjam/saml v0.3 — panics on unsigned assertions
+
+## What you asked to read
+
+Output of get_execution_state:
+Task 33 details:
+Column companies.metadata already exists with type text.
+
+## Your move
+
+Answer with exactly one tool call. You have 3 steps left on this task; use them to finish. This is the last re-plan allowed; if this plan cannot succeed, escalate.

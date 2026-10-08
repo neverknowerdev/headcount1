@@ -9,11 +9,27 @@ type GitHubInstallationRecord = repository.GitHubInstallationRecord
 type SaveGitHubOAuthAccountParams = repository.SaveGitHubOAuthAccountParams
 type CodegraphProjectServer = repository.CodegraphProjectServer
 type TeamMemberInfo = repository.TeamMemberInfo
+type TransitionGuard = repository.TransitionGuard
+type WorkflowTx = repository.WorkflowTx
+type WorkflowChild = repository.WorkflowChild
+type UsageFilter = repository.UsageFilter
+type UsageTotals = repository.UsageTotals
+type UsageGroup = repository.UsageGroup
 
 const (
-	PurposeCommitMessages   = repository.PurposeCommitMessages
-	PurposeTaskOrchestrator = repository.PurposeTaskOrchestrator
-	PurposeHelperWorker     = repository.PurposeHelperWorker
+	PurposeCommitMessages = repository.PurposeCommitMessages
+	PurposeSmart          = repository.PurposeSmart
+	PurposeCheap          = repository.PurposeCheap
+	PurposeClassifier     = repository.PurposeClassifier
+
+	UsageByTask      = repository.UsageByTask
+	UsageByRoot      = repository.UsageByRoot
+	UsageByPhase     = repository.UsageByPhase
+	UsageByAgent     = repository.UsageByAgent
+	UsageByModel     = repository.UsageByModel
+	UsageByTier      = repository.UsageByTier
+	UsageByPhaseTier = repository.UsageByPhaseTier
+	UsageByDay       = repository.UsageByDay
 
 	ProviderNameOpenRouter     = repository.ProviderNameOpenRouter
 	ProviderNameOpenCodeZen    = repository.ProviderNameOpenCodeZen
@@ -24,9 +40,8 @@ const (
 	ProviderPresetOpenCodeGo   = repository.ProviderPresetOpenCodeGo
 	ProviderPresetMiniMax      = repository.ProviderPresetMiniMax
 	ProviderPresetDeepSeek     = repository.ProviderPresetDeepSeek
+	ProviderPresetTypeSafe     = repository.ProviderPresetTypeSafe
 	RunStatusPaused            = repository.RunStatusPaused
-	RunStatusRecoverableFailed = repository.RunStatusRecoverableFailed
-	RunStatusStale             = repository.RunStatusStale
 	RunStatusResuming          = repository.RunStatusResuming
 	CheckpointVersion          = repository.CheckpointVersion
 	AccessTokenLifetime        = repository.AccessTokenLifetime
@@ -46,4 +61,7 @@ var (
 	SessionReauthGap                  = repository.SessionReauthGap
 	TaskGitBranch                     = repository.TaskGitBranch
 	ExpandModelGroupMembers           = repository.ExpandModelGroupMembers
+	ErrLeaseLost                      = repository.ErrLeaseLost
+	ErrTransitionConflict             = repository.ErrTransitionConflict
+	GuardFor                          = repository.GuardFor
 )

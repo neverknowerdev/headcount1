@@ -19,7 +19,7 @@ func TestGetRunWithTaskPreloadsAgent(t *testing.T) {
 
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
-	agent := Agent{CompanyID: company.ID, Name: "Orchestrator", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "You orchestrate."}
+	agent := Agent{CompanyID: company.ID, Name: "CEO", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "You are the CEO agent."}
 	require.NoError(t, database.Create(&agent).Error)
 	sprint := Sprint{CompanyID: company.ID, Name: "Sprint"}
 	require.NoError(t, database.Create(&sprint).Error)
@@ -101,163 +101,46 @@ func TestRunResumeClaimIsAtomicAndPreservesCheckpoint(t *testing.T) {
 	assert.Equal(t, int64(2), loaded.Recovery.CheckpointSequence, "checkpoint remains until terminal completion")
 }
 
-func TestRunResumeSupportsFailedAndStaleStatesAndLeaseRecovery(t *testing.T) {
+// A worker that claims a paused session and dies before starting it must not
+// strand the session: once its lease runs out the session is paused again,
+// checkpoint intact, for the next worker to claim.
+func TestExpiredResumeLeaseReturnsRunToPaused(t *testing.T) {
 	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
 
 	company := Company{Name: "Acme", ShortName: "acme"}
 	require.NoError(t, database.Create(&company).Error)
-	agent := Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "CEO", ShortName: "CEO", SystemPrompt: "work"}
+	agent := Agent{CompanyID: company.ID, Name: "Runner", RoleKey: "Coder", ShortName: "CODER", SystemPrompt: "work"}
 	require.NoError(t, database.Create(&agent).Error)
 	task := Task{CompanyID: company.ID, AgentID: &agent.ID, Title: "recover me"}
 	require.NoError(t, database.Create(&task).Error)
-	failed := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusRecoverableFailed}
-	stale := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusStale}
-	require.NoError(t, database.Create(&failed).Error)
-	require.NoError(t, database.Create(&stale).Error)
-	failed.Recovery = RunRecovery{CheckpointSequence: 2, CheckpointVersion: CheckpointVersion}
-	stale.Recovery = RunRecovery{CheckpointSequence: 3, CheckpointVersion: CheckpointVersion}
-	require.NoError(t, database.Save(&failed).Error)
-	require.NoError(t, database.Save(&stale).Error)
-	q := New(database)
-	auto, err := q.GetRunsByRecoveryStates(context.Background(), []string{RunStatusPaused})
-	require.NoError(t, err)
-	assert.Empty(t, auto, "failed and stale checkpoints are explicit-recovery only")
-
-	claimed, err := q.ClaimRunForResume(context.Background(), failed.ID, "worker-f", "failed_recovery", failed.Status, time.Now().Add(time.Minute), []string{RunStatusRecoverableFailed}, 2)
-	require.NoError(t, err)
-	require.True(t, claimed)
-	claimed, err = q.ClaimRunForResume(context.Background(), stale.ID, "worker-s", "stale_recovery", stale.Status, time.Now().Add(time.Minute), []string{RunStatusStale}, 3)
-	require.NoError(t, err)
-	require.True(t, claimed)
-
-	// Expiring both leases restores their original recovery policy instead of
-	// converting failed/stale sessions into automatically resumed pauses.
-	var failedLease, staleLease Run
-	require.NoError(t, database.First(&failedLease, failed.ID).Error)
-	require.NoError(t, database.First(&staleLease, stale.ID).Error)
-	failedLease.Recovery.ResumeLeaseUntil = ptrTime(time.Now().Add(-time.Minute))
-	staleLease.Recovery.ResumeLeaseUntil = ptrTime(time.Now().Add(-time.Minute))
-	require.NoError(t, database.Save(&failedLease).Error)
-	require.NoError(t, database.Save(&staleLease).Error)
-	require.NoError(t, q.ReclaimExpiredResumeLeases(context.Background(), time.Now()))
-	gotFailed, err := q.GetRun(context.Background(), failed.ID)
-	require.NoError(t, err)
-	gotStale, err := q.GetRun(context.Background(), stale.ID)
-	require.NoError(t, err)
-	assert.Equal(t, RunStatusRecoverableFailed, gotFailed.Status)
-	assert.Equal(t, RunStatusStale, gotStale.Status)
-	assert.NotZero(t, gotFailed.Recovery.CheckpointSequence)
-	assert.NotZero(t, gotStale.Recovery.CheckpointSequence)
-}
-
-func TestMarkRunStaleIsAtomicAndTerminal(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	run := Run{TaskID: 1, AgentID: 1, Status: "running", StartedAt: time.Now().Add(-time.Hour)}
+	run := Run{TaskID: task.ID, AgentID: agent.ID, Status: RunStatusPaused, Recovery: RunRecovery{CheckpointSequence: 2, CheckpointVersion: CheckpointVersion}}
 	require.NoError(t, database.Create(&run).Error)
-	q := New(database)
-	changed, err := q.MarkRunStale(context.Background(), run.ID, "heartbeat timeout")
-	require.NoError(t, err)
-	assert.True(t, changed)
-	changed, err = q.MarkRunStale(context.Background(), run.ID, "duplicate monitor tick")
-	require.NoError(t, err)
-	assert.False(t, changed)
-	loaded, err := q.GetRun(context.Background(), run.ID)
-	require.NoError(t, err)
-	assert.Equal(t, RunStatusStale, loaded.Status)
-	assert.NotNil(t, loaded.EndedAt)
-	assert.Equal(t, "heartbeat timeout", loaded.Recovery.RecoveryReason)
-}
 
-func TestRunEventInboxDeduplicatesAndConsumes(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	q := New(database)
-	event := RunEvent{TaskID: 7, RunID: 9, EventType: RunEventTypeLifecycleStatus, Payload: "failed", DedupeKey: "run:9:status:failed"}
-	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
-	require.NoError(t, q.EnqueueRunEvent(context.Background(), event))
-	pending, err := q.ListPendingRunEvents(context.Background(), 7)
-	require.NoError(t, err)
-	require.Len(t, pending, 1)
-	require.NoError(t, q.ConsumeRunEvents(context.Background(), []int64{pending[0].ID}))
-	pending, err = q.ListPendingRunEvents(context.Background(), 7)
-	require.NoError(t, err)
-	require.Empty(t, pending)
-}
-
-func TestRunStatusReportsKeepHistoryAndLatestCache(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
-	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	run := Run{TaskID: 7, AgentID: 9, Status: "running"}
-	require.NoError(t, database.Create(&run).Error)
 	q := New(database)
 	ctx := context.Background()
-	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "planning", 11))
-	time.Sleep(time.Millisecond)
-	require.NoError(t, q.RecordRunStatusReport(ctx, run.ID, "implementing", 12))
+	claimed, err := q.ClaimRunForResume(ctx, run.ID, "worker-1", "restart", run.Status, time.Now().Add(time.Minute), []string{RunStatusPaused}, 2)
+	require.NoError(t, err)
+	require.True(t, claimed)
 
-	var reports []RunStatusReport
-	require.NoError(t, database.Where("run_id = ?", run.ID).Order("reported_at asc").Find(&reports).Error)
-	require.Len(t, reports, 2)
-	latest, err := q.GetLatestRunStatusReport(ctx, run.ID)
+	// A lease that has not run out is left alone.
+	require.NoError(t, q.ReclaimExpiredResumeLeases(ctx, time.Now()))
+	held, err := q.GetRun(ctx, run.ID)
 	require.NoError(t, err)
-	assert.Equal(t, "implementing", latest.Status)
-	assert.Equal(t, int64(12), latest.MessageID)
-	assert.True(t, latest.ReportedAt.After(reports[0].ReportedAt) || latest.ID > reports[0].ID)
-	listed, err := q.ListRunStatusReports(ctx, run.ID)
-	require.NoError(t, err)
-	require.Len(t, listed, 2)
-	assert.Equal(t, "planning", listed[0].Status)
-	assert.Equal(t, "implementing", listed[1].Status)
-	loaded, err := q.GetRun(ctx, run.ID)
-	require.NoError(t, err)
-	assert.Equal(t, "implementing", loaded.LatestReportedStatus)
-}
+	assert.Equal(t, RunStatusResuming, held.Status)
 
-func TestRunStatusReportEnqueuesOrchestratorEvent(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.NoError(t, q.ReclaimExpiredResumeLeases(ctx, time.Now().Add(2*time.Minute)))
+	reclaimed, err := q.GetRun(ctx, run.ID)
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	parent := Run{TaskID: 7, AgentID: 9, Status: "running"}
-	require.NoError(t, database.Create(&parent).Error)
-	worker := Run{TaskID: parent.TaskID, AgentID: parent.AgentID, Status: "running", ParentRunID: &parent.ID, RootRunID: &parent.ID}
-	require.NoError(t, database.Create(&worker).Error)
+	assert.Equal(t, RunStatusPaused, reclaimed.Status)
+	assert.Equal(t, int64(2), reclaimed.Recovery.CheckpointSequence)
+	assert.Empty(t, reclaimed.Recovery.ResumeLeaseOwner)
 
-	q := New(database)
-	require.NoError(t, q.RecordRunStatusReport(context.Background(), worker.ID, "implementing", 77))
-
-	events, err := q.ListPendingRunEvents(context.Background(), parent.TaskID)
+	paused, err := q.GetRunsByRecoveryStates(ctx, []string{RunStatusPaused})
 	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, worker.ID, events[0].RunID)
-	assert.Equal(t, RunEventTypeStatusReport, events[0].EventType)
-	assert.Contains(t, events[0].Payload, `"message_id":77`)
-}
-
-func TestRunStatusReportRoutesNestedTaskEventToRootInbox(t *testing.T) {
-	database, err := gorm.Open(sqlite.Open(":memory:"), &gorm.Config{})
+	require.Len(t, paused, 1)
+	claimed, err = q.ClaimRunForResume(ctx, run.ID, "worker-2", "restart", reclaimed.Status, time.Now().Add(time.Minute), []string{RunStatusPaused}, 2)
 	require.NoError(t, err)
-	require.NoError(t, migrations.ApplyGORM(database, "sqlite", "test"))
-	parentTask := Task{CompanyID: 1, Title: "root"}
-	require.NoError(t, database.Create(&parentTask).Error)
-	childTask := Task{CompanyID: 1, ParentID: &parentTask.ID, Title: "child"}
-	require.NoError(t, database.Create(&childTask).Error)
-	agent := Agent{CompanyID: 1, Name: "worker"}
-	require.NoError(t, database.Create(&agent).Error)
-	orchestrator := Run{TaskID: parentTask.ID, AgentID: agent.ID, Status: "running"}
-	require.NoError(t, database.Create(&orchestrator).Error)
-	worker := Run{TaskID: childTask.ID, AgentID: agent.ID, Status: "running", ParentRunID: &orchestrator.ID, RootRunID: &orchestrator.ID}
-	require.NoError(t, database.Create(&worker).Error)
-	q := New(database)
-	require.NoError(t, q.RecordRunStatusReport(context.Background(), worker.ID, "researching", 12))
-	events, err := q.ListPendingRunEvents(context.Background(), parentTask.ID)
-	require.NoError(t, err)
-	require.Len(t, events, 1)
-	assert.Equal(t, parentTask.ID, events[0].TaskID)
-	assert.Equal(t, worker.ID, events[0].RunID)
+	assert.True(t, claimed, "the session can be claimed again after its lease expired")
 }

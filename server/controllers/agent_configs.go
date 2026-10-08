@@ -4,47 +4,27 @@ import (
 	"net/http"
 
 	"agent-orchestrator/engine/agentconfig"
-	"agent-orchestrator/pkg/agentdefaults"
 )
 
-// AgentConfigResponse is the wire shape for a built-in role template. These
-// values are read-only bootstrap/documentation data; runtime settings live on
-// the company's db.Agent row.
+// AgentConfigResponse is the wire shape of a built-in role. It is read-only
+// reference data; what an agent actually says lives on the company's row.
 type AgentConfigResponse struct {
-	Name           string   `json:"name"`
-	CanonicalName  string   `json:"canonical_name"`
-	Slug           string   `json:"slug"`
-	Description    string   `json:"description"`
-	Prompt         string   `json:"prompt"`
-	ChatType       string   `json:"chat_type"`
-	ReasoningLevel string   `json:"reasoning_level"`
-	BestModels     []string `json:"best_models,omitempty"`
-	AllowedTools   []string `json:"allowed_tools,omitempty"`
-	AllowedMCPs    []string `json:"allowed_mcps,omitempty"`
-	Permissions    string   `json:"permissions"`
-	CanUseWorkers  bool     `json:"can_use_workers"`
+	Name        string `json:"name"`
+	Slug        string `json:"slug"`
+	Description string `json:"description"`
+	Prompt      string `json:"prompt"`
 }
 
-// ListAgentConfigs returns built-in role templates (CEO, CTO, CMO, Coder, …)
-// in canonical order so the Agents page can display available defaults
-// alongside the company's database-owned agents.
+// ListAgentConfigs returns the built-in roles in canonical order.
 func (api *API) ListAgentConfigs(w http.ResponseWriter, r *http.Request) {
 	configs := agentconfig.BuiltinConfigs()
 	out := make([]AgentConfigResponse, 0, len(configs))
 	for _, cfg := range configs {
 		out = append(out, AgentConfigResponse{
-			Name:           cfg.Name,
-			CanonicalName:  cfg.Name,
-			Slug:           cfg.EffectiveShortName(),
-			Description:    cfg.Description,
-			Prompt:         cfg.Prompt,
-			ChatType:       string(cfg.ChatType),
-			ReasoningLevel: string(cfg.ReasoningLevel),
-			BestModels:     cfg.BestModels,
-			AllowedTools:   cfg.AllowedTools,
-			AllowedMCPs:    cfg.AllowedMCPs,
-			Permissions:    agentdefaults.PermissionsForConfig(cfg),
-			CanUseWorkers:  cfg.CanUseWorkers,
+			Name:        cfg.Name,
+			Slug:        cfg.ShortName,
+			Description: cfg.Description,
+			Prompt:      cfg.Prompt,
 		})
 	}
 	api.respondJSON(w, http.StatusOK, out)

@@ -13,13 +13,17 @@ func NewDefaultModelSettingRepository(db *gorm.DB) *DefaultModelSettingRepositor
 	return &DefaultModelSettingRepository{db: db}
 }
 
+// The Default Models slots. Smart models decide, cheap models execute, and
+// the optional classifier answers typed yes/no and choice questions that gate
+// the other two; commit messages have a slot of their own.
 const (
-	PurposeCommitMessages   = "commit_messages"
-	PurposeTaskOrchestrator = "task_orchestrator"
-	PurposeHelperWorker     = "helper_worker"
+	PurposeCommitMessages = "commit_messages"
+	PurposeSmart          = "smart"
+	PurposeCheap          = "cheap"
+	PurposeClassifier     = "classifier"
 )
 
-var defaultModelSettingPurposes = []string{PurposeCommitMessages, PurposeTaskOrchestrator, PurposeHelperWorker}
+var defaultModelSettingPurposes = []string{PurposeSmart, PurposeCheap, PurposeClassifier, PurposeCommitMessages}
 
 func (q *DefaultModelSettingRepository) GetDefaultModelSetting(ctx context.Context, userID int32, purpose string) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
@@ -40,10 +44,9 @@ func (q *DefaultModelSettingRepository) ListDefaultModelSettings(ctx context.Con
 	return list, err
 }
 
-// UpdateDefaultModelSetting overwrites a purpose's target. providerID and
+// UpdateDefaultModelSetting overwrites a slot's target. providerID and
 // modelGroupID are expected to be mutually exclusive (the caller — the API
-// handler — enforces that); passing both nil clears the override, falling
-// back to the calling session's own LLM.
+// handler — enforces that); passing both nil leaves the slot unconfigured.
 func (q *DefaultModelSettingRepository) UpdateDefaultModelSetting(ctx context.Context, userID int32, purpose string, providerID *int32, model string, modelGroupID *int32) (DefaultModelSetting, error) {
 	var s DefaultModelSetting
 	if err := q.db.WithContext(ctx).Where("user_id = ? AND purpose = ?", userID, purpose).First(&s).Error; err != nil {
@@ -59,9 +62,8 @@ func (q *DefaultModelSettingRepository) UpdateDefaultModelSetting(ctx context.Co
 }
 
 // EnsureDefaultModelSettingsForUser seeds the user's unconfigured row per
-// known purpose if missing, so each purpose falls back to the calling
-// session's own LLM until the user points it at a provider/model or a model
-// group. Idempotent: never overwrites an existing row's configuration.
+// slot if missing, so every slot shows up to be configured. Idempotent: it
+// never overwrites an existing row's configuration.
 func (q *DefaultModelSettingRepository) EnsureDefaultModelSettingsForUser(ctx context.Context, userID int32) error {
 	uid := userID
 	for _, purpose := range defaultModelSettingPurposes {

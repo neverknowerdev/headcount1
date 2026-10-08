@@ -83,7 +83,7 @@ func newTestLogger(t *testing.T, hub interface{ BroadcastEvent(string, interface
 	if database != nil {
 		q = db.New(database)
 	}
-	logger, err := NewProxyLoggerWithHub(t.TempDir(), "TST", 1, runID, hub, q)
+	logger, err := NewTaskRunLogger(t.TempDir(), "TST", 1, 1, runID, hub, q)
 	require.NoError(t, err)
 	return logger
 }
@@ -233,11 +233,11 @@ func TestLogAfterCloseDoesNotPanic(t *testing.T) {
 // TestLoggerWithoutHubOrDB verifies the logger degrades gracefully when
 // created without a hub and/or query layer (both are optional in prod).
 func TestLoggerWithoutHubOrDB(t *testing.T) {
-	logger, err := NewProxyLogger(t.TempDir(), "TST", 1, 7)
+	logger, err := NewTaskRunLogger(t.TempDir(), "TST", 1, 1, 7, nil, nil)
 	require.NoError(t, err)
 	assert.NotPanics(t, func() {
 		logger.LogInfo("no hub, no db")
-		logger.LogErrorMsg("still fine")
+		logger.LogInfo("still fine")
 	})
 	require.NoError(t, logger.Close())
 }

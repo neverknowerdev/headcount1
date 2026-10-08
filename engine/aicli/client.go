@@ -52,11 +52,14 @@ type FuncMeta struct {
 
 // ChatRequest is the body for POST /v1/chat/completions.
 type ChatRequest struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	Tools     []ToolDef `json:"tools,omitempty"`
-	Stream    bool      `json:"stream,omitempty"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Tools    []ToolDef `json:"tools,omitempty"`
+	// ToolChoice constrains tool use ("required" forces a tool call). Some
+	// OpenAI-compatible providers ignore or reject it; see CompleteWithTool.
+	ToolChoice string `json:"tool_choice,omitempty"`
+	Stream     bool   `json:"stream,omitempty"`
+	MaxTokens  int    `json:"max_tokens,omitempty"`
 	// ReasoningEffort controls how much reasoning the model applies.
 	// Accepted values: "low", "medium", "high". Supported by OpenAI o-series
 	// and compatible providers; ignored by providers that don't support it.

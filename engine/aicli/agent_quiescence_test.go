@@ -14,7 +14,7 @@ import (
 // stop a run, wait for the engine, and then safely delete its database rows.
 func TestRunWithHistoryWaitsForAsyncPersistence(t *testing.T) {
 	var released atomic.Bool
-	a := &Agent{Mode: Mode("unsupported")}
+	a := &Agent{}
 	a.asyncPersistence.Add(1)
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()

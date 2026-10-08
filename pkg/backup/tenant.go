@@ -93,11 +93,11 @@ var tenantInsertOrder = []string{
 	"comments",
 	"attachments",
 	"artifacts",
+	"task_steps",
+	"decisions",
+	"llm_calls",
 	"mcp_servers",
 	"mcp_accounts",
-	"agent_mcp_servers",
-	"agent_mcp_accounts",
-	"agent_mcp_tool_filters",
 	"activity_logs",
 }
 
@@ -176,7 +176,6 @@ func collectTenant(ctx context.Context, database *gorm.DB, userID int32) (*tenan
 	projectIDs := ids(tables["projects"])
 	tables["sprints"] = read("sprints", "company_id IN ?", companyIDs)
 	tables["agents"] = read("agents", "company_id IN ?", companyIDs)
-	agentIDs := ids(tables["agents"])
 	tables["skills"] = read("skills", "company_id IN ?", companyIDs)
 	tables["tasks"] = read("tasks", "company_id IN ?", companyIDs)
 	taskIDs := ids(tables["tasks"])
@@ -185,6 +184,9 @@ func collectTenant(ctx context.Context, database *gorm.DB, userID int32) (*tenan
 	tables["attachments"] = read("attachments", "task_id IN ?", orNone(taskIDs))
 	tables["artifacts"] = read("artifacts", "task_id IN ?", orNone(taskIDs))
 	tables["runs"] = read("runs", "task_id IN ?", orNone(taskIDs))
+	tables["task_steps"] = read("task_steps", "task_id IN ?", orNone(taskIDs))
+	tables["decisions"] = read("decisions", "task_id IN ?", orNone(taskIDs))
+	tables["llm_calls"] = read("llm_calls", "company_id IN ?", companyIDs)
 
 	// Owner-scoped global tables.
 	tables["llm_providers"] = read("llm_providers", "user_id = ?", userID)
@@ -198,9 +200,6 @@ func collectTenant(ctx context.Context, database *gorm.DB, userID int32) (*tenan
 	mcpServerIDs := ids(tables["mcp_servers"])
 	tables["mcp_accounts"] = read("mcp_accounts", "user_id = ? OR mcp_server_id IN ?", userID, orNone(mcpServerIDs))
 
-	tables["agent_mcp_servers"] = read("agent_mcp_servers", "agent_id IN ?", orNone(agentIDs))
-	tables["agent_mcp_accounts"] = read("agent_mcp_accounts", "agent_id IN ?", orNone(agentIDs))
-	tables["agent_mcp_tool_filters"] = read("agent_mcp_tool_filters", "agent_id IN ?", orNone(agentIDs))
 	tables["activity_logs"] = read("activity_logs", "company_id IN ?", companyIDs)
 
 	// Passkey-wrapped DEKs, carried so the account can unlock after a
@@ -355,8 +354,8 @@ type tenantImporter struct {
 	companyShort map[int64]shortNames // old companyID -> {old, new} short name
 	taskCompany  map[int64]int64      // old taskID -> old companyID
 	taskRoot     map[int64]int64      // old taskID -> old root taskID
-	runRoot      map[int64]int64      // old runID -> old root runID
-	runTask      map[int64]int64      // old runID -> old taskID
+	taskOrigin   map[int64]int64      // old taskID -> old task_steps id that created it
+	columns      map[string]map[string]bool
 
 	// Snapshots of path-bearing rows, captured BEFORE insertion mutates the row
 	// maps (insert deletes the old id, remaps FKs, and backfills the new id), so
@@ -385,13 +384,11 @@ type pathSnap struct {
 	oldPath string
 }
 
-// runSnap is a run's pre-import identity, including its root run (whose id names
-// the on-disk log directory).
+// runSnap is a run's pre-import identity. Its log lives in its task's folder.
 type runSnap struct {
-	oldID      int64
-	oldTask    int64
-	oldRootRun int64
-	oldPath    string
+	oldID   int64
+	oldTask int64
+	oldPath string
 }
 
 func (imp *tenantImporter) run(tx *gorm.DB) (TenantImportStats, error) {
@@ -425,12 +422,38 @@ func (imp *tenantImporter) run(tx *gorm.DB) (TenantImportStats, error) {
 		imp.tally(&stats, table, insertedCount)
 	}
 
+	if err := imp.linkTaskTrees(tx); err != nil {
+		return stats, err
+	}
+
 	// Path columns depend on the newly-assigned ids/short names; rewrite them
 	// now that every id map is complete.
 	if err := imp.rewritePathColumns(tx); err != nil {
 		return stats, err
 	}
 	return stats, nil
+}
+
+// linkTaskTrees completes the references a task row could not carry at
+// insert time: the root of its tree, which for a root is its own new id, and
+// the journal step that created it, which is inserted after the tasks.
+func (imp *tenantImporter) linkTaskTrees(tx *gorm.DB) error {
+	for oldTask, newTask := range imp.idMap["tasks"] {
+		if !imp.insertedIDs["tasks"][newTask] {
+			continue
+		}
+		links := map[string]interface{}{"root_task_id": newTask}
+		if newRoot, ok := imp.idMap["tasks"][imp.taskRoot[oldTask]]; ok {
+			links["root_task_id"] = newRoot
+		}
+		if newStep, ok := imp.idMap["task_steps"][imp.taskOrigin[oldTask]]; ok {
+			links["origin_step_id"] = newStep
+		}
+		if err := tx.Table("tasks").Where("id = ?", newTask).Updates(links).Error; err != nil {
+			return fmt.Errorf("link imported task %d: %w", newTask, err)
+		}
+	}
+	return nil
 }
 
 // buildGraphs precomputes the old-id graphs (task parent chains, run roots,
@@ -465,19 +488,16 @@ func (imp *tenantImporter) buildGraphs() {
 		imp.taskRoot[tid] = root
 	}
 
-	imp.runRoot = map[int64]int64{}
-	imp.runTask = map[int64]int64{}
-	for _, rn := range imp.data.Tables["runs"] {
-		rid := toID(rn)
-		imp.runTask[rid] = asInt64(rn["task_id"])
-		root := asInt64(rn["root_run_id"])
-		if root == 0 {
-			root = rid
+	imp.taskOrigin = map[int64]int64{}
+	for _, t := range imp.data.Tables["tasks"] {
+		if origin := asInt64(t["origin_step_id"]); origin != 0 {
+			imp.taskOrigin[toID(t)] = origin
 		}
-		imp.runRoot[rid] = root
+	}
+
+	for _, rn := range imp.data.Tables["runs"] {
 		imp.runSnaps = append(imp.runSnaps, runSnap{
-			oldID: rid, oldTask: asInt64(rn["task_id"]), oldRootRun: root,
-			oldPath: strVal(rn["log_file_path"]),
+			oldID: toID(rn), oldTask: asInt64(rn["task_id"]), oldPath: strVal(rn["log_file_path"]),
 		})
 	}
 
@@ -513,12 +533,26 @@ func (imp *tenantImporter) resolveOrInsertRow(tx *gorm.DB, table string, r row, 
 	imp.remapFKs(table, r)
 	imp.reowner(table, r)
 	imp.relabelSecrets(r)
+	imp.settle(table, r)
+	if err := imp.keepKnownColumns(tx, table, r); err != nil {
+		return 0, false, false, err
+	}
 
-	// Comments have no stable domain key of their own. Import them only under a
-	// freshly-inserted task; on a task the importer already had, skip them so a
-	// re-import never duplicates a discussion.
-	if table == "comments" {
-		if newTask := asInt64(r["task_id"]); newTask != 0 && !imp.taskWasNew[newTask] {
+	// Comments, journal steps, decisions and usage rows have no stable domain
+	// key of their own. Import them only under a freshly-inserted task; on a
+	// task the importer already had, skip them so a re-import never duplicates
+	// a discussion, a journal or a bill.
+	switch table {
+	case "comments", "task_steps", "decisions":
+		if newTask := asInt64(r["task_id"]); newTask == 0 || !imp.taskWasNew[newTask] {
+			return 0, false, false, nil
+		}
+	case "llm_calls":
+		if newTask := asInt64(r["task_id"]); newTask != 0 {
+			if !imp.taskWasNew[newTask] {
+				return 0, false, false, nil
+			}
+		} else if !imp.insertedIDs["companies"][asInt64(r["company_id"])] {
 			return 0, false, false, nil
 		}
 	}
@@ -545,15 +579,6 @@ func (imp *tenantImporter) resolveOrInsertRow(tx *gorm.DB, table string, r row, 
 		imp.ensureUnique(tx, table, "slug", r)
 	case "mcp_servers":
 		imp.ensureUnique(tx, table, "name", r)
-	}
-
-	// Join tables (composite primary key, no auto-increment id) insert without a
-	// RETURNING clause and contribute no id mapping.
-	if joinTables[table] {
-		if err := tx.Table(table).Create(r).Error; err != nil {
-			return 0, false, false, err
-		}
-		return 0, false, true, nil
 	}
 
 	if err := tx.Table(table).
@@ -685,13 +710,6 @@ func (imp *tenantImporter) findExisting(tx *gorm.DB, table string, r row) (int64
 		return imp.existingID(tx, "mcp_servers", "name = ? AND project_id = ?", strVal(r["name"]), r["project_id"])
 	case "mcp_accounts":
 		return imp.existingID(tx, "mcp_accounts", "mcp_server_id = ? AND name = ?", r["mcp_server_id"], strVal(r["name"]))
-	case "agent_mcp_servers":
-		return imp.existingID(tx, "agent_mcp_servers", "agent_id = ? AND mcp_server_id = ?", r["agent_id"], r["mcp_server_id"])
-	case "agent_mcp_accounts":
-		return imp.existingID(tx, "agent_mcp_accounts", "agent_id = ? AND mcp_account_id = ?", r["agent_id"], r["mcp_account_id"])
-	case "agent_mcp_tool_filters":
-		return imp.existingID(tx, "agent_mcp_tool_filters",
-			"agent_id = ? AND mcp_server_id = ? AND tool_name = ?", r["agent_id"], r["mcp_server_id"], strVal(r["tool_name"]))
 	}
 	return 0, false
 }
@@ -707,12 +725,8 @@ func (imp *tenantImporter) byParentName(tx *gorm.DB, table, parentCol string, pa
 }
 
 // existingID returns the id of the first row matching where, and whether one was
-// found. A join table (no id column) returns a non-zero sentinel on a match so
-// callers can still detect "already present" and skip the insert.
+// found.
 func (imp *tenantImporter) existingID(tx *gorm.DB, table, where string, args ...interface{}) (int64, bool) {
-	if joinTables[table] {
-		return -1, imp.rowExists(tx, table, where, args...)
-	}
 	var id int64
 	if err := tx.Table(table).Where(where, args...).Select("id").Limit(1).Scan(&id).Error; err != nil {
 		return 0, false
@@ -740,13 +754,6 @@ func providerFromRow(r row) db.LLMProvider {
 	}
 }
 
-// joinTables have a composite primary key and no auto-increment id column.
-var joinTables = map[string]bool{
-	"agent_mcp_servers":      true,
-	"agent_mcp_accounts":     true,
-	"agent_mcp_tool_filters": true,
-}
-
 // remapFKs rewrites every foreign-key column of a row through the id maps built
 // so far. Referenced tables are always inserted before their referrers (see
 // tenantInsertOrder), so the maps are populated by the time we need them.
@@ -771,22 +778,44 @@ func (imp *tenantImporter) remapFKs(table string, r row) {
 		remap("company_id", "companies")
 	case "agents":
 		remap("company_id", "companies")
-		remap("provider_id", "llm_providers")
-		remap("model_group_id", "model_groups")
 	case "tasks":
 		remap("company_id", "companies")
 		remap("project_id", "projects")
 		remap("sprint_id", "sprints")
 		remap("agent_id", "agents")
 		remap("parent_id", "tasks")
-		// run_id points at a run inserted later; clear it (patched to nil, the
-		// task still functions and its runs list is intact).
-		r["run_id"] = nil
+		remap("provider_id", "llm_providers")
+		remap("model_group_id", "model_groups")
+		// The tree links are completed once every task and step has its new
+		// id (see linkTaskTrees).
+		r["root_task_id"] = 0
+		r["origin_step_id"] = nil
 	case "runs":
 		remap("task_id", "tasks")
 		remap("agent_id", "agents")
-		remap("parent_run_id", "runs")
-		remap("root_run_id", "runs")
+	case "task_steps":
+		remap("task_id", "tasks")
+		remap("root_task_id", "tasks")
+		remap("agent_id", "agents")
+		remap("run_id", "runs")
+		remap("ref_task_id", "tasks")
+		remap("comment_id", "comments")
+	case "decisions":
+		remap("task_id", "tasks")
+		remap("root_task_id", "tasks")
+		remap("parent_decision_id", "decisions")
+		remap("supersedes_id", "decisions")
+		remap("step_id", "task_steps")
+		remap("run_id", "runs")
+		remap("agent_id", "agents")
+	case "llm_calls":
+		remap("company_id", "companies")
+		remap("root_task_id", "tasks")
+		remap("task_id", "tasks")
+		remap("agent_id", "agents")
+		remap("provider_id", "llm_providers")
+		remap("step_id", "task_steps")
+		remap("run_id", "runs")
 	case "comments":
 		remap("task_id", "tasks")
 		remap("run_id", "runs")
@@ -808,18 +837,70 @@ func (imp *tenantImporter) remapFKs(table string, r row) {
 		remap("project_id", "projects")
 	case "mcp_accounts":
 		remap("mcp_server_id", "mcp_servers")
-	case "agent_mcp_servers":
-		remap("agent_id", "agents")
-		remap("mcp_server_id", "mcp_servers")
-	case "agent_mcp_accounts":
-		remap("agent_id", "agents")
-		remap("mcp_account_id", "mcp_accounts")
-	case "agent_mcp_tool_filters":
-		remap("agent_id", "agents")
-		remap("mcp_server_id", "mcp_servers")
 	case "activity_logs":
 		remap("company_id", "companies")
 	}
+}
+
+// settle brings imported work to rest. Nothing in the archive is running
+// here: no process holds a task's lease, an executor session or the worktree,
+// and the model a task was waiting for belongs to another installation. A
+// top-level task that was under way goes back to the backlog, to be started
+// again by its new owner; a subtask or a session that was under way is
+// canceled, as it would be had its task been stopped.
+func (imp *tenantImporter) settle(table string, r row) {
+	switch table {
+	case "tasks":
+		r["run_id"] = nil
+		r["lease_owner"] = ""
+		r["lease_until"] = nil
+		r["waiting_on"] = ""
+		r["wait_ref"] = nil
+		r["wait_until"] = nil
+		r["wait_detail"] = ""
+		r["workspace_owner_task_id"] = nil
+		switch strVal(r["status"]) {
+		case db.TaskStatusTodo, db.TaskStatusDependsOnTask, db.TaskStatusInProgress, db.TaskStatusBlocked, "refinement":
+			r["phase"] = ""
+			if asInt64(r["parent_id"]) == 0 {
+				r["status"] = db.TaskStatusBacklog
+			} else {
+				r["status"] = db.TaskStatusCanceled
+				r["result_reason"] = "stopped"
+			}
+		}
+	case "runs":
+		switch strVal(r["status"]) {
+		case "completed", "failed", "canceled":
+		default:
+			r["status"] = "canceled"
+		}
+		r["resume_lease_owner"] = ""
+		r["resume_lease_until"] = nil
+	}
+}
+
+// keepKnownColumns drops the fields of an archive row that this database has
+// no column for, so an archive written by an older version still imports: what
+// that version stored and this one no longer has is simply left behind.
+func (imp *tenantImporter) keepKnownColumns(tx *gorm.DB, table string, r row) error {
+	known, ok := imp.columns[table]
+	if !ok {
+		var err error
+		if known, err = tableColumns(tx, table); err != nil {
+			return err
+		}
+		if imp.columns == nil {
+			imp.columns = map[string]map[string]bool{}
+		}
+		imp.columns[table] = known
+	}
+	for column := range r {
+		if !known[column] {
+			delete(r, column)
+		}
+	}
+	return nil
 }
 
 // reowner binds ownership columns to the importing user/team instead of the
@@ -943,7 +1024,7 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 		tx.Table("artifacts").Where("id = ?", newArtID).Update("file_path", np)
 	}
 
-	// runs.log_file_path -> logs/{newShort}/{newRootTaskID}/run-{newRootRunID}/<basename>
+	// runs.log_file_path -> logs/{newShort}/{newRootTaskID}/task-{newTaskID}/run-{newRunID}.jsonl
 	for _, s := range imp.runSnaps {
 		newRunID, ok := imp.idMap["runs"][s.oldID]
 		if !ok || s.oldPath == "" || !imp.insertedIDs["runs"][newRunID] {
@@ -953,11 +1034,11 @@ func (imp *tenantImporter) rewritePathColumns(tx *gorm.DB) error {
 		if !ok {
 			continue
 		}
-		newRootRun, ok := imp.idMap["runs"][s.oldRootRun]
+		newTask, ok := imp.idMap["tasks"][s.oldTask]
 		if !ok {
-			newRootRun = newRunID
+			continue
 		}
-		np := filepath.Join(imp.paths().RunLogsDir(newShort, newRoot, int32(newRootRun)), filepath.Base(s.oldPath))
+		np := filepath.Join(imp.paths().TaskJournalDir(newShort, newRoot, int32(newTask)), fmt.Sprintf("run-%d.jsonl", newRunID))
 		tx.Table("runs").Where("id = ?", newRunID).Update("log_file_path", np)
 	}
 
@@ -1038,7 +1119,7 @@ func (imp *tenantImporter) restoreFiles() {
 			imp.copyInto(aFrom, p.TaskArtifactsDir(sn.new, int32(newRoot)))
 		}
 		// logs/{oldShort}/{oldRoot} -> logs/{newShort}/{newRoot}, renaming
-		// run-{oldRootRunID} subdirs to their remapped ids.
+		// each task's folder and session logs to their remapped ids.
 		lFrom := filepath.Join(src, "logs", sn.old, strconv.FormatInt(oldRoot, 10))
 		if dirExists(lFrom) {
 			imp.copyLogsDir(lFrom, p.TaskLogsDir(sn.new, int32(newRoot)))
@@ -1070,27 +1151,49 @@ func (imp *tenantImporter) restoreFiles() {
 	repairWorktrees(imp.basePath)
 }
 
-// copyLogsDir copies a task's logs directory, renaming each run-{oldRootRunID}
-// subdirectory to run-{newRootRunID}.
+// copyLogsDir copies the logs of a task tree: one task-{id} folder per task,
+// holding that task's journal, its decisions and a run-{id}.jsonl per executor
+// session. Folders and session logs are renamed to their remapped ids, and
+// only those of freshly imported tasks and sessions are copied; the files
+// themselves are a record of what happened and are copied as they are.
 func (imp *tenantImporter) copyLogsDir(from, to string) {
-	entries, err := os.ReadDir(from)
+	folders, err := os.ReadDir(from)
 	if err != nil {
 		return
 	}
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() && strings.HasPrefix(name, "run-") {
-			oldRun, err := strconv.ParseInt(strings.TrimPrefix(name, "run-"), 10, 64)
-			if err == nil {
-				if newRun, ok := imp.idMap["runs"][oldRun]; ok {
-					imp.copyInto(filepath.Join(from, name), filepath.Join(to, fmt.Sprintf("run-%d", newRun)))
+	for _, folder := range folders {
+		oldTask, ok := numberedName(folder.Name(), "task-", "")
+		newTask, mapped := imp.idMap["tasks"][oldTask]
+		if !folder.IsDir() || !ok || !mapped || !imp.insertedIDs["tasks"][newTask] {
+			continue
+		}
+		taskFrom := filepath.Join(from, folder.Name())
+		taskTo := filepath.Join(to, fmt.Sprintf("task-%d", newTask))
+		files, err := os.ReadDir(taskFrom)
+		if err != nil {
+			continue
+		}
+		for _, file := range files {
+			name := file.Name()
+			if oldRun, ok := numberedName(name, "run-", ".jsonl"); ok {
+				newRun, mapped := imp.idMap["runs"][oldRun]
+				if !mapped || !imp.insertedIDs["runs"][newRun] {
 					continue
 				}
+				name = fmt.Sprintf("run-%d.jsonl", newRun)
 			}
+			imp.copyInto(filepath.Join(taskFrom, file.Name()), filepath.Join(taskTo, name))
 		}
-		// Non-run entries (or unmapped runs) copy verbatim.
-		imp.copyInto(filepath.Join(from, name), filepath.Join(to, name))
 	}
+}
+
+// numberedName reads the id out of a name of the form prefix{id}suffix.
+func numberedName(name, prefix, suffix string) (int64, bool) {
+	if !strings.HasPrefix(name, prefix) || !strings.HasSuffix(name, suffix) {
+		return 0, false
+	}
+	id, err := strconv.ParseInt(strings.TrimSuffix(strings.TrimPrefix(name, prefix), suffix), 10, 64)
+	return id, err == nil
 }
 
 // copyInto copies from → to WITHOUT overwriting files that already exist at the
