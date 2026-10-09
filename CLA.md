@@ -2,7 +2,7 @@
 
 Version 1.0
 
-Thank you for contributing to headcount1. This agreement sets out the rights you give to GMGM sp. z o.o., ul. Szlak 77/222, 31-153 Kraków, Poland, NIP 6762685956 ("GMGM", "we"), the company behind headcount1, when you contribute. You keep ownership of your work. We need these rights so that we can publish headcount1 under the GNU AGPL v3 and also offer it under commercial licenses.
+Thank you for contributing to headcount1. This agreement sets out the rights you give to GMGM sp. z o.o., ul. Szlak 77/222, 31-153 Kraków, Poland, NIP 6762685956 ("GMGM", "we"), when you contribute. headcount1 is created by neverknower; GMGM is the company that operates headcount1 Cloud and handles licensing for the project. You keep ownership of your work. We need these rights so that headcount1 can be published under the GNU AGPL v3 and also offered under commercial licenses.
 
 ## 1. Definitions
 
@@ -20,7 +20,7 @@ You keep the copyright in your Contributions. You grant GMGM a non-exclusive, wo
 - making them available to the public, including over the internet and as a hosted service
 - running, displaying, storing and transmitting them as part of computer programs
 
-This license lets GMGM license your Contributions, alone or as part of headcount1, to others under any terms, including the GNU AGPL v3, other open-source licenses, and commercial or proprietary licenses.
+This license lets GMGM license your Contributions, alone or as part of headcount1, to others, including the author of headcount1, under any terms, including the GNU AGPL v3, other open-source licenses, and commercial or proprietary licenses.
 
 If the law does not allow a perpetual license, the license lasts for the full term of the copyright, and you agree not to terminate it.
 

@@ -4,7 +4,7 @@ Contributions are welcome: bug reports, fixes, features and documentation.
 
 ## Before your first pull request
 
-headcount1 is published under the [GNU AGPL v3](LICENSE) and is also offered under commercial licenses. To make that possible, every contributor agrees to the [Contributor License Agreement](CLA.md). You keep the copyright in your work and give GMGM sp. z o.o. the right to license it.
+headcount1 is published under the [GNU AGPL v3](LICENSE) and is also offered under commercial licenses. To make that possible, every contributor agrees to the [Contributor License Agreement](CLA.md). You keep the copyright in your work and give GMGM sp. z o.o., the company that handles licensing for the project, the right to license it.
 
 To sign, add this sentence to the description of your first pull request:
 

@@ -29,7 +29,7 @@ export const legalPages = ({ APP_URL, GITHUB_URL }) => {
         'headcount1 is an agent orchestrator: it runs a company of AI agents that plan, build and verify work on the tasks you give them. You can use it in two ways.',
         [
           '<b>headcount1 Cloud</b> is the version we host. These terms apply to it and to this website.',
-          `<b>Self-hosted headcount1</b> is the open-source software you build and run yourself from ${repo}. It is licensed to you under the GNU Affero General Public License v3.0 published there, or under a separate commercial license if you have agreed one with us, and these terms do not limit the rights those licenses give you. We do not operate your instance and have no access to it. The headcount1 name and logo are our trademarks and are not covered by the open-source license.`,
+          `<b>Self-hosted headcount1</b> is the open-source software you build and run yourself from ${repo}. It is licensed to you under the GNU Affero General Public License v3.0 published there, or under a separate commercial license if you have agreed one with us, and these terms do not limit the rights those licenses give you. We do not operate your instance and have no access to it. That license requires you to keep the author attribution described in the repository’s NOTICE file, and it does not cover the headcount1 name and logo.`,
         ],
       ]],
       ['Your account', [
