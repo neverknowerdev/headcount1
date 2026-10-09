@@ -533,7 +533,7 @@ ${footer}`;
 
 // ---------- contact page ----------
 const story = [
-  'headcount1 started with a simple frustration: AI coding agents were good at a single task and bad at running a project. Someone still had to write the specs, pick the model, check the work, and answer the same questions again and again.',
+  'In April 2026, headcount1 started with a simple frustration: AI coding agents were good at a single task and bad at running a project. Someone still had to write the specs, pick the model, check the work, and answer the same questions again and again.',
   'So the idea was to stop treating agents as tools and to staff them like a company: a CEO who owns the outcome, a CTO who writes the specs, coders who build, QA who verify, and designers and marketers around them. The human sets the direction and steps in only when a decision is really theirs.',
   'The second half of the idea is cost. Most harnesses run every step on one flagship model and resend the whole chat history. headcount1 routes each step to the cheapest model that fits it and gives smart models a short brief instead of a transcript.',
   'It is built in the open, as a single Go binary you can self-host, by one person working with a team of AI agents. They also help build headcount1 itself.',
