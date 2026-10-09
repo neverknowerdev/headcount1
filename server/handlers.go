@@ -123,6 +123,8 @@ func (s *Server) MountPublic(r chi.Router) {
 	// Public: lets the register page show which team an invite joins (the
 	// token itself is the credential).
 	r.Get("/invite-info", api.InviteInfo)
+	// Public: the documents the register page asks a new user to accept.
+	r.Get("/legal", api.LegalInfo)
 
 	// Public deploy webhook: CI (not a user session) posts build/deploy events
 	// here. It authenticates with the shared HEADCOUNT1_DEPLOY_API_KEY, and is

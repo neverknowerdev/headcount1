@@ -1,0 +1,8 @@
+name = "headcount1-landing"
+compatibility_date = "2026-10-01"
+
+[assets]
+directory = "./dist"
+
+# Required by `wrangler preview`, which Cloudflare runs for pull request builds.
+[previews]

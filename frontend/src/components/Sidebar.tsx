@@ -3,6 +3,7 @@ import { Link, useLocation } from 'react-router-dom';
 import { LayoutDashboard, CheckSquare, FolderOpen, Users, Code, Activity, Settings, Cpu, BarChart3 } from 'lucide-react';
 import { useStore } from '../store';
 import axios from 'axios';
+import { Attribution } from './Attribution';
 
 const getNavItems = (companyIdentifier: string | null) => {
   const base = companyIdentifier ? `/companies/${companyIdentifier}` : '';
@@ -83,16 +84,19 @@ export const Sidebar: React.FC = () => {
         </nav>
       </div>
 
-      {version && (
-        <div className="px-3 py-3 border-t border-gray-100">
+      <div className="px-3 py-3 border-t border-gray-100">
+        {version && (
           <div
             className="text-xs text-gray-400 font-mono truncate"
             title={build ? `${version}\n${build}` : version}
           >
             {version}
           </div>
+        )}
+        <div className="hidden sm:block mt-1">
+          <Attribution />
         </div>
-      )}
+      </div>
     </div>
   );
 };
