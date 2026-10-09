@@ -1,4 +1,4 @@
-h1:of6hH3nbBG0NZd1nkpNt2vWPKVSL4Yx8KdNiqKQsFb8=
+h1:5upsHTlxSCR/zKoGAdlYXaJyAlWbtB6JdY2lwLGCj6A=
 20260816000001_users.up.sql h1:zWGpDshwpFAWWZj7TWEG5DBCglIIJdICp2sbioyDRSY=
 20260816000002_teams.up.sql h1:gjtNenVxgvh4t4DwxsZYiMeoIzUjsJNFMpFE0gDC01A=
 20260816000003_companies.up.sql h1:SePgHobf9TTKwjWKQGuUO2rbqqzEuDdDy+Fw+xnKXz0=
@@ -70,3 +70,4 @@ h1:of6hH3nbBG0NZd1nkpNt2vWPKVSL4Yx8KdNiqKQsFb8=
 20261007000006_execution_clean_slate.up.sql h1:i1QpiCWWBUnIrDYjoRBWSQzGCBoZJBRXIs62Fzb95/s=
 20261007000007_agent_roles_only.up.sql h1:BxZpIV1o7zoK+cCv6ru+GnYvQBVwNyP75pa+a5x8x+s=
 20261008000001_task_model_error_reason.up.sql h1:MpNI9PeMUMwz5ES1hFrPZz2tOuH8nmyNdhKEUQbAkCQ=
+20261008000002_system_one_models.up.sql h1:FclIu/V4vbIt26zpJdtzqyhw5ExyYjQ+Q87Tp5658iU=

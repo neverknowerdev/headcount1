@@ -2,6 +2,8 @@ import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { ProviderOrGroupSelect } from './ProviderOrGroupSelect';
 import type { ProviderOrGroupValue } from './ProviderOrGroupSelect';
+import { modelsOfKind } from '../lib/modelKinds';
+import type { ModelKind } from '../lib/modelKinds';
 
 // The model slots, matching db.Purpose* on the backend. Smart models decide,
 // cheap models do the work; the other two are optional.
@@ -20,7 +22,7 @@ const SLOTS: Record<string, { title: string; description: string; none: string; 
     },
     classifier: {
         title: 'Classifier (optional)',
-        description: 'A TypeSafe (Jev) classifier that answers yes/no questions about a running session: has it just decided something worth recording, is it going in circles. Without it the engine uses fixed rules instead.',
+        description: 'A System One model (TypeSafe\'s Jev) that answers yes/no questions about a running session: has it just decided something worth recording, is it going in circles. It is not a language model, so only System One models and groups of them are offered here. Without one the engine uses fixed rules instead.',
         none: 'Not used',
         required: false,
     },
@@ -121,10 +123,12 @@ export const DefaultModelSettings: React.FC<DefaultModelSettingsProps> = ({ prov
                     const info = SLOTS[s.purpose];
                     const value = forms[s.purpose] || toFormValue(s);
                     const unset = !value.provider_id && !value.model_group_id;
-                    // The classifier slot takes a classifier and nothing else; a
-                    // classifier can fill no other slot.
+                    // The classifier slot takes a System One model, or a group
+                    // of them, from whichever provider serves one; the other
+                    // slots take language models.
                     const isClassifierSlot = s.purpose === 'classifier';
-                    const slotProviders = providers.filter(p => (p.provider_type === 'typesafe') === isClassifierSlot);
+                    const kind: ModelKind = isClassifierSlot ? 'system_one' : 'llm';
+                    const slotProviders = providers.filter(p => modelsOfKind(p, kind).length > 0);
                     return (
                         <div key={s.purpose} data-testid={`model-slot-${s.purpose}`} className={`bg-white p-6 rounded-lg border shadow-sm space-y-3 ${(info.required || isClassifierSlot) && unset ? 'border-amber-300' : ''}`}>
                             <div>
@@ -133,19 +137,20 @@ export const DefaultModelSettings: React.FC<DefaultModelSettingsProps> = ({ prov
                             </div>
                             <ProviderOrGroupSelect
                                 label="Provider or Model Group"
-                                providers={slotProviders}
-                                modelGroups={isClassifierSlot ? [] : modelGroups}
+                                kind={kind}
+                                providers={providers}
+                                modelGroups={modelGroups}
                                 noneLabel={info.none}
                                 value={value}
                                 onChange={v => setForms(f => ({ ...f, [s.purpose]: v }))}
                             />
                             {isClassifierSlot && slotProviders.length === 0 && (
                                 <p className="text-xs text-gray-600">
-                                    No classifier is connected yet.{' '}
+                                    None of your providers serves a System One model yet.{' '}
                                     {onConnectClassifier ? (
-                                        <button type="button" onClick={onConnectClassifier} className="font-medium text-indigo-600 underline hover:text-indigo-800">Connect TypeSafe (Jev)</button>
-                                    ) : 'Add “TypeSafe (Jev classifier)” under Add Provider.'}
-                                    {' '}It needs only an API key from typesafe.ai; this slot is then filled for you.
+                                        <button type="button" onClick={onConnectClassifier} className="font-medium text-indigo-600 underline hover:text-indigo-800">Connect one</button>
+                                    ) : 'Add one under Add Provider.'}
+                                    {' '}TypeSafe serves Jev, and so do OpenCode (jev-1.13-free is free there) and AI Surplus. Once a provider with one is connected, this slot is filled for you.
                                 </p>
                             )}
                             <div className="flex items-center gap-3 pt-1">

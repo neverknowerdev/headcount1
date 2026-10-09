@@ -15,8 +15,8 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/engine"
-	"agent-orchestrator/engine/classifier"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/githubapp"
@@ -276,9 +276,9 @@ func (api *API) taskModel(r *http.Request, providerID, modelGroupID *int32, mode
 	if err := api.authorizeModelBinding(r, providerID, modelGroupID); err != nil {
 		return taskModelOverride{}, err
 	}
-	if providerID != nil && modelGroupID == nil {
-		// A classifier answers yes/no questions; it cannot run a task.
-		if provider, err := api.q.GetLLMProvider(r.Context(), *providerID); err != nil || provider.ProviderType == classifier.ProviderType {
+	if providerID != nil || modelGroupID != nil {
+		// A System One model answers typed questions; it cannot run a task.
+		if kind, err := api.modelChoiceKind(r.Context(), providerID, modelGroupID, model); err != nil || kind != models.ModelKindLLM {
 			return taskModelOverride{}, errNotOwned
 		}
 	}

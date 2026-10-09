@@ -41,6 +41,7 @@ const (
 	ProviderPresetMiniMax      = repository.ProviderPresetMiniMax
 	ProviderPresetDeepSeek     = repository.ProviderPresetDeepSeek
 	ProviderPresetTypeSafe     = repository.ProviderPresetTypeSafe
+	ProviderPresetSurplus      = repository.ProviderPresetSurplus
 	RunStatusPaused            = repository.RunStatusPaused
 	RunStatusResuming          = repository.RunStatusResuming
 	CheckpointVersion          = repository.CheckpointVersion

@@ -384,9 +384,16 @@ export const ProvidersManager: React.FC = () => {
                 </button>
             </div>
 
-            <ClassifierNotice refreshSignal={`${slotsVersion}/${providers.length}`}>
-                {providers.some(p => p.provider_type === 'typesafe') ? (
-                    <span className="text-xs">Choose it in the Classifier slot under Default Models and save.</span>
+            <ClassifierNotice refreshSignal={`${slotsVersion}/${providers.map(p => `${p.id}:${p.has_api_key}:${p.system_one_models}`).join('|')}`}>
+                {providers.some(p => p.system_one_models && p.has_api_key && p.enabled) ? (
+                    <span className="text-xs">
+                        {providers.filter(p => p.system_one_models && p.has_api_key && p.enabled).map(p => p.name).join(', ')} serves one: choose it in the Classifier slot under Default Models and save.
+                    </span>
+                ) : providers.some(p => p.system_one_models && !p.has_api_key) ? (
+                    <span className="text-xs">
+                        {providers.find(p => p.system_one_models && !p.has_api_key).name} serves one for free: activate it with an API key and the slot is filled for you. Or{' '}
+                        <button type="button" onClick={connectClassifier} data-testid="connect-classifier" className="font-medium underline">connect TypeSafe</button>.
+                    </span>
                 ) : (
                     <button type="button" onClick={connectClassifier} data-testid="connect-classifier" className="rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700">
                         Connect TypeSafe (Jev)
@@ -462,6 +469,12 @@ export const ProvidersManager: React.FC = () => {
                                 expanded={expandedModelsIds.has(p.id)}
                                 onToggle={() => toggleModelsExpanded(p.id)}
                             />
+                        )}
+                        {p.system_one_models && (
+                            <p className="mt-2 text-sm text-gray-600" data-testid="provider-system-one-models">
+                                <span className="mr-1.5 rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800" title="A System One model answers typed questions with a probability, a choice or a score. It is not a language model and is offered only for the Classifier slot.">System One</span>
+                                <span className="font-mono text-xs">{p.system_one_models.split(',').join(', ')}</span>
+                            </p>
                         )}
                         {p.builtin && !p.has_api_key && (
                             <div className="mt-3">
@@ -541,8 +554,8 @@ export const ProvidersManager: React.FC = () => {
                                     />
                                     <p className="text-xs text-gray-500 mt-2">
                                         {selectedPresetKey === 'typesafe'
-                                            ? 'Jev is a classifier, not a language model: it is used only in the Classifier slot under Default Models, which is filled for you once the key is saved. Get a key at typesafe.ai.'
-                                            : 'The base URL and available models are discovered automatically once the key is saved.'}
+                                            ? 'Jev is a System One model, not a language model: it is used only in the Classifier slot under Default Models, which is filled for you once the key is saved. Get a key at typesafe.ai.'
+                                            : 'The base URL and available models are discovered automatically once the key is saved. System One models the provider serves, such as Jev, are recognised and kept apart from its language models.'}
                                     </p>
                                     {presetError && (
                                         <p className="text-sm text-red-600 mt-3">{presetError}</p>

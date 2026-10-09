@@ -6,6 +6,10 @@ import { AddressInfo } from 'net';
 export const SMART_MODEL = 'e2e-smart-model';
 export const CHEAP_MODEL = 'e2e-cheap-model';
 export const MOCK_MODELS = [SMART_MODEL, CHEAP_MODEL, 'e2e-mock-model', 'e2e-other-model'];
+// System One models the mock serves at /v1/systemone, as a provider does that
+// offers Jev beside its language models. They are not in MOCK_MODELS: a test
+// that wants a provider to have them names them when it creates the provider.
+export const SYSTEM_ONE_MODELS = ['jev-e2e', 'jev-e2e-free'];
 
 /** Every completion reports the same usage, so a test can predict totals from call counts. */
 export const USAGE_PER_CALL = { prompt_tokens: 100, completion_tokens: 10, total_tokens: 110 };
@@ -94,6 +98,8 @@ interface MockState {
     holdAll: ScenarioMatch | null;
     holdWaiters: Array<() => void>;
     held: number;
+    /** When set, systemone calls for this model are refused with this status. */
+    systemOneFailure: { model: string; status: number } | null;
     shutdown: (() => Promise<void>) | null;
 }
 
@@ -270,6 +276,7 @@ function handleTestRoutes(req: http.IncomingMessage, res: http.ServerResponse, b
             held: state.held,
             requests: state.received,
             completions,
+            systemOne: state.received.filter((entry) => entry.path.includes('/systemone')),
         });
         return true;
     }
@@ -292,7 +299,15 @@ function handleTestRoutes(req: http.IncomingMessage, res: http.ServerResponse, b
         state.completionsAnswered = 0;
         state.rules = [];
         state.holdAll = null;
+        state.systemOneFailure = null;
         releaseHeld(state);
+        json(res, 200, { status: 'ok' });
+        return true;
+    }
+    // Make one System One model refuse its calls, as a rate-limited one does.
+    if (url === '/__test/systemone-failure' && req.method === 'POST') {
+        const data = body as { model?: string; status?: number } | null;
+        state.systemOneFailure = data?.model ? { model: data.model, status: data.status || 429 } : null;
         json(res, 200, { status: 'ok' });
         return true;
     }
@@ -336,6 +351,7 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
         holdAll: null,
         holdWaiters: [],
         held: 0,
+        systemOneFailure: null,
         shutdown: null,
     };
     const sockets = new Set<net.Socket>();
@@ -355,6 +371,23 @@ export async function startMockProviderServer(): Promise<{ baseUrl: string; port
 
         if (url === '/v1/models' && req.method === 'GET') {
             json(res, 200, { object: 'list', data: MOCK_MODELS.map((id) => ({ id, object: 'model', owned_by: 'e2e' })) });
+            return;
+        }
+        // A System One call: typed questions about a state, each answered
+        // with a probability or a choice. The mock sees nothing notable.
+        if (url.includes('/systemone') && req.method === 'POST') {
+            const asked = (body || {}) as { model?: string; questions?: Record<string, { type?: string; criteria?: Record<string, string> }> };
+            if (state.systemOneFailure && state.systemOneFailure.model === asked.model) {
+                json(res, state.systemOneFailure.status, { error: { message: 'Rate limit exceeded', type: 'e2e_error' } });
+                return;
+            }
+            const answers: Record<string, unknown> = {};
+            for (const [name, question] of Object.entries(asked.questions || {})) {
+                answers[name] = question.type === 'choice'
+                    ? { choice: 'none', confidence: 0.9 }
+                    : { noul: 0.02 };
+            }
+            json(res, 200, { model: asked.model, answers, usage: { input_tokens: 20, output_tokens: 1 } });
             return;
         }
         if (!url.includes('/chat/completions') || req.method !== 'POST') {

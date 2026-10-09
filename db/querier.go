@@ -76,6 +76,7 @@ type LLMProviderQuerier interface {
 	EnsureBuiltinLLMProvidersForUser(ctx context.Context, userID int32) error
 	UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
 	ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error
+	SortLLMProviderCatalogs(ctx context.Context) error
 }
 
 type ProviderPresetQuerier interface {

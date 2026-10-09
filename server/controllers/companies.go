@@ -8,7 +8,7 @@ import (
 	"os"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/engine/classifier"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/pkg/agentdefaults"
 	"agent-orchestrator/pkg/filesystem"
 )
@@ -59,8 +59,9 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		// the first task has a model to run on.
 		if providers, err := api.q.ListLLMProvidersForUser(r.Context(), api.currentUserID(r)); err == nil {
 			for _, provider := range providers {
-				// A classifier is not a model a task can run on.
-				if provider.Enabled && provider.ProviderType != classifier.ProviderType {
+				// A task runs on a language model; a provider that serves
+				// only System One models has none.
+				if provider.Enabled && len(provider.ModelsOfKind(models.ModelKindLLM)) > 0 {
 					providerID := provider.ID
 					req.ProviderID = &providerID
 					if req.Model == "" {
@@ -80,7 +81,7 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, "failed to seed built-in agents: "+err.Error())
 		return
 	}
-	if req.ProviderID != nil && req.Model != "" && !api.isClassifierProvider(r.Context(), *req.ProviderID) {
+	if req.ProviderID != nil && req.Model != "" && !models.IsSystemOneModel(req.Model) {
 		if err := api.fillModelTiers(r.Context(), uid, *req.ProviderID, req.Model); err != nil {
 			api.respondError(w, http.StatusInternalServerError, "failed to set default models: "+err.Error())
 			return
@@ -97,11 +98,6 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
 
 	api.respondJSON(w, http.StatusCreated, comp)
-}
-
-func (api *API) isClassifierProvider(ctx context.Context, providerID int32) bool {
-	provider, err := api.q.GetLLMProvider(ctx, providerID)
-	return err == nil && provider.ProviderType == classifier.ProviderType
 }
 
 // fillModelTiers points the user's smart and cheap model slots at a provider

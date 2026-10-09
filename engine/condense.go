@@ -26,7 +26,7 @@ const leftOutOfPrompt = "(Left out as not needed for this step. Read it with get
 func (d *workflowDriver) condense(ctx context.Context, l *loadedTask, phase string, agent *db.Agent, input workflow.PromptInput, prompt workflow.Prompt) workflow.Prompt {
 	usage := callContextFor(l.task, phase, "", agent)
 
-	if gate := classifierFor(ctx, d.q, l.company); gate != nil {
+	if gate := classifierFor(ctx, d.q, l.company, taskSession(l.task)); gate != nil {
 		items := map[string]string{}
 		for i, subtask := range input.Subtasks {
 			items[fmt.Sprintf("subtask:%d", i)] = subtask.Title + "\n" + subtask.Summary

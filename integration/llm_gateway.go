@@ -55,6 +55,7 @@ func (g *LLMGateway) Mount(r chi.Router) {
 		r.Use(g.requireGatewayAuth)
 		r.Route("/proxy/group/{group_key}", func(r chi.Router) {
 			r.Post("/v1/chat/completions", g.proxyChatCompletionsForGroup)
+			r.Post("/v1/systemone", g.proxySystemOneForGroup)
 			r.Get("/v1/models", g.getModelsForGroup)
 		})
 	})

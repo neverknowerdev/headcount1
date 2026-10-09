@@ -12,6 +12,7 @@ import (
 	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/aicli/tools"
 	"agent-orchestrator/engine/classifier"
+	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
 )
 
@@ -37,44 +38,87 @@ const (
 // classifier configured, or with one that is failing, the workflow behaves
 // the same, only less finely.
 type gate struct {
-	q      *db.Queries
-	client *classifier.Client
-	target modelTarget
+	q         *db.Queries
+	client    *classifier.Client
+	target    modelTarget
+	companyID int32
+	// failures counts the calls in a row that got no answer. A classifier
+	// that keeps failing is left alone for the rest of what this gate serves
+	// (one executor session, one prompt), which goes on by the fixed rules.
+	failures int
 }
 
+// maxGateFailures is how many failed calls in a row end a gate's use.
+const maxGateFailures = 3
+
 // classifierFor returns the classifier configured for a company, or nil when
-// there is none to use: the slot is empty, it points at a provider that is
-// not a classifier, or the key is sealed.
-func classifierFor(ctx context.Context, q *db.Queries, company db.Company) *gate {
+// there is none to use: the slot is empty, what it names is not a System One
+// model, or the key is sealed. The slot holds a provider's System One model
+// or a group of them; a group is reached through the gateway, which routes
+// between its members as it does for language models. session names the
+// conversation the calls belong to.
+func classifierFor(ctx context.Context, q *db.Queries, company db.Company, session string) *gate {
 	if company.UserID == nil {
 		return nil
 	}
 	target, err := resolveDefaultModel(ctx, q, *company.UserID, db.PurposeClassifier, models.TierClassifier)
-	if err != nil || target.viaGateway() || target.Provider.ProviderType != classifier.ProviderType {
+	if err != nil || target.vaultLocked() {
+		return nil
+	}
+	// The slot only takes System One models, but what it names can change
+	// after it was chosen; a language model here would only fail every call.
+	if target.viaGateway() {
+		if target.group.Kind != models.ModelKindSystemOne {
+			return nil
+		}
+	} else if !models.IsSystemOneModel(target.Model) {
 		return nil
 	}
 	apiKey, err := secrets.Default().Decrypt(target.Provider.ApiKeyEncrypted)
 	if err != nil {
 		return nil
 	}
-	return &gate{q: q, client: classifier.New(target.Provider.BaseUrl, apiKey, target.Model), target: target}
+	client := classifier.New(target.Provider.BaseUrl, apiKey, target.Model)
+	client.Headers = map[string]string{"User-Agent": aicli.UserAgent}
+	if session != "" {
+		client.Headers[aicli.SessionHeader] = session
+	}
+	return &gate{q: q, client: client, target: target, companyID: company.ID}
 }
 
 // ask puts questions to the classifier and records the call. It returns nil
 // when the classifier could not answer; the caller then applies its fixed
 // rule, as it would with no classifier at all.
 func (g *gate) ask(ctx context.Context, usage callContext, state string, questions map[string]classifier.Question) map[string]classifier.Answer {
-	if g == nil || len(questions) == 0 {
+	if g == nil || len(questions) == 0 || g.failures >= maxGateFailures {
 		return nil
 	}
-	answers, result, err := g.client.Ask(ctx, state, questions)
+	client := g.client
+	if g.target.viaGateway() {
+		// The call belongs to a company but to no run, so it shows the
+		// in-process gateway a token of its own, valid for this call.
+		token, revoke := runtokens.Default().IssueCompany(g.companyID)
+		defer revoke()
+		if token == "" {
+			return nil
+		}
+		routed := *g.client
+		routed.Headers = map[string]string{runtokens.TokenHeader: token}
+		for name, value := range g.client.Headers {
+			routed.Headers[name] = value
+		}
+		client = &routed
+	}
+	answers, result, err := client.Ask(ctx, state, questions)
 	tokens := aicli.Usage{PromptTokens: result.InputTokens, CompletionTokens: result.OutputTokens}
 	if err != nil {
 		if !errors.Is(err, context.Canceled) {
+			g.failures++
 			recordCall(context.Background(), g.q, usage, g.target, result.Model, tokens, result.Duration, models.LLMCallError, err.Error())
 		}
 		return nil
 	}
+	g.failures = 0
 	recordCall(context.Background(), g.q, usage, g.target, result.Model, tokens, result.Duration, models.LLMCallOK, "")
 	return answers
 }

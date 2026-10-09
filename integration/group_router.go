@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
@@ -257,11 +258,42 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
-	g.serveGroupChatCompletions(w, r, group)
+	g.serveGroup(w, r, group, models.ModelKindLLM)
 }
 
-func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Request, group db.ModelGroup) {
-	group.Members = db.ExpandModelGroupMembers(group.Members)
+// proxySystemOneForGroup is the same entrypoint for a group of System One
+// models: the request is TypeSafe's systemone call, and the group routes it
+// between its members exactly as a group of language models routes a chat
+// completion, with the same ordering, failover, cooldowns and statistics.
+func (g *LLMGateway) proxySystemOneForGroup(w http.ResponseWriter, r *http.Request) {
+	groupKey := chi.URLParam(r, "group_key")
+	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
+	if err != nil || !g.mayUseGroup(r, group) {
+		http.Error(w, "Model group not found", http.StatusNotFound)
+		return
+	}
+	g.serveGroup(w, r, group, models.ModelKindSystemOne)
+}
+
+// groupEndpoints is the provider endpoint each kind of model is called at.
+var groupEndpoints = map[string]string{
+	models.ModelKindLLM:       "/chat/completions",
+	models.ModelKindSystemOne: "/systemone",
+}
+
+func (g *LLMGateway) serveGroup(w http.ResponseWriter, r *http.Request, group db.ModelGroup, kind string) {
+	if groupKind(group) != kind {
+		// A language model cannot answer a systemone call, nor a classifier
+		// a chat completion: sending either would only fail upstream.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{
+			"message": fmt.Sprintf("model group %q holds %s models and cannot serve this endpoint", group.Name, kindName(groupKind(group))),
+			"type":    "model_group_kind_mismatch",
+		}})
+		return
+	}
+	group.Members = db.ExpandModelGroupMembers(group)
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
@@ -338,7 +370,7 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		}
 
 		start := time.Now()
-		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, "/chat/completions", attemptBody, r.Header, skipHeaders)
+		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, groupEndpoints[kind], attemptBody, r.Header, skipHeaders)
 		if err != nil {
 			lastErrMsg = err.Error()
 			lastStatus = http.StatusBadGateway
@@ -377,10 +409,16 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 			}
 
 			var payload struct {
-				Usage tokenUsage `json:"usage"`
+				Usage struct {
+					tokenUsage
+					// A systemone response counts its tokens under these names.
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
 			}
 			json.Unmarshal(respBody, &payload)
-			g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration, payload.Usage.PromptTokens, payload.Usage.CompletionTokens, "")
+			g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration,
+				payload.Usage.PromptTokens+payload.Usage.InputTokens, payload.Usage.CompletionTokens+payload.Usage.OutputTokens, "")
 
 			copyResponseHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
@@ -436,6 +474,22 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 			"type":    errType,
 		},
 	})
+}
+
+// groupKind is the kind of models a group holds; a group stored before kinds
+// existed holds language models.
+func groupKind(group db.ModelGroup) string {
+	if models.IsModelKind(group.Kind) {
+		return group.Kind
+	}
+	return models.ModelKindLLM
+}
+
+func kindName(kind string) string {
+	if kind == models.ModelKindSystemOne {
+		return "System One"
+	}
+	return "language"
 }
 
 // VaultLockedErrorType is the error type the group route returns, with HTTP
@@ -591,7 +645,7 @@ func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *LLMGateway) serveGroupModels(w http.ResponseWriter, group db.ModelGroup) {
-	group.Members = db.ExpandModelGroupMembers(group.Members)
+	group.Members = db.ExpandModelGroupMembers(group)
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`

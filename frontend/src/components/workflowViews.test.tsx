@@ -313,10 +313,14 @@ describe('ClassifierNotice', () => {
         expect(within(warning).getByText('Connect TypeSafe (Jev)')).toBeTruthy();
     });
 
-    it('is silent once one is chosen', async () => {
-        vi.mocked(axios.get).mockResolvedValue({ data: [{ purpose: 'classifier', provider_id: 4 }] } as never);
-        render(<ClassifierNotice />);
-        await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/default-model-settings'));
-        expect(screen.queryByTestId('classifier-warning')).toBeNull();
+    it('is silent once one is chosen, a model or a group of them', async () => {
+        for (const chosen of [{ provider_id: 4 }, { provider_id: null, model_group_id: 9 }]) {
+            vi.mocked(axios.get).mockResolvedValue({ data: [{ purpose: 'classifier', ...chosen }] } as never);
+            const { unmount } = render(<ClassifierNotice />);
+            await waitFor(() => expect(axios.get).toHaveBeenCalledWith('/api/default-model-settings'));
+            expect(screen.queryByTestId('classifier-warning')).toBeNull();
+            unmount();
+            vi.clearAllMocks();
+        }
     });
 });

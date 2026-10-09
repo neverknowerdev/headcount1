@@ -1,8 +1,12 @@
-// Package classifier talks to TypeSafe's Jev, a classifier rather than a
-// language model: given a state and a set of typed questions it returns a
+// Package classifier talks to TypeSafe's Jev, a System One model rather than
+// a language model: given a state and a set of typed questions it returns a
 // probability, a choice among given options, or a score. It cannot write or
 // extract text, so the engine uses it only as a gate: to decide whether
 // something is worth asking a language model about.
+//
+// TypeSafe serves it, and so do other providers beside their language models
+// (OpenCode Zen, AI Surplus). All of them take the same request at the
+// systemone endpoint next to their chat endpoint.
 package classifier
 
 import (
@@ -75,6 +79,9 @@ type Client struct {
 	// Backoff is the wait before each retry of a rate-limited or overloaded
 	// request; its length is the number of retries.
 	Backoff []time.Duration
+	// Headers are added to every request: who is calling, which conversation
+	// the call belongs to, and what a gateway in between needs.
+	Headers map[string]string
 }
 
 // New returns a client with the default retry policy.
@@ -147,7 +154,12 @@ func (c *Client) post(ctx context.Context, body []byte) (map[string]Answer, Resu
 		return nil, Result{}, err
 	}
 	request.Header.Set("Content-Type", "application/json")
-	request.Header.Set("Authorization", "Bearer "+c.APIKey)
+	if c.APIKey != "" {
+		request.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	for name, value := range c.Headers {
+		request.Header.Set(name, value)
+	}
 	response, err := c.HTTP.Do(request)
 	if err != nil {
 		return nil, Result{}, err

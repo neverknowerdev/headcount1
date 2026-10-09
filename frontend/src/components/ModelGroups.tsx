@@ -1,6 +1,8 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { Plus, Trash2, Edit2, Minus, Copy, Check, ArrowUp, ArrowDown, BarChart3, X } from 'lucide-react';
+import { groupKind, modelsOfKind } from '../lib/modelKinds';
+import type { ModelKind } from '../lib/modelKinds';
 
 interface MemberWindow {
     requests: number;
@@ -123,6 +125,9 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
     const [formName, setFormName] = useState('');
     const [formDescription, setFormDescription] = useState('');
     const [formMembers, setFormMembers] = useState<MemberForm[]>([]);
+    // A group routes between language models or between System One models,
+    // never both. The kind is chosen when the group is made and stays.
+    const [formKind, setFormKind] = useState<ModelKind>('llm');
     const [saveError, setSaveError] = useState('');
     const [isSaving, setIsSaving] = useState(false);
     const [copiedId, setCopiedId] = useState<number | null>(null);
@@ -163,6 +168,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
         setSaveError('');
         if (g) {
             setEditingId(g.id);
+            setFormKind(groupKind(g));
             setFormName(g.name);
             setFormDescription(g.description || '');
             setFormMembers((g.members || []).map((m: any) => ({
@@ -170,6 +176,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
             })));
         } else {
             setEditingId(null);
+            setFormKind('llm');
             setFormName('');
             setFormDescription('');
             setFormMembers([{ provider_id: '', model: '', all_models: false, is_free: false }]);
@@ -189,7 +196,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                     all_models: m.all_models,
                     is_free: m.is_free,
                 }));
-            const payload = { name: formName, description: formDescription, members };
+            const payload = { name: formName, description: formDescription, kind: formKind, members };
             if (editingId) {
                 await axios.put(`/api/model-groups/${editingId}`, payload);
             } else {
@@ -230,11 +237,9 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
         });
     };
 
-    const providerModels = (providerId: number | ''): string[] => {
-        const p = providers.find(pr => pr.id === providerId);
-        if (!p?.supported_models) return [];
-        return p.supported_models.split(',').map((m: string) => m.trim()).filter(Boolean);
-    };
+    // The models of a provider that fit the group being edited: those of its kind.
+    const providerModels = (providerId: number | ''): string[] =>
+        modelsOfKind(providers.find(p => p.id === providerId), formKind);
 
     // Options for a member's model dropdown: the provider's live catalog,
     // plus the member's already-saved model if the catalog doesn't (yet, or
@@ -305,6 +310,9 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                         <div className="flex justify-between items-start mb-2">
                             <h3 className="text-lg font-bold text-gray-900 flex items-center gap-2">
                                 {g.name}
+                                {groupKind(g) === 'system_one' && (
+                                    <span className="rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800" data-testid="group-kind">System One</span>
+                                )}
                             </h3>
                             <div className="flex space-x-2">
                                 <button onClick={() => setStatsGroupId(g.id)} className="text-gray-500 hover:text-indigo-600" title="View stats"><BarChart3 size={18} /></button>
@@ -315,7 +323,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                         {g.description && <p className="text-sm text-gray-600 mb-2">{g.description}</p>}
 
                         <div className="flex items-center gap-2 mb-3 bg-gray-50 border rounded px-2 py-1.5">
-                            <code className="text-xs text-gray-700 truncate flex-1">{groupUrl(g.slug)}</code>
+                            <code className="text-xs text-gray-700 truncate flex-1">{groupUrl(g.slug)}{groupKind(g) === 'system_one' ? '/systemone' : ''}</code>
                             <button onClick={() => copyUrl(g)} className="text-gray-500 hover:text-indigo-600 shrink-0" title="Copy endpoint URL — requests need your login session (cookie) or an agent run token">
                                 {copiedId === g.id ? <Check size={15} className="text-green-600" /> : <Copy size={15} />}
                             </button>
@@ -354,6 +362,34 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                                 <input type="text" value={formDescription} onChange={e => setFormDescription(e.target.value)} className="w-full border rounded p-2" />
                             </div>
                             <div>
+                                <span className="block text-sm font-medium text-gray-700 mb-1">Kind of models</span>
+                                <div className="inline-flex overflow-hidden rounded border text-sm" role="group" aria-label="Kind of models">
+                                    {([['llm', 'Language models'], ['system_one', 'System One (classifiers)']] as [ModelKind, string][]).map(([kind, label]) => (
+                                        <button
+                                            key={kind}
+                                            type="button"
+                                            aria-pressed={formKind === kind}
+                                            disabled={!!editingId}
+                                            onClick={() => {
+                                                if (kind === formKind) return;
+                                                setFormKind(kind);
+                                                // Models of the other kind have no place in this group.
+                                                setFormMembers([{ provider_id: '', model: '', all_models: false, is_free: false }]);
+                                            }}
+                                            className={`px-3 py-1.5 ${formKind === kind ? 'bg-indigo-600 text-white' : 'bg-white text-gray-700 hover:bg-gray-50'} disabled:cursor-not-allowed disabled:opacity-60`}
+                                        >
+                                            {label}
+                                        </button>
+                                    ))}
+                                </div>
+                                <p className="mt-1 text-xs text-gray-500">
+                                    {formKind === 'system_one'
+                                        ? 'A System One model such as Jev answers typed questions; it does not write. A group of them can only be chosen in the Classifier slot, and routes exactly as a group of language models does.'
+                                        : 'Language models do a task\'s thinking and work. A group of them can be chosen for any model slot but the Classifier.'}
+                                    {editingId ? ' The kind of an existing group cannot be changed.' : ''}
+                                </p>
+                            </div>
+                            <div>
                                 <label className="block text-sm font-medium text-gray-700 mb-2">Models (tried top to bottom; free models always go first)</label>
                                 {formMembers.map((m, idx) => (
                                     <div key={idx} className="flex items-center gap-2 mb-2">
@@ -363,7 +399,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                                             className="border rounded p-2 text-sm w-56 shrink-0"
                                         >
                                             <option value="">Provider…</option>
-                                            {providers.map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
+                                            {providers.filter(p => modelsOfKind(p, formKind).length > 0 || p.id === m.provider_id).map(p => <option key={p.id} value={p.id}>{p.name}</option>)}
                                         </select>
                                         <select
                                             value={m.all_models ? ANY_MODEL : m.model}
@@ -379,7 +415,7 @@ export const ModelGroups: React.FC<{ providers: any[]; onChange?: () => void }> 
                                             className="flex-1 min-w-0 border rounded p-2 text-sm disabled:bg-gray-50 disabled:text-gray-400"
                                         >
                                             <option value="">Model…</option>
-                                            <option value={ANY_MODEL}>Any model (all currently supported by this provider)</option>
+                                            <option value={ANY_MODEL}>{formKind === 'system_one' ? 'Any System One model of this provider' : 'Any model (all currently supported by this provider)'}</option>
                                             {modelOptionsFor(m).map(pm => <option key={pm} value={pm}>{pm}</option>)}
                                         </select>
                                         <label className="flex items-center gap-1 text-xs text-gray-600 shrink-0">

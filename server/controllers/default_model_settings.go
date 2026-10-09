@@ -5,7 +5,10 @@ import (
 	"net/http"
 
 	"agent-orchestrator/db"
-	"agent-orchestrator/engine/classifier"
+
+	"agent-orchestrator/db/models"
+	"context"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 )
@@ -46,26 +49,23 @@ func (api *API) UpdateDefaultModelSetting(w http.ResponseWriter, r *http.Request
 		api.respondError(w, http.StatusNotFound, "provider or model group not found")
 		return
 	}
-	// The classifier slot takes a classifier and nothing else; a classifier
-	// can do none of the work the other slots are for.
-	if req.ProviderID != nil {
-		provider, err := api.q.GetLLMProvider(r.Context(), *req.ProviderID)
+	// The classifier slot takes a System One model, or a group of them, and
+	// nothing else; a System One model can do none of the work the other
+	// slots are for.
+	if req.ProviderID != nil || req.ModelGroupID != nil {
+		kind, err := api.modelChoiceKind(r.Context(), req.ProviderID, req.ModelGroupID, req.Model)
 		if err != nil {
 			api.respondError(w, http.StatusNotFound, "provider or model group not found")
 			return
 		}
-		isClassifier := provider.ProviderType == classifier.ProviderType
-		if purpose == db.PurposeClassifier && !isClassifier {
-			api.respondError(w, http.StatusBadRequest, "the classifier slot needs a TypeSafe provider; add one under LLM Providers")
+		if purpose == db.PurposeClassifier && kind != models.ModelKindSystemOne {
+			api.respondError(w, http.StatusBadRequest, "the classifier slot needs a System One model such as Jev, or a group of them; a language model cannot fill it")
 			return
 		}
-		if purpose != db.PurposeClassifier && isClassifier {
-			api.respondError(w, http.StatusBadRequest, "a classifier cannot be used as a language model; it only fits the classifier slot")
+		if purpose != db.PurposeClassifier && kind == models.ModelKindSystemOne {
+			api.respondError(w, http.StatusBadRequest, "a System One model is a classifier, not a language model; it only fits the classifier slot")
 			return
 		}
-	} else if req.ModelGroupID != nil && purpose == db.PurposeClassifier {
-		api.respondError(w, http.StatusBadRequest, "the classifier slot needs a TypeSafe provider, not a model group")
-		return
 	}
 	updated, err := api.q.UpdateDefaultModelSetting(r.Context(), api.currentUserID(r), purpose, req.ProviderID, req.Model, req.ModelGroupID)
 	if err != nil {
@@ -75,6 +75,33 @@ func (api *API) UpdateDefaultModelSetting(w http.ResponseWriter, r *http.Request
 	// Tasks that were waiting for a model of this tier can go on.
 	api.engine.NotifyCredentialsChanged()
 	api.respondJSON(w, http.StatusOK, updated)
+}
+
+// modelChoiceKind is the kind of the model a choice names: that of a group,
+// or of a provider's model. A provider named without a model stands for its
+// default model.
+func (api *API) modelChoiceKind(ctx context.Context, providerID, modelGroupID *int32, model string) (string, error) {
+	if modelGroupID != nil {
+		group, err := api.q.GetModelGroup(ctx, *modelGroupID)
+		if err != nil {
+			return "", err
+		}
+		if models.IsModelKind(group.Kind) {
+			return group.Kind, nil
+		}
+		return models.ModelKindLLM, nil
+	}
+	if providerID == nil {
+		return models.ModelKindLLM, nil
+	}
+	provider, err := api.q.GetLLMProvider(ctx, *providerID)
+	if err != nil {
+		return "", err
+	}
+	if strings.TrimSpace(model) == "" {
+		model = provider.DefaultModel
+	}
+	return models.ModelKind(model), nil
 }
 
 // authorizeModelBinding verifies that a provider and a model group belong to

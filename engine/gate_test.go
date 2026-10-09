@@ -23,9 +23,12 @@ import (
 // fakeJev stands in for the TypeSafe API. Each question is answered by the
 // test's judge; what it was asked is kept.
 type fakeJev struct {
-	mu       sync.Mutex
-	states   []string
-	asked    [][]string
+	mu     sync.Mutex
+	states []string
+	asked  [][]string
+	// models and headers are what each request named and arrived with.
+	models   []string
+	headers  []http.Header
 	status   int
 	judge    func(state, name, instructions string, options map[string]string) classifier.Answer
 	server   *httptest.Server
@@ -35,6 +38,7 @@ type fakeJev struct {
 func (j *fakeJev) serve(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		State     string `json:"state"`
+		Model     string `json:"model"`
 		Questions map[string]struct {
 			Type         string            `json:"type"`
 			Instructions string            `json:"instructions"`
@@ -45,6 +49,8 @@ func (j *fakeJev) serve(w http.ResponseWriter, r *http.Request) {
 	j.mu.Lock()
 	defer j.mu.Unlock()
 	j.states = append(j.states, body.State)
+	j.models = append(j.models, body.Model)
+	j.headers = append(j.headers, r.Header.Clone())
 	var names []string
 	answers := map[string]classifier.Answer{}
 	for name, question := range body.Questions {
@@ -96,6 +102,61 @@ func (f *driverFixture) classifierCalls(purpose string) []db.LLMCall {
 
 var nothingNotable = func(string, string, string, map[string]string) classifier.Answer {
 	return classifier.Answer{Noul: 0.02}
+}
+
+// Jev is served by TypeSafe and, beside their language models, by other
+// providers. Whichever serves it, it is the model that makes it a classifier:
+// chosen in the classifier slot it is asked at that provider's systemone
+// endpoint, under its own name there.
+func TestASystemOneModelFromAnOrdinaryProviderIsTheClassifier(t *testing.T) {
+	x := newExecutorFixture(t)
+	jev := x.useClassifier(func(state, name, _ string, _ map[string]string) classifier.Answer {
+		if name == "abandoned" && strings.Contains(state, "grep") {
+			return classifier.Answer{Noul: 0.93}
+		}
+		return classifier.Answer{Noul: 0.03}
+	})
+	// The same endpoint, now as a provider that mostly serves language models.
+	require.NoError(t, x.database.Model(&db.LLMProvider{}).Where("id = ?", jev.provider.ID).Updates(map[string]interface{}{
+		"name": "OpenCode Zen", "provider_type": "openai", "base_url": jev.server.URL + "/zen/v1",
+		"supported_models": "big-pickle", "system_one_models": "jev-1.13,jev-1.13-free", "default_model": "big-pickle",
+	}).Error)
+	_, err := x.q.UpdateDefaultModelSetting(context.Background(), x.owner.ID, db.PurposeClassifier, &jev.provider.ID, "jev-1.13-free", nil)
+	require.NoError(t, err)
+
+	task := x.direct(models.TaskTypeResearch, "Find the login handler", "Locate it.")
+	x.provider.pushCheap(
+		call("ls", `{"path":"."}`),
+		call("grep", `{"pattern":"login","path":"."}`),
+		call("checkpoint", `{"progress":"Grep was useless","next_step":"read the router",
+			"dead_ends":[{"title":"Grep for login","detail":"Searched every file","reason":"no matches"}]}`),
+		finish("done", "Found it in the router."),
+	)
+	x.start(task.ID)
+	require.Equal(t, db.TaskStatusDone, x.task(task.ID).Status)
+
+	require.NotEmpty(t, jev.models)
+	for i, model := range jev.models {
+		assert.Equal(t, "jev-1.13-free", model)
+		assert.Equal(t, aicli.UserAgent, jev.headers[i].Get("User-Agent"))
+		assert.Regexp(t, `^hc1-[0-9a-f]{32}$`, jev.headers[i].Get(aicli.SessionHeader), "the calls say which session they belong to")
+	}
+	assert.Equal(t, []string{"checkpoint"}, toolsOffered(x.provider.servedBy(cheapModel)[2]), "it timed the checkpoint as TypeSafe's own would")
+	gateCalls := x.classifierCalls("checkpoint_gate")
+	require.NotEmpty(t, gateCalls)
+	assert.Equal(t, "OpenCode Zen", gateCalls[0].ProviderName)
+	assert.Equal(t, "jev-1.13-free", gateCalls[0].RequestedModel)
+
+	// The provider's language model in the slot is not a classifier: it is
+	// never sent a classifier question.
+	_, err = x.q.UpdateDefaultModelSetting(context.Background(), x.owner.ID, db.PurposeClassifier, &jev.provider.ID, "big-pickle", nil)
+	require.NoError(t, err)
+	asked := jev.requests()
+	second := x.direct(models.TaskTypeResearch, "Look again", "Locate it.")
+	x.provider.pushCheap(call("ls", `{"path":"."}`), finish("done", "Nothing new."))
+	x.start(second.ID)
+	require.Equal(t, db.TaskStatusDone, x.task(second.ID).Status)
+	assert.Equal(t, asked, jev.requests())
 }
 
 // The classifier sees an approach being abandoned and the engine asks for a
@@ -292,6 +353,7 @@ func TestAFailingOrMisconfiguredClassifierChangesNothing(t *testing.T) {
 	require.Len(t, requests, 4)
 	assert.Equal(t, []string{"checkpoint"}, toolsOffered(requests[2]), "the fixed interval still applies")
 	assert.Greater(t, jev.requests(), 0)
+	assert.LessOrEqual(t, jev.requests(), maxGateFailures, "a classifier that keeps failing is left alone for the rest of the session")
 	failures := x.classifierCalls("checkpoint_gate")
 	require.NotEmpty(t, failures)
 	assert.Equal(t, models.LLMCallError, failures[0].Status, "a failed classifier call is in the ledger as failed")

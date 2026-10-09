@@ -12,7 +12,7 @@ import (
 // by the gateway for every request; selecting a member here would bypass
 // free-first ordering, cooldowns, failover, and request statistics.
 func resolveModelGroupTarget(group db.ModelGroup) (db.LLMProvider, string, error) {
-	if len(db.ExpandModelGroupMembers(group.Members)) == 0 {
+	if len(db.ExpandModelGroupMembers(group)) == 0 {
 		return db.LLMProvider{}, "", fmt.Errorf("model group %q has no members", group.Name)
 	}
 	provider := db.LLMProvider{

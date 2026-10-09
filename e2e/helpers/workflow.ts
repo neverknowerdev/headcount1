@@ -26,6 +26,8 @@ export interface MockLog {
     completionsAnswered: number;
     held: number;
     completions: ReceivedRequest[];
+    /** Calls made to System One models. */
+    systemOne: ReceivedRequest[];
 }
 
 export async function mockLog(): Promise<MockLog> {

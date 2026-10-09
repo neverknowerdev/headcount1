@@ -237,7 +237,7 @@ func (s *executorSession) execute(ctx context.Context, resumed bool) (status, me
 	}
 	s.checkpoints = checkpointTracker{every: s.e.driver.budgets.CheckpointEveryToolCalls}
 	s.checkpoints.start(history)
-	s.gate = classifierFor(ctx, s.e.q, s.company)
+	s.gate = classifierFor(ctx, s.e.q, s.company, runSession(s.run))
 	s.turn.judged, _ = toolCalls(history)
 	s.info(fmt.Sprintf("Executor for task %s (attempt %d, model %s via %s) in %s", s.task.RefKey, s.run.Attempt, s.target.Model, s.target.Provider.Name, s.workspace))
 

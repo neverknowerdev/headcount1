@@ -68,6 +68,16 @@ const TaskStatusFailed = models.TaskStatusFailed
 const TaskStatusInProgress = models.TaskStatusInProgress
 const TaskStatusInReview = models.TaskStatusInReview
 const TaskStatusTodo = models.TaskStatusTodo
+
+// Model kinds: a language model writes, a System One model only decides.
+const (
+	ModelKindLLM       = models.ModelKindLLM
+	ModelKindSystemOne = models.ModelKindSystemOne
+)
+
+// IsSystemOneModel reports whether a model ID names a System One model.
+var IsSystemOneModel = models.IsSystemOneModel
+
 const TaskTypeResearch = models.TaskTypeResearch
 const TaskTypeCoding = models.TaskTypeCoding
 const TaskTypeReview = models.TaskTypeReview

@@ -18,7 +18,7 @@ func TestMigrationManifestsAuditEveryDownPair(t *testing.T) {
 		t.Run(dialect, func(t *testing.T) {
 			manifest, err := BuildManifest(dialect)
 			require.NoError(t, err)
-			require.Len(t, manifest.Migrations, 71)
+			require.Len(t, manifest.Migrations, 72)
 			for _, migration := range manifest.Migrations {
 				require.NotEmpty(t, migration.UpSQL, migration.Version)
 				require.NotEmpty(t, migration.DownSQL, "missing down migration for %s", migration.Version)
@@ -185,7 +185,7 @@ func TestApplySQLiteEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 71, revisions)
+	require.Equal(t, 72, revisions)
 	for _, column := range []string{"mode", "subagents", "model", "provider_id", "model_group_id", "chat_type", "permissions", "can_use_workers"} {
 		var present int
 		require.NoError(t, database.QueryRow(`SELECT count(*) FROM pragma_table_info('agents') WHERE name = ?`, column).Scan(&present))
@@ -223,7 +223,7 @@ func TestApplyPostgresEmbeddedMigrations(t *testing.T) {
 
 	var revisions int
 	require.NoError(t, database.QueryRow(`SELECT count(*) FROM public.atlas_schema_revisions`).Scan(&revisions))
-	require.Equal(t, 71, revisions)
+	require.Equal(t, 72, revisions)
 
 	_ = database.Close()
 }
@@ -302,7 +302,7 @@ func runWorkflowMigrationsRoundTrip(t *testing.T, r roundTripDB) {
 		migration.Reversible = true
 		rollback = append(rollback, migration)
 	}
-	require.Len(t, rollback, 8)
+	require.Len(t, rollback, 9)
 	require.NoError(t, ApplyDownWithSchema(ctx, database, r.dialect, rollback, r.schema))
 
 	require.Equal(t, 63, count(`SELECT count(*) FROM atlas_schema_revisions`))
@@ -322,7 +322,7 @@ func runWorkflowMigrationsRoundTrip(t *testing.T, r roundTripDB) {
 	require.Error(t, err, "the pre-workflow purpose domain must be restored")
 
 	require.NoError(t, ApplyWithSchema(ctx, database, r.dialect, "test", r.schema))
-	require.Equal(t, 71, count(`SELECT count(*) FROM atlas_schema_revisions`))
+	require.Equal(t, 72, count(`SELECT count(*) FROM atlas_schema_revisions`))
 	rows, err := database.Query(`SELECT id, root_task_id, depth, task_type, mode FROM tasks ORDER BY id`)
 	require.NoError(t, err)
 	defer rows.Close()
@@ -392,7 +392,7 @@ func runCleanSlateDataMigration(t *testing.T, r roundTripDB) {
 		migration.Reversible = true
 		rollback = append(rollback, migration)
 	}
-	require.Len(t, rollback, 3)
+	require.Len(t, rollback, 4)
 	require.NoError(t, ApplyDownWithSchema(ctx, database, r.dialect, rollback, r.schema))
 
 	exec(`INSERT INTO users (id, email) VALUES (1, 'owner@example.com')`)

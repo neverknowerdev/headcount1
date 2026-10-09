@@ -25,6 +25,13 @@ func (provider *LLMProvider) BeforeCreate(_ *gorm.DB) error {
 	return nil
 }
 
+// BeforeSave files every listed model under its kind, however the catalog
+// reached the row: typed by hand, discovered, or restored from a backup.
+func (provider *LLMProvider) BeforeSave(_ *gorm.DB) error {
+	provider.SortCatalog()
+	return nil
+}
+
 func slugifyProvider(value string) string {
 	value = strings.ToLower(strings.TrimSpace(value))
 	var result strings.Builder
@@ -42,15 +49,18 @@ func slugifyProvider(value string) string {
 }
 
 type LLMProvider struct {
-	ID              int32     `json:"id" gorm:"primaryKey"`
-	Name            string    `json:"name" gorm:"not null"`
-	BaseUrl         string    `json:"base_url" gorm:"not null"`
-	ApiKeyEncrypted string    `json:"-" gorm:"column:api_key;not null;serializer:sealed"`
-	HasApiKey       bool      `json:"has_api_key" gorm:"-"`
-	UserID          *int32    `json:"user_id" gorm:"index"`
-	ProviderType    string    `json:"provider_type"`
-	DefaultModel    string    `json:"default_model"`
-	SupportedModels string    `json:"supported_models"`
+	ID              int32  `json:"id" gorm:"primaryKey"`
+	Name            string `json:"name" gorm:"not null"`
+	BaseUrl         string `json:"base_url" gorm:"not null"`
+	ApiKeyEncrypted string `json:"-" gorm:"column:api_key;not null;serializer:sealed"`
+	HasApiKey       bool   `json:"has_api_key" gorm:"-"`
+	UserID          *int32 `json:"user_id" gorm:"index"`
+	ProviderType    string `json:"provider_type"`
+	DefaultModel    string `json:"default_model"`
+	SupportedModels string `json:"supported_models"`
+	// SystemOneModels are the provider's System One (classifier) models, kept
+	// apart from the language models in SupportedModels.
+	SystemOneModels string    `json:"system_one_models" gorm:"not null;default:''"`
 	Builtin         bool      `json:"builtin" gorm:"not null;default:false"`
 	Enabled         bool      `json:"enabled" gorm:"not null;default:true"`
 	PresetKey       string    `json:"preset_key" gorm:"default:''"`

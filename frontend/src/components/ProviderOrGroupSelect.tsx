@@ -1,5 +1,7 @@
 import React from 'react';
 import { Link } from 'react-router-dom';
+import { groupKind, modelsOfKind } from '../lib/modelKinds';
+import type { ModelKind } from '../lib/modelKinds';
 
 // Describes one model group's members as a short label list, showing "Any
 // model" for wildcard (all_models) members instead of a blank model name.
@@ -25,6 +27,10 @@ interface Props {
     // can be left blank to fall back to the calling session's own LLM).
     noneLabel?: string;
     modelRequired?: boolean;
+    // The kind of model being chosen: language models unless said otherwise.
+    // Only providers that have a model of this kind, only their models of
+    // this kind, and only groups of this kind are offered.
+    kind?: ModelKind;
 }
 
 // Combined "provider or model group" picker, plus a concrete model dropdown
@@ -33,8 +39,12 @@ interface Props {
 // app-level Default Models settings so both offer identical, dropdown-only
 // (no free-text) selection.
 export const ProviderOrGroupSelect: React.FC<Props> = ({
-    label, providers, modelGroups, value, onChange, manageLinkTo, noneLabel, modelRequired,
+    label, providers: allProviders, modelGroups: allGroups, value, onChange, manageLinkTo, noneLabel, modelRequired, kind = 'llm',
 }) => {
+    // What is selected stays in the list even if it no longer fits, so that
+    // a stale choice is shown for what it is rather than as nothing.
+    const providers = allProviders.filter(p => modelsOfKind(p, kind).length > 0 || p.id.toString() === value.provider_id);
+    const modelGroups = allGroups.filter(g => groupKind(g) === kind || g.id.toString() === value.model_group_id);
     const selectValue = value.model_group_id ? `group:${value.model_group_id}` : (value.provider_id ? `provider:${value.provider_id}` : '');
 
     return (
@@ -52,7 +62,13 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
                     } else if (v.startsWith('provider:')) {
                         const selectedProviderId = v.slice(9);
                         const provider = providers.find(p => p.id.toString() === selectedProviderId);
-                        onChange({ provider_id: selectedProviderId, model_group_id: '', model: provider?.default_model || '' });
+                        const models = modelsOfKind(provider, kind);
+                        // The provider's default when it is of this kind; else
+                        // a free model of the kind if there is one, else the first.
+                        const model = models.includes(provider?.default_model)
+                            ? provider.default_model
+                            : (models.find(m => m.toLowerCase().includes('free')) || models[0] || '');
+                        onChange({ provider_id: selectedProviderId, model_group_id: '', model });
                     } else {
                         onChange({ provider_id: '', model_group_id: '', model: '' });
                     }
@@ -61,7 +77,7 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
             >
                 <option value="">{noneLabel || '-- Select Provider or Group --'}</option>
                 {modelGroups.length > 0 && (
-                    <optgroup label="Model Groups (auto-routing & failover)">
+                    <optgroup label={kind === 'system_one' ? 'System One groups (auto-routing & failover)' : 'Model Groups (auto-routing & failover)'}>
                         {modelGroups.map(g => <option key={g.id} value={`group:${g.id}`}>{g.name}</option>)}
                     </optgroup>
                 )}
@@ -79,10 +95,10 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
                 </div>
             ) : value.provider_id ? (
                 <div className="mt-2">
-                    <label className="block text-sm font-medium text-gray-700 mb-1">Model Name</label>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">{kind === 'system_one' ? 'System One model' : 'Model Name'}</label>
                     <select required={modelRequired} value={value.model || ''} onChange={e => onChange({ ...value, model: e.target.value })} className="w-full border rounded p-2">
                         <option value="">-- Select Model --</option>
-                        {providers.find(p => p.id.toString() === value.provider_id)?.supported_models?.split(',').map((m: string) => m.trim()).filter((m: string) => m).map((m: string) => (
+                        {modelsOfKind(providers.find(p => p.id.toString() === value.provider_id), kind).map((m: string) => (
                             <option key={m} value={m}>{m}</option>
                         ))}
                     </select>

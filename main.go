@@ -231,6 +231,12 @@ func run() error {
 			}
 		}
 	}
+	// File every provider's models under their kind. Rows written before
+	// System One models were told apart from language models list them
+	// together; this moves each to where it belongs.
+	if err := db.New(database).SortLLMProviderCatalogs(context.Background()); err != nil {
+		log.Printf("Warning: failed to sort provider model catalogs: %v", err)
+	}
 	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
 	// pick from a dropdown when adding a provider. These are a global catalog;
 	// they don't become actual LLMProvider rows until a user picks one and

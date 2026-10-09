@@ -95,15 +95,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.HasApiKey = p.ApiKeyEncrypted != ""
-	if p.ProviderType == classifier.ProviderType {
-		// A classifier has one use. Connecting one puts it to that use unless
-		// another is already chosen, so adding the key is the whole setup.
-		if slot, err := api.q.GetDefaultModelSetting(r.Context(), uid, db.PurposeClassifier); err == nil && slot.ProviderID == nil {
-			if _, err := api.q.UpdateDefaultModelSetting(r.Context(), uid, db.PurposeClassifier, &p.ID, p.DefaultModel, nil); err == nil {
-				api.engine.NotifyCredentialsChanged()
-			}
-		}
-	}
+	api.adoptClassifier(r.Context(), uid, p)
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -132,6 +124,9 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		// SystemOneModels is a pointer so a client that does not know of the
+		// second catalog leaves it as it is.
+		SystemOneModels *string `json:"system_one_models"`
 		// Enabled is a pointer so a caller that omits it (an older client, or
 		// a request that only means to touch other fields) leaves the
 		// current value untouched instead of silently disabling the provider.
@@ -149,6 +144,9 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.ProviderType = req.ProviderType
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
+	if req.SystemOneModels != nil {
+		provider.SystemOneModels = *req.SystemOneModels
+	}
 	if req.ApiKey != "" {
 		uid := api.currentUserID(r)
 		sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
@@ -167,6 +165,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.adoptClassifier(r.Context(), api.currentUserID(r), updated)
 
 	api.respondJSON(w, http.StatusOK, updated)
 }
@@ -240,6 +239,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		SystemOneModels string `json:"system_one_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -259,6 +259,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
+		SystemOneModels: req.SystemOneModels,
 		Enabled:         true,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
@@ -266,6 +267,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.HasApiKey = p.ApiKeyEncrypted != ""
+	api.adoptClassifier(r.Context(), uid, p)
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -322,9 +324,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	url := strings.TrimSpace(baseUrl)
 
-	// A classifier endpoint speaks neither chat format: it is tested with a
-	// question of its own kind.
-	if providerType == classifier.ProviderType || strings.Contains(strings.ToLower(url), "typesafe.ai") {
+	// A System One model speaks neither chat format: it is tested with a
+	// question of its own kind, at whichever provider serves it.
+	if providerType == classifier.ProviderType || strings.Contains(strings.ToLower(url), "typesafe.ai") || isSystemOneModel(req.Model) {
 		model := strings.TrimSpace(req.Model)
 		if model == "" {
 			model = classifier.DefaultModel
@@ -334,7 +336,7 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		api.respondJSON(w, http.StatusOK, map[string]interface{}{
-			"status": "ok", "provider_type": classifier.ProviderType, "url": url,
+			"status": "ok", "provider_type": systemOneTestProviderType(providerType, url), "url": url,
 			"model": model, "log": "The classifier answered a test question.",
 		})
 		return

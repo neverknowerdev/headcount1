@@ -65,7 +65,13 @@ An **agent** is a role: a name, a description and a short prompt (`You are the C
 
 ### The classifier (optional)
 
-[TypeSafe](https://typesafe.ai)'s Jev is a classifier, not a language model: it answers yes/no and which-of-these questions about a text for very little. Until one is set, *LLM Providers* and *Settings* show a warning with a **Connect TypeSafe (Jev)** button: paste an API key and the **classifier** slot is filled for you. The engine then asks it, after each executor turn, whether something worth recording has just happened (so checkpoints come at the right moment instead of only at the fixed interval), whether a new record merely rewords an existing one, whether a session is going in circles, and which reports are irrelevant to a prompt that does not fit. Nothing depends on it: with no classifier, or with one that is failing, fixed rules apply instead.
+[TypeSafe](https://typesafe.ai)'s Jev is a **System One model**, not a language model: it answers yes/no and which-of-these questions about a text for very little, and cannot write. The engine asks it, after each executor turn, whether something worth recording has just happened (so checkpoints come at the right moment instead of only at the fixed interval), whether a new record merely rewords an existing one, whether a session is going in circles, and which reports are irrelevant to a prompt that does not fit. Nothing depends on it: with no classifier, or with one that is failing, fixed rules apply instead.
+
+Jev is served by TypeSafe and, beside their language models, by other providers: OpenCode Zen (`jev-1.13`, and `jev-1.13-free` at no cost) and AI Surplus (`jev-1.13.0`). Wherever a provider's models are discovered, its System One models are recognised by their ID and kept in a list of their own, so they never show up where a language model is chosen:
+
+- The **classifier** slot under *Default Models* offers only System One models and groups of them; every other slot, and a task's own model, offers only language models.
+- A **model group** holds one kind. A group of System One models routes exactly as a group of language models does (free members first, failover on errors and rate limits, the same statistics) and can be chosen only as the classifier.
+- Connecting or activating a provider that serves a System One model fills the classifier slot if it is still empty, preferring a free model. Until a classifier is set, *LLM Providers* and *Settings* show a warning that says how to get one.
 
 ## Accounts & Multi-User
 

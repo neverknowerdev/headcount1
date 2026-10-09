@@ -471,3 +471,96 @@ func TestGroupProxyAllModelsMember_TriesEveryModelInOrder(t *testing.T) {
 		t.Errorf("expected a success stat row on model-c, got %+v (present=%v)", s, ok)
 	}
 }
+
+// A group of System One models routes a systemone call between its members
+// just as a group of language models routes a chat completion: free members
+// first, failover on a rate limit, the model swapped for the member's own, a
+// statistic for each attempt.
+func TestGroupProxyRoutesSystemOneCalls(t *testing.T) {
+	database := setupGroupTestDB(t)
+
+	var limitedCalls, okCalls int
+	limited := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		limitedCalls++
+		w.WriteHeader(http.StatusTooManyRequests)
+		w.Write([]byte(`{"error": {"message": "Rate limit exceeded"}}`))
+	}))
+	defer limited.Close()
+	var servedPath, servedModel, servedSession string
+	ok := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		okCalls++
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+		servedPath, servedModel, servedSession = r.URL.Path, payload["model"].(string), r.Header.Get("x-opencode-session")
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"model": "jev-1.13", "answers": {"urgent": {"noul": 0.9}}, "usage": {"input_tokens": 40, "output_tokens": 2}}`))
+	}))
+	defer ok.Close()
+
+	free := db.LLMProvider{Name: "Free", BaseUrl: limited.URL + "/v1", ApiKeyEncrypted: sealKey("k1"), SystemOneModels: "jev-1.13-free"}
+	paid := db.LLMProvider{Name: "Paid", BaseUrl: ok.URL + "/v1", ApiKeyEncrypted: sealKey("k2"), SupportedModels: "big-pickle", SystemOneModels: "jev-1.13"}
+	database.Create(&free)
+	database.Create(&paid)
+	group := db.ModelGroup{Name: "Classifiers", Slug: "classifiers", Kind: db.ModelKindSystemOne}
+	database.Create(&group)
+	// The paid member comes first in the list; the free one is still tried first.
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: paid.ID, AllModels: true, Priority: 0})
+	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: free.ID, Model: "jev-1.13-free", IsFree: true, Priority: 1})
+	writers := db.ModelGroup{Name: "Writers", Slug: "writers"}
+	database.Create(&writers)
+	database.Create(&db.ModelGroupMember{GroupID: writers.ID, ProviderID: paid.ID, Model: "big-pickle"})
+
+	gw := integration.NewLLMGateway(database)
+	r := chi.NewRouter()
+	gw.Mount(r)
+	post := func(key, endpoint, body string) *httptest.ResponseRecorder {
+		req := httptest.NewRequest("POST", "/proxy/group/"+key+"/v1/"+endpoint, strings.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("x-opencode-session", "hc1-test")
+		rctx := chi.NewRouteContext()
+		rctx.URLParams.Add("group_key", key)
+		req = req.WithContext(context.WithValue(req.Context(), chi.RouteCtxKey, rctx))
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, req)
+		return w
+	}
+
+	w := post("classifiers", "systemone", `{"model": "classifiers", "state": "The server is down.", "questions": {"urgent": {"type": "noul", "instructions": "Is it urgent?"}}}`)
+	if w.Code != 200 {
+		t.Fatalf("expected 200 after failover, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(w.Body.String(), `"noul": 0.9`) {
+		t.Errorf("the answer should pass through unchanged, got %s", w.Body.String())
+	}
+	if limitedCalls != 1 || okCalls != 1 {
+		t.Fatalf("expected the free member first, then the paid one; got free=%d paid=%d", limitedCalls, okCalls)
+	}
+	if servedPath != "/v1/systemone" || servedModel != "jev-1.13" {
+		t.Errorf("expected the paid provider's own System One model at its systemone endpoint, got %s %s", servedPath, servedModel)
+	}
+	if servedSession != "hc1-test" {
+		t.Errorf("the session header should reach the provider, got %q", servedSession)
+	}
+
+	time.Sleep(100 * time.Millisecond)
+	var stats []db.ModelRequestStat
+	database.Order("id").Find(&stats)
+	if len(stats) != 2 || !stats[0].RateLimited || !stats[1].Success {
+		t.Fatalf("expected a rate-limited attempt and a success, got %+v", stats)
+	}
+	if stats[1].PromptTokens != 40 || stats[1].CompletionTokens != 2 {
+		t.Errorf("a systemone answer counts its tokens as input and output, got %+v", stats[1])
+	}
+
+	// Each kind of group answers only its own kind of call.
+	if w := post("classifiers", "chat/completions", `{"model": "x"}`); w.Code != 400 || !strings.Contains(w.Body.String(), "holds System One models") {
+		t.Errorf("a chat completion to a System One group should be refused, got %d: %s", w.Code, w.Body.String())
+	}
+	if w := post("writers", "systemone", `{"model": "x"}`); w.Code != 400 || !strings.Contains(w.Body.String(), "holds language models") {
+		t.Errorf("a systemone call to a language group should be refused, got %d: %s", w.Code, w.Body.String())
+	}
+	if okCalls != 1 {
+		t.Errorf("a refused call must not reach a provider, got %d calls", okCalls)
+	}
+}

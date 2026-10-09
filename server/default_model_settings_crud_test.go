@@ -131,4 +131,22 @@ func TestDefaultModelSettings_ClassifierSlotTakesOnlyAClassifier(t *testing.T) {
 	assert.Equal(t, http.StatusBadRequest, put(db.PurposeCheap, map[string]interface{}{"provider_id": jev.ID, "model": "jev-latest"}))
 	// Clearing the slot is always allowed.
 	assert.Equal(t, http.StatusOK, put(db.PurposeClassifier, map[string]interface{}{}))
+
+	// Other providers serve Jev beside their language models. What decides
+	// is the model, not who serves it.
+	zen := db.LLMProvider{Name: "Zen", ProviderType: "openai", SupportedModels: "big-pickle,jev-1.13-free", UserID: &uid}
+	require.NoError(t, database.Create(&zen).Error)
+	assert.Equal(t, http.StatusOK, put(db.PurposeClassifier, map[string]interface{}{"provider_id": zen.ID, "model": "jev-1.13-free"}))
+	assert.Equal(t, http.StatusBadRequest, put(db.PurposeClassifier, map[string]interface{}{"provider_id": zen.ID, "model": "big-pickle"}))
+	assert.Equal(t, http.StatusBadRequest, put(db.PurposeClassifier, map[string]interface{}{"provider_id": zen.ID}),
+		"a provider named without a model stands for its default, a language model")
+	assert.Equal(t, http.StatusBadRequest, put(db.PurposeCheap, map[string]interface{}{"provider_id": zen.ID, "model": "jev-1.13-free"}))
+	assert.Equal(t, http.StatusOK, put(db.PurposeCheap, map[string]interface{}{"provider_id": zen.ID, "model": "big-pickle"}))
+
+	// A group of System One models fits the classifier slot and no other.
+	classifiers := db.ModelGroup{Name: "Classifiers", Slug: "classifiers", Kind: db.ModelKindSystemOne, UserID: &uid}
+	require.NoError(t, database.Create(&classifiers).Error)
+	assert.Equal(t, http.StatusOK, put(db.PurposeClassifier, map[string]interface{}{"model_group_id": classifiers.ID}))
+	assert.Equal(t, http.StatusBadRequest, put(db.PurposeSmart, map[string]interface{}{"model_group_id": classifiers.ID}))
+	assert.Equal(t, http.StatusOK, put(db.PurposeSmart, map[string]interface{}{"model_group_id": group.ID}))
 }
