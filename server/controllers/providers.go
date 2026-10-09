@@ -393,8 +393,13 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		var parsedErr string
 		if resp.StatusCode >= 400 {
 			lowerBodyStr := strings.ToLower(string(respBody))
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				parsedErr = "Invalid API Key or unauthorized access."
+			if said := providerErrorMessage(respBody); resp.StatusCode == 403 && said != "" {
+				// A refusal the provider explains is not a bad key: it may be
+				// a model the key has no access to, or a restriction on who
+				// may call it. Its own words say which.
+				parsedErr = said
+			} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				parsedErr = invalidKeyMessage
 			} else if resp.StatusCode == 429 {
 				parsedErr = "Rate limit exceeded or insufficient quota."
 			} else if strings.Contains(lowerBodyStr, "model") && (strings.Contains(lowerBodyStr, "not found") || strings.Contains(lowerBodyStr, "does not exist") || strings.Contains(lowerBodyStr, "invalid") || strings.Contains(lowerBodyStr, "unsupported")) {
@@ -491,9 +496,12 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		out := modelOutcome{}
 		// Endpoint-shape attempts complete in a non-deterministic order, so
 		// bucket errors by kind and pick the most meaningful one at the end
-		// (auth > rate-limit > other) rather than letting a stray 404 from the
-		// unused shape overwrite the real reason.
-		var authErr, rateErr, otherErr string
+		// (refusal > auth > rate-limit > other) rather than letting a stray 404
+		// from the unused shape overwrite the real reason. A 403 the provider
+		// explained comes first: the other shape's request carries the key
+		// where this provider does not look for it and is answered with a
+		// plain "missing key", which would hide the explanation.
+		var refusedErr, authErr, rateErr, otherErr string
 		for i := 0; i < len(openAiUrls)+len(anthropicUrls); i++ {
 			res := <-resultCh
 			out.log += res.logMsg + "\n\n"
@@ -508,6 +516,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 				if res.parsedErr != "" {
 					rateErr = res.parsedErr
 				}
+			case res.status == http.StatusForbidden && res.parsedErr != "" && res.parsedErr != invalidKeyMessage:
+				out.authFailed = true
+				refusedErr = res.parsedErr
 			case res.status == http.StatusUnauthorized || res.status == http.StatusForbidden:
 				out.authFailed = true
 				if res.parsedErr != "" {
@@ -520,6 +531,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		switch {
+		case refusedErr != "":
+			out.parsedErr = refusedErr
 		case authErr != "":
 			out.parsedErr = authErr
 		case rateErr != "":

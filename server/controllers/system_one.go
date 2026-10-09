@@ -2,6 +2,7 @@ package endpoints
 
 import (
 	"context"
+	"encoding/json"
 	"strings"
 
 	"agent-orchestrator/db"
@@ -51,4 +52,31 @@ func systemOneTestProviderType(providerType, url string) string {
 		return "openai"
 	}
 	return providerType
+}
+
+// invalidKeyMessage is what a connection test says when a provider turned the
+// key away without saying why.
+const invalidKeyMessage = "Invalid API Key or unauthorized access."
+
+// providerErrorMessage reads what a provider said went wrong from an error
+// body of either common shape: {"error":{"message":...}} or {"message":...}.
+func providerErrorMessage(body []byte) string {
+	var parsed struct {
+		Error   json.RawMessage `json:"error"`
+		Message string          `json:"message"`
+	}
+	if json.Unmarshal(body, &parsed) != nil {
+		return ""
+	}
+	var nested struct {
+		Message string `json:"message"`
+	}
+	if json.Unmarshal(parsed.Error, &nested) == nil && strings.TrimSpace(nested.Message) != "" {
+		return strings.TrimSpace(nested.Message)
+	}
+	var plain string
+	if json.Unmarshal(parsed.Error, &plain) == nil && strings.TrimSpace(plain) != "" {
+		return strings.TrimSpace(plain)
+	}
+	return strings.TrimSpace(parsed.Message)
 }

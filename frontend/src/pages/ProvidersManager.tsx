@@ -5,6 +5,7 @@ import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, Chev
 import { ModelGroups } from '../components/ModelGroups';
 import { DefaultModelSettings } from '../components/DefaultModelSettings';
 import { ClassifierNotice } from '../components/ClassifierNotice';
+import { modelsOfKind } from '../lib/modelKinds';
 
 // Renders a provider's model list truncated to one line, with an expand
 // toggle that only appears once the list actually overflows that line —
@@ -298,7 +299,7 @@ export const ProvidersManager: React.FC = () => {
         setActivateProvider(provider);
         setActivateApiKey('');
         setActivateTestResult(null);
-        setActivateTestModel(provider.default_model || '');
+        setActivateTestModel(provider.default_model || modelsOfKind(provider, 'system_one')[0] || '');
     };
 
     const closeActivateModal = () => {
@@ -666,19 +667,32 @@ export const ProvidersManager: React.FC = () => {
                                 />
                             </div>
 
-                            {activateProvider.supported_models && (
+                            {(activateProvider.supported_models || activateProvider.system_one_models) && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Model to test &amp; use</label>
+                                    <label htmlFor="activate-test-model" className="block text-sm font-medium text-gray-700 mb-1">Model to test &amp; use</label>
                                     <select
+                                        id="activate-test-model"
                                         value={activateTestModel}
                                         onChange={e => { setActivateTestModel(e.target.value); setActivateTestResult(null); }}
                                         className="w-full border rounded p-2"
                                     >
-                                        {activateProvider.supported_models.split(',').map((m: string) => (
-                                            <option key={m} value={m}>{m}{m === activateProvider.default_model ? ' (default)' : ''}</option>
-                                        ))}
+                                        {modelsOfKind(activateProvider, 'llm').length > 0 && (
+                                            <optgroup label="Language models">
+                                                {modelsOfKind(activateProvider, 'llm').map(m => (
+                                                    <option key={m} value={m}>{m}{m === activateProvider.default_model ? ' (default)' : ''}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                        {modelsOfKind(activateProvider, 'system_one').length > 0 && (
+                                            <optgroup label="System One models (for the Classifier slot)">
+                                                {modelsOfKind(activateProvider, 'system_one').map(m => <option key={m} value={m}>{m}</option>)}
+                                            </optgroup>
+                                        )}
                                     </select>
-                                    <p className="text-xs text-gray-500 mt-1">If the default model is rate-limited or errors, pick another here — Test Connection and Save both use this selection.</p>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        If the default model is rate-limited or errors, pick another here — Test Connection and Save both use this selection.
+                                        {modelsOfKind(activateProvider, 'system_one').length > 0 && ' A provider may refuse its language models to this app and still serve its System One models: testing one of those is enough to save the key and use it as the classifier.'}
+                                    </p>
                                 </div>
                             )}
 
@@ -717,6 +731,9 @@ export const ProvidersManager: React.FC = () => {
                                 )}
                                 {activateProvider.supported_models && (
                                     <p className="text-xs text-gray-500 mt-1 break-words">{activateProvider.supported_models.split(',').join(', ')}</p>
+                                )}
+                                {activateProvider.system_one_models && (
+                                    <p className="text-xs text-gray-500 mt-1 break-words"><span className="font-semibold">System One:</span> {activateProvider.system_one_models.split(',').join(', ')}</p>
                                 )}
                             </div>
                         </div>
