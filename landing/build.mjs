@@ -1,6 +1,7 @@
 // Builds the static landing page into dist/. No dependencies: `node build.mjs`.
 import { createHash } from 'node:crypto';
 import { cpSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { legalPages } from './src/legal.mjs';
 
 const APP_URL = 'https://app.headcount1.ai';
 const GITHUB_URL = 'https://github.com/neverknowerdev/headcount1';
@@ -153,28 +154,43 @@ const faqs = [
   ['What are the council of experts and A/B testing?', 'For important decisions, several smart models give independent opinions and the council decides, with dissent recorded on the task. For worker tasks, headcount1 can run the same task on several models, let Jet judge the runs, keep the best verified result, and mark that model as more capable for that kind of work in future.'],
   ['Can anyone else read my data?', 'Not without your passkey. API keys, MCP tokens and SSH keys are sealed with AES-256-GCM under your personal key, which exists only in memory while you are signed in. There is no master key on the server.'],
   ['What do I need to self-host?', 'Go 1.21+ and Node 18+ to build. It runs on SQLite out of the box (~/.headcount1) or on PostgreSQL via DATABASE_URL. For multi-tenant hosts, run it on Linux with Landlock to get the full sandbox.'],
+  ['What license is it under?', 'The GNU AGPL v3. You can use, self-host and modify headcount1 for free, including in a business. If you run a modified version as a service for others, you publish your changes under the same license. Companies that cannot work with the AGPL can buy a commercial license or use the cloud version.'],
   ['Which models are supported?', 'Any provider you connect. Roles come with suggested defaults (for example GPT 6.1 for the CEO and Opus 5.5 for the CTO), and you can override them per agent or use model groups with fallbacks.'],
 ];
 
 // ---------- page ----------
 const star = `<a class="btn btn-dark" href="${GITHUB_URL}"><span class="star" aria-hidden="true">★</span><span>Star on GitHub</span></a>`;
 
-const body = `
-<header class="nav">
+// home is '' on the landing page and '/' on the pages that link back to it.
+const nav = home => `<header class="nav">
   <div class="wrap nav-in">
-    <a class="logo" href="#top"><span class="logo-mark" aria-hidden="true">1</span><span>headcount1</span></a>
+    <a class="logo" href="${home || '#top'}"><span class="logo-mark" aria-hidden="true">1</span><span>headcount1</span></a>
     <nav class="nav-links" aria-label="Sections">
-      <a href="#org">Agents</a>
-      <a href="#flow">Workflow</a>
-      <a href="#cost">Savings</a>
-      <a href="#routing">Routing</a>
-      <a href="#privacy">Privacy</a>
-      <a href="#pricing">Pricing</a>
-      <a href="#faq">FAQ</a>
+      <a href="${home}#org">Agents</a>
+      <a href="${home}#flow">Workflow</a>
+      <a href="${home}#cost">Savings</a>
+      <a href="${home}#routing">Routing</a>
+      <a href="${home}#privacy">Privacy</a>
+      <a href="${home}#pricing">Pricing</a>
+      <a href="${home}#faq">FAQ</a>
     </nav>
     ${star}
   </div>
-</header>
+</header>`;
+
+const footer = `<footer class="foot">
+  <div class="wrap foot-in">
+    <span>headcount1 · AI agent orchestration</span>
+    <nav class="foot-links" aria-label="Footer">
+      <a href="/terms">Terms</a>
+      <a href="/privacy">Privacy</a>
+      <a href="${GITHUB_URL}">GitHub</a>
+    </nav>
+  </div>
+</footer>`;
+
+const body = `
+${nav('')}
 
 <main>
 <section id="top" class="wrap hero">
@@ -509,12 +525,27 @@ ${each(faqs, ([q, a], i) => `    <details name="faq"${i ? '' : ' open'}><summary
 </section>
 </main>
 
-<footer class="foot">
-  <div class="wrap foot-in">
-    <span>headcount1 · AI agent orchestration</span>
-    <a href="${GITHUB_URL}">github.com/neverknowerdev/headcount1</a>
-  </div>
-</footer>`;
+${footer}`;
+
+const block = b => Array.isArray(b) ? `<ul>\n${each(b, li => `  <li><span>${li}</span></li>`)}\n</ul>` : `<p>${b}</p>`;
+
+const legalBody = doc => `
+${nav('/')}
+
+<main class="wrap legal">
+  <header class="legal-head">
+    <span class="eyebrow">Legal</span>
+    <h1 class="h-lg">${doc.title}</h1>
+    <span class="legal-date mono">Effective ${doc.effective}</span>
+    <p class="lede">${doc.intro}</p>
+  </header>
+${each(doc.sections, ([heading, blocks], i) => `  <section id="s${i + 1}">
+    <h2><span class="mono">${String(i + 1).padStart(2, '0')}</span>${heading}</h2>
+${each(blocks, block)}
+  </section>`)}
+</main>
+
+${footer}`;
 
 // ---------- output ----------
 const css = read('src/styles.css').replace(/\/\*[\s\S]*?\*\//g, '').replace(/\n\s*/g, '').trim();
@@ -522,24 +553,23 @@ const js = read('src/main.js');
 const jsName = `assets/main.${createHash('sha256').update(js).digest('hex').slice(0, 10)}.js`;
 const fonts = 'https://fonts.googleapis.com/css2?family=Newsreader:ital,opsz,wght@0,6..72,300..600;1,6..72,300..600&amp;family=Geist:wght@400;500;600&amp;family=Geist+Mono:wght@400;500&amp;display=swap';
 
-const html = `<!DOCTYPE html>
+const page = ({ title, description, body, script }) => `<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${TITLE}</title>
-<meta name="description" content="${esc(DESCRIPTION)}">
+<title>${title}</title>
+<meta name="description" content="${esc(description)}">
 <meta name="theme-color" content="#F6F4EF">
 <meta property="og:type" content="website">
-<meta property="og:title" content="${TITLE}">
-<meta property="og:description" content="${esc(DESCRIPTION)}">
+<meta property="og:title" content="${title}">
+<meta property="og:description" content="${esc(description)}">
 <meta name="twitter:card" content="summary">
 <link rel="icon" href="/favicon.svg" type="image/svg+xml">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link rel="stylesheet" href="${fonts}">
-<style>${css}</style>
-<script src="/${jsName}" defer></script>
+<style>${css}</style>${script ? `\n<script src="/${script}" defer></script>` : ''}
 </head>
 <body>
 ${body}
@@ -547,10 +577,16 @@ ${body}
 </html>
 `;
 
+const html = page({ title: TITLE, description: DESCRIPTION, body, script: jsName });
+
 const dist = new URL('dist/', root);
 rmSync(dist, { recursive: true, force: true });
 mkdirSync(new URL('assets/', dist), { recursive: true });
 cpSync(new URL('public/', root), dist, { recursive: true });
 writeFileSync(new URL('index.html', dist), html);
 writeFileSync(new URL(jsName, dist), js);
+// Served at /terms and /privacy.
+for (const doc of legalPages({ APP_URL, GITHUB_URL })) {
+  writeFileSync(new URL(`${doc.slug}.html`, dist), page({ title: `${doc.title} — headcount1`, description: doc.description, body: legalBody(doc) }));
+}
 console.log(`dist/index.html ${(html.length / 1024).toFixed(1)} kB, ${jsName} ${(js.length / 1024).toFixed(1)} kB`);

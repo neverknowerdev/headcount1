@@ -60,3 +60,15 @@ Because DEKs live only in memory, a plain restart would force every active user 
 ### Hardening the agent sandbox
 
 The agent's shell tool runs as the server's user by default and can read the server's at-rest files. For shared/multi-tenant hosts, run the agent under a dedicated uid and/or hide the data directory from it — see [`doc/sandbox-hardening.md`](doc/sandbox-hardening.md).
+
+## License
+
+headcount1 is open source under the [GNU Affero General Public License v3.0](LICENSE). Copyright © 2026 GMGM sp. z o.o.
+
+- You can use, self-host and modify it for free, including in a business.
+- If you distribute a modified version, or let other people use one over a network, the AGPL requires you to publish your source under the same license.
+- If the AGPL does not work for your organization, a commercial license is available: write to legal@headcount1.ai. The hosted version at [app.headcount1.ai](https://app.headcount1.ai) is the other option.
+
+The headcount1 name and logo are not covered by the AGPL. See the [trademark policy](TRADEMARKS.md).
+
+Contributions are welcome under the [Contributor License Agreement](CLA.md). See [CONTRIBUTING.md](CONTRIBUTING.md).
