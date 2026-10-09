@@ -45,6 +45,7 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
     // a stale choice is shown for what it is rather than as nothing.
     const providers = allProviders.filter(p => modelsOfKind(p, kind).length > 0 || p.id.toString() === value.provider_id);
     const modelGroups = allGroups.filter(g => groupKind(g) === kind || g.id.toString() === value.model_group_id);
+    const offered = modelsOfKind(providers.find(p => p.id.toString() === value.provider_id), kind);
     const selectValue = value.model_group_id ? `group:${value.model_group_id}` : (value.provider_id ? `provider:${value.provider_id}` : '');
 
     return (
@@ -98,10 +99,20 @@ export const ProviderOrGroupSelect: React.FC<Props> = ({
                     <label className="block text-sm font-medium text-gray-700 mb-1">{kind === 'system_one' ? 'System One model' : 'Model Name'}</label>
                     <select required={modelRequired} value={value.model || ''} onChange={e => onChange({ ...value, model: e.target.value })} className="w-full border rounded p-2">
                         <option value="">-- Select Model --</option>
-                        {modelsOfKind(providers.find(p => p.id.toString() === value.provider_id), kind).map((m: string) => (
+                        {/* A model that was chosen and has since left the provider's
+                            list is shown for what it is, not as nothing chosen. */}
+                        {value.model && !offered.includes(value.model) && (
+                            <option value={value.model}>{value.model} (no longer offered)</option>
+                        )}
+                        {offered.map((m: string) => (
                             <option key={m} value={m}>{m}</option>
                         ))}
                     </select>
+                    {value.model && !offered.includes(value.model) && (
+                        <p className="mt-1 text-xs text-amber-700" data-testid="model-no-longer-offered">
+                            {value.model} is no longer in this provider's list: it was withdrawn or cannot be called from here. Choose another model.
+                        </p>
+                    )}
                 </div>
             ) : null}
         </div>

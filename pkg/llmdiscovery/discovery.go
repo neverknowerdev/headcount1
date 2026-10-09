@@ -5,6 +5,7 @@
 package llmdiscovery
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,9 +16,11 @@ import (
 	"net/url"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli"
 	"agent-orchestrator/engine/classifier"
 )
 
@@ -91,10 +94,23 @@ func isOpenCodeZenFree(id string) bool {
 }
 
 // FetchOpenCodeZenFreeModels fetches OpenCode Zen's public model catalog and
-// returns the IDs of models that are free to use.
+// returns the IDs of the free models this application can actually call.
 func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]string, error) {
+	return fetchOpenCodeZenFreeModels(ctx, client, db.OpenCodeZenBaseURL)
+}
+
+// fetchOpenCodeZenFreeModels lists the free models at baseURL and keeps those
+// that answer a caller like this one.
+//
+// Being listed as free does not make a model usable from here. OpenCode
+// serves most of its free language models only to its own client and refuses
+// everyone else with a 403; some listed models are deprecated or have no
+// capacity behind them. The list says none of this, so each free model is
+// asked one minimal question and judged by the answer. A model that cannot
+// be reached at all is kept: that says nothing about the model.
+func fetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client, baseURL string) ([]string, error) {
 	var resp openAIModelsResponse
-	if err := fetchJSONWithRetry(ctx, client, db.OpenCodeZenBaseURL+"/models", "", &resp); err != nil {
+	if err := fetchJSONWithRetry(ctx, client, baseURL+"/models", "", &resp); err != nil {
 		return nil, fmt.Errorf("fetch OpenCode Zen models: %w", err)
 	}
 	var free []string
@@ -104,7 +120,73 @@ func FetchOpenCodeZenFreeModels(ctx context.Context, client *http.Client) ([]str
 		}
 	}
 	sort.Strings(free)
-	return free, nil
+
+	usable := make([]bool, len(free))
+	slots := make(chan struct{}, 4)
+	var wg sync.WaitGroup
+	for i, id := range free {
+		wg.Add(1)
+		go func(i int, id string) {
+			defer wg.Done()
+			slots <- struct{}{}
+			defer func() { <-slots }()
+			usable[i] = openCodeZenModelAnswers(ctx, client, baseURL, id)
+		}(i, id)
+	}
+	wg.Wait()
+
+	available := make([]string, 0, len(free))
+	for i, id := range free {
+		if usable[i] {
+			available = append(available, id)
+		} else {
+			log.Printf("llmdiscovery: OpenCode Zen lists %s as free but does not serve it to this application; leaving it out", id)
+		}
+	}
+	return available, nil
+}
+
+// openCodeZenModelAnswers asks a free model one minimal question, of its own
+// kind and without a key, and reports whether the model is usable from here.
+// It is not when the provider says so: the free tier is closed to outside
+// callers (403), the model is gone (404, 410), or nothing is serving it.
+func openCodeZenModelAnswers(ctx context.Context, client *http.Client, baseURL, id string) bool {
+	endpoint, body := "/chat/completions", map[string]interface{}{
+		"model": id, "max_tokens": 1,
+		"messages": []map[string]string{{"role": "user", "content": "hi"}},
+	}
+	if db.IsSystemOneModel(id) {
+		endpoint, body = "/systemone", map[string]interface{}{
+			"model": id, "state": "The sky is blue.",
+			"questions": map[string]interface{}{"check": map[string]string{"type": "noul", "instructions": "Does the text mention a colour?"}},
+		}
+	}
+	payload, _ := json.Marshal(body)
+	probeCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+	req, err := http.NewRequestWithContext(probeCtx, http.MethodPost, baseURL+endpoint, bytes.NewReader(payload))
+	if err != nil {
+		return true
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("User-Agent", aicli.UserAgent)
+	req.Header.Set(aicli.SessionHeader, aicli.SessionID("discovery/", id, "/", time.Now().UnixNano()))
+	res, err := client.Do(req)
+	if err != nil {
+		return true
+	}
+	defer res.Body.Close()
+	raw, _ := io.ReadAll(io.LimitReader(res.Body, 64*1024))
+	switch res.StatusCode {
+	case http.StatusForbidden, http.StatusNotFound, http.StatusGone:
+		return false
+	case http.StatusBadRequest:
+		// A bad request may be this probe's fault rather than the model's;
+		// only what the provider itself calls unavailable counts.
+		said := strings.ToLower(string(raw))
+		return !strings.Contains(said, "unavailable") && !strings.Contains(said, "deprecated") && !strings.Contains(said, "not found")
+	}
+	return true
 }
 
 // PresetDiscoverer knows how to fetch the live model catalog for a provider

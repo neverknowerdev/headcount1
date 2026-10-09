@@ -7,6 +7,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -96,29 +97,66 @@ func sortedCopy(s []string) []string {
 	return out
 }
 
-func TestFetchOpenCodeZenFreeModels_FiltersByNameHeuristic(t *testing.T) {
+// OpenCode lists its free models without saying which of them it serves to a
+// caller that is not its own client. Each is asked one question of its kind,
+// and only those that are not refused are kept: a free tier closed to outside
+// callers, a deprecated model and one with nothing serving it are all left
+// out, while a model that merely could not be reached stays.
+func TestFetchOpenCodeZenFreeModels_KeepsOnlyTheModelsThatAnswer(t *testing.T) {
+	var mu sync.Mutex
+	asked := map[string]string{}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		assert.Equal(t, "/models", r.URL.Path)
-		json.NewEncoder(w).Encode(map[string]any{
-			"data": []map[string]any{
-				{"id": "gpt-4o"},
-				{"id": "big-pickle"},
-				{"id": "minimax-m2.5-free"},
-				{"id": "claude-sonnet-4"},
-			},
-		})
+		if r.URL.Path == "/models" {
+			json.NewEncoder(w).Encode(map[string]any{"data": []map[string]any{
+				{"id": "gpt-4o"}, {"id": "claude-sonnet-4"}, {"id": "jev-1.13"},
+				{"id": "big-pickle"}, {"id": "nemotron-3-ultra-free"}, {"id": "exo-free"}, {"id": "ling-3.0-flash-fin-free"},
+				{"id": "space-bunny-free"}, {"id": "flaky-free"}, {"id": "odd-free"}, {"id": "jev-1.13-free"},
+			}})
+			return
+		}
+		var body struct {
+			Model string `json:"model"`
+		}
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		mu.Lock()
+		asked[body.Model] = r.URL.Path + " " + r.Header.Get("Authorization") + "|" + r.Header.Get("User-Agent")
+		mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		switch body.Model {
+		case "big-pickle", "nemotron-3-ultra-free":
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}`))
+		case "exo-free":
+			w.WriteHeader(http.StatusGone)
+			w.Write([]byte(`{"type":"error","error":{"type":"ModelDeprecated","message":"Model exo-free has been deprecated."}}`))
+		case "ling-3.0-flash-fin-free":
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"type":"server_error","message":"Upstream request failed: Model is unavailable."}}`))
+		case "flaky-free":
+			w.WriteHeader(http.StatusBadGateway)
+		case "odd-free":
+			// A request this probe got wrong says nothing about the model.
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":{"message":"max_tokens must be at least 16"}}`))
+		case "jev-1.13-free":
+			w.Write([]byte(`{"model":"jev-1.13-free","answers":{"check":{"noul":0.99}},"usage":{"input_tokens":20,"output_tokens":1}}`))
+		default:
+			w.Write([]byte(`{"choices":[{"message":{"content":"hi"}}]}`))
+		}
 	}))
 	defer srv.Close()
 
-	var resp openAIModelsResponse
-	require.NoError(t, fetchJSONWithRetry(context.Background(), http.DefaultClient, srv.URL+"/models", "", &resp))
-	var free []string
-	for _, m := range resp.Data {
-		if isOpenCodeZenFree(m.ID) {
-			free = append(free, m.ID)
-		}
-	}
-	assert.ElementsMatch(t, []string{"big-pickle", "minimax-m2.5-free"}, free)
+	models, err := fetchOpenCodeZenFreeModels(context.Background(), http.DefaultClient, srv.URL)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"flaky-free", "jev-1.13-free", "odd-free", "space-bunny-free"}, models)
+
+	// Only the free models were asked, each at the endpoint of its kind,
+	// without a key and under this application's own name.
+	assert.Len(t, asked, 8)
+	assert.NotContains(t, asked, "gpt-4o")
+	assert.NotContains(t, asked, "jev-1.13", "a paid System One model is not a free model")
+	assert.Equal(t, "/systemone |headcount1", asked["jev-1.13-free"])
+	assert.Equal(t, "/chat/completions |headcount1", asked["space-bunny-free"])
 }
 
 func TestFetchModelsForPreset_RequiresApiKey(t *testing.T) {

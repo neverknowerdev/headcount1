@@ -130,7 +130,11 @@ test.describe('System One models', () => {
         // System One models; the cheap slot offers neither.
         const classifierSlot = page.getByTestId('model-slot-classifier');
         const classifierChoice = classifierSlot.getByRole('combobox').first();
-        await expect(classifierChoice.locator('option')).toHaveText(['Not used', 'Classifiers', 'Mixed provider']);
+        // (A built-in provider that serves a System One model would be listed too.)
+        const classifierChoices = await classifierChoice.locator('option').allTextContents();
+        expect(classifierChoices[0]).toBe('Not used');
+        expect(classifierChoices).toContain('Classifiers');
+        expect(classifierChoices).toContain('Mixed provider');
         await classifierChoice.selectOption({ label: 'Mixed provider' });
         await expect(classifierSlot.getByRole('combobox').nth(1).locator('option')).toHaveText(['-- Select Model --', 'jev-e2e', 'jev-e2e-free']);
         await expect(classifierSlot.getByRole('combobox').nth(1)).toHaveValue('jev-e2e-free');

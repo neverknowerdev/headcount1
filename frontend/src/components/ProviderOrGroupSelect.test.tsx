@@ -57,6 +57,13 @@ describe('ProviderOrGroupSelect', () => {
         expect(screen.getByText('System One model')).toBeTruthy();
     });
 
+    it('shows a chosen model that the provider no longer lists for what it is', () => {
+        renderSelect('llm', { provider_id: '1', model_group_id: '', model: 'nemotron-3-ultra-free' });
+        const models = Array.from(screen.getAllByRole('combobox')[1].querySelectorAll('option')).map(option => option.textContent);
+        expect(models).toEqual(['-- Select Model --', 'nemotron-3-ultra-free (no longer offered)', 'big-pickle', 'deepseek-v4-flash']);
+        expect(screen.getByTestId('model-no-longer-offered').textContent).toContain('Choose another model');
+    });
+
     it('tells the kinds apart', () => {
         expect(modelsOfKind(providers[0], 'llm')).toEqual(['big-pickle', 'deepseek-v4-flash']);
         expect(modelsOfKind(providers[0], 'system_one')).toEqual(['jev-1.13', 'jev-1.13-free']);
