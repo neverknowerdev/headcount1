@@ -94,6 +94,40 @@ func TestAcceptTeamInviteFor(t *testing.T) {
 	require.True(t, q.IsTeamMember(ctx, ownerMembership.TeamID, invited.ID))
 }
 
+// TestRegisterBeginRequiresLegalAcceptance: an instance that publishes legal
+// documents refuses to create an account without acceptance, and still lets a
+// credential-less account re-enroll (recovery never re-asks).
+func TestRegisterBeginRequiresLegalAcceptance(t *testing.T) {
+	database, api := setupAuthTestDB(t)
+	q := db.New(database)
+	ctx := context.Background()
+
+	begin := func(email string, accept bool) int {
+		body, _ := json.Marshal(map[string]any{"email": email, "accept_terms": accept})
+		req := httptest.NewRequest(http.MethodPost, "/auth/register/begin", bytes.NewReader(body))
+		w := httptest.NewRecorder()
+		api.RegisterBegin(w, req)
+		return w.Code
+	}
+
+	// No documents configured (self-hosted default) → nothing to accept.
+	require.Equal(t, http.StatusOK, begin("selfhosted@corp.io", false))
+
+	t.Setenv("HEADCOUNT1_TERMS_URL", "https://example.com/terms")
+	t.Setenv("HEADCOUNT1_PRIVACY_URL", "https://example.com/privacy")
+
+	require.Equal(t, http.StatusBadRequest, begin("refuses@corp.io", false))
+	_, err := q.GetUserByEmail(ctx, "refuses@corp.io")
+	require.Error(t, err, "a refused sign-up must not leave an account behind")
+
+	require.Equal(t, http.StatusOK, begin("accepts@corp.io", true))
+
+	_, err = q.CreateUser(ctx, "recovering@corp.io")
+	require.NoError(t, err)
+	require.Equal(t, http.StatusOK, begin("recovering@corp.io", false),
+		"re-enrolling an existing account must not ask again")
+}
+
 // TestRegisterBeginReEnroll covers the A7 fix: a credential-less account (post
 // recovery, or an abandoned registration) may re-enroll; an account that still
 // holds a passkey is a real duplicate and is rejected.

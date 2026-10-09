@@ -169,6 +169,7 @@ func (api *API) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Email       string `json:"email"`
 		InviteToken string `json:"invite_token"`
+		AcceptTerms bool   `json:"accept_terms"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid payload")
@@ -208,6 +209,13 @@ func (api *API) RegisterBegin(w http.ResponseWriter, r *http.Request) {
 		}
 		user = existing // re-enroll onto the existing (credential-less) account
 	} else {
+		// A new account must accept the instance's legal documents, when it has
+		// any. Re-enrollment above is exempt: that account accepted them when it
+		// was created.
+		if legalAcceptanceRequired() && !req.AcceptTerms {
+			api.respondError(w, http.StatusBadRequest, "you must accept the Terms of Service and Privacy Policy to create an account")
+			return
+		}
 		// Validate an invite up front (before creating anything) so a bad token
 		// doesn't leave an orphan account.
 		if req.InviteToken != "" {

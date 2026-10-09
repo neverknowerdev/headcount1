@@ -49,6 +49,7 @@ Everything is configured with environment variables. The most common ones:
 | `APP_BASE_URL` | Public URL of your instance, used in recovery and invitation emails. |
 | `SMTP_HOST`, `SMTP_PORT`, `SMTP_USERNAME`, `SMTP_PASSWORD`, `SMTP_FROM` | Outgoing email. Without SMTP, links are printed to the server log. |
 | `SESSION_ABSOLUTE_CAP`, `SESSION_REAUTH_GAP` | Session lifetime limits. |
+| `HEADCOUNT1_TERMS_URL`, `HEADCOUNT1_PRIVACY_URL` | Links to your own Terms of Service and Privacy Policy. When set, the sign-up page shows a required acceptance checkbox and the server refuses sign-ups without it. Unset by default. |
 | `HEADCOUNT1_GITHUB_APP_*` | GitHub App credentials. See [`doc/github-app.md`](doc/github-app.md). |
 
 More guides:

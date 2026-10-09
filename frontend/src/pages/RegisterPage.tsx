@@ -14,6 +14,18 @@ export function RegisterPage() {
     const [email, setEmail] = useState('');
     const [error, setError] = useState('');
     const [busy, setBusy] = useState(false);
+    // Set only on instances that publish legal documents (the hosted service).
+    const [legal, setLegal] = useState({ terms_url: '', privacy_url: '' });
+    const [accepted, setAccepted] = useState(false);
+    const needsAcceptance = Boolean(legal.terms_url || legal.privacy_url);
+
+    useEffect(() => {
+        let cancelled = false;
+        axios.get('/api/legal')
+            .then((res) => { if (!cancelled) setLegal(res.data); })
+            .catch(() => { /* the server still enforces acceptance */ });
+        return () => { cancelled = true; };
+    }, []);
 
     // With an invite link, show which team it joins and pre-fill the email.
     useEffect(() => {
@@ -41,7 +53,7 @@ export function RegisterPage() {
         setBusy(true);
         setError('');
         try {
-            const data = await register(email, inviteToken);
+            const data = await register(email, inviteToken, accepted);
             setUser({ ...data.user, locked: !data.unlocked });
             navigate('/', { replace: true });
         } catch (err: any) {
@@ -65,6 +77,28 @@ export function RegisterPage() {
                     We’ll create a passkey on this device. Your passkey also unlocks your
                     encrypted secrets — no password is ever stored.
                 </p>
+                {needsAcceptance && (
+                    <label className="mb-4 flex items-start gap-2 text-sm text-gray-700">
+                        <input
+                            type="checkbox"
+                            required
+                            checked={accepted}
+                            onChange={(e) => setAccepted(e.target.checked)}
+                            className="mt-0.5 h-4 w-4 rounded border-gray-300 text-indigo-600"
+                        />
+                        <span>
+                            I accept the{' '}
+                            {legal.terms_url
+                                ? <a href={legal.terms_url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">Terms of Service</a>
+                                : 'Terms of Service'}
+                            {' '}and{' '}
+                            {legal.privacy_url
+                                ? <a href={legal.privacy_url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">Privacy Policy</a>
+                                : 'Privacy Policy'}
+                            .
+                        </span>
+                    </label>
+                )}
                 <AuthSubmit busy={busy}>Create account with passkey</AuthSubmit>
             </form>
             <div className="mt-4 text-center text-sm">
