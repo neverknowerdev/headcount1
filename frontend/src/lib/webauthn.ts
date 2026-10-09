@@ -96,9 +96,9 @@ async function runCeremony(beginURL: string, finishURL: string, beginBody: any, 
     return finish.data;
 }
 
-export function register(email: string, inviteToken?: string) {
+export function register(email: string, inviteToken?: string, acceptTerms = false) {
     return runCeremony('/api/auth/register/begin', '/api/auth/register/finish',
-        { email, invite_token: inviteToken || '' }, 'create');
+        { email, invite_token: inviteToken || '', accept_terms: acceptTerms }, 'create');
 }
 
 export function login(email: string) {
