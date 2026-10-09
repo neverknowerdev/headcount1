@@ -153,7 +153,7 @@ jobs:
       timeout-minutes: 12
       run: |
         cd e2e
-        npx playwright test sqlite_backend auto_update_resume deploy_webhook shared_db
+        npx playwright test sqlite_backend workflow_restart_recovery deploy_webhook shared_db
       env:
         E2E_MODE: true
 

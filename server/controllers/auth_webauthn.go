@@ -506,6 +506,8 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 		if dek, err := secrets.UnwrapDEKWithPRF(dbCred.WrappedDEK, prf); err == nil {
 			secrets.UnlockUser(user.ID, dek, keyringTTL())
 			unlocked = true
+			// Tasks that stopped because this vault was locked can go on.
+			api.engine.NotifyCredentialsChanged()
 		}
 	}
 	api.respondJSON(w, http.StatusOK, map[string]any{"user": userResponse{ID: user.ID, Email: user.Email, IsAdmin: user.IsAdmin}, "unlocked": unlocked})

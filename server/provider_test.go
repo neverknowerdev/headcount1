@@ -46,3 +46,39 @@ func skipTestProviderConnection(t *testing.T) {
 
 	runTest("Alibaba DashScope", "https://dashscope-intl.aliyuncs.com/compatible-mode/v1", alibabaKey, "qwen-plus")
 }
+
+// A provider that refuses a call says why, and that is what the user needs to
+// read: a free model that only answers the provider's own client is not a bad
+// key. Only a refusal with no explanation is put down to the key.
+func TestProviderConnectionTestReportsWhyAProviderRefused(t *testing.T) {
+	refusal := `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}`
+	run := func(forbiddenBody string) map[string]interface{} {
+		provider := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			if strings.HasSuffix(r.URL.Path, "/chat/completions") {
+				w.WriteHeader(http.StatusForbidden)
+				w.Write([]byte(forbiddenBody))
+				return
+			}
+			// The other request shape carries the key where this provider
+			// does not look for it.
+			w.WriteHeader(http.StatusUnauthorized)
+			w.Write([]byte(`{"type":"error","error":{"type":"AuthError","message":"Missing API key."}}`))
+		}))
+		defer provider.Close()
+		b, _ := json.Marshal(map[string]string{"base_url": provider.URL + "/v1", "api_key": "sk-valid", "model": "big-pickle"})
+		req, err := http.NewRequest("POST", "/test", bytes.NewBuffer(b))
+		assert.NoError(t, err)
+		rr := httptest.NewRecorder()
+		(&endpoints.API{}).TestProvider(rr, req)
+		assert.Equal(t, http.StatusBadRequest, rr.Code)
+		var res map[string]interface{}
+		assert.NoError(t, json.Unmarshal(rr.Body.Bytes(), &res))
+		return res
+	}
+
+	for i := 0; i < 5; i++ { // the two shapes answer in either order
+		assert.Equal(t, "OpenCode's free tier can only be used from within OpenCode", run(refusal)["error"])
+	}
+	assert.Equal(t, "Invalid API Key or unauthorized access.", run(`{}`)["error"], "an unexplained refusal is still put down to the key")
+}

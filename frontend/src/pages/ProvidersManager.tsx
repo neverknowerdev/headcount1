@@ -4,6 +4,8 @@ import axios from 'axios';
 import { Plus, Trash2, Edit2, Play, Pause, Minus, RefreshCw, KeyRound, Zap, ChevronDown, ChevronUp } from 'lucide-react';
 import { ModelGroups } from '../components/ModelGroups';
 import { DefaultModelSettings } from '../components/DefaultModelSettings';
+import { ClassifierNotice } from '../components/ClassifierNotice';
+import { modelsOfKind } from '../lib/modelKinds';
 
 // Renders a provider's model list truncated to one line, with an expand
 // toggle that only appears once the list actually overflows that line —
@@ -58,6 +60,8 @@ export const ProvidersManager: React.FC = () => {
     // purpose to "Session's own model" server-side, and this makes the UI
     // reflect it immediately.
     const [modelGroupsVersion, setModelGroupsVersion] = useState(0);
+    // Bumped whenever a Default Models slot is saved.
+    const [slotsVersion, setSlotsVersion] = useState(0);
 
     // Built-in providers (OpenRouter/OpenCode free models) get a simplified
     // "Activate" flow instead of the generic edit modal — their model list
@@ -139,6 +143,13 @@ export const ProvidersManager: React.FC = () => {
             setSelectedPresetKey('custom');
         }
         setIsModalOpen(true);
+    };
+
+    // The classifier is added like any preset provider; this opens the form
+    // with it already chosen, so all that is left to enter is the key.
+    const connectClassifier = () => {
+        handleOpenModal();
+        setSelectedPresetKey('typesafe');
     };
 
     const handleSubmit = async (e: React.FormEvent) => {
@@ -288,7 +299,7 @@ export const ProvidersManager: React.FC = () => {
         setActivateProvider(provider);
         setActivateApiKey('');
         setActivateTestResult(null);
-        setActivateTestModel(provider.default_model || '');
+        setActivateTestModel(provider.default_model || modelsOfKind(provider, 'system_one')[0] || '');
     };
 
     const closeActivateModal = () => {
@@ -374,6 +385,23 @@ export const ProvidersManager: React.FC = () => {
                 </button>
             </div>
 
+            <ClassifierNotice refreshSignal={`${slotsVersion}/${providers.map(p => `${p.id}:${p.has_api_key}:${p.system_one_models}`).join('|')}`}>
+                {providers.some(p => p.system_one_models && p.has_api_key && p.enabled) ? (
+                    <span className="text-xs">
+                        {providers.filter(p => p.system_one_models && p.has_api_key && p.enabled).map(p => p.name).join(', ')} serves one: choose it in the Classifier slot under Default Models and save.
+                    </span>
+                ) : providers.some(p => p.system_one_models && !p.has_api_key) ? (
+                    <span className="text-xs">
+                        {providers.find(p => p.system_one_models && !p.has_api_key).name} serves one for free: activate it with an API key and the slot is filled for you. Or{' '}
+                        <button type="button" onClick={connectClassifier} data-testid="connect-classifier" className="font-medium underline">connect TypeSafe</button>.
+                    </span>
+                ) : (
+                    <button type="button" onClick={connectClassifier} data-testid="connect-classifier" className="rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700">
+                        Connect TypeSafe (Jev)
+                    </button>
+                )}
+            </ClassifierNotice>
+
             <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                 {providers.map(p => (
                     <div key={p.id} className={`bg-white p-6 rounded-lg border shadow-sm flex flex-col relative overflow-hidden ${p.builtin && !p.enabled ? 'opacity-60' : ''}`}>
@@ -443,6 +471,12 @@ export const ProvidersManager: React.FC = () => {
                                 onToggle={() => toggleModelsExpanded(p.id)}
                             />
                         )}
+                        {p.system_one_models && (
+                            <p className="mt-2 text-sm text-gray-600" data-testid="provider-system-one-models">
+                                <span className="mr-1.5 rounded-full bg-violet-100 px-2 py-0.5 text-xs font-medium text-violet-800" title="A System One model answers typed questions with a probability, a choice or a score. It is not a language model and is offered only for the Classifier slot.">System One</span>
+                                <span className="font-mono text-xs">{p.system_one_models.split(',').join(', ')}</span>
+                            </p>
+                        )}
                         {p.builtin && !p.has_api_key && (
                             <div className="mt-3">
                                 <p className="text-xs text-amber-600 mb-2">Free to use — activate with a free API key to enable this provider.</p>
@@ -463,7 +497,12 @@ export const ProvidersManager: React.FC = () => {
 
             <ModelGroups providers={providers} onChange={() => setModelGroupsVersion(v => v + 1)} />
 
-            <DefaultModelSettings providers={providers} refreshSignal={modelGroupsVersion} />
+            <DefaultModelSettings
+                providers={providers}
+                refreshSignal={modelGroupsVersion}
+                onConnectClassifier={connectClassifier}
+                onSaved={() => setSlotsVersion(v => v + 1)}
+            />
 
             {testingProgress && !isModalOpen && (
                 <div className="mt-4 p-4 rounded bg-blue-50 text-blue-800">
@@ -515,7 +554,9 @@ export const ProvidersManager: React.FC = () => {
                                         placeholder="sk-..."
                                     />
                                     <p className="text-xs text-gray-500 mt-2">
-                                        The base URL and available models are discovered automatically once the key is saved.
+                                        {selectedPresetKey === 'typesafe'
+                                            ? 'Jev is a System One model, not a language model: it is used only in the Classifier slot under Default Models, which is filled for you once the key is saved. Get a key at typesafe.ai.'
+                                            : 'The base URL and available models are discovered automatically once the key is saved. System One models the provider serves, such as Jev, are recognised and kept apart from its language models.'}
                                     </p>
                                     {presetError && (
                                         <p className="text-sm text-red-600 mt-3">{presetError}</p>
@@ -626,19 +667,32 @@ export const ProvidersManager: React.FC = () => {
                                 />
                             </div>
 
-                            {activateProvider.supported_models && (
+                            {(activateProvider.supported_models || activateProvider.system_one_models) && (
                                 <div>
-                                    <label className="block text-sm font-medium text-gray-700 mb-1">Model to test &amp; use</label>
+                                    <label htmlFor="activate-test-model" className="block text-sm font-medium text-gray-700 mb-1">Model to test &amp; use</label>
                                     <select
+                                        id="activate-test-model"
                                         value={activateTestModel}
                                         onChange={e => { setActivateTestModel(e.target.value); setActivateTestResult(null); }}
                                         className="w-full border rounded p-2"
                                     >
-                                        {activateProvider.supported_models.split(',').map((m: string) => (
-                                            <option key={m} value={m}>{m}{m === activateProvider.default_model ? ' (default)' : ''}</option>
-                                        ))}
+                                        {modelsOfKind(activateProvider, 'llm').length > 0 && (
+                                            <optgroup label="Language models">
+                                                {modelsOfKind(activateProvider, 'llm').map(m => (
+                                                    <option key={m} value={m}>{m}{m === activateProvider.default_model ? ' (default)' : ''}</option>
+                                                ))}
+                                            </optgroup>
+                                        )}
+                                        {modelsOfKind(activateProvider, 'system_one').length > 0 && (
+                                            <optgroup label="System One models (for the Classifier slot)">
+                                                {modelsOfKind(activateProvider, 'system_one').map(m => <option key={m} value={m}>{m}</option>)}
+                                            </optgroup>
+                                        )}
                                     </select>
-                                    <p className="text-xs text-gray-500 mt-1">If the default model is rate-limited or errors, pick another here — Test Connection and Save both use this selection.</p>
+                                    <p className="text-xs text-gray-500 mt-1">
+                                        If the default model is rate-limited or errors, pick another here — Test Connection and Save both use this selection.
+                                        {modelsOfKind(activateProvider, 'system_one').length > 0 && ' A provider may refuse its language models to this app and still serve its System One models: testing one of those is enough to save the key and use it as the classifier.'}
+                                    </p>
                                 </div>
                             )}
 
@@ -677,6 +731,9 @@ export const ProvidersManager: React.FC = () => {
                                 )}
                                 {activateProvider.supported_models && (
                                     <p className="text-xs text-gray-500 mt-1 break-words">{activateProvider.supported_models.split(',').join(', ')}</p>
+                                )}
+                                {activateProvider.system_one_models && (
+                                    <p className="text-xs text-gray-500 mt-1 break-words"><span className="font-semibold">System One:</span> {activateProvider.system_one_models.split(',').join(', ')}</p>
                                 )}
                             </div>
                         </div>

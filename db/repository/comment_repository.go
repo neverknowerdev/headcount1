@@ -17,34 +17,17 @@ func (q *CommentRepository) CreateComment(ctx context.Context, c Comment) (Comme
 	err := q.db.WithContext(ctx).Create(&c).Error
 	return c, err
 }
+func (q *CommentRepository) GetComment(ctx context.Context, id int32) (Comment, error) {
+	var c Comment
+	err := q.db.WithContext(ctx).First(&c, id).Error
+	return c, err
+}
 func (q *CommentRepository) ListCommentsByTask(ctx context.Context, taskID int32) ([]Comment, error) {
 	var c []Comment
 	err := q.db.WithContext(ctx).Where("task_id = ?", taskID).Order("created_at asc").Find(&c).Error
 	return c, err
 }
 
-// FindPendingHumanQuestion returns the oldest unanswered ask_user comment.
-// Comments are the durable conversation record, so a restart does not lose
-// the wait. A later human comment resolves the currently pending question;
-// unrelated comments before the next question do not.
-func (q *CommentRepository) FindPendingHumanQuestion(ctx context.Context, taskID int32) (Comment, bool, error) {
-	comments, err := q.ListCommentsByTask(ctx, taskID)
-	if err != nil {
-		return Comment{}, false, err
-	}
-	var pending Comment
-	for _, comment := range comments {
-		switch {
-		case comment.CommentType == "ask_user" && comment.AuthorType == "agent":
-			if pending.ID == 0 {
-				pending = comment
-			}
-		case pending.ID != 0 && comment.AuthorType == "human" && comment.ID > pending.ID:
-			pending = Comment{}
-		}
-	}
-	return pending, pending.ID != 0, nil
-}
 func (q *CommentRepository) ListAllComments(ctx context.Context) ([]Comment, error) {
 	var comments []Comment
 	err := q.db.WithContext(ctx).Order("id").Find(&comments).Error

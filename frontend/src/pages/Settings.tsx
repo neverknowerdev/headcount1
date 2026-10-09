@@ -3,6 +3,7 @@ import axios from 'axios';
 import { useStore, useIsOwner } from '../store';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { ExternalLink, GitBranch, KeyRound } from 'lucide-react';
+import { ClassifierNotice } from '../components/ClassifierNotice';
 
 interface BuildVersion {
     /** Version number: "2026.07.29" in production, "staging-<short branch>-<short commit>" on staging. */
@@ -270,8 +271,11 @@ export const Settings: React.FC = () => {
 						<GitBranch className="mt-0.5 shrink-0 text-indigo-700" size={18}/>
 						<p><span className="font-semibold">Connect GitHub in MCP Servers.</span> Add personal and work GitHub accounts separately, then choose from their permitted repositories when setting up a project. <a href={`/companies/${companyShortName}/mcp-servers`} className="inline-flex items-center gap-1 font-medium text-indigo-700 underline hover:text-indigo-900">Manage GitHub accounts <ExternalLink size={13}/></a></p>
 					</div>
+                    <ClassifierNotice>
+                        <a href={`/companies/${companyShortName}/providers`} className="rounded bg-amber-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-amber-700">Set it up</a>
+                    </ClassifierNotice>
                     <div className="bg-indigo-50 border border-indigo-100 rounded-md p-3 text-sm text-indigo-900">
-                        Models used for lightweight internal calls (commit messages, artifact Q&A) are configured under <strong>Default Models</strong> on the{' '}
+                        The models tasks run on (smart and cheap), the classifier and the model that writes commit messages are configured under <strong>Default Models</strong> on the{' '}
                         <a href={`/companies/${companyShortName}/providers`} className="underline hover:text-indigo-700">LLM Providers</a> page.
                     </div>
 					<details className="rounded-lg border border-gray-200 p-4">

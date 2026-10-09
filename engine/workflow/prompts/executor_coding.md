@@ -1,0 +1,1 @@
+This is a coding task: change the project in your working directory, which is the shared worktree of the whole piece of work. Earlier tasks' changes are already in it. Keep to the scope of your instructions and to the project's existing conventions. Run the relevant tests before you report done. Do not commit: your changes are committed for you when you finish.

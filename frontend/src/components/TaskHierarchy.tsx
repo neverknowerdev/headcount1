@@ -3,11 +3,18 @@ import { ChevronDown, ChevronRight, Circle, CircleCheck, CircleDashed, Link2 } f
 import { Link } from 'react-router-dom';
 import { buildTaskForest, getSearchVisibility, sortTasksByUpdated, type HierarchyTask, type TaskNode } from '../utils/taskHierarchy';
 import { COLUMN_LABELS, DISPLAY_ORDER, type TaskColumn } from '../utils/taskColumns';
+import { PhaseChip } from './PhaseChip';
+import { statusLabel } from '../lib/workflow';
 
 export interface BoardTask extends HierarchyTask {
   description: string;
   status: string;
   priority: string;
+  task_type: string;
+  phase: string;
+  waiting_on: string;
+  wait_detail: string;
+  result_reason?: string;
   company_id?: number;
   project_id?: number | null;
   sprint_id?: number | null;
@@ -29,25 +36,16 @@ export interface TaskHierarchyProps {
   taskHref: (id: number) => string;
 }
 
-const STATUS_LABELS: Record<string, string> = {
-  backlog: 'Backlog',
-  'to-do': 'To do',
-  refinement: 'Refinement',
-  'in-progress': 'In progress',
-  blocked: 'Blocked',
-  'depends-on-task': 'Depends on task',
-  'in-review': 'In review',
-  done: 'Done',
-};
 const STATUS_STYLES: Record<string, string> = {
   backlog: 'bg-slate-100 text-slate-700',
   'to-do': 'bg-sky-50 text-sky-700',
-  refinement: 'bg-violet-50 text-violet-700',
   'in-progress': 'bg-indigo-50 text-indigo-700',
   blocked: 'bg-rose-50 text-rose-700',
   'depends-on-task': 'bg-amber-50 text-amber-700',
   'in-review': 'bg-cyan-50 text-cyan-700',
   done: 'bg-emerald-50 text-emerald-700',
+  failed: 'bg-red-50 text-red-700',
+  canceled: 'bg-slate-100 text-slate-500',
 };
 function relativeDate(value?: string | null) {
   if (!value) return '—';
@@ -144,8 +142,11 @@ export const TaskHierarchy: React.FC<TaskHierarchyProps> = ({ tasks, prefix, col
         {visibleColumns.map(column => (
           <td key={column} className="whitespace-nowrap px-4 py-3 text-sm text-slate-600">
             {column === 'status' && (
-              <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${STATUS_STYLES[task.status] ?? 'bg-slate-100 text-slate-700'}`}>
-                {STATUS_LABELS[task.status] ?? task.status}
+              <span className="inline-flex items-center gap-1.5">
+                <span className={`rounded-full px-2.5 py-1 text-xs font-medium ${STATUS_STYLES[task.status] ?? 'bg-slate-100 text-slate-700'}`}>
+                  {statusLabel(task.status)}
+                </span>
+                <PhaseChip task={task} />
               </span>
             )}
             {column === 'assignee' && (
@@ -153,7 +154,7 @@ export const TaskHierarchy: React.FC<TaskHierarchyProps> = ({ tasks, prefix, col
                 ? agentNames.get(task.agent_id) ?? `Agent #${task.agent_id}`
                 : <span className="text-slate-400">Unassigned</span>
             )}
-            {column === 'agent' && (executionAgents.get(task.id) ?? <span className="text-slate-400">Not started</span>)}
+            {column === 'agent' && (executionAgents.get(task.id) ?? <span className="text-slate-400">—</span>)}
             {column === 'project' && (
               task.project_id
                 ? projectNames.get(task.project_id) ?? `Project #${task.project_id}`

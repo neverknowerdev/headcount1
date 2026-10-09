@@ -2,7 +2,7 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link, useNavigate } from 'react-router-dom';
-import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw, ArrowLeft, MoreHorizontal } from 'lucide-react';
+import { X, Send, Save, Archive, ExternalLink, ChevronDown, ChevronUp, RotateCcw, ArrowLeft, MoreHorizontal, Square, Play, Download } from 'lucide-react';
 import { useStore } from '../store';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
@@ -11,6 +11,16 @@ import { RunLogViewer } from './RunLogViewer';
 import { getRunAgentName } from '../utils/runDisplay';
 import { TaskRelations } from './TaskRelations';
 import { useWebSocket, wsUrl } from '../useWebSocket';
+import { PhaseChip, TaskTypeBadge } from './PhaseChip';
+import { TaskJournal } from './TaskJournal';
+import { TaskTree } from './TaskTree';
+import { TaskErrors } from './TaskErrors';
+import type { RunRow } from './RunTree';
+import { UsagePanel } from './UsagePanel';
+import { ProviderOrGroupSelect } from './ProviderOrGroupSelect';
+import { TASK_TYPES, RESULT_REASONS, canStopTask, errorMessage, isTaskRunning, statusLabel } from '../lib/workflow';
+import type { Decision, Task, TaskErrorReport, TaskStep } from '../lib/workflow';
+import { pairQuestions } from '../utils/questions';
 
 // parseSpecItems decodes a structured acceptance-criteria / test-cases item
 // list. Returns null for legacy plain-text content (rendered as markdown).
@@ -46,6 +56,22 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     const [runs, setRuns] = useState<any[]>([]);
     const [runAgent, setRunAgent] = useState(true);
     const [isRerunning, setIsRerunning] = useState(false);
+    const [isStopping, setIsStopping] = useState(false);
+    const [actionError, setActionError] = useState('');
+    // The task's workflow: its journal, the tree of subtasks beneath it and
+    // what was decided anywhere in that tree.
+    const [steps, setSteps] = useState<TaskStep[]>([]);
+    const [tree, setTree] = useState<Task[]>([]);
+    const [decisions, setDecisions] = useState<Decision[]>([]);
+    const [tab, setTab] = useState<'activity' | 'workflow' | 'decisions' | 'errors' | 'usage'>('activity');
+    const [errors, setErrors] = useState<TaskErrorReport | null>(null);
+    // The sessions of every task beneath this one, for the subtask tree.
+    const [treeRuns, setTreeRuns] = useState<RunRow[]>([]);
+    const [usageRefresh, setUsageRefresh] = useState(0);
+    // One draft per question the workflow asked, so each is answered on its own.
+    const [answers, setAnswers] = useState<Record<number, string>>({});
+    const [providers, setProviders] = useState<any[]>([]);
+    const [modelGroups, setModelGroups] = useState<any[]>([]);
     const [expandedComments, setExpandedComments] = useState<Set<number>>(new Set());
     const [expandedArtifact, setExpandedArtifact] = useState<number | null>(null);
     const [openRunMenu, setOpenRunMenu] = useState<number | null>(null);
@@ -72,6 +98,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         parent_id: '',
         status: 'backlog',
         is_archived: false,
+        task_type: 'general',
+        provider_id: '',
+        model_group_id: '',
+        model: '',
     });
 
     // Metadata
@@ -90,9 +120,13 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             axios.get(`/api/projects?company_id=${selectedCompanyId}`),
             axios.get(`/api/sprints?company_id=${selectedCompanyId}`),
             axios.get(`/api/agents?company_id=${selectedCompanyId}`),
-            axios.get(`/api/tasks?company_id=${selectedCompanyId}`)
-        ]).then(([projRes, sprintRes, agentRes, tasksRes]) => {
+            axios.get(`/api/tasks?company_id=${selectedCompanyId}`),
+            axios.get('/api/providers'),
+            axios.get('/api/model-groups'),
+        ]).then(([projRes, sprintRes, agentRes, tasksRes, providersRes, groupsRes]) => {
             setAllTasks(tasksRes.data || []);
+            setProviders(providersRes.data || []);
+            setModelGroups(groupsRes.data || []);
             setProjects(projRes.data || []);
             const fetchedSprints = sprintRes.data || [];
             setSprints(fetchedSprints);
@@ -114,23 +148,43 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
     // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [selectedCompanyId, taskId]);
 
-    // Fetches only comments + runs + artifacts — safe to call for re-sync
+    // Fetches the task's activity and workflow — safe to call for re-sync
     // without resetting the form.
     const fetchActivity = useCallback(async () => {
         if (!taskId) return;
         try {
-            const [commentsRes, runsRes, artifactsRes] = await Promise.all([
+            const [commentsRes, runsRes, artifactsRes, stepsRes, treeRes, decisionsRes, errorsRes] = await Promise.all([
                 axios.get(`/api/comments?task_id=${taskId}`),
                 axios.get(`/api/tasks/${taskId}/runs`),
                 axios.get(`/api/tasks/${taskId}/artifacts`),
+                axios.get(`/api/tasks/${taskId}/steps`),
+                axios.get(`/api/tasks/${taskId}/tree`),
+                axios.get(`/api/tasks/${taskId}/decisions?subtree=true`),
+                axios.get(`/api/tasks/${taskId}/errors`),
             ]);
             setComments(commentsRes.data || []);
             setRuns(runsRes.data || []);
             setArtifacts(artifactsRes.data || []);
+            setSteps(stepsRes.data || []);
+            setTree(treeRes.data || []);
+            setDecisions(decisionsRes.data || []);
+            setErrors(errorsRes.data || null);
+            setUsageRefresh(n => n + 1);
         } catch (e) {
             console.error(e);
         }
     }, [taskId]);
+
+    // The sessions beneath the task change whenever its tree or its usage does.
+    const companyId = task?.company_id;
+    useEffect(() => {
+        if (!taskId || !companyId) return;
+        let current = true;
+        axios.get(`/api/runs?company_id=${companyId}&subtree_of=${taskId}`)
+            .then(res => { if (current) setTreeRuns(Array.isArray(res.data) ? res.data : []); })
+            .catch(() => {});
+        return () => { current = false; };
+    }, [taskId, companyId, usageRefresh, tree.length]);
 
     useEffect(() => {
         if (!taskId) return;
@@ -151,6 +205,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                     parent_id: t.parent_id ? t.parent_id.toString() : '',
                     status: t.status,
                     is_archived: t.is_archived,
+                    task_type: t.task_type || 'general',
+                    provider_id: t.provider_id ? t.provider_id.toString() : '',
+                    model_group_id: t.model_group_id ? t.model_group_id.toString() : '',
+                    model: t.model || '',
                 });
                 await fetchActivity();
             } catch (e) {
@@ -215,6 +273,27 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
         if (msg.type === 'task_updated' && (msg.payload.id === taskId || msg.payload.task_id === taskId)) {
             setTask((prev: any) => prev ? { ...prev, ...msg.payload } : prev);
+            if (msg.payload.status) setFormData(prev => ({ ...prev, status: msg.payload.status }));
+        }
+        // Anything that happens beneath this task changes its tree.
+        if ((msg.type === 'task_updated' || msg.type === 'task_created') && msg.payload.id !== taskId
+            && (msg.payload.root_task_id === task?.root_task_id || tree.some(member => member.id === msg.payload.id || member.id === msg.payload.parent_id))) {
+            axios.get(`/api/tasks/${taskId}/tree`).then(res => setTree(res.data || [])).catch(() => {});
+            // A subtask that failed or was stopped may have met an error.
+            if (['failed', 'canceled'].includes(msg.payload.status)) {
+                axios.get(`/api/tasks/${taskId}/errors`).then(res => setErrors(res.data || null)).catch(() => {});
+            }
+        }
+        if (msg.type === 'task_step' && msg.payload.task_id === taskId && msg.payload.step) {
+            const step: TaskStep = msg.payload.step;
+            setSteps(prev => prev.some(existing => existing.id === step.id) ? prev : [...prev, step]);
+            if (step.kind === 'smart_error' || step.kind === 'run_finished' || step.kind === 'human_question') {
+                axios.get(`/api/tasks/${taskId}/errors`).then(res => setErrors(res.data || null)).catch(() => {});
+            }
+            if (step.kind === 'smart_call' || step.kind === 'run_finished') {
+                axios.get(`/api/tasks/${taskId}/decisions?subtree=true`).then(res => setDecisions(res.data || [])).catch(() => {});
+                setUsageRefresh(n => n + 1);
+            }
         }
         if (msg.type === 'run_started' && msg.payload.task_id === taskId) {
             setRuns(prev => prev.some((r: any) => r.id === msg.payload.id) ? prev : [...prev, msg.payload]);
@@ -242,17 +321,18 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     }, { enabled: !!taskId, onConnect: resyncAfterReconnect });
 
+    // refreshTask re-reads the task after something that changes its state
+    // asynchronously, so the modal does not wait for a websocket event.
+    const refreshTask = async () => {
+        await fetchActivity();
+        const taskRes = await axios.get(`/api/tasks/${taskId}`);
+        setTask((prev: any) => prev ? { ...prev, ...taskRes.data } : taskRes.data);
+        setFormData(prev => ({ ...prev, status: taskRes.data.status, is_archived: taskRes.data.is_archived }));
+    };
+
     const handleAddComment = async () => {
         if (!newComment.trim() || !taskId) return;
         const content = newComment.trim();
-        const hasPendingHumanQuestion = comments.some((question: any) =>
-            ['ask_user', 'ask_owner'].includes(question.comment_type) &&
-            question.author_type === 'agent' &&
-            !comments.some((answer: any) =>
-                answer.id > question.id && answer.author_type === 'human' &&
-                !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
-            ),
-        );
         setIsPostingComment(true);
         setCommentError('');
         try {
@@ -260,24 +340,36 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 task_id: taskId,
                 author_type: 'human',
                 content,
-                run_agent: task?.status === 'blocked' || hasPendingHumanQuestion ? false : runAgent
+                // Running it again only means something for a task at rest; a
+                // comment on a task that is working is read at its next step.
+                run_agent: canRunAgain ? runAgent : false,
             });
             setNewComment('');
             setComments(prev => prev.some((c: any) => c.id === response.data?.id) ? prev : [...prev, response.data]);
-            // The reply changes task/run state asynchronously. Re-read both
-            // streams so the modal immediately leaves the human-wait state,
-            // even when the websocket event was missed during the transition.
-            await fetchActivity();
-            const taskRes = await axios.get(`/api/tasks/${taskId}`);
-            setTask((prev: any) => prev ? { ...prev, ...taskRes.data } : taskRes.data);
-            setFormData(prev => ({
-                ...prev,
-                status: taskRes.data.status,
-                is_archived: taskRes.data.is_archived,
-            }));
-        } catch (e: any) {
+            await refreshTask();
+        } catch (e) {
             console.error(e);
-            setCommentError(e.response?.data?.error || 'Could not submit the reply. Please try again.');
+            setCommentError(errorMessage(e, 'Could not submit the comment. Please try again.'));
+        } finally {
+            setIsPostingComment(false);
+        }
+    };
+
+    // Answers one question the workflow asked. The reply names its question,
+    // so with several open each answer reaches the right one.
+    const handleAnswer = async (questionId: number) => {
+        const content = (answers[questionId] || '').trim();
+        if (!content || !taskId) return;
+        setIsPostingComment(true);
+        setCommentError('');
+        try {
+            const response = await axios.post('/api/comments', { task_id: taskId, author_type: 'human', content, reply_to_id: questionId });
+            setAnswers(prev => ({ ...prev, [questionId]: '' }));
+            setComments(prev => prev.some((c: any) => c.id === response.data?.id) ? prev : [...prev, response.data]);
+            await refreshTask();
+        } catch (e) {
+            console.error(e);
+            setCommentError(errorMessage(e, 'Could not submit the answer. Please try again.'));
         } finally {
             setIsPostingComment(false);
         }
@@ -301,9 +393,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
             if (formData.agent_id) payload.agent_id = parseInt(formData.agent_id);
             if (formData.parent_id) payload.parent_id = parseInt(formData.parent_id);
             if (formData.due_date) payload.due_date = new Date(formData.due_date).toISOString();
+            // The type selects the workflow; the model, if set, overrides the
+            // default of the task's tier. An empty model clears the override.
+            if (!taskId || formData.task_type !== task.task_type) payload.task_type = formData.task_type;
+            const modelChanged = !taskId
+                || formData.provider_id !== (task.provider_id?.toString() || '')
+                || formData.model_group_id !== (task.model_group_id?.toString() || '')
+                || formData.model !== (task.model || '');
+            if (modelChanged && (taskId || formData.provider_id || formData.model_group_id)) {
+                payload.provider_id = formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null);
+                payload.model_group_id = formData.model_group_id ? parseInt(formData.model_group_id) : null;
+                payload.model = formData.model_group_id ? '' : formData.model;
+            }
 
             if (taskId) {
-                payload.status = formData.status;
+                if (formData.status !== task.status) payload.status = formData.status;
                 await axios.put(`/api/tasks/${taskId}`, payload);
             } else {
                 await axios.post('/api/tasks', payload);
@@ -319,16 +423,36 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
         }
     };
 
+    // Starts a task that never ran, or sends one that is finished, parked or
+    // stuck back to work.
     const handleRerun = async () => {
         if (!taskId) return;
         setIsRerunning(true);
+        setActionError('');
         try {
             await axios.post(`/api/tasks/${taskId}/rerun`);
+            await refreshTask();
         } catch (e) {
             console.error(e);
-            alert('Failed to start re-run');
+            setActionError(errorMessage(e, 'Could not run the task'));
         } finally {
             setIsRerunning(false);
+        }
+    };
+
+    // Stops the task and everything beneath it.
+    const handleStop = async () => {
+        if (!taskId) return;
+        setIsStopping(true);
+        setActionError('');
+        try {
+            await axios.post(`/api/tasks/${taskId}/stop`);
+            await refreshTask();
+        } catch (e) {
+            console.error(e);
+            setActionError(errorMessage(e, 'Could not stop the task'));
+        } finally {
+            setIsStopping(false);
         }
     };
 
@@ -349,14 +473,12 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
     if (taskId && !task) return null;
 
-    const hasPendingHumanQuestion = comments.some((question: any) =>
-        ['ask_user', 'ask_owner'].includes(question.comment_type) &&
-        question.author_type === 'agent' &&
-        !comments.some((answer: any) =>
-            answer.id > question.id && answer.author_type === 'human' &&
-            !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(answer.comment_type),
-        ),
-    );
+    const running = !!task && isTaskRunning(task.status);
+    // A task at rest can be run again: finished, in review, failed, or stopped.
+    const canRunAgain = !!task && !running && task.status !== 'backlog' && !(task.status === 'blocked' && task.waiting_on === 'human');
+    const isSubtask = !!task?.parent_id;
+    const questions = pairQuestions(comments);
+    const companyPath = `/companies/${shortName}`;
 
     const header = (
         <div className="px-6 py-4 border-b flex items-center gap-4 bg-white shrink-0">
@@ -371,10 +493,44 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                 <div className="flex flex-col min-w-0">
                     <span className="text-xs font-mono text-gray-400">{task.ref_key || `${prefix}-${task.id}`}{formData.is_archived ? <span className="ml-2 bg-red-100 text-red-800 px-1.5 py-0.5 rounded">Archived</span> : null}</span>
                     <h1 className="text-xl font-bold text-gray-900 truncate">{formData.title || task.title}</h1>
-					{task.github_pr_url && <a href={task.github_pr_url} target="_blank" rel="noreferrer" className="text-sm text-indigo-600 hover:underline">PR #{task.github_pr_number}</a>}
+                    <div className="mt-1 flex flex-wrap items-center gap-2 text-sm" data-testid="task-state">
+                        <TaskTypeBadge type={task.task_type} />
+                        <span className="font-medium text-gray-700" data-testid="task-status-label">{statusLabel(task.status)}</span>
+                        <PhaseChip task={task} />
+                        {task.wait_detail && <span className="text-xs text-gray-500" data-testid="task-wait-detail">{task.wait_detail}</span>}
+                        {task.github_pr_url && <a href={task.github_pr_url} target="_blank" rel="noreferrer" className="text-indigo-600 hover:underline">PR #{task.github_pr_number}</a>}
+                    </div>
                 </div>
             ) : (
                 <h2 className="text-xl font-bold text-gray-900">Create New Task</h2>
+            )}
+            {taskId && (
+                <div className="ml-auto flex shrink-0 items-center gap-2">
+                    {actionError && <span className="max-w-xs text-xs text-red-600">{actionError}</span>}
+                    <a
+                        href={`/api/tasks/${taskId}/logs/download`}
+                        data-testid="task-download-logs"
+                        title="Everything recorded for this task and its subtasks: journals, executor sessions and decisions"
+                        className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50"
+                    >
+                        <Download size={14} /> Logs
+                    </a>
+                    {canStopTask(task) && (
+                        <button type="button" onClick={handleStop} disabled={isStopping} data-testid="task-stop" className="flex items-center gap-1.5 rounded-md border border-red-200 px-3 py-1.5 text-sm text-red-700 hover:bg-red-50 disabled:opacity-50">
+                            <Square size={14} /> {isStopping ? 'Stopping…' : 'Stop'}
+                        </button>
+                    )}
+                    {!isSubtask && task.status === 'backlog' && (
+                        <button type="button" onClick={handleRerun} disabled={isRerunning} data-testid="task-start" className="flex items-center gap-1.5 rounded-md bg-indigo-600 px-3 py-1.5 text-sm text-white hover:bg-indigo-700 disabled:opacity-50">
+                            <Play size={14} /> Start
+                        </button>
+                    )}
+                    {!isSubtask && canRunAgain && (
+                        <button type="button" onClick={handleRerun} disabled={isRerunning} data-testid="task-rerun" className="flex items-center gap-1.5 rounded-md border border-gray-300 px-3 py-1.5 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-50">
+                            <RotateCcw size={14} /> Run again
+                        </button>
+                    )}
+                </div>
             )}
         </div>
     );
@@ -396,11 +552,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             <div className="mb-4 flex items-start gap-2 border border-violet-200 bg-violet-50 text-violet-900 px-3 py-2 rounded-lg text-xs" data-testid="subtask-banner">
                                 <span className="mt-0.5">🧩</span>
                                 <div>
-                                    <span className="font-semibold">Delegated subtask</span> of{' '}
+                                    <span className="font-semibold">Subtask</span> of{' '}
                                     <Link to={`/companies/${shortName}/tasks/${task.parent_id}`} className="font-medium text-violet-700 underline hover:text-violet-900">
                                         task #{task.parent_id}
                                     </Link>
-                                    . Runs listed here are sub-sessions of the parent task's main run — re-running restarts the parent's main session.
+                                    {task.origin_phase ? `, created while it was in its ${task.origin_phase} step` : ''}. Its result goes back to that task, which decides what happens next.
                                 </div>
                             </div>
                         )}
@@ -415,18 +571,32 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                             </div>
                         </form>
 
-                        {/* CEO-generated spec: kept separate from the user's original input.
-                            The refined description stays visible next to the user input;
-                            acceptance criteria and test cases are collapsed by default. */}
-                        {task && (task.refined_description || task.acceptance_criteria || task.test_cases) && (
-                            <div className="mt-4 space-y-3" data-testid="ceo-spec">
+                        {/* What the task came to: shown as soon as it has a result. */}
+                        {task && (task.result_summary || task.result_reason) && (
+                            <div className={`mt-4 rounded-lg border px-3 py-2 text-sm ${task.status === 'failed' || task.status === 'canceled' ? 'border-red-200 bg-red-50' : 'border-green-200 bg-green-50'}`} data-testid="task-result">
+                                <p className="text-xs font-semibold text-gray-600">
+                                    Result{task.result_verdict ? ` · ${task.result_verdict.replace('_', ' ')}` : ''}
+                                    {task.result_reason ? ` · ${RESULT_REASONS[task.result_reason] || task.result_reason}` : ''}
+                                </p>
+                                {task.result_summary && <p className="mt-1 whitespace-pre-wrap text-gray-800">{task.result_summary}</p>}
+                                {task.result_details && (
+                                    <details className="mt-1">
+                                        <summary className="cursor-pointer text-xs text-gray-500">Details</summary>
+                                        <p className="mt-1 whitespace-pre-wrap text-xs text-gray-700">{task.result_details}</p>
+                                    </details>
+                                )}
+                            </div>
+                        )}
+
+                        {/* What refinement and planning produced, kept apart from
+                            the user's original input. */}
+                        {task && (task.refined_description || task.design || task.acceptance_criteria || task.test_cases) && (
+                            <div className="mt-4 space-y-3" data-testid="task-spec">
                                 {task.refined_description && (
                                     <div className="border border-violet-200 rounded-lg bg-violet-50/40 overflow-hidden">
                                         <div className="flex items-center justify-between px-3 py-1.5 bg-violet-50 border-b border-violet-100">
-                                            <span className="text-xs font-semibold text-violet-800">Refined Description</span>
-                                                <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full" title="This field was produced by the CEO orchestrator during planning">
-                                                🤖 Generated by CEO
-                                            </span>
+                                            <span className="text-xs font-semibold text-violet-800">Specification</span>
+                                            <span className="text-xs text-violet-600">from refinement</span>
                                         </div>
                                         <div className="px-3 py-2 bg-white prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm">
                                             <ReactMarkdown remarkPlugins={[remarkGfm]}>{task.refined_description}</ReactMarkdown>
@@ -434,8 +604,9 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     </div>
                                 )}
                                 {([
-                                    ['Acceptance Criteria', task.acceptance_criteria],
-                                    ['Test Cases', task.test_cases],
+                                    ['Technical design', task.design],
+                                    ['Definition of done', task.acceptance_criteria],
+                                    ['Test scenarios', task.test_cases],
                                 ] as [string, string][]).filter(([, value]) => value).map(([label, value]) => {
                                     const isExpanded = expandedSpecs.has(label);
                                     const items = parseSpecItems(value);
@@ -465,9 +636,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                         </span>
                                                     )}
                                                 </span>
-                                            <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full" title="This field was produced by the CEO orchestrator during planning">
-                                                    🤖 Generated by CEO
-                                                </span>
                                             </button>
                                             {isExpanded && (
                                                 items ? (
@@ -485,7 +653,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                         ))}
                                                     </ul>
                                                 ) : (
-                                                    // Legacy plain-text spec from before structured items.
+                                                    // Free text, such as the technical design.
                                                     <div className="px-3 py-2 bg-white border-t border-violet-100 prose prose-sm max-w-none prose-headings:mt-2 prose-headings:mb-1 prose-p:my-1 prose-ul:my-1 prose-ol:my-1 prose-li:my-0 text-sm">
                                                         <ReactMarkdown remarkPlugins={[remarkGfm]}>{value}</ReactMarkdown>
                                                     </div>
@@ -565,8 +733,62 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         )}
 
                         {taskId && (
-                            <div className="flex-1 mt-8">
-                                <h3 className="text-sm font-semibold text-gray-700 mb-4 border-b pb-2">Activity</h3>
+                            <div className="mt-8 flex gap-6 border-b text-sm" role="tablist">
+                                {([
+                                    ['activity', 'Activity'],
+                                    ['workflow', `Workflow${tree.length > 1 ? ` (${tree.length - 1})` : ''}`],
+                                    ['decisions', `Decisions${decisions.length ? ` (${decisions.length})` : ''}`],
+                                    ['errors', `Errors${errors?.total ? ` (${errors.total})` : ''}`],
+                                    ['usage', 'Usage'],
+                                ] as const).map(([key, label]) => (
+                                    <button
+                                        key={key}
+                                        type="button"
+                                        role="tab"
+                                        aria-selected={tab === key}
+                                        data-testid={`task-tab-${key}`}
+                                        onClick={() => setTab(key)}
+                                        className={`-mb-px border-b-2 pb-2 font-semibold ${tab === key ? 'border-indigo-500 text-indigo-600' : key === 'errors' && errors?.total ? 'border-transparent text-red-600 hover:text-red-700' : 'border-transparent text-gray-500 hover:text-gray-700'}`}
+                                    >
+                                        {label}
+                                    </button>
+                                ))}
+                            </div>
+                        )}
+                        {taskId && tab === 'workflow' && (
+                            <div className="mt-4 space-y-5" data-testid="task-workflow">
+                                <div>
+                                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Subtasks</h3>
+                                    <TaskTree tasks={tree} companyPath={companyPath} runs={treeRuns} />
+                                </div>
+                                <div>
+                                    <h3 className="mb-2 text-xs font-semibold uppercase tracking-wide text-gray-500">Journal</h3>
+                                    <TaskJournal taskId={taskId} steps={steps} companyPath={companyPath} />
+                                </div>
+                            </div>
+                        )}
+                        {taskId && tab === 'decisions' && (
+                            <div className="mt-4" data-testid="task-decisions">
+                                <TaskTree tasks={tree} companyPath={companyPath} decisions={decisions} />
+                            </div>
+                        )}
+                        {taskId && tab === 'errors' && (
+                            <div className="mt-4" data-testid="task-errors">
+                                <TaskErrors report={errors} companyPath={companyPath} />
+                            </div>
+                        )}
+                        {taskId && tab === 'usage' && task && (
+                            <div className="mt-4" data-testid="task-usage">
+                                <UsagePanel
+                                    reportUrl={`/api/tasks/${taskId}/usage`}
+                                    callsQuery={`company_id=${task.company_id}&task_id=${taskId}&subtree=true`}
+                                    dimensions={['phase', 'task', 'agent', 'model']}
+                                    refreshSignal={usageRefresh}
+                                />
+                            </div>
+                        )}
+                        {taskId && tab === 'activity' && (
+                            <div className="flex-1 mt-4">
                                 <div className="space-y-4 min-w-0 overflow-x-hidden" data-testid="comments-list">
                                     {(() => {
                                         // Merge comments (includes artifact_created and status_change) and runs into a single chronological timeline
@@ -581,26 +803,10 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                         });
                                         timeline.sort((a, b) => a.time - b.time);
 
-                                        // Keep answers visually attached to the question that caused
-                                        // them, like a small messenger thread. Human questions use
-                                        // ask_user; worker questions routed through the orchestrator
-                                        // use ask_owner and are answered by the next agent update.
-                                        const humanReplyByQuestion = new Map<number, any>();
-                                        const pairedHumanReplyIds = new Set<number>();
-                                        comments.filter((comment: any) => ['ask_user', 'ask_owner'].includes(comment.comment_type)).forEach((question: any) => {
-                                            const expectedAuthor = question.comment_type === 'ask_user' ? 'human' : 'agent';
-                                            const reply = comments
-                                                .filter((comment: any) => {
-                                                    if (comment.id <= question.id || comment.author_type !== expectedAuthor) return false;
-                                                    if (question.comment_type === 'ask_owner' && comment.run_id === question.run_id) return false;
-                                                    return !['ask_user', 'ask_owner', 'status_change', 'artifact_created'].includes(comment.comment_type);
-                                                })
-                                                .sort((a: any, b: any) => a.id - b.id)[0];
-                                            if (reply) {
-                                                humanReplyByQuestion.set(question.id, reply);
-                                                pairedHumanReplyIds.add(reply.id);
-                                            }
-                                        });
+                                        // Keep each answer attached to the question that caused it,
+                                        // like a small messenger thread.
+                                        const humanReplyByQuestion = questions.replies;
+                                        const pairedHumanReplyIds = questions.replyIds;
 
                                         if (timeline.length === 0) {
                                             return <p className="text-sm text-gray-500 italic">No activity yet.</p>;
@@ -615,7 +821,7 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 const isStatusChange = c.comment_type === 'status_change';
                                                 const isArtifact = c.comment_type === 'artifact_created';
                                                 const isTaskDone = c.comment_type === 'task_done';
-                                                const isAskQuestion = ['ask_user', 'ask_owner'].includes(c.comment_type);
+                                                const isAskQuestion = c.comment_type === 'ask_user';
                                                 const isAgent = c.author_type === 'agent';
 
                                                 // Artifact entry — compact card with expandable content
@@ -653,13 +859,8 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                 if (isStatusChange) {
                                                     let meta: {from?: string; to?: string} = {};
                                                     try { meta = JSON.parse(c.content); } catch {}
-                                                    const statusLabel: Record<string, string> = {
-                                                        'to-do': 'To Do', 'in-progress': 'In Progress',
-                                                        'in-review': 'In Review', 'done': 'Done',
-                                                        'blocked': 'Blocked', 'depends-on-task': 'Depends on Task',
-                                                    };
-                                                    const fromLabel = statusLabel[meta.from || ''] || meta.from || '';
-                                                    const toLabel = statusLabel[meta.to || ''] || meta.to || '';
+                                                    const fromLabel = statusLabel(meta.from || '');
+                                                    const toLabel = statusLabel(meta.to || '');
                                                     const actor = c.author_type === 'human' ? '👤' : '⚙️';
                                                     return (
                                                         <div key={`c-${c.id}`} className="flex items-center justify-center gap-2 text-xs text-gray-400 py-1">
@@ -694,7 +895,21 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                     <span className="whitespace-pre-wrap">{reply.content}</span>
                                                                 </div>
                                                             ) : (
-                                                                <div className="ml-8 text-xs italic text-amber-700">Waiting for a reply…</div>
+                                                                <div className="ml-8 flex gap-2" data-testid="question-answer-form">
+                                                                    <input
+                                                                        type="text"
+                                                                        aria-label="Your answer"
+                                                                        value={answers[c.id] || ''}
+                                                                        onChange={e => setAnswers(prev => ({ ...prev, [c.id]: e.target.value }))}
+                                                                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleAnswer(c.id); } }}
+                                                                        placeholder="Answer this question…"
+                                                                        disabled={isPostingComment}
+                                                                        className="flex-1 rounded-md border border-amber-300 p-2 text-sm shadow-sm focus:border-amber-500 focus:ring-amber-500"
+                                                                    />
+                                                                    <button type="button" onClick={() => handleAnswer(c.id)} disabled={isPostingComment || !(answers[c.id] || '').trim()} className="rounded-md bg-amber-600 px-3 text-sm text-white hover:bg-amber-700 disabled:opacity-50">
+                                                                        Answer
+                                                                    </button>
+                                                                </div>
                                                             )}
                                                         </div>
                                                     );
@@ -721,12 +936,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
 
                                                 const authorLabel = getActivityAuthorLabel(c, runs);
 
-                                                const statusLabel: Record<string, string> = {
-                                                    'to-do': 'To Do', 'in-progress': 'In Progress',
-                                                    'in-review': 'In Review', 'done': 'Done',
-                                                    'blocked': 'Blocked', 'depends-on-task': 'Depends on Task',
-                                                };
-
                                                 return (
                                                     <div key={`c-${c.id}`} className={`flex flex-col ${isAgent ? 'items-start' : 'items-end'}`}>
                                                         <div className={`max-w-[85%] rounded-lg p-3 text-sm ${bubbleClass}`}>
@@ -735,11 +944,11 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                 {taskDoneMeta?.from && taskDoneMeta?.to && (
                                                                     <span className="inline-flex items-center gap-1 font-normal">
                                                                         <span className="px-1.5 py-0.5 rounded bg-white/60 text-gray-500 border border-gray-200 text-xs">
-                                                                            {statusLabel[taskDoneMeta.from] || taskDoneMeta.from}
+                                                                            {statusLabel(taskDoneMeta.from)}
                                                                         </span>
                                                                         <span className="text-gray-400">→</span>
                                                                         <span className="px-1.5 py-0.5 rounded bg-green-100 text-green-700 border border-green-200 text-xs font-medium">
-                                                                            {statusLabel[taskDoneMeta.to] || taskDoneMeta.to}
+                                                                            {statusLabel(taskDoneMeta.to)}
                                                                         </span>
                                                                     </span>
                                                                 )}
@@ -801,19 +1010,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                     canceled: 'bg-orange-100 text-orange-800 border-orange-200',
                                                 };
                                                 const statusClass = statusColors[r.status] || 'bg-gray-100 text-gray-800 border-gray-200';
-                                                const maxRunId = Math.max(...runs.map((x: any) => x.id));
-                                                const isLatest = r.id === maxRunId;
                                                 const menuOpen = openRunMenu === r.id;
                                                 return (
                                                     <div key={`r-${r.id}`} className="w-full min-w-0">
                                                         <details className="w-full min-w-0 border rounded-lg bg-white shadow-sm">
                                                             <summary className="px-3 py-2 cursor-pointer flex items-center justify-between text-xs">
                                                                 <span className="font-semibold text-gray-600 flex items-center gap-1.5">
-                                                                    ⚙️ Run {r.name || `#${r.id}`}
-                                                                    {r.parent_run_id ? (
-                                                                        <span className="font-normal bg-violet-100 text-violet-700 px-1.5 py-0.5 rounded-full" title={`Sub-session of run #${r.parent_run_id}`}>sub-session</span>
-                                                                    ) : (
-                                                                        <span className="font-normal bg-indigo-50 text-indigo-600 px-1.5 py-0.5 rounded-full">main session</span>
+                                                                    ⚙️ Executor session {r.name || `#${r.id}`}
+                                                                    {r.attempt > 1 && (
+                                                                        <span className="font-normal bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded-full">attempt {r.attempt}</span>
                                                                     )}
                                                                     {getRunAgentName(r) && (
                                                                         <span className="font-normal bg-gray-100 text-gray-600 px-1.5 py-0.5 rounded-full" title={`Agent: ${getRunAgentName(r)}`}>
@@ -841,15 +1046,6 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                                         </button>
                                                                         {menuOpen && (
                                                                             <div className="absolute right-0 top-6 z-20 bg-white border rounded-lg shadow-lg py-1 min-w-[130px]">
-                                                                                {isLatest && r.status !== 'running' && (
-                                                                                    <button
-                                                                                        onClick={e => { e.preventDefault(); setOpenRunMenu(null); handleRerun(); }}
-                                                                                        disabled={isRerunning}
-                                                                                        className="w-full text-left px-3 py-1.5 text-xs hover:bg-gray-50 flex items-center gap-2 disabled:opacity-50"
-                                                                                    >
-                                                                                        <RotateCcw size={11} /> Re-run
-                                                                                    </button>
-                                                                                )}
                                                                                 <Link
                                                                                     to={`/companies/${shortName}/run-logs/${r.id}`}
                                                                                     onClick={() => setOpenRunMenu(null)}
@@ -878,34 +1074,17 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                     })()}
                                 </div>
                                 <div className="mt-4">
-                                    {task?.run_id && task?.status !== 'blocked' && !hasPendingHumanQuestion ? (
-                                        <div className="group relative">
-                                            <input
-                                                type="text"
-                                                disabled
-                                                placeholder="Agent is running... Comments are disabled until it finishes"
-                                                className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 text-sm bg-gray-100 text-gray-500 cursor-not-allowed"
-                                            />
-                                            <div className="absolute bottom-full left-1/2 -translate-x-1/2 mb-2 hidden group-hover:block bg-gray-900 text-white text-xs rounded px-3 py-1.5 whitespace-nowrap z-50">
-                                                Comments are disabled while an agent run is in progress
-                                                <div className="absolute top-full left-1/2 -translate-x-1/2 border-4 border-transparent border-t-gray-900"></div>
-                                            </div>
-                                        </div>
-                                    ) : (
-                                        <>
                                         <div className="flex gap-2" data-testid="human-reply-form">
                                             <input
                                                 type="text"
                                                 value={newComment}
                                                 onChange={(e) => setNewComment(e.target.value)}
                                                 onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); void handleAddComment(); } }}
-                                                placeholder="Add a comment..."
+                                                placeholder={questions.open.length > 0 ? 'Add a comment (answer questions above)…' : 'Add a comment...'}
                                                 className="flex-1 border-gray-300 rounded-md shadow-sm border p-2 focus:ring-indigo-500 focus:border-indigo-500 text-sm"
                                                 disabled={isPostingComment}
                                             />
-                                            {task?.status === 'blocked' ? (
-                                                <span className="flex items-center px-2 text-xs text-amber-700">Answer pending question</span>
-                                            ) : (
+                                            {canRunAgain && !isSubtask && (
                                                 <div className="flex items-center px-2">
                                                     <input
                                                         type="checkbox"
@@ -913,16 +1092,15 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                                                         checked={runAgent}
                                                         onChange={(e) => setRunAgent(e.target.checked)}
                                                     />
-                                                    <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run Agent</label>
+                                                    <label htmlFor="runAgentCheckbox" className="ml-1 text-xs text-gray-600">Run again</label>
                                                 </div>
                                             )}
                                             <button type="button" onClick={handleAddComment} disabled={isPostingComment || !newComment.trim()} className="bg-indigo-600 text-white p-2 rounded-md hover:bg-indigo-700 disabled:opacity-50">
                                                 <Send size={18} />
                                             </button>
                                         </div>
+                                        {running && <p className="mt-1 text-xs text-gray-500">The task is working. A comment is read at its next step; to redirect it now, stop it and run it again.</p>}
                                         {commentError && <p className="mt-1 text-xs text-red-600">{commentError}</p>}
-                                        </>
-                                    )}
                                 </div>
 
                             </div>
@@ -935,17 +1113,41 @@ export const TaskModal: React.FC<TaskModalProps> = ({ taskId, projectId, onClose
                         {taskId && (
                             <div>
                                 <label htmlFor="task-status" className="block text-sm font-medium text-gray-700 mb-1">Status</label>
-                                <select id="task-status" value={formData.status} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm font-semibold text-indigo-600">
+                                {/* The status is the workflow's while it runs. A person
+                                    queues the task, stops it, and places it once at rest. */}
+                                <select id="task-status" value={formData.status} disabled={running} onChange={e => setFormData({...formData, status: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm font-semibold text-indigo-600 disabled:bg-gray-100 disabled:text-gray-500">
+                                    {!['backlog', 'to-do', 'in-review', 'done'].includes(task.status) && <option value={task.status} disabled>{statusLabel(task.status)}</option>}
                                     <option value="backlog">Backlog</option>
-                                    <option value="to-do">To Do</option>
-                                    <option value="in-progress">In Progress</option>
-                                    <option value="in-review">In Review</option>
-                                    <option value="blocked">Blocked</option>
-                                    <option value="depends-on-task" disabled>Depends on Task</option>
+                                    <option value="to-do">{task.status === 'backlog' || task.status === 'to-do' ? 'To do (start)' : 'To do (run again)'}</option>
+                                    <option value="in-review">In review</option>
                                     <option value="done">Done</option>
                                 </select>
+                                {running && <p className="mt-1 text-xs text-gray-500">Stop the task to move it by hand.</p>}
                             </div>
                         )}
+                        <div>
+                            <label htmlFor="task-type" className="block text-sm font-medium text-gray-700 mb-1">Type</label>
+                            <select
+                                id="task-type"
+                                value={formData.task_type}
+                                disabled={!!task && (running || task.status === 'blocked')}
+                                onChange={e => setFormData({...formData, task_type: e.target.value})}
+                                className="w-full border rounded p-2 text-sm shadow-sm disabled:bg-gray-100 disabled:text-gray-500"
+                            >
+                                {TASK_TYPES.map(type => <option key={type.value} value={type.value}>{type.label}</option>)}
+                            </select>
+                            <p className="mt-1 text-xs text-gray-500">{TASK_TYPES.find(type => type.value === formData.task_type)?.hint}</p>
+                        </div>
+                        <div data-testid="task-model">
+                            <ProviderOrGroupSelect
+                                label="Model"
+                                providers={providers.filter((p: any) => p.provider_type !== 'typesafe')}
+                                modelGroups={modelGroups}
+                                noneLabel={task?.mode === 'direct' ? 'Default cheap model' : 'Default smart model'}
+                                value={{ provider_id: formData.provider_id, model_group_id: formData.model_group_id, model: formData.model }}
+                                onChange={v => setFormData({ ...formData, provider_id: v.provider_id, model_group_id: v.model_group_id, model: v.model })}
+                            />
+                        </div>
                         <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1">Project</label>
                             <select value={formData.project_id} onChange={e => setFormData({...formData, project_id: e.target.value})} className="w-full border rounded p-2 text-sm shadow-sm">

@@ -247,7 +247,7 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 		// tools were configured with. The workspace and caches are already
 		// readable via the RW grants above.
 		roots := append(append([]string{}, readScopeRoots...), cfg.ReadOnlyDirs...)
-		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
+		rules = append(rules, readRules(roots)...)
 	case len(cfg.ReadRoots) > 0:
 		// Read the whole filesystem EXCEPT the headcount1 data root (the parent
 		// granted "/" minus that subtree), then re-grant the task's own dirs
@@ -255,14 +255,40 @@ func restrictWritesToWorkspace(workspace string, cfg childConfig) error {
 		// the RW grant above. Net effect — system/home toolchains stay readable,
 		// but the only data-root paths the agent can read are its own task's.
 		roots := append(append([]string{}, cfg.ReadRoots...), cfg.ReadOnlyDirs...)
-		rules = append(rules, landlock.RODirs(roots...).IgnoreIfMissing())
+		rules = append(rules, readRules(roots)...)
 	default:
 		rules = append(rules, landlock.RODirs("/"))
 	}
 	return landlock.V5.BestEffort().RestrictPaths(rules...)
 }
 
-// readRootsExcluding returns a set of directories whose union grants read
+// readRules grants read access to paths that may be directories or files. The
+// kernel refuses a directory rule on anything that is not a directory, and one
+// refused rule fails the whole sandbox, so each kind gets the rule that fits
+// it. A path that cannot be examined is not granted.
+func readRules(paths []string) []landlock.Rule {
+	var dirs, files []string
+	for _, path := range paths {
+		info, err := os.Stat(path)
+		switch {
+		case err != nil:
+		case info.IsDir():
+			dirs = append(dirs, path)
+		default:
+			files = append(files, path)
+		}
+	}
+	var rules []landlock.Rule
+	if len(dirs) > 0 {
+		rules = append(rules, landlock.RODirs(dirs...).IgnoreIfMissing())
+	}
+	if len(files) > 0 {
+		rules = append(rules, landlock.ROFiles(files...).IgnoreIfMissing())
+	}
+	return rules
+}
+
+// readRootsExcluding returns the paths whose union grants read
 // access to the entire filesystem EXCEPT the subtrees in `excludes`. Landlock
 // access is an allowlist with no "deny" primitive, so a subtree is hidden by
 // granting every sibling along its ancestor chain and never the subtree itself.

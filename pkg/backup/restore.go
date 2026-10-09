@@ -137,9 +137,9 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	// auth tables (sessions, reset tokens, invites) are cleared too since
 	// they FK to users and are not part of the archive.
 	tables := []string{
-		"agent_mcp_tool_filters", "agent_mcp_accounts", "agent_mcp_servers",
 		"mcp_accounts", "mcp_servers",
-		"activity_logs", "proxy_request_logs", "artifacts", "runs", "comments",
+		"activity_logs", "llm_calls", "decisions", "task_steps",
+		"artifacts", "runs", "comments",
 		"attachments", "tasks", "skills", "agents",
 		"model_group_members", "model_groups", "default_model_settings",
 		"llm_providers", "sprints", "projects", "companies",
@@ -174,9 +174,6 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		{"default-model-settings.json", "default_model_settings"},
 		{"mcp-servers.json", "mcp_servers"},
 		{"mcp-accounts.json", "mcp_accounts"},
-		{"agent-mcp-servers.json", "agent_mcp_servers"},
-		{"agent-mcp-accounts.json", "agent_mcp_accounts"},
-		{"agent-mcp-tool-filters.json", "agent_mcp_tool_filters"},
 		{"activity-logs.json", "activity_logs"},
 	} {
 		rows, err := readRowsFile(filepath.Join(entitiesDir, g.file))
@@ -208,6 +205,9 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		if rows, err := readRowsFile(filepath.Join(compDir, "skills.json")); err == nil {
 			addRows("skills", rows)
 		}
+		if rows, err := readRowsFile(filepath.Join(compDir, "usage.json")); err == nil {
+			addRows("llm_calls", rows)
+		}
 
 		projEntries, _ := os.ReadDir(filepath.Join(compDir, "projects"))
 		for _, pe := range projEntries {
@@ -226,7 +226,7 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 			}
 			taskDir := filepath.Join(compDir, "tasks", te.Name())
 			if r, err := readRowFile(filepath.Join(taskDir, "task.json")); err == nil {
-				addRows("tasks", []row{r})
+				addRows("tasks", normalizeRestoredTaskRows([]row{r}))
 			} else {
 				log.Printf("Warning: restore: task %s/%s: %v", ce.Name(), te.Name(), err)
 				continue
@@ -241,6 +241,12 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 				addRows("artifacts", rows)
 			}
 			addRows("runs", normalizeRestoredRunRows(readRowDir(filepath.Join(taskDir, "runs"))))
+			if rows, err := readRowsFile(filepath.Join(taskDir, "steps.json")); err == nil {
+				addRows("task_steps", rows)
+			}
+			if rows, err := readRowsFile(filepath.Join(taskDir, "decisions.json")); err == nil {
+				addRows("decisions", rows)
+			}
 		}
 	}
 
@@ -251,14 +257,26 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 		"companies", "llm_providers", "model_groups", "model_group_members",
 		"default_model_settings", "sprints", "projects", "agents", "skills",
 		"tasks", "comments", "attachments", "artifacts", "runs",
+		"task_steps", "decisions", "llm_calls",
 		"mcp_servers", "mcp_accounts",
-		"agent_mcp_servers", "agent_mcp_accounts", "agent_mcp_tool_filters",
 		"activity_logs",
 	}
 	for _, table := range insertOrder {
 		rows := byTable[table]
 		sortRowsByID(rows)
+		// An archive written by an older version may carry fields this
+		// database no longer has a column for; they are left behind.
+		known, err := tableColumns(database, table)
+		if err != nil {
+			log.Printf("Warning: restore: %v", err)
+			continue
+		}
 		for _, r := range rows {
+			for column := range r {
+				if !known[column] {
+					delete(r, column)
+				}
+			}
 			if err := database.Table(table).Create(&r).Error; err != nil {
 				log.Printf("Warning: restore: failed to insert into %s (id=%v): %v", table, r["id"], err)
 			}
@@ -275,24 +293,47 @@ func restoreEntities(tempDir string, database *gorm.DB) error {
 	return nil
 }
 
-// normalizeRestoredRunRows prevents a restored database from claiming that a
-// live session is still executing. A backup contains only durable rows; the
-// in-memory cancellation handle and goroutine that owned a running/waiting
-// session are not part of the archive. Restore therefore records those
-// snapshot-time active sessions as interrupted so they remain visible and
-// recoverable without being mistaken for currently active work.
+// normalizeRestoredRunRows keeps restored sessions within what this version
+// knows. A session the archive shows as running or paused is restored as it
+// was: the engine finds on its first sweep that nobody is running it and deals
+// with it as it does after any crash, retrying its task. A status this
+// version does not have (from an older archive) is restored as failed.
 func normalizeRestoredRunRows(rows []row) []row {
 	for _, run := range rows {
-		status, _ := run["status"].(string)
-		switch status {
-		case "running", "resuming", "waiting":
-			run["status"] = "interrupted"
+		switch status, _ := run["status"].(string); status {
+		case "running", "paused", "resuming", "completed", "failed", "canceled":
+		default:
+			run["status"] = "failed"
 			if endedAt, exists := run["ended_at"]; !exists || endedAt == nil || endedAt == "" {
 				run["ended_at"] = time.Now().UTC().Format(time.RFC3339Nano)
 			}
 		}
 	}
 	return rows
+}
+
+// normalizeRestoredTaskRows maps a task status from an older archive that
+// this version does not have onto the backlog.
+func normalizeRestoredTaskRows(rows []row) []row {
+	for _, task := range rows {
+		if status, _ := task["status"].(string); status == "refinement" {
+			task["status"] = "backlog"
+		}
+	}
+	return rows
+}
+
+// tableColumns returns the names of a table's columns.
+func tableColumns(database *gorm.DB, table string) (map[string]bool, error) {
+	types, err := database.Migrator().ColumnTypes(table)
+	if err != nil {
+		return nil, fmt.Errorf("read columns of %s: %w", table, err)
+	}
+	known := make(map[string]bool, len(types))
+	for _, column := range types {
+		known[column.Name()] = true
+	}
+	return known, nil
 }
 
 // resetPostgresSequences advances each table's identity sequence past the

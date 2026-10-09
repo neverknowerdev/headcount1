@@ -1,8 +1,6 @@
 package agentconfig_test
 
 import (
-	"os"
-	"path/filepath"
 	"testing"
 
 	"agent-orchestrator/engine/agentconfig"
@@ -11,248 +9,25 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ---- AgentConfig tests ------------------------------------------------------
-
-func TestAgentConfig_DefaultModel(t *testing.T) {
-	cfg := &agentconfig.AgentConfig{AllowedModels: []string{"model-a", "model-b"}}
-	assert.Equal(t, "model-a", cfg.DefaultModel())
-
-	empty := &agentconfig.AgentConfig{}
-	assert.Equal(t, "", empty.DefaultModel())
-}
-
-func TestAgentConfig_IsToolAllowed(t *testing.T) {
-	tests := []struct {
-		name         string
-		allowedTools []string
-		tool         string
-		want         bool
-	}{
-		{"empty list allows all", nil, "read", true},
-		{"explicit match", []string{"read", "write"}, "read", true},
-		{"explicit no match", []string{"read"}, "bash", false},
-		{"wildcard allows all", []string{"*"}, "anything", true},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			cfg := &agentconfig.AgentConfig{AllowedTools: tt.allowedTools}
-			assert.Equal(t, tt.want, cfg.IsToolAllowed(tt.tool))
-		})
-	}
-}
-
-// ---- Loader tests -----------------------------------------------------------
-
-const validTOML = `
-name = "TestAgent"
-description = "A test agent"
-chat_type = "message_history"
-allowed_models = ["model-x", "model-y"]
-best_models = ["model-best", "model-fast"]
-reasoning_level = "medium"
-allowed_tools = ["read", "grep"]
-`
-
-func TestLoadFromBytes_ValidTOML(t *testing.T) {
-	cfg, err := agentconfig.LoadFromBytes([]byte(validTOML), "")
-	require.NoError(t, err)
-	assert.Equal(t, "TestAgent", cfg.Name)
-	assert.Equal(t, "A test agent", cfg.Description)
-	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
-	assert.Equal(t, []string{"model-x", "model-y"}, cfg.AllowedModels)
-	assert.Equal(t, []string{"model-best", "model-fast"}, cfg.BestModels)
-	assert.Equal(t, agentconfig.ReasoningLevelMedium, cfg.ReasoningLevel)
-	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
-}
-
-func TestLoadFromBytes_InvalidTOML(t *testing.T) {
-	_, err := agentconfig.LoadFromBytes([]byte("not : valid : toml :::"), "")
-	require.Error(t, err)
-}
-
-func TestLoadYAMLFromBytes_Valid(t *testing.T) {
-	cfg, err := agentconfig.LoadYAMLFromBytes([]byte(`
-name: YAML Agent
-short_name: YAML
-description: yaml description
-chat_type: message_history
-reasoning_level: medium
-allowed_tools: [read, grep]
-subagents: [QA]
-`), "")
-	require.NoError(t, err)
-	assert.Equal(t, "YAML Agent", cfg.Name)
-	assert.Equal(t, "YAML", cfg.ShortName)
-	assert.Equal(t, []string{"read", "grep"}, cfg.AllowedTools)
-	assert.Equal(t, []string{"QA"}, cfg.Subagents)
-}
-
-func TestLoadFromFile_WithPromptFile(t *testing.T) {
-	dir := t.TempDir()
-	promptPath := filepath.Join(dir, "agent.md")
-	require.NoError(t, os.WriteFile(promptPath, []byte("You are a test agent."), 0644))
-
-	tomlContent := `
-name = "FileAgent"
-prompt_file = "agent.md"
-chat_type = "compact_thinking"
-allowed_models = ["model-z"]
-reasoning_level = "max"
-`
-	cfgPath := filepath.Join(dir, "agent.toml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte(tomlContent), 0644))
-
-	cfg, err := agentconfig.LoadFromFile(cfgPath)
-	require.NoError(t, err)
-	assert.Equal(t, "FileAgent", cfg.Name)
-	assert.Equal(t, "You are a test agent.", cfg.Prompt)
-	assert.Equal(t, agentconfig.ChatTypeCompactThinking, cfg.ChatType)
-	assert.Equal(t, agentconfig.ReasoningLevelMax, cfg.ReasoningLevel)
-}
-
-func TestLoadFromFile_MissingPromptFile(t *testing.T) {
-	dir := t.TempDir()
-	tomlContent := "name = \"X\"\nprompt_file = \"missing.md\"\n"
-	cfgPath := filepath.Join(dir, "agent.toml")
-	require.NoError(t, os.WriteFile(cfgPath, []byte(tomlContent), 0644))
-
-	_, err := agentconfig.LoadFromFile(cfgPath)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "missing.md")
-}
-
-func TestLoadFromFile_NonExistentFile(t *testing.T) {
-	_, err := agentconfig.LoadFromFile("/no/such/file.toml")
-	require.Error(t, err)
-}
-
-// ---- Factory tests ----------------------------------------------------------
-
-func TestDefaultFactory_BuiltinAgents(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-	names := f.ListNames()
-	expected := []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"}
-	for _, name := range expected {
-		assert.Contains(t, names, name, "builtin agent %q should be registered", name)
-	}
-}
-
-func TestBuiltinConfigs_PreserveFilenameOrder(t *testing.T) {
-	expected := []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"}
+// The clean-slate migration resets built-in prompts with the same sentence,
+// so the catalog and an upgraded database must agree on it.
+func TestBuiltinConfigsAreRolesOnly(t *testing.T) {
 	configs := agentconfig.BuiltinConfigs()
-	require.Len(t, configs, len(expected))
-	for i, cfg := range configs {
-		assert.Equal(t, expected[i], cfg.Name, "built-in config order at index %d", i)
+	require.Len(t, configs, 13)
+
+	names := map[string]bool{}
+	shortNames := map[string]bool{}
+	for _, cfg := range configs {
+		assert.NotEmpty(t, cfg.Description, cfg.Name)
+		assert.Equal(t, "You are the "+cfg.Name+" agent.", cfg.Prompt)
+		assert.LessOrEqual(t, len(cfg.ShortName), 7, cfg.Name)
+		assert.NotEmpty(t, cfg.ShortName, cfg.Name)
+		assert.False(t, names[cfg.Name], "duplicate name %s", cfg.Name)
+		assert.False(t, shortNames[cfg.ShortName], "duplicate short name %s", cfg.ShortName)
+		names[cfg.Name] = true
+		shortNames[cfg.ShortName] = true
 	}
-}
-
-func TestDefaultFactory_GetConfig(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-
-	cfg, err := f.GetConfig("CEO")
-	require.NoError(t, err)
-	assert.Equal(t, "CEO", cfg.Name)
-	assert.NotEmpty(t, cfg.Prompt)
-	assert.Equal(t, agentconfig.ChatTypeCompactThinking, cfg.ChatType)
-	assert.Equal(t, agentconfig.ReasoningLevelMax, cfg.ReasoningLevel)
-	// Builtin configs intentionally have no hardcoded models so that the
-	// runtime resolver picks from the configured provider's supported list.
-	assert.Empty(t, cfg.AllowedModels)
-	assert.NotEmpty(t, cfg.BestModels)
-
-	cfg, err = f.GetConfig("Coder")
-	require.NoError(t, err)
-	assert.Equal(t, agentconfig.ChatTypeMessageHistory, cfg.ChatType)
-	assert.Empty(t, cfg.AllowedModels)
-	for _, tool := range []string{"bash", "read", "write", "ls", "grep"} {
-		assert.True(t, cfg.IsToolAllowed(tool), "Coder should be allowed to use runtime tool %q", tool)
+	for _, role := range []string{"CEO", "CTO", "Coder", "QA Lead", "QA"} {
+		assert.True(t, names[role], "the workflow needs the %s role", role)
 	}
-	for _, legacy := range []string{"exec_command", "read_file", "write_file", "list_dir"} {
-		assert.False(t, cfg.IsToolAllowed(legacy), "legacy tool name %q must not be used in the runtime allowlist", legacy)
-	}
-}
-
-func TestDefaultFactory_GetConfig_NotFound(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-	_, err := f.GetConfig("Unknown")
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "Unknown")
-}
-
-func TestDefaultFactory_Register_Override(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-	custom := &agentconfig.AgentConfig{
-		Name:   "CEO",
-		Prompt: "custom prompt",
-	}
-	f.Register(custom)
-
-	cfg, err := f.GetConfig("CEO")
-	require.NoError(t, err)
-	assert.Equal(t, "custom prompt", cfg.Prompt)
-}
-
-func TestEmptyFactory_Register(t *testing.T) {
-	f := agentconfig.NewEmptyFactory()
-	assert.Empty(t, f.ListNames())
-
-	f.Register(&agentconfig.AgentConfig{Name: "MyAgent", Prompt: "hello"})
-	names := f.ListNames()
-	require.Len(t, names, 1)
-	assert.Equal(t, "MyAgent", names[0])
-}
-
-func TestDefaultFactory_BuiltinPrompts_NotEmpty(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-	for _, name := range []string{"CEO", "CTO", "Coder", "QA Lead", "QA Manual", "QA", "Debugger", "UX Designer", "Graphic Designer", "CMO", "SMM", "Writer", "Ads manager"} {
-		cfg, err := f.GetConfig(name)
-		require.NoError(t, err)
-		assert.NotEmpty(t, cfg.Prompt, "agent %q should have a non-empty prompt", name)
-	}
-}
-
-func TestBuiltinConfigs_HaveBestModels(t *testing.T) {
-	for _, cfg := range agentconfig.BuiltinConfigs() {
-		assert.NotEmpty(t, cfg.BestModels, "agent %q should have best model recommendations", cfg.Name)
-	}
-}
-
-func TestDefaultFactory_UsesRoleWorkerCapabilityWithoutHierarchy(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-
-	ceo, _ := f.GetConfig("CEO")
-	assert.True(t, ceo.CanUseWorkers)
-	assert.Contains(t, ceo.Subagents, "CTO")
-	assert.Contains(t, ceo.Subagents, "CMO")
-	assert.Contains(t, ceo.Subagents, "UX Designer")
-	assert.Contains(t, ceo.Subagents, "Graphic Designer")
-
-	cto, _ := f.GetConfig("CTO")
-	assert.True(t, cto.CanUseWorkers)
-	assert.Equal(t, "CEO", cto.ParentAgent)
-	assert.Contains(t, cto.Subagents, "Coder")
-	assert.Contains(t, cto.Subagents, "Debugger")
-	assert.Contains(t, cto.Subagents, "QA Lead")
-	assert.Contains(t, cto.Subagents, "QA Manual")
-	assert.Contains(t, cto.Subagents, "QA")
-	assert.Contains(t, cto.Subagents, "Debugger")
-
-	cmo, _ := f.GetConfig("CMO")
-	assert.True(t, cmo.CanUseWorkers)
-	assert.Equal(t, "CEO", cmo.ParentAgent)
-	assert.Contains(t, cmo.Subagents, "SMM")
-	assert.Contains(t, cmo.Subagents, "Ads manager")
-	assert.Contains(t, cmo.Subagents, "Writer")
-	coder, _ := f.GetConfig("Coder")
-	assert.False(t, coder.CanUseWorkers)
-}
-
-func TestDefaultFactoryPromptsMatchToolCapabilities(t *testing.T) {
-	f := agentconfig.NewDefaultFactory()
-	ceo, _ := f.GetConfig("CEO")
-	cto, _ := f.GetConfig("CTO")
-	qaManual, _ := f.GetConfig("QA Manual")
-	assert.Contains(t, ceo.Prompt, "product owner")
-	assert.Contains(t, cto.Prompt, "never do manual implementation")
-	assert.Contains(t, qaManual.Prompt, "browser-based UI tester")
 }

@@ -261,63 +261,50 @@ test.describe.serial('Deploy webhook', () => {
         // Seed a runnable task on this isolated server.
         const provider = await postJSON(`${base}/api/providers`, {
             name: 'mock', base_url: mockUrl, api_key: 'test-key',
-            provider_type: 'openai', default_model: 'e2e-mock-model', supported_models: 'e2e-mock-model,e2e-orchestrator-model',
+            provider_type: 'openai', default_model: 'e2e-smart-model', supported_models: 'e2e-smart-model,e2e-cheap-model',
         });
-        const orchestratorSetting = await fetch(`${base}/api/default-model-settings/task_orchestrator`, {
+        const company = await postJSON(`${base}/api/companies`, { name: 'Deploy Co', short_name: 'dc', color: '#0ea5e9', provider_id: provider.id, model: 'e2e-smart-model' });
+        const cheapSetting = await fetch(`${base}/api/default-model-settings/cheap`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ provider_id: provider.id, model: 'e2e-orchestrator-model' }),
+            body: JSON.stringify({ provider_id: provider.id, model: 'e2e-cheap-model' }),
         });
-        expect(orchestratorSetting.ok).toBeTruthy();
-        const company = await postJSON(`${base}/api/companies`, { name: 'Deploy Co', short_name: 'dc', color: '#0ea5e9' });
+        expect(cheapSetting.ok).toBeTruthy();
         const sprint = await postJSON(`${base}/api/sprints`, { company_id: company.id, name: 'S1', goal: 'ship' });
-        const agent = await postJSON(`${base}/api/agents`, {
-            company_id: company.id, name: 'Runner', system_prompt: 'You do the work.',
-            model: 'e2e-mock-model', provider_id: provider.id,
-        });
         const task = await postJSON(`${base}/api/tasks`, {
-            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            company_id: company.id, sprint_id: sprint.id, task_type: 'research',
             title: 'Survives a deploy', description: 'a task to deploy through',
         });
 
-        // Turn 1 reports progress (a tool call, so the run has more to do and is
-        // a valid pause point); turn 2 finishes after the restart.
+        // The executor's first turn is a tool call, so the session has more to
+        // do and is a valid pause point; its second turn reports, after the
+        // restart. Everything else is answered by the mock's autopilot.
         await fetch(`${mockUrl}/__test/set-scenario`, {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-mock-model',
-                entries: [
-                    { tool_call: { id: 'rs-1', name: 'report_status', arguments: { status: statusMarker } } },
-                    { tool_call: { id: 'ft-1', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'Survived the deploy.' } } },
-                ],
-            }),
+            body: JSON.stringify({ rules: [{ match: { phase: 'executor' }, replies: [
+                { tool_call: { name: 'write', arguments: { path: 'progress.txt', content: statusMarker } } },
+                { tool_call: { name: 'finish_work', arguments: { status: 'done', summary: 'Survived the deploy.' } } },
+            ] }] }),
         });
-        await fetch(`${mockUrl}/__test/set-scenario`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ model: 'e2e-orchestrator-model', entries: [
-                { tool_call: { id: 'run-1', name: 'run_new_session', arguments: { agent_name: 'Runner', title: 'Complete task', prompt: 'Complete the task.' } } },
-                { text: 'The worker completed the task.' },
-                { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: { summary: 'The resumed worker completed successfully and the result was verified.' } } },
-            ] }),
+        // Hold the executor's LLM response so the session is provably blocked mid-turn.
+        await fetch(`${mockUrl}/__test/hold`, {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ match: { phase: 'executor' } }),
         });
-        // Hold the LLM response so the run is provably blocked mid-turn.
-        await fetch(`${mockUrl}/__test/hold-worker`, { method: 'POST' });
 
         await fetch(`${base}/api/tasks/${task.id}`, {
             method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ status: 'to-do' }),
         });
         await expect
-            .poll(async () => {
-                const requests = await (await fetch(`${mockUrl}/__test/requests`)).json();
-                return (requests.requests as any[]).filter((entry) =>
-                    entry.path?.includes('chat/completions') && entry.body?.model === 'e2e-mock-model').length;
-            },
-                { timeout: 30_000, intervals: [200], message: 'run should reach its first LLM call' })
+            .poll(async () => (await (await fetch(`${mockUrl}/__test/requests`)).json()).held,
+                { timeout: 30_000, intervals: [200], message: 'the executor session should reach its first LLM call' })
             .toBe(1);
 
-        const runs = await (await fetch(`${base}/api/tasks/${task.id}/runs`)).json();
-        expect(runs.length).toBe(2);
-        const worker = runs.find((run: any) => run.kind === 'agent_session');
-        expect(worker).toBeTruthy();
-        const runId = worker.id;
+        // The executor session belongs to the subtask the plan created.
+        const tree = await (await fetch(`${base}/api/tasks/${task.id}/tree`)).json();
+        expect(tree.length).toBe(2);
+        const subtaskId = tree[1].id;
+        const runs = await (await fetch(`${base}/api/tasks/${subtaskId}/runs`)).json();
+        expect(runs.length).toBe(1);
+        const runId = runs[0].id;
 
         // Deploy while that run is blocked on its LLM call.
         const drainMark = serverLog.length;
@@ -352,22 +339,27 @@ test.describe.serial('Deploy webhook', () => {
                 { timeout: 120_000, intervals: [1000], message: 'deploy should restart into the new build' })
             .toBe(targetCommit);
 
-        // The new build picks the interrupted run back up and finishes it.
+        // The new build picks the interrupted session back up and finishes it.
         await expect
             .poll(async () => {
                 try {
-                    const rs = await (await fetch(`${base}/api/tasks/${task.id}/runs`)).json();
+                    const rs = await (await fetch(`${base}/api/tasks/${subtaskId}/runs`)).json();
                     return rs.find((r: any) => r.id === runId)?.status ?? '';
                 } catch { return ''; }
-            }, { timeout: 120_000, intervals: [1000], message: 'the interrupted run must resume in the new build and complete' })
+            }, { timeout: 120_000, intervals: [1000], message: 'the interrupted session must resume in the new build and complete' })
             .toBe('completed');
 
-        // The tool call pending at pause time ran on resume, and the task
-        // reached the status the agent set after the restart.
+        // The tool call pending at pause time ran on resume, in the same
+        // session (no second attempt), and the whole task went on to review.
         const finalRun = await (await fetch(`${base}/api/runs/${runId}`)).json();
-        expect(finalRun.latest_reported_status).toBe(statusMarker);
-        const finalTask = await (await fetch(`${base}/api/tasks/${task.id}`)).json();
-        expect(finalTask.status).toBe('done');
+        expect(fs.readFileSync(path.join(finalRun.workspace_path, 'progress.txt'), 'utf8')).toBe(statusMarker);
+        expect((await (await fetch(`${base}/api/tasks/${subtaskId}/runs`)).json()).length).toBe(1);
+        await expect
+            .poll(async () => (await (await fetch(`${base}/api/tasks/${task.id}`)).json()).status,
+                { timeout: 60_000, intervals: [500], message: 'the task should finish its workflow after the restart' })
+            .toBe('in-review');
+        const finalSubtask = await (await fetch(`${base}/api/tasks/${subtaskId}`)).json();
+        expect(finalSubtask.result_summary).toBe('Survived the deploy.');
     });
 
     // Configuration delivery: CI reads its GitHub Environment's vars/secrets and

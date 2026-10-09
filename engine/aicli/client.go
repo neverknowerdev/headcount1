@@ -6,6 +6,8 @@ package aicli
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -52,11 +54,14 @@ type FuncMeta struct {
 
 // ChatRequest is the body for POST /v1/chat/completions.
 type ChatRequest struct {
-	Model     string    `json:"model"`
-	Messages  []Message `json:"messages"`
-	Tools     []ToolDef `json:"tools,omitempty"`
-	Stream    bool      `json:"stream,omitempty"`
-	MaxTokens int       `json:"max_tokens,omitempty"`
+	Model    string    `json:"model"`
+	Messages []Message `json:"messages"`
+	Tools    []ToolDef `json:"tools,omitempty"`
+	// ToolChoice constrains tool use ("required" forces a tool call). Some
+	// OpenAI-compatible providers ignore or reject it; see CompleteWithTool.
+	ToolChoice string `json:"tool_choice,omitempty"`
+	Stream     bool   `json:"stream,omitempty"`
+	MaxTokens  int    `json:"max_tokens,omitempty"`
 	// ReasoningEffort controls how much reasoning the model applies.
 	// Accepted values: "low", "medium", "high". Supported by OpenAI o-series
 	// and compatible providers; ignored by providers that don't support it.
@@ -175,6 +180,26 @@ type Client struct {
 	// ExtraHeaders are added to every request. Used when the client targets
 	// the in-process model-group gateway (X-Run-ID, log-mode hints).
 	ExtraHeaders map[string]string
+	// SessionID names the conversation the requests belong to; it is sent in
+	// SessionHeader. Every request of one executor session, or of one task's
+	// smart steps, carries the same one.
+	SessionID string
+}
+
+// SessionHeader carries a stable ID for one conversation. OpenCode's
+// providers use it for routing and prompt caching and refuse requests that
+// come without it; other providers ignore it.
+const SessionHeader = "x-opencode-session"
+
+// UserAgent identifies this application to providers, which ask clients not
+// to arrive under an HTTP library's generic name.
+const UserAgent = "headcount1"
+
+// SessionID derives a conversation ID from what identifies the conversation,
+// stable across restarts and of a shape providers accept.
+func SessionID(parts ...interface{}) string {
+	sum := sha256.Sum256([]byte(fmt.Sprint(parts...)))
+	return "hc1-" + hex.EncodeToString(sum[:16])
 }
 
 // NewClient creates a Client with sensible defaults.
@@ -254,6 +279,10 @@ func (c *Client) doRequest(ctx context.Context, body []byte) (*ChatResponse, []b
 	httpReq.Header.Set("Content-Type", "application/json")
 	if c.APIKey != "" {
 		httpReq.Header.Set("Authorization", "Bearer "+c.APIKey)
+	}
+	httpReq.Header.Set("User-Agent", UserAgent)
+	if c.SessionID != "" {
+		httpReq.Header.Set(SessionHeader, c.SessionID)
 	}
 	for k, v := range c.ExtraHeaders {
 		httpReq.Header.Set(k, v)

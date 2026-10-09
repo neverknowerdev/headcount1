@@ -95,7 +95,7 @@ test.describe.serial('Task views', () => {
             status: 200,
             contentType: 'application/json',
             body: JSON.stringify([{
-                id: 9001, task_id: root.id, agent_id: 9001, kind: 'agent_session', status: 'completed',
+                id: 9001, task_id: root.id, agent_id: 9001, status: 'completed',
                 started_at: '2026-10-01T12:00:00Z', agent: { id: 9001, name: 'Execution Agent' },
             }]),
         }));
@@ -139,18 +139,19 @@ test.describe.serial('Task views', () => {
         await expect(page.getByText(names.child, { exact: true })).toBeHidden();
         await screenshotIfRequested(page, 'task-board');
 
-        // Board cards continue to support keyboard drag and drop. Move the
-        // root from Backlog to Blocked (not an executable queue state) and
-        // verify persistence without launching an agent run.
-        const draggable = page.locator(`[data-rfd-draggable-id="${root.id}"]`);
+        // Board cards continue to support keyboard drag and drop. A person
+        // may only drop into the columns that are theirs, and "To do" would
+        // start the workflow, so move the finished task from Done back to
+        // In review and verify persistence without launching any work.
+        const draggable = page.locator(`[data-rfd-draggable-id="${related.id}"]`);
         await draggable.focus();
         await draggable.press('Space');
-        for (let index = 0; index < 4; index++) await page.keyboard.press('ArrowRight');
+        await page.keyboard.press('ArrowLeft');
         await page.keyboard.press('Space');
         await expect.poll(async () => {
-            const response = await request.get(`/api/tasks/${root.id}`);
+            const response = await request.get(`/api/tasks/${related.id}`);
             return response.ok() ? (await response.json()).status : null;
-        }, { message: 'keyboard drag should persist the task status' }).toBe('blocked');
+        }, { message: 'keyboard drag should persist the task status' }).toBe('in-review');
 
         // Task updates are broadcast over the real websocket and should appear
         // on the active page without reloading it.
@@ -172,7 +173,7 @@ test.describe.serial('Task views', () => {
         await websocketConnected;
         await expect(row(page, child)).toContainText('Researcher');
         await expect(row(page, child)).toContainText(names.project);
-        await expect(row(page, related)).toContainText('Done');
+        await expect(row(page, related)).toContainText('In review');
         await screenshotIfRequested(page, 'task-hierarchy');
 
         // Relations are created through the live API, so the metadata column

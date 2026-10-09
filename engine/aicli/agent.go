@@ -41,6 +41,11 @@ var ErrMaxTurns = errors.New("agent loop exceeded max turns without a final answ
 // resumes exactly where this one left off.
 var ErrPaused = errors.New("agent run paused")
 
+// ErrModelCall is returned (wrapped, with the provider's error) when a model
+// request got no answer. The session did nothing wrong; its model could not
+// be reached or refused the call.
+var ErrModelCall = errors.New("LLM call failed")
+
 // PauseRequested is polled once per turn, right after that turn's LLM
 // response has fully arrived and before any of its tool calls execute — the
 // one point in the loop where nothing is in flight and the conversation is
@@ -66,18 +71,12 @@ var mcpDispatcherTools = map[string]bool{
 }
 
 // blockingTools are allowed to run without the per-call watchdog timeout.
-// ask_human, create_subtask and ask_task_owner block
-// by design (waiting on a human reply, a durable child session, or the
-// orchestrator's answer) and can legitimately take hours. browser_use is
-// stateful: it parents a headless browser on the first call's context so the
-// browser survives for the whole run — a per-call cancel would kill it
-// between turns and lose all navigation state. Its operations carry their
-// own internal timeouts instead.
+// browser_use is stateful: it parents a headless browser on the first call's
+// context so the browser survives for the whole run — a per-call cancel would
+// kill it between turns and lose all navigation state. Its operations carry
+// their own internal timeouts instead.
 var blockingTools = map[string]bool{
-	string(ToolAskHuman):      true,
-	string(ToolCreateSubtask): true,
-	string(ToolAskTaskOwner):  true,
-	string(ToolBrowserUse):    true,
+	string(ToolBrowserUse): true,
 }
 
 // toolCallTimeout caps every non-blocking tool call so a single wedged tool
@@ -86,9 +85,9 @@ var blockingTools = map[string]bool{
 const toolCallTimeout = 10 * time.Minute
 
 const (
-	// maxTurns is the safety cap for one agent session. Delegated workflows
-	// can legitimately require many tool/LLM round trips before finish_task.
-	maxTurns = 300
+	// defaultMaxTurns is the safety cap for one agent session when the host
+	// sets no budget of its own (see Config.MaxTurns).
+	defaultMaxTurns = 300
 
 	// maxToolOutputChars caps a single tool result appended to history.
 	// Pathologically large outputs (full-file dumps, huge search results)
@@ -108,22 +107,18 @@ const (
 	freshAssistantTurns = 2
 )
 
-// Mode controls how the agent manages its conversation state.
-type Mode string
-
-const (
-	// ModeMessageHistory (default) appends every turn to the history and
-	// sends the full history to the LLM on each call.
-	ModeMessageHistory Mode = "message_history"
-
-	// ModeCompactThinking uses extended reasoning by passing a reasoning_effort
-	// parameter on every request. History management is identical to
-	// ModeMessageHistory; the difference is in how the LLM reasons internally.
-	ModeCompactThinking Mode = "compact_thinking"
-
-	// ModePlan10k is reserved for future implementation.
-	ModePlan10k Mode = "plan-10k"
-)
+// ModelCall describes one provider round trip made by the agent loop.
+type ModelCall struct {
+	// Model is the model that answered, as the provider reported it.
+	Model    string
+	Usage    Usage
+	Duration time.Duration
+	// Err is set when the call failed.
+	Err error
+	// Sequence is the log sequence of the assistant message the call
+	// produced; for a failed call, of the last message before it.
+	Sequence int64
+}
 
 // RunLogger abstracts the logging dependencies that the agent needs.
 // It is satisfied by *logging.ProxyLogger plus a few extra methods.
@@ -140,12 +135,10 @@ type RunLogger interface {
 // LLM provider.  It supports tool calling, retry (via Client.Complete), and
 // structured logging into the existing RunLog infrastructure.
 type Agent struct {
-	Client         *Client
-	Registry       *Registry
-	Mode           Mode
-	ProviderName   string
-	AgentName      string
-	ReasoningLevel string // "low", "medium", "max" → mapped to API values
+	Client       *Client
+	Registry     *Registry
+	ProviderName string
+	AgentName    string
 	// ResumeNotice is appended after a restored pending tool result and before
 	// the first post-resume LLM request. It is runtime-only metadata.
 	ResumeNotice string
@@ -160,15 +153,15 @@ type Agent struct {
 	// TerminalTools are tool names that end the run: once such a tool
 	// executes successfully, the loop returns without another LLM call.
 	TerminalTools        map[string]bool
+	maxTurns             int
 	q                    *db.Queries
 	runID                int32
 	logger               RunLogger
 	conversationSequence int64
 	beforeTurn           func(context.Context, []Message) ([]Message, error)
-	// interrupt is checked after a response that would otherwise end the run.
-	// Hosts may use it for an explicit control-plane interruption; normal
-	// session messaging is delivered through BeforeTurn and durable RunEvents.
-	interrupt func(context.Context, []Message) ([]Message, error)
+	toolsForTurn         func([]Message) []string
+	onModelCall          func(ModelCall)
+	onFinalText          func(context.Context, []Message) ([]Message, error)
 	// asyncPersistence tracks the small, non-critical bookkeeping writes that
 	// are launched while executing a tool. A canceled session joins them before
 	// it returns so an E2E database wipe (or shutdown) cannot race a late log or
@@ -178,42 +171,47 @@ type Agent struct {
 
 // Config collects all the dependencies needed to create an Agent.
 type Config struct {
-	Client       *Client
-	Registry     *Registry
-	Mode         Mode
-	ProviderName string
-	AgentName    string
-	// ReasoningLevel controls how much reasoning the LLM applies.
-	// Accepted values: "low", "medium", "max". Empty = provider default.
-	ReasoningLevel        string
+	Client                *Client
+	Registry              *Registry
+	ProviderName          string
+	AgentName             string
 	ResumeNotice          string
 	HistoryAlreadyLogged  bool
 	MCPListingCostPerTurn int
 	MCPServerListingCosts map[string]int
 	// TerminalTools lists tool names that end the run once they execute
-	// successfully (e.g. "finish_task"), skipping the final wrap-up LLM call.
-	TerminalTools               []string
+	// successfully (e.g. "finish_work"), skipping the final wrap-up LLM call.
+	TerminalTools []string
+	// MaxTurns caps the LLM round trips of one session. Zero uses the
+	// package default.
+	MaxTurns                    int
 	Queries                     *db.Queries
 	RunID                       int32
 	Logger                      RunLogger
 	InitialConversationSequence int64
-	// BeforeTurn supplies durable control messages immediately before the next
-	// provider request. It receives the complete conversation accumulated so
-	// far and never interrupts an in-flight tool or LLM call.
+	// BeforeTurn may add messages immediately before the next provider
+	// request. It receives the complete conversation accumulated so far and
+	// never interrupts an in-flight tool or LLM call.
 	BeforeTurn func(context.Context, []Message) ([]Message, error)
-	// Interrupt handles a pending host-side question after a provider response
-	// is received but before a no-tool response ends the session. Tool calls are
-	// always completed first; the next BeforeTurn handles interruptions queued
-	// while tools were running. It receives the complete current conversation
-	// so the isolated answer can use the worker's prior context.
-	Interrupt func(context.Context, []Message) ([]Message, error)
+	// ToolsForTurn may narrow the next request to the named tools, which the
+	// model is then required to call. It is how a host makes one specific
+	// call mandatory for a turn; returning nothing leaves the turn unrestricted.
+	ToolsForTurn func(history []Message) []string
+	// OnModelCall is told about every provider round trip the loop makes,
+	// successful or not, so the host can account for it.
+	OnModelCall func(ModelCall)
+	// OnFinalText is called when the model answers without calling a tool,
+	// which would otherwise end the run. The host may return messages to
+	// continue the conversation with — a reminder of what is still expected —
+	// or nothing to let the run end. It receives the whole conversation.
+	OnFinalText func(context.Context, []Message) ([]Message, error)
 }
 
 // New creates an Agent from a Config.
 func New(cfg Config) *Agent {
-	mode := cfg.Mode
-	if mode == "" {
-		mode = ModeMessageHistory
+	maxTurns := cfg.MaxTurns
+	if maxTurns <= 0 {
+		maxTurns = defaultMaxTurns
 	}
 	terminal := make(map[string]bool, len(cfg.TerminalTools))
 	for _, name := range cfg.TerminalTools {
@@ -222,21 +220,22 @@ func New(cfg Config) *Agent {
 	return &Agent{
 		Client:                cfg.Client,
 		Registry:              cfg.Registry,
-		Mode:                  mode,
 		ProviderName:          cfg.ProviderName,
 		AgentName:             cfg.AgentName,
-		ReasoningLevel:        cfg.ReasoningLevel,
 		ResumeNotice:          cfg.ResumeNotice,
 		HistoryAlreadyLogged:  cfg.HistoryAlreadyLogged,
 		MCPListingCostPerTurn: cfg.MCPListingCostPerTurn,
 		MCPServerListingCosts: cfg.MCPServerListingCosts,
 		TerminalTools:         terminal,
+		maxTurns:              maxTurns,
 		q:                     cfg.Queries,
 		runID:                 cfg.RunID,
 		logger:                cfg.Logger,
 		conversationSequence:  cfg.InitialConversationSequence,
 		beforeTurn:            cfg.BeforeTurn,
-		interrupt:             cfg.Interrupt,
+		toolsForTurn:          cfg.ToolsForTurn,
+		onModelCall:           cfg.OnModelCall,
+		onFinalText:           cfg.OnFinalText,
 	}
 }
 
@@ -253,24 +252,6 @@ func (a *Agent) logConversationMessage(message Message) {
 		return
 	}
 	a.conversationSequence = a.logger.LogConversationMessage(payload)
-}
-
-// Run executes the agent loop starting with systemPrompt and userMessage.
-// It returns the final text response from the LLM after all tool calls are
-// exhausted, or an error if the loop fails. Never pauses (see RunWithHistory).
-func (a *Agent) Run(ctx context.Context, systemPrompt, userMessage string) (string, error) {
-	return a.RunWithMessages(ctx, systemPrompt, []Message{{Role: "user", Content: userMessage}})
-}
-
-// RunWithMessages executes the agent loop with an explicit slice of initial
-// messages (after the system prompt). Use this when the initial context
-// contains multiple turns, e.g. task description + per-comment messages.
-// Runs to completion or failure — it never pauses; callers that need
-// pause/resume support (a single long-lived session that may be interrupted
-// by a graceful server restart) should call RunWithHistory directly.
-func (a *Agent) RunWithMessages(ctx context.Context, systemPrompt string, initialMessages []Message) (string, error) {
-	result, _, err := a.RunWithHistory(ctx, BuildHistory(systemPrompt, initialMessages), nil)
-	return result, err
 }
 
 // BuildHistory assembles a session's opening conversation: the system prompt
@@ -305,39 +286,17 @@ func (a *Agent) RunWithHistory(ctx context.Context, history []Message, pause Pau
 			a.asyncPersistence.Wait()
 		}
 	}()
-	switch a.Mode {
-	case ModeMessageHistory, "":
-		return a.runMessageHistory(ctx, history, "", pause)
-	case ModeCompactThinking:
-		return a.runMessageHistory(ctx, history, a.reasoningEffort(), pause)
-	default:
-		return "", history, fmt.Errorf("unsupported agent mode: %s", a.Mode)
-	}
-}
-
-// reasoningEffort maps the agent's ReasoningLevel to the OpenAI API value.
-func (a *Agent) reasoningEffort() string {
-	switch a.ReasoningLevel {
-	case "low":
-		return "low"
-	case "medium":
-		return "medium"
-	case "max":
-		return "high"
-	default:
-		return ""
-	}
+	return a.runMessageHistory(ctx, history, pause)
 }
 
 // runMessageHistory maintains a rolling conversation history and sends the
-// full history to the LLM on every turn. reasoningEffort is passed verbatim
-// as the request's reasoning_effort field when non-empty.
+// full history to the LLM on every turn.
 //
 // history may arrive "mid-turn": if it was captured by a prior pause (see
 // PauseRequested), its last message is an assistant turn whose tool calls
 // were never executed. That step is replayed first, before the main loop
 // begins, so resuming is indistinguishable from having never paused.
-func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reasoningEffort string, pause PauseRequested) (string, []Message, error) {
+func (a *Agent) runMessageHistory(ctx context.Context, history []Message, pause PauseRequested) (string, []Message, error) {
 	if !a.HistoryAlreadyLogged {
 		for _, message := range history {
 			a.logConversationMessage(message)
@@ -370,7 +329,7 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		a.ResumeNotice = ""
 	}
 
-	for turn := 0; turn < maxTurns; turn++ {
+	for turn := 0; turn < a.maxTurns; turn++ {
 		if ctx.Err() != nil {
 			return "", history, ctx.Err()
 		}
@@ -386,9 +345,14 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		}
 
 		req := ChatRequest{
-			Messages:        pruneHistory(history),
-			Tools:           a.Registry.Defs(),
-			ReasoningEffort: reasoningEffort,
+			Messages: pruneHistory(history),
+			Tools:    a.Registry.Defs(),
+		}
+		if a.toolsForTurn != nil {
+			if only := a.toolsForTurn(history); len(only) > 0 {
+				req.Tools = a.Registry.Filter(only).Defs()
+				req.ToolChoice = ToolChoiceRequired
+			}
 		}
 
 		// Log the outgoing request.
@@ -397,10 +361,15 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 			a.logger.LogRequest(a.Client.Model, a.AgentName, a.ProviderName, reqBody)
 		}
 
+		callStarted := time.Now()
 		resp, rawBody, err := a.Client.Complete(ctx, req)
 		if err != nil {
-			return "", history, fmt.Errorf("turn %d: LLM call failed: %w", turn, err)
+			if a.onModelCall != nil {
+				a.onModelCall(ModelCall{Err: err, Duration: time.Since(callStarted), Sequence: a.conversationSequence})
+			}
+			return "", history, fmt.Errorf("turn %d: %w: %w", turn, ErrModelCall, err)
 		}
+		callDuration := time.Since(callStarted)
 
 		// Log the response.
 		if a.logger != nil {
@@ -472,26 +441,27 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 		// so the next LLM call sees the full context.
 		history = append(history, assistantMsg)
 		a.logConversationMessage(assistantMsg)
+		if a.onModelCall != nil {
+			// The sequence is that of the assistant message just logged: it
+			// locates this turn in the session's log.
+			a.onModelCall(ModelCall{Model: resp.Model, Usage: resp.Usage, Duration: callDuration, Sequence: a.conversationSequence})
+		}
 
 		if len(assistantMsg.ToolCalls) == 0 {
-			// A host-side question may have arrived while this provider request
-			// was in flight. Service it before ending the run so the main loop can
-			// continue with the isolated answer in its durable history.
-			if a.interrupt != nil {
-				interruptMessages, interruptErr := a.interrupt(ctx, history)
-				if interruptErr != nil {
-					return "", history, fmt.Errorf("interrupt handling failed: %w", interruptErr)
+			if a.onFinalText != nil {
+				more, hookErr := a.onFinalText(ctx, history)
+				if hookErr != nil {
+					return "", history, fmt.Errorf("final-text hook failed: %w", hookErr)
 				}
-				if len(interruptMessages) > 0 {
-					history = append(history, interruptMessages...)
-					for _, message := range interruptMessages {
+				if len(more) > 0 {
+					history = append(history, more...)
+					for _, message := range more {
 						a.logConversationMessage(message)
 					}
 					continue
 				}
 			}
-			// No tools or pending interruptions — the assistant's text is the
-			// final answer.
+			// No tool call and nothing more expected: the text is the final answer.
 			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 
@@ -522,14 +492,14 @@ func (a *Agent) runMessageHistory(ctx context.Context, history []Message, reason
 			a.logConversationMessage(message)
 		}
 
-		// A terminal tool (e.g. finish_task) completed — the run is over.
+		// A terminal tool (e.g. finish_work) completed — the run is over.
 		// Skip the extra wrap-up LLM round; the finish summary already exists.
 		if terminalDone {
 			return strings.TrimSpace(assistantMsg.Content), history, nil
 		}
 	}
 
-	return "", history, fmt.Errorf("%w (%d turns)", ErrMaxTurns, maxTurns)
+	return "", history, fmt.Errorf("%w (%d turns)", ErrMaxTurns, a.maxTurns)
 }
 
 // executeToolCalls runs each ToolCall in the assistant message, logging each

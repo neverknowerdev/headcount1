@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/aicli"
+	"agent-orchestrator/engine/classifier"
 	"agent-orchestrator/pkg/llmdiscovery"
 	"agent-orchestrator/pkg/secrets"
 	"agent-orchestrator/pkg/utils"
@@ -93,6 +95,7 @@ func (api *API) CreateProviderFromPreset(w http.ResponseWriter, r *http.Request)
 		return
 	}
 	p.HasApiKey = p.ApiKeyEncrypted != ""
+	api.adoptClassifier(r.Context(), uid, p)
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -121,6 +124,9 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		// SystemOneModels is a pointer so a client that does not know of the
+		// second catalog leaves it as it is.
+		SystemOneModels *string `json:"system_one_models"`
 		// Enabled is a pointer so a caller that omits it (an older client, or
 		// a request that only means to touch other fields) leaves the
 		// current value untouched instead of silently disabling the provider.
@@ -138,6 +144,9 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 	provider.ProviderType = req.ProviderType
 	provider.DefaultModel = req.DefaultModel
 	provider.SupportedModels = req.SupportedModels
+	if req.SystemOneModels != nil {
+		provider.SystemOneModels = *req.SystemOneModels
+	}
 	if req.ApiKey != "" {
 		uid := api.currentUserID(r)
 		sealedKey, err := secrets.Default().EncryptForUser(uid, req.ApiKey)
@@ -156,6 +165,7 @@ func (api *API) UpdateProvider(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
+	api.adoptClassifier(r.Context(), api.currentUserID(r), updated)
 
 	api.respondJSON(w, http.StatusOK, updated)
 }
@@ -229,6 +239,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType    string `json:"provider_type"`
 		DefaultModel    string `json:"default_model"`
 		SupportedModels string `json:"supported_models"`
+		SystemOneModels string `json:"system_one_models"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid payload")
@@ -248,6 +259,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		ProviderType:    req.ProviderType,
 		DefaultModel:    req.DefaultModel,
 		SupportedModels: req.SupportedModels,
+		SystemOneModels: req.SystemOneModels,
 		Enabled:         true,
 	}
 	if err := api.db.Create(&p).Error; err != nil {
@@ -255,6 +267,7 @@ func (api *API) CreateProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	p.HasApiKey = p.ApiKeyEncrypted != ""
+	api.adoptClassifier(r.Context(), uid, p)
 	api.respondJSON(w, http.StatusCreated, p)
 }
 
@@ -311,6 +324,24 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 
 	url := strings.TrimSpace(baseUrl)
 
+	// A System One model speaks neither chat format: it is tested with a
+	// question of its own kind, at whichever provider serves it.
+	if providerType == classifier.ProviderType || strings.Contains(strings.ToLower(url), "typesafe.ai") || isSystemOneModel(req.Model) {
+		model := strings.TrimSpace(req.Model)
+		if model == "" {
+			model = classifier.DefaultModel
+		}
+		if err := llmdiscovery.CheckClassifier(r.Context(), &http.Client{Timeout: 20 * time.Second}, url, apiKey, model); err != nil {
+			api.respondJSON(w, http.StatusBadRequest, map[string]interface{}{"error": err.Error(), "log": err.Error()})
+			return
+		}
+		api.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"status": "ok", "provider_type": systemOneTestProviderType(providerType, url), "url": url,
+			"model": model, "log": "The classifier answered a test question.",
+		})
+		return
+	}
+
 	// Helper to make request
 	makeRequest := func(reqUrl string, isAnthropic bool, model string) (int, string, string, error) {
 		var payload []byte
@@ -332,6 +363,10 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		}
 
 		clientReq.Header.Set("Content-Type", "application/json")
+		// What every real call carries; a provider that insists on a session
+		// would otherwise fail the test and then work in use.
+		clientReq.Header.Set("User-Agent", aicli.UserAgent)
+		clientReq.Header.Set(aicli.SessionHeader, aicli.SessionID("connection-test/", reqUrl, "/", time.Now().UnixNano()))
 		if isAnthropic {
 			clientReq.Header.Set("x-api-key", apiKey)
 			clientReq.Header.Set("anthropic-version", "2023-06-01")
@@ -358,8 +393,13 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		var parsedErr string
 		if resp.StatusCode >= 400 {
 			lowerBodyStr := strings.ToLower(string(respBody))
-			if resp.StatusCode == 401 || resp.StatusCode == 403 {
-				parsedErr = "Invalid API Key or unauthorized access."
+			if said := providerErrorMessage(respBody); resp.StatusCode == 403 && said != "" {
+				// A refusal the provider explains is not a bad key: it may be
+				// a model the key has no access to, or a restriction on who
+				// may call it. Its own words say which.
+				parsedErr = said
+			} else if resp.StatusCode == 401 || resp.StatusCode == 403 {
+				parsedErr = invalidKeyMessage
 			} else if resp.StatusCode == 429 {
 				parsedErr = "Rate limit exceeded or insufficient quota."
 			} else if strings.Contains(lowerBodyStr, "model") && (strings.Contains(lowerBodyStr, "not found") || strings.Contains(lowerBodyStr, "does not exist") || strings.Contains(lowerBodyStr, "invalid") || strings.Contains(lowerBodyStr, "unsupported")) {
@@ -456,9 +496,12 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 		out := modelOutcome{}
 		// Endpoint-shape attempts complete in a non-deterministic order, so
 		// bucket errors by kind and pick the most meaningful one at the end
-		// (auth > rate-limit > other) rather than letting a stray 404 from the
-		// unused shape overwrite the real reason.
-		var authErr, rateErr, otherErr string
+		// (refusal > auth > rate-limit > other) rather than letting a stray 404
+		// from the unused shape overwrite the real reason. A 403 the provider
+		// explained comes first: the other shape's request carries the key
+		// where this provider does not look for it and is answered with a
+		// plain "missing key", which would hide the explanation.
+		var refusedErr, authErr, rateErr, otherErr string
 		for i := 0; i < len(openAiUrls)+len(anthropicUrls); i++ {
 			res := <-resultCh
 			out.log += res.logMsg + "\n\n"
@@ -473,6 +516,9 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 				if res.parsedErr != "" {
 					rateErr = res.parsedErr
 				}
+			case res.status == http.StatusForbidden && res.parsedErr != "" && res.parsedErr != invalidKeyMessage:
+				out.authFailed = true
+				refusedErr = res.parsedErr
 			case res.status == http.StatusUnauthorized || res.status == http.StatusForbidden:
 				out.authFailed = true
 				if res.parsedErr != "" {
@@ -485,6 +531,8 @@ func (api *API) TestProvider(w http.ResponseWriter, r *http.Request) {
 			}
 		}
 		switch {
+		case refusedErr != "":
+			out.parsedErr = refusedErr
 		case authErr != "":
 			out.parsedErr = authErr
 		case rateErr != "":

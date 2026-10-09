@@ -9,7 +9,7 @@ import * as path from 'path';
  * `<tmp>/headcount1-e2e/<id>/repo.git` so each test run gets a clean slate.
  *
  * The dummy commit is required so that `git ls-remote` and `git clone` succeed
- * when the orchestrator validates the remote and clones it.
+ * when the server validates the remote and clones it.
  */
 export function setupBareRepo(): string {
     const baseDir = path.join(os.tmpdir(), 'headcount1-e2e');

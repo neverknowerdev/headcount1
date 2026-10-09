@@ -13,11 +13,11 @@ describe('RunLogViewer request/response identities', () => {
         render(
             <RunLogViewer
                 autoScroll={false}
-                agentName="Orchestrator"
+                agentName="Coder"
                 messages={[
                     message(1, {
                         type: 'request',
-                        agent_name: 'Orchestrator',
+                        agent_name: 'Coder',
                         content: JSON.stringify({ messages: [{ role: 'user', content: 'Task context' }] }),
                     }),
                     message(2, {
@@ -34,7 +34,7 @@ describe('RunLogViewer request/response identities', () => {
         );
 
         expect(screen.getAllByText('LLM Provider')).toHaveLength(1);
-        expect(screen.getAllByText('Orchestrator')).toHaveLength(2);
+        expect(screen.getAllByText('Coder')).toHaveLength(2);
         expect(screen.queryByText('CEO Agent')).toBeNull();
         expect(screen.queryByText('AI Model')).toBeNull();
     });

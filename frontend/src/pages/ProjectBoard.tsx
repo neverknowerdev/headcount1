@@ -11,13 +11,14 @@ import { COLUMN_LABELS, DISPLAY_ORDER, type TaskColumn } from '../utils/taskColu
 import { latestExecutionAgents, type TaskExecutionRun } from '../utils/taskExecutionAgents';
 import { useWebSocket, wsUrl } from '../useWebSocket';
 import { useCoalescedCallback } from '../utils/useCoalescedCallback';
+import { PhaseChip, TaskTypeBadge } from '../components/PhaseChip';
+import { errorMessage, statusLabel } from '../lib/workflow';
 import { sortTasksByUpdated } from '../utils/taskHierarchy';
 
-const STATUSES = ['backlog', 'to-do', 'refinement', 'in-progress', 'blocked', 'depends-on-task', 'in-review', 'done'];
-const STATUS_LABELS: Record<string, string> = {
-    backlog: 'Backlog', 'to-do': 'To Do', refinement: 'Refinement', 'in-progress': 'In Progress',
-    blocked: 'Blocked', 'depends-on-task': 'Depends on Task', 'in-review': 'In Review', done: 'Done',
-};
+const STATUSES = ['backlog', 'to-do', 'in-progress', 'blocked', 'depends-on-task', 'in-review', 'done'];
+// The columns a person may drop a task into. The others say what the workflow
+// is doing with a task and only the workflow moves a task there.
+const HUMAN_STATUSES = ['backlog', 'to-do', 'in-review', 'done'];
 const DEFAULT_COLUMNS: TaskColumn[] = ['status', 'assignee', 'agent', 'project', 'relations', 'taskId', 'updated'];
 type TaskView = 'hierarchy' | 'board';
 interface Project { id: number; name: string }
@@ -98,6 +99,7 @@ export const ProjectBoard: React.FC = () => {
   const [search, setSearch] = useState('');
   const [tasks, setTasks] = useState<BoardTask[]>([]);
   const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
+  const [moveError, setMoveError] = useState('');
   const [settings, setSettings] = useState<SavedViewSettings>(() => readViewSettings(selectedCompanyId));
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [taskError, setTaskError] = useState('');
@@ -193,14 +195,23 @@ export const ProjectBoard: React.FC = () => {
     },
   });
 
+  // Moving a card asks the workflow for the move: "to do" starts or reruns the
+  // task, the others place a task that is at rest. A task that is running
+  // refuses, and the card goes back.
   const updateTaskStatus = async (id: number, status: string) => {
-    try { await axios.put(`/api/tasks/${id}`, { status }); }
-    catch (e) { console.error(e); fetchTasks(); }
+    setMoveError('');
+    try {
+      await axios.put(`/api/tasks/${id}`, { status });
+    } catch (e) {
+      console.error(e);
+      setMoveError(errorMessage(e, 'The task could not be moved.'));
+    }
+    fetchTasks();
   };
   const onDragEnd = (result: DropResult) => {
       if (!result.destination) return;
       const { source, destination, draggableId } = result;
-      if (destination.droppableId === 'depends-on-task') return;
+      if (!HUMAN_STATUSES.includes(destination.droppableId)) return;
       if (source.droppableId !== destination.droppableId) {
           setTasks(prev => prev.map(t => t.id.toString() === draggableId ? { ...t, status: destination.droppableId } : t));
           updateTaskStatus(parseInt(draggableId), destination.droppableId);
@@ -368,6 +379,13 @@ export const ProjectBoard: React.FC = () => {
         </label>
       </div>
 
+      {moveError && (
+        <div className="mb-3 flex items-center justify-between rounded border border-amber-300 bg-amber-50 px-3 py-2 text-sm text-amber-900" data-testid="board-move-error">
+          <span>{moveError}</span>
+          <button onClick={() => setMoveError('')} className="text-xs text-amber-700 hover:underline">Dismiss</button>
+        </div>
+      )}
+
       {taskError ? (
         <div role="alert" className="grid flex-1 place-items-center rounded-xl border border-rose-200 bg-white p-8 text-center">
           <div>
@@ -401,13 +419,13 @@ export const ProjectBoard: React.FC = () => {
                 <div key={status} className="flex max-h-full w-72 flex-col rounded-xl border border-slate-200 bg-white shadow-sm">
                   <div className="flex items-center justify-between border-b border-slate-100 px-3.5 py-3">
                     <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-600">
-                      {STATUS_LABELS[status] || status}
+                      {statusLabel(status)}
                     </h3>
                     <span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
                       {visibleRoots.filter(task => task.status === status).length}
                     </span>
                   </div>
-                  <Droppable droppableId={status}>
+                  <Droppable droppableId={status} isDropDisabled={!HUMAN_STATUSES.includes(status)}>
                     {(provided, snapshot) => (
                       <div
                         ref={provided.innerRef}
@@ -425,6 +443,10 @@ export const ProjectBoard: React.FC = () => {
                                 className={`cursor-grab rounded-lg border bg-white p-4 transition ${dragging.isDragging ? 'border-indigo-400 shadow-lg ring-2 ring-indigo-100' : 'border-slate-200 shadow-sm hover:border-indigo-300'}`}
                               >
                                 <p className="text-sm font-medium text-slate-800">{task.title}</p>
+                                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                                  <TaskTypeBadge type={task.task_type} />
+                                  <PhaseChip task={task} />
+                                </div>
                                 {task.relation_summary?.blocked_by?.length ? (
                                   <div
                                     className="mt-2 flex items-center gap-1 truncate text-[11px] text-amber-700"

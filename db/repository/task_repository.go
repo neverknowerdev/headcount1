@@ -26,32 +26,53 @@ func TaskGitBranch(refKey string, taskID int32) string {
 }
 
 func (q *TaskRepository) CreateTask(ctx context.Context, t Task) (Task, error) {
-	err := q.db.WithContext(ctx).Create(&t).Error
-	if err != nil {
+	return createTask(q.db.WithContext(ctx), t)
+}
+
+// createTask inserts a task and completes the fields derived from its place in
+// the tree: its root and depth, its human-readable ref key, and the branch the
+// whole tree shares. It runs on whatever handle it is given, so a workflow
+// transition can create tasks inside its own transaction.
+func createTask(db *gorm.DB, t Task) (Task, error) {
+	if t.ParentID != nil {
+		var parent Task
+		if err := db.Select("id", "root_task_id", "depth").First(&parent, *t.ParentID).Error; err == nil {
+			t.RootTaskID = parent.RootTaskID
+			if t.RootTaskID == 0 {
+				t.RootTaskID = parent.ID
+			}
+			t.Depth = parent.Depth + 1
+		}
+	}
+	if err := db.Create(&t).Error; err != nil {
 		return t, err
+	}
+	if t.RootTaskID == 0 {
+		// A root is its own root; so is a task whose parent no longer exists.
+		t.RootTaskID = t.ID
+		if err := db.Model(&Task{}).Where("id = ?", t.ID).Update("root_task_id", t.ID).Error; err != nil {
+			return t, err
+		}
 	}
 	// Assign the human-readable ref key ("DEC-50", subtasks "DEC-50-1", …).
 	if t.RefKey == "" {
-		if key, kErr := q.computeTaskRefKey(ctx, t); kErr == nil && key != "" {
+		if key, kErr := computeTaskRefKey(db, t); kErr == nil && key != "" {
 			t.RefKey = key
-			if uErr := q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", t.ID).Update("ref_key", key).Error; uErr != nil {
+			if uErr := db.Model(&Task{}).Where("id = ?", t.ID).Update("ref_key", key).Error; uErr != nil {
 				fmt.Printf("Warning: failed to store ref_key for task %d: %v\n", t.ID, uErr)
 			}
 		}
 	}
-	if err := q.EnsureTaskGitBranch(ctx, &t); err != nil {
+	if err := ensureTaskGitBranch(db, &t); err != nil {
 		return t, fmt.Errorf("assign task git branch: %w", err)
 	}
-	return t, err
+	return t, nil
 }
 
-// ensureTaskGitBranch assigns one canonical branch to a task tree. New root
-// tasks get a branch from their RefKey; subtasks inherit the root branch.
-// Existing non-empty branches are preserved for backwards compatibility.
-func (q *TaskRepository) EnsureTaskGitBranch(ctx context.Context, t *Task) error {
+func ensureTaskGitBranch(db *gorm.DB, t *Task) error {
 	root := *t
 	if t.ParentID != nil {
-		resolved, err := q.GetRootTask(ctx, t.ID)
+		resolved, err := getRootTask(db, t.ID)
 		if err != nil {
 			return err
 		}
@@ -61,14 +82,14 @@ func (q *TaskRepository) EnsureTaskGitBranch(ctx context.Context, t *Task) error
 	branch := strings.TrimSpace(root.GitHubBranch)
 	if branch == "" {
 		branch = TaskGitBranch(root.RefKey, root.ID)
-		if err := q.db.WithContext(ctx).Model(&Task{}).
+		if err := db.Model(&Task{}).
 			Where("id = ?", root.ID).Update("git_hub_branch", branch).Error; err != nil {
 			return err
 		}
 	}
 	if strings.TrimSpace(t.GitHubBranch) == "" {
 		t.GitHubBranch = branch
-		if err := q.db.WithContext(ctx).Model(&Task{}).
+		if err := db.Model(&Task{}).
 			Where("id = ?", t.ID).Update("git_hub_branch", branch).Error; err != nil {
 			return err
 		}
@@ -79,10 +100,10 @@ func (q *TaskRepository) EnsureTaskGitBranch(ctx context.Context, t *Task) error
 // computeTaskRefKey builds the task key: main tasks get
 // "<COMPANY_SHORT>-<id>"; subtasks get "<parent ref>-<sibling index>" where
 // the index is the task's 1-based position among its parent's subtasks.
-func (q *TaskRepository) computeTaskRefKey(ctx context.Context, t Task) (string, error) {
+func computeTaskRefKey(db *gorm.DB, t Task) (string, error) {
 	if t.ParentID == nil {
 		var company Company
-		if err := q.db.WithContext(ctx).First(&company, t.CompanyID).Error; err != nil {
+		if err := db.First(&company, t.CompanyID).Error; err != nil {
 			return "", err
 		}
 		short := strings.ToUpper(company.ShortName)
@@ -92,20 +113,20 @@ func (q *TaskRepository) computeTaskRefKey(ctx context.Context, t Task) (string,
 		return fmt.Sprintf("%s-%d", short, t.ID), nil
 	}
 	var parent Task
-	if err := q.db.WithContext(ctx).First(&parent, *t.ParentID).Error; err != nil {
+	if err := db.First(&parent, *t.ParentID).Error; err != nil {
 		return "", err
 	}
 	parentRef := parent.RefKey
 	if parentRef == "" {
 		var pErr error
-		if parentRef, pErr = q.computeTaskRefKey(ctx, parent); pErr != nil {
+		if parentRef, pErr = computeTaskRefKey(db, parent); pErr != nil {
 			return "", pErr
 		}
 	}
 	// Next sibling index = max index used by existing siblings + 1, so keys
 	// never collide even after siblings are deleted.
 	var siblings []Task
-	if err := q.db.WithContext(ctx).
+	if err := db.
 		Select("id", "ref_key").
 		Where("parent_id = ? AND id != ?", *t.ParentID, t.ID).
 		Find(&siblings).Error; err != nil {
@@ -125,119 +146,96 @@ func (q *TaskRepository) computeTaskRefKey(ctx context.Context, t Task) (string,
 	return fmt.Sprintf("%s-%d", parentRef, maxIdx+1), nil
 }
 
-func (q *TaskRepository) UpdateTask(ctx context.Context, t Task) (Task, error) {
-	var previous Task
-	if err := q.db.WithContext(ctx).Select("id", "status", "done_at").First(&previous, t.ID).Error; err == nil {
-		if t.Status == TaskStatusDone {
-			if t.DoneAt == nil {
-				if previous.Status != TaskStatusDone || previous.DoneAt == nil {
-					now := time.Now()
-					t.DoneAt = &now
-				} else {
-					t.DoneAt = previous.DoneAt
+// UpdateTaskFields writes only the named columns of a task and returns the
+// reloaded row. Callers that hold a copy of the task loaded earlier (an HTTP
+// handler, a lifecycle hook) must use this rather than saving that copy: a
+// full-row save would write back every column as it was when the copy was
+// read, silently undoing whatever the engine changed in between. done_at
+// follows a status change exactly as SetTaskStatusIf does.
+func (q *TaskRepository) UpdateTaskFields(ctx context.Context, taskID int32, fields map[string]interface{}) (Task, error) {
+	if len(fields) > 0 {
+		err := q.db.WithContext(ctx).Transaction(func(tx *gorm.DB) error {
+			updates := make(map[string]interface{}, len(fields)+1)
+			for column, value := range fields {
+				updates[column] = value
+			}
+			if status, ok := fields["status"].(string); ok {
+				var previous Task
+				if err := tx.Select("id", "status", "done_at").First(&previous, taskID).Error; err != nil {
+					return err
+				}
+				switch {
+				case status != TaskStatusDone:
+					updates["done_at"] = nil
+				case previous.Status != TaskStatusDone || previous.DoneAt == nil:
+					updates["done_at"] = time.Now()
 				}
 			}
-		} else {
-			t.DoneAt = nil
+			if err := tx.Model(&Task{}).Where("id = ?", taskID).Updates(updates).Error; err != nil {
+				return err
+			}
+			if _, reparented := fields["parent_id"]; reparented {
+				return recomputeTaskTree(tx, taskID)
+			}
+			return nil
+		})
+		if err != nil {
+			return Task{}, err
 		}
 	}
-	err := q.db.WithContext(ctx).Save(&t).Error
-	return t, err
+	return q.GetTask(ctx, taskID)
 }
 
-// SetTaskStatusIf changes only the task status when it still has the expected
-// value. Lifecycle signals such as a human reply must not Save a stale full
-// task row: that could overwrite an archive flag or another concurrent edit.
-func (q *TaskRepository) SetTaskStatusIf(ctx context.Context, taskID int32, from, to string) (bool, error) {
-	updates := map[string]interface{}{"status": to}
-	if to == TaskStatusDone && from != TaskStatusDone {
-		updates["done_at"] = time.Now()
-	} else if to != TaskStatusDone {
-		updates["done_at"] = nil
+// recomputeTaskTree restores root_task_id and depth across the company of the
+// given task after it moved to another parent: the task and everything below
+// it now sit in a different tree. Re-parenting is a rare manual edit, so the
+// whole company is recomputed rather than tracking the affected subtree.
+func recomputeTaskTree(db *gorm.DB, taskID int32) error {
+	var task Task
+	if err := db.Select("id", "company_id").First(&task, taskID).Error; err != nil {
+		return err
 	}
-	result := q.db.WithContext(ctx).Model(&Task{}).
-		Where("id = ? AND status = ?", taskID, from).
-		Updates(updates)
-	return result.RowsAffected == 1, result.Error
+	return db.Exec(`WITH RECURSIVE tree(id, root_id, depth) AS (
+  SELECT id, id, 0 FROM tasks WHERE parent_id IS NULL AND company_id = ?
+  UNION ALL
+  SELECT child.id, tree.root_id, tree.depth + 1 FROM tasks AS child JOIN tree ON child.parent_id = tree.id
+)
+UPDATE tasks SET
+  root_task_id = COALESCE((SELECT root_id FROM tree WHERE tree.id = tasks.id), tasks.id),
+  depth = COALESCE((SELECT depth FROM tree WHERE tree.id = tasks.id), 0)
+WHERE company_id = ?`, task.CompanyID, task.CompanyID).Error
 }
 
 func (q *TaskRepository) GetTask(ctx context.Context, id int32) (Task, error) {
+	return getTask(q.db.WithContext(ctx), id)
+}
+
+func getTask(db *gorm.DB, id int32) (Task, error) {
 	var t Task
-	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
+	err := db.Preload("Company").Preload("Project").Preload("Sprint").First(&t, id).Error
 	return t, err
-}
-
-func (q *TaskRepository) GetTaskByRefKey(ctx context.Context, refKey string) (Task, error) {
-	var t Task
-	err := q.db.WithContext(ctx).Preload("Company").Preload("Project").Preload("Sprint").Where("ref_key = ?", refKey).First(&t).Error
-	return t, err
-}
-
-func (q *TaskRepository) DeleteTask(ctx context.Context, id int32) error {
-	return q.db.WithContext(ctx).Delete(&Task{}, id).Error
-}
-
-func (q *TaskRepository) LockTaskRun(ctx context.Context, taskID int32, runID int32) error {
-	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND run_id IS NULL", taskID).Update("run_id", runID).Error
-}
-
-// ClaimTaskRun atomically claims an unowned task for a newly-created run.
-// The boolean is false when another caller won the race.
-func (q *TaskRepository) ClaimTaskRun(ctx context.Context, taskID int32, runID int32) (bool, error) {
-	result := q.db.WithContext(ctx).Model(&Task{}).Where("id = ? AND run_id IS NULL", taskID).Update("run_id", runID)
-	return result.RowsAffected == 1, result.Error
-}
-
-func (q *TaskRepository) UnlockTaskRun(ctx context.Context, taskID int32) error {
-	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).Update("run_id", nil).Error
-}
-
-// SetTaskOrchestratorRun records the current task-level orchestrator root.
-// Historical orchestrator runs remain in the runs table; this pointer is the
-// durable owner of the task's active monitoring session.
-func (q *TaskRepository) SetTaskOrchestratorRun(ctx context.Context, taskID, runID int32) error {
-	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).Update("orchestrator_run_id", runID).Error
 }
 
 // GetRootTask walks the parent chain from taskID and returns the top-most
 // ancestor (the task itself when it has no parent). Bounded to 20 hops to
 // guard against cycles.
 func (q *TaskRepository) GetRootTask(ctx context.Context, taskID int32) (Task, error) {
-	task, err := q.GetTask(ctx, taskID)
+	return getRootTask(q.db.WithContext(ctx), taskID)
+}
+
+func getRootTask(db *gorm.DB, taskID int32) (Task, error) {
+	task, err := getTask(db, taskID)
 	if err != nil {
 		return Task{}, err
 	}
 	for hops := 0; task.ParentID != nil && hops < 20; hops++ {
-		parent, err := q.GetTask(ctx, *task.ParentID)
+		parent, err := getTask(db, *task.ParentID)
 		if err != nil {
 			return task, nil // parent missing — treat current as root
 		}
 		task = parent
 	}
 	return task, nil
-}
-
-// UpdateTaskRefinedDescription stores the agent-produced refinement without
-// touching the user's original description.
-func (q *TaskRepository) UpdateTaskRefinedDescription(ctx context.Context, taskID int32, refined string) error {
-	return q.db.WithContext(ctx).Model(&Task{}).Where("id = ?", taskID).
-		Update("refined_description", refined).Error
-}
-
-func (q *TaskRepository) ListSubtasksByParent(ctx context.Context, parentID int32) ([]Task, error) {
-	var tasks []Task
-	err := q.db.WithContext(ctx).Preload("Agent").Where("parent_id = ?", parentID).
-		Order("created_at ASC").Find(&tasks).Error
-	return tasks, err
-}
-
-func (q *TaskRepository) CountRunningSubtasks(ctx context.Context, parentID int32) (int64, error) {
-	var count int64
-	err := q.db.WithContext(ctx).Model(&Task{}).
-		Joins("JOIN runs ON runs.id = tasks.run_id").
-		Where("tasks.parent_id = ? AND runs.status = ?", parentID, "running").
-		Count(&count).Error
-	return count, err
 }
 
 func (q *TaskRepository) ListAllTasks(ctx context.Context) ([]Task, error) {

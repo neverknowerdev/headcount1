@@ -11,9 +11,8 @@ export interface HubEvent {
  * Wait for a task to reach a given status by polling the REST API.
  * Falls back to this if WebSocket events are flaky or unavailable.
  *
- * On timeout, also fetches the latest run log for the task's company and
- * includes it in the thrown error so test failures show what the engine
- * actually did (or didn't do).
+ * On timeout, the task's workflow journal is included in the thrown error so
+ * test failures show what the engine actually did (or didn't do).
  */
 export async function waitForTaskStatus(
     request: APIRequestContext,
@@ -32,7 +31,7 @@ export async function waitForTaskStatus(
                 const task = await res.json();
                 last = task;
                 if (task.status === status) return;
-                if (['failed', 'canceled', 'stale', 'recoverable_failed'].includes(task.status) && task.status !== status) {
+                if (['failed', 'canceled'].includes(task.status) && task.status !== status) {
                     throw new Error(`task entered terminal status "${task.status}" before expected "${status}"`);
                 }
             }
@@ -47,47 +46,17 @@ export async function waitForTaskStatus(
         await sleep(250);
     }
 
+    // What the workflow did with the task says more than any run log.
     let runLogHint = '';
     try {
-        const companyId = last?.company_id ?? last?.CompanyID;
-        if (companyId != null) {
-            const runsRes = await request.get(`/api/runs?company_id=${companyId}`, { timeout: 3_000 });
-            if (runsRes.ok()) {
-                const runs = await runsRes.json();
-                const mine = (runs as any[])
-                    .filter((r) => r.task_id === taskId || r.TaskID === taskId)
-                    .sort((a, b) => {
-                        const ta = new Date(a.started_at || a.StartedAt || 0).getTime();
-                        const tb = new Date(b.started_at || b.StartedAt || 0).getTime();
-                        return tb - ta;
-                    });
-                if (mine.length > 0) {
-                    const latest = mine[0];
-                    // The list endpoint omits log_content/log_entries (they're
-                    // full transcripts, only fetched lazily by the Run Log
-                    // Details page) — re-fetch the single run for diagnostics.
-                    let full: any = latest;
-                    try {
-                        const runRes = await request.get(`/api/runs/${latest.id}`, { timeout: 3_000 });
-                        if (runRes.ok()) full = await runRes.json();
-                    } catch { /* fall back to list data below */ }
-                    const log = full.log_content || full.LogContent || '';
-                    const status = full.status || full.Status || '';
-                    const sess = full.session_id || full.SessionID || '';
-                    runLogHint =
-                        `\nLatest run for task ${taskId}: status="${status}" session="${sess}"\n` +
-                        `Run log (last 2000 chars):\n${log.slice(-2000)}`;
-                } else {
-                    runLogHint = `\nNo runs found for task ${taskId}. runs endpoint returned ${runs.length} total runs; first run keys: ${runs.length > 0 ? Object.keys(runs[0]).join(',') : '(empty)'}`;
-                }
-            } else {
-                runLogHint = `\nRuns endpoint returned status ${runsRes.status()}`;
-            }
-        } else {
-            runLogHint = `\nNo company_id on task; cannot fetch runs.`;
+        const stepsRes = await request.get(`/api/tasks/${taskId}/steps`, { timeout: 3_000 });
+        if (stepsRes.ok()) {
+            const steps = (await stepsRes.json()) as any[];
+            runLogHint = `\nphase="${last?.phase}" waiting_on="${last?.waiting_on}" detail="${last?.wait_detail}"\nJournal:\n` +
+                steps.map((step) => `  ${step.kind} ${step.phase} ${step.tool_name} ${step.result || step.error}`.trimEnd()).join('\n');
         }
     } catch (e) {
-        runLogHint = `\nFailed to fetch runs: ${(e as Error).message}`;
+        runLogHint = `\nFailed to fetch the task journal: ${(e as Error).message}`;
     }
 
     throw new Error(

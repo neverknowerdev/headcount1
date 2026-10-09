@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/pkg/logging"
 	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
@@ -31,8 +33,6 @@ import (
 var internalGatewayHeaders = map[string]bool{
 	strings.ToLower(runtokens.TokenHeader): true, // X-Gateway-Token
 	"x-run-id":                             true,
-	strings.ToLower(proxyLogModeHeader):    true, // X-Proxy-Log-Mode
-	"x-provider-id":                        true,
 }
 
 // Rate-limit cooldowns double per consecutive rate limit, capped so a model
@@ -205,12 +205,6 @@ func (g *LLMGateway) recordStat(stat db.ModelRequestStat) {
 	}()
 }
 
-// proxyLogModeHeader selects how much run logging the group router does when
-// an X-Run-ID is present. The native engine sets "switches-only" because its
-// agent loop already logs requests/responses and token stats itself; the
-// router then only contributes model_switch and exhaustion entries.
-const proxyLogModeHeader = "X-Proxy-Log-Mode"
-
 // sendProviderRequest builds and sends a request to a provider endpoint
 // (e.g. "/chat/completions" or "/models"), forwarding the incoming request's
 // headers (except the ones in skipHeaders, matched case-insensitively) and
@@ -242,7 +236,7 @@ func sendProviderRequest(ctx context.Context, method string, provider db.LLMProv
 	// provider key — surface that clearly instead of sending an empty Bearer
 	// and getting an opaque upstream 401.
 	if provider.UserID != nil && !secrets.IsUnlocked(*provider.UserID) {
-		return nil, fmt.Errorf("vault locked: this provider's owner is logged out — re-authenticate to run")
+		return nil, fmt.Errorf("vault locked: this provider's owner is logged out — re-authenticate to run: %w", secrets.ErrLocked)
 	}
 	apiKey, err := secrets.Default().Decrypt(provider.ApiKeyEncrypted)
 	if err != nil {
@@ -264,11 +258,42 @@ func (g *LLMGateway) proxyChatCompletionsForGroup(w http.ResponseWriter, r *http
 		http.Error(w, "Model group not found", http.StatusNotFound)
 		return
 	}
-	g.serveGroupChatCompletions(w, r, group)
+	g.serveGroup(w, r, group, models.ModelKindLLM)
 }
 
-func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Request, group db.ModelGroup) {
-	group.Members = db.ExpandModelGroupMembers(group.Members)
+// proxySystemOneForGroup is the same entrypoint for a group of System One
+// models: the request is TypeSafe's systemone call, and the group routes it
+// between its members exactly as a group of language models routes a chat
+// completion, with the same ordering, failover, cooldowns and statistics.
+func (g *LLMGateway) proxySystemOneForGroup(w http.ResponseWriter, r *http.Request) {
+	groupKey := chi.URLParam(r, "group_key")
+	group, err := g.q.GetModelGroupByKey(r.Context(), groupKey)
+	if err != nil || !g.mayUseGroup(r, group) {
+		http.Error(w, "Model group not found", http.StatusNotFound)
+		return
+	}
+	g.serveGroup(w, r, group, models.ModelKindSystemOne)
+}
+
+// groupEndpoints is the provider endpoint each kind of model is called at.
+var groupEndpoints = map[string]string{
+	models.ModelKindLLM:       "/chat/completions",
+	models.ModelKindSystemOne: "/systemone",
+}
+
+func (g *LLMGateway) serveGroup(w http.ResponseWriter, r *http.Request, group db.ModelGroup, kind string) {
+	if groupKind(group) != kind {
+		// A language model cannot answer a systemone call, nor a classifier
+		// a chat completion: sending either would only fail upstream.
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]interface{}{"error": map[string]interface{}{
+			"message": fmt.Sprintf("model group %q holds %s models and cannot serve this endpoint", group.Name, kindName(groupKind(group))),
+			"type":    "model_group_kind_mismatch",
+		}})
+		return
+	}
+	group.Members = db.ExpandModelGroupMembers(group)
 	if len(group.Members) == 0 {
 		http.Error(w, "Model group has no members", http.StatusBadGateway)
 		return
@@ -303,24 +328,21 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		return
 	}
 
+	// A request made for an executor session carries its run: the session
+	// logs its own requests and responses and accounts for its own tokens, so
+	// the router only adds what the session cannot see, the model switches.
 	runID := parseRunID(r)
-	switchesOnly := r.Header.Get(proxyLogModeHeader) == "switches-only"
-	var proxyLogger *logging.ProxyLogger
-	if !switchesOnly {
-		proxyLogger = g.loggerForRun(r.Context(), runID, reqPayload.Model, group.Name, group.Name, bodyBytes, reqPayload.Messages)
-		if proxyLogger != nil {
-			defer proxyLogger.Close()
-		}
-	}
 
 	candidates := g.orderCandidates(group.Members, time.Now())
 	var lastErrMsg string
 	var lastStatus int
+	// lockedCandidates counts members that could not even be attempted because
+	// their owner's vault is locked — a condition retrying cannot fix.
+	lockedCandidates := 0
 	skipHeaders := map[string]bool{
-		"authorization":                     true,
-		"x-run-id":                          true,
-		"content-length":                    true,
-		strings.ToLower(proxyLogModeHeader): true,
+		"authorization":  true,
+		"x-run-id":       true,
+		"content-length": true,
 	}
 
 	for i, member := range candidates {
@@ -334,10 +356,8 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 			msg := fmt.Sprintf("Switching model: %s @ %s failed (%s), trying %s @ %s",
 				prev.Model, prev.Provider.Name, reason, member.Model, provider.Name)
 			log.Printf("[model-group %s] %s", group.Slug, msg)
-			if proxyLogger != nil {
-				proxyLogger.LogModelSwitch(prev.Provider.Name, prev.Model, provider.Name, member.Model, reason)
-			} else if runID > 0 {
-				g.logRunEvent(runID, "model_switch",
+			if runID > 0 {
+				g.logRunEntry(runID, "model_switch",
 					fmt.Sprintf("Model switch: %s @ %s → %s @ %s (%s)", prev.Model, prev.Provider.Name, member.Model, provider.Name, reason),
 					map[string]interface{}{
 						"from_provider": prev.Provider.Name,
@@ -350,10 +370,13 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		}
 
 		start := time.Now()
-		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, "/chat/completions", attemptBody, r.Header, skipHeaders)
+		resp, err := sendProviderRequest(r.Context(), http.MethodPost, provider, groupEndpoints[kind], attemptBody, r.Header, skipHeaders)
 		if err != nil {
 			lastErrMsg = err.Error()
 			lastStatus = http.StatusBadGateway
+			if errors.Is(err, secrets.ErrLocked) {
+				lockedCandidates++
+			}
 			g.noteFailure(group.ID, member, 0, time.Since(start), err.Error())
 			continue
 		}
@@ -385,14 +408,17 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 				continue
 			}
 
-			usage, reasoning := parseNonStreamUsage(respBody)
-			g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration, usage.PromptTokens, usage.CompletionTokens, "")
-			if !switchesOnly {
-				g.finishRunAccounting(r.Context(), runID, member, usage)
+			var payload struct {
+				Usage struct {
+					tokenUsage
+					// A systemone response counts its tokens under these names.
+					InputTokens  int `json:"input_tokens"`
+					OutputTokens int `json:"output_tokens"`
+				} `json:"usage"`
 			}
-			if proxyLogger != nil {
-				proxyLogger.LogResponse(member.Model, provider.Name, resp.StatusCode, respBody, reasoning, usage)
-			}
+			json.Unmarshal(respBody, &payload)
+			g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration,
+				payload.Usage.PromptTokens+payload.Usage.InputTokens, payload.Usage.CompletionTokens+payload.Usage.OutputTokens, "")
 
 			copyResponseHeaders(w, resp.Header)
 			w.WriteHeader(resp.StatusCode)
@@ -411,8 +437,7 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 		copyResponseHeaders(w, resp.Header)
 		w.WriteHeader(resp.StatusCode)
 
-		fullContent, fullReasoning, lastUsage, collectedToolCalls, rawBody, streamErr := proxySSEStream(
-			w, flusher, resp.Body, proxyLogger, member.Model, "model-group:"+group.Slug, provider.Name)
+		usage, streamErr := proxySSEStream(w, flusher, resp.Body)
 		resp.Body.Close()
 		duration := time.Since(start)
 
@@ -422,38 +447,54 @@ func (g *LLMGateway) serveGroupChatCompletions(w http.ResponseWriter, r *http.Re
 			return
 		}
 
-		var usage normalizedUsage
-		if lastUsage != nil {
-			usage = *lastUsage
-		}
 		g.recordOutcome(group.ID, member, outcomeSuccess, resp.StatusCode, duration, usage.PromptTokens, usage.CompletionTokens, "")
-		if !switchesOnly {
-			g.finishRunAccounting(r.Context(), runID, member, usage)
-		}
-		if proxyLogger != nil {
-			proxyLogger.LogStreamResponse(member.Model, provider.Name, fullContent, fullReasoning, collectedToolCalls, rawBody, usage)
-		}
 		return
 	}
 
 	msg := fmt.Sprintf("All %d models in group %q failed; last error: %s", len(candidates), group.Name, lastErrMsg)
-	if proxyLogger != nil {
-		proxyLogger.LogErrorMsg(msg)
-	} else if switchesOnly && runID > 0 {
-		g.logRunEvent(runID, "error", msg, nil)
+	if runID > 0 {
+		g.logRunEntry(runID, "error", msg, nil)
 	}
 	if lastStatus == 0 {
 		lastStatus = http.StatusBadGateway
+	}
+	errType := "model_group_exhausted"
+	if len(candidates) > 0 && lockedCandidates == len(candidates) {
+		// Nothing was wrong with any model: every key is sealed. Say so in a
+		// form the caller can act on (wait for an unlock) instead of a generic
+		// upstream failure it would retry or count against the task.
+		lastStatus = http.StatusLocked
+		errType = VaultLockedErrorType
 	}
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(lastStatus)
 	json.NewEncoder(w).Encode(map[string]interface{}{
 		"error": map[string]interface{}{
 			"message": msg,
-			"type":    "model_group_exhausted",
+			"type":    errType,
 		},
 	})
 }
+
+// groupKind is the kind of models a group holds; a group stored before kinds
+// existed holds language models.
+func groupKind(group db.ModelGroup) string {
+	if models.IsModelKind(group.Kind) {
+		return group.Kind
+	}
+	return models.ModelKindLLM
+}
+
+func kindName(kind string) string {
+	if kind == models.ModelKindSystemOne {
+		return "System One"
+	}
+	return "language"
+}
+
+// VaultLockedErrorType is the error type the group route returns, with HTTP
+// 423, when every candidate failed because its owner's vault is locked.
+const VaultLockedErrorType = "vault_locked"
 
 // handleAttemptError classifies a >=400 response and updates health/stats.
 func (g *LLMGateway) handleAttemptError(groupID int32, member db.ModelGroupMember, status int, duration time.Duration, body []byte, lastErrMsg *string) {
@@ -517,42 +558,6 @@ func (g *LLMGateway) recordOutcome(groupID int32, member db.ModelGroupMember, re
 	g.recordStat(stat)
 }
 
-// finishRunAccounting rolls token usage into the run aggregates when the
-// request carried an X-Run-ID.
-func (g *LLMGateway) finishRunAccounting(ctx context.Context, runID int, member db.ModelGroupMember, usage normalizedUsage) {
-	if runID <= 0 {
-		return
-	}
-	g.q.AddRunTokenStats(ctx, int32(runID), db.RunTokenStats{
-		PromptTokens:     usage.PromptTokens,
-		CompletionTokens: usage.CompletionTokens,
-		ReasoningTokens:  usage.ReasoningTokens,
-		ToolInputTokens:  usage.ToolInputTokens,
-		CachedTokens:     usage.CachedTokens,
-	})
-	if run, _, err := g.q.GetRunWithTask(ctx, int32(runID)); err == nil && run.Task.AgentID != nil {
-		g.q.CreateProxyRequestLog(ctx, db.ProxyRequestLog{
-			AgentID:          *run.Task.AgentID,
-			ProviderID:       member.ProviderID,
-			Model:            member.Model,
-			PromptTokens:     usage.PromptTokens,
-			CompletionTokens: usage.CompletionTokens,
-			TotalTokens:      usage.TotalTokens,
-		})
-	}
-}
-
-// companyScopedHub adapts the gateway hub to the plain BroadcastEvent
-// interface the proxy logger expects, pinning delivery to one company.
-type companyScopedHub struct {
-	hub       GatewayHub
-	companyID int32
-}
-
-func (h companyScopedHub) BroadcastEvent(eventType string, payload interface{}) {
-	h.hub.BroadcastEventForCompany(h.companyID, eventType, payload)
-}
-
 // companyForRun resolves (and caches) the company a run belongs to, for
 // tenant-scoped run_log events. Returns -1 (matches no client) when the run
 // can't be resolved — fail closed rather than leak across tenants.
@@ -568,44 +573,11 @@ func (g *LLMGateway) companyForRun(runID int32) int32 {
 	return task.CompanyID
 }
 
-// loggerForRun builds a ProxyLogger when an X-Run-ID header is present,
-// mirroring the behavior of the other proxy entrypoints.
-func (g *LLMGateway) loggerForRun(ctx context.Context, runID int, model, sourceName, providerName string, bodyBytes []byte, messages []map[string]interface{}) *logging.ProxyLogger {
-	if runID <= 0 {
-		return nil
-	}
-	run, _, err := g.q.GetRunWithTask(ctx, int32(runID))
-	if err != nil || run.Task.Company.ID == 0 {
-		return nil
-	}
-	var scopedHub interface{ BroadcastEvent(string, interface{}) }
-	if g.hub != nil {
-		scopedHub = companyScopedHub{hub: g.hub, companyID: run.Task.CompanyID}
-	}
-	proxyLogger, loggerErr := logging.NewProxyLoggerWithHub(
-		g.basePath,
-		run.Task.Company.ShortName,
-		run.TaskID,
-		run.ID,
-		scopedHub,
-		g.q,
-	)
-	if loggerErr != nil {
-		log.Printf("Warning: failed to create proxy logger: %v", loggerErr)
-		return nil
-	}
-	proxyLogger.LogRequest(model, sourceName, providerName, bodyBytes)
-	g.q.UpdateRunLogFilePath(ctx, int32(runID), proxyLogger.FilePath())
-	proxyLogger.LogToolResultsFromRequest(model, providerName, messages)
-	return proxyLogger
-}
-
-// logRunEvent records a routing event for a run and broadcasts it over the
-// WebSocket hub. Used in switches-only log mode, where no ProxyLogger (and
-// thus no log file) is created — the engine's session logger owns the file;
-// the router only contributes routing events, which are short enough that
-// the metadata row's preview carries the whole content.
-func (g *LLMGateway) logRunEvent(runID int, entryType, content string, extra map[string]interface{}) {
+// logRunEntry adds a routing entry to a run's log and broadcasts it over the
+// WebSocket hub. The session's own logger owns its log file; the router only
+// contributes routing events, which are short enough that the metadata row's
+// preview carries the whole content.
+func (g *LLMGateway) logRunEntry(runID int, entryType, content string, extra map[string]interface{}) {
 	entry := map[string]interface{}{
 		"type":    entryType,
 		"content": content,
@@ -659,48 +631,6 @@ func truncateMsg(s string, n int) string {
 	return s[:n] + "…"
 }
 
-// parseNonStreamUsage extracts normalized token usage and reasoning text
-// from a buffered (non-streaming) chat-completions response body.
-func parseNonStreamUsage(respBody []byte) (normalizedUsage, string) {
-	var resPayload struct {
-		Choices []struct {
-			Message struct {
-				ReasoningContent string `json:"reasoning_content"`
-				Reasoning        string `json:"reasoning"`
-			} `json:"message"`
-		} `json:"choices"`
-		Usage struct {
-			PromptTokens        int `json:"prompt_tokens"`
-			CompletionTokens    int `json:"completion_tokens"`
-			TotalTokens         int `json:"total_tokens"`
-			PromptTokensDetails struct {
-				CachedTokens int `json:"cached_tokens"`
-			} `json:"prompt_tokens_details"`
-			CompletionTokensDetails struct {
-				ReasoningTokens int `json:"reasoning_tokens"`
-			} `json:"completion_tokens_details"`
-		} `json:"usage"`
-	}
-	json.Unmarshal(respBody, &resPayload)
-
-	var reasoning string
-	for _, c := range resPayload.Choices {
-		if c.Message.ReasoningContent != "" {
-			reasoning += c.Message.ReasoningContent
-		} else if c.Message.Reasoning != "" {
-			reasoning += c.Message.Reasoning
-		}
-	}
-	usage := normalizedUsage{
-		PromptTokens:     resPayload.Usage.PromptTokens,
-		CompletionTokens: resPayload.Usage.CompletionTokens,
-		TotalTokens:      resPayload.Usage.TotalTokens,
-		CachedTokens:     resPayload.Usage.PromptTokensDetails.CachedTokens,
-	}
-	usage.ReasoningTokens = resolveReasoningTokens(resPayload.Usage.CompletionTokensDetails.ReasoningTokens, reasoning)
-	return usage, reasoning
-}
-
 // getModelsForGroup answers /v1/models for a group endpoint. The group's
 // slug is listed as a routable pseudo-model (any requested model is
 // overridden by the router anyway), followed by the concrete members.
@@ -715,7 +645,7 @@ func (g *LLMGateway) getModelsForGroup(w http.ResponseWriter, r *http.Request) {
 }
 
 func (g *LLMGateway) serveGroupModels(w http.ResponseWriter, group db.ModelGroup) {
-	group.Members = db.ExpandModelGroupMembers(group.Members)
+	group.Members = db.ExpandModelGroupMembers(group)
 	type modelEntry struct {
 		ID      string `json:"id"`
 		Object  string `json:"object"`

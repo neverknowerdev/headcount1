@@ -1,19 +1,27 @@
 package endpoints
 
 import (
+	"archive/zip"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
+	"agent-orchestrator/engine"
 	"agent-orchestrator/pkg/filesystem"
 	"agent-orchestrator/pkg/git"
 	"agent-orchestrator/pkg/githubapp"
+
+	"github.com/go-chi/chi/v5"
 )
 
 func (api *API) ListTasks(w http.ResponseWriter, r *http.Request) {
@@ -126,9 +134,20 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Priority      string  `json:"priority"`
 		GitBaseBranch string  `json:"git_base_branch"`
 		DueDate       *string `json:"due_date"`
+		TaskType      string  `json:"task_type"`
+		ProviderID    *int32  `json:"provider_id"`
+		ModelGroupID  *int32  `json:"model_group_id"`
+		Model         string  `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
+		return
+	}
+	if req.TaskType == "" {
+		req.TaskType = db.TaskTypeGeneral
+	}
+	if !isTaskType(req.TaskType) {
+		api.respondError(w, http.StatusBadRequest, "task_type must be research, coding, review or general")
 		return
 	}
 	var dueDate *time.Time
@@ -164,7 +183,14 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusNotFound, "a referenced project, agent, sprint, or parent task was not found")
 		return
 	}
+	model, err := api.taskModel(r, req.ProviderID, req.ModelGroupID, req.Model)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "provider or model group not found")
+		return
+	}
 
+	// A task a person creates is driven by a smart model through the workflow
+	// of its type; the workflow creates the direct tasks that do the work.
 	p := db.Task{
 		CompanyID:     req.CompanyID,
 		ProjectID:     req.ProjectID,
@@ -177,6 +203,11 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 		Priority:      priority,
 		GitBaseBranch: gitBaseBranch,
 		DueDate:       dueDate,
+		TaskType:      req.TaskType,
+		Mode:          db.TaskModeManaged,
+		ProviderID:    model.providerID,
+		ModelGroupID:  model.modelGroupID,
+		Model:         model.model,
 	}
 
 	task, err := api.q.CreateTask(r.Context(), p)
@@ -204,14 +235,61 @@ func (api *API) CreateTask(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusCreated, task)
 }
 
-func isTaskStatus(status string) bool {
-	switch status {
-	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInProgress,
-		db.TaskStatusBlocked, db.TaskStatusInReview, db.TaskStatusDone, db.TaskStatusRefinement:
+func isTaskType(taskType string) bool {
+	switch taskType {
+	case db.TaskTypeResearch, db.TaskTypeCoding, db.TaskTypeReview, db.TaskTypeGeneral:
 		return true
-	default:
-		return false
 	}
+	return false
+}
+
+// isHumanTaskStatus reports whether a person may put a task in a status.
+// Every other status says what the workflow is doing and is its to set.
+func isHumanTaskStatus(status string) bool {
+	switch status {
+	case db.TaskStatusBacklog, db.TaskStatusTodo, db.TaskStatusInReview, db.TaskStatusDone:
+		return true
+	}
+	return false
+}
+
+// isTaskRunning reports whether the workflow is working on a task or about to.
+func isTaskRunning(status string) bool {
+	switch status {
+	case db.TaskStatusTodo, db.TaskStatusDependsOnTask, db.TaskStatusInProgress:
+		return true
+	}
+	return false
+}
+
+// taskModelOverride is a task's own model: a provider with a model, a model
+// group, or nothing, which means the default of its tier.
+type taskModelOverride struct {
+	providerID   *int32
+	modelGroupID *int32
+	model        string
+}
+
+// taskModel validates a requested model override. A model group takes
+// precedence over a provider; a provider without a model is no override.
+func (api *API) taskModel(r *http.Request, providerID, modelGroupID *int32, model string) (taskModelOverride, error) {
+	if err := api.authorizeModelBinding(r, providerID, modelGroupID); err != nil {
+		return taskModelOverride{}, err
+	}
+	if providerID != nil || modelGroupID != nil {
+		// A System One model answers typed questions; it cannot run a task.
+		if kind, err := api.modelChoiceKind(r.Context(), providerID, modelGroupID, model); err != nil || kind != models.ModelKindLLM {
+			return taskModelOverride{}, errNotOwned
+		}
+	}
+	model = strings.TrimSpace(model)
+	switch {
+	case modelGroupID != nil:
+		return taskModelOverride{modelGroupID: modelGroupID}, nil
+	case providerID != nil && model != "":
+		return taskModelOverride{providerID: providerID, model: model}, nil
+	}
+	return taskModelOverride{}, nil
 }
 
 func (api *API) GetTask(w http.ResponseWriter, r *http.Request) {
@@ -253,6 +331,10 @@ func (api *API) reconcileDependents(ctx context.Context, prerequisiteTaskID int3
 	}
 }
 
+// UpdateTask edits a task. Its status is the workflow's while it runs, so a
+// person can only do three things with it: queue the task (to-do), which also
+// sends a finished or parked task back to work; stop it (see StopTask); and
+// place a task that is at rest in the backlog, in review, or done.
 func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		ProjectID     *int32  `json:"project_id"`
@@ -266,21 +348,31 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		DueDate       *string `json:"due_date"`
 		Status        string  `json:"status"`
 		IsArchived    *bool   `json:"is_archived"`
+		TaskType      string  `json:"task_type"`
+		// The three model fields are replaced together when any is present;
+		// sending an empty model alone clears the override.
+		ProviderID   *int32  `json:"provider_id"`
+		ModelGroupID *int32  `json:"model_group_id"`
+		Model        *string `json:"model"`
 	}
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		api.respondError(w, http.StatusBadRequest, "Invalid request payload")
 		return
 	}
-	if req.Status != "" && !isTaskStatus(req.Status) {
-		api.respondError(w, http.StatusBadRequest, "invalid task status")
-		return
-	}
-	if req.Status == db.TaskStatusDependsOnTask {
-		api.respondError(w, http.StatusConflict, "depends-on-task is managed by task dependencies")
-		return
-	}
 
 	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+
+	if req.Status == task.Status {
+		req.Status = ""
+	}
+	if req.Status != "" && !isHumanTaskStatus(req.Status) {
+		api.respondError(w, http.StatusConflict, "that status is set by the workflow; a task can be moved to backlog, to-do, in-review or done")
+		return
+	}
+	if req.TaskType != "" && !isTaskType(req.TaskType) {
+		api.respondError(w, http.StatusBadRequest, "task_type must be research, coding, review or general")
+		return
+	}
 
 	// Referenced objects must belong to the task's company (same tenancy check
 	// as CreateTask) — a foreign project_id/agent_id must never be bound here.
@@ -289,24 +381,21 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	statusChanged := false
-	prevStatus := task.Status
-	if req.Status != "" && req.Status != task.Status {
-		task.Status = req.Status
-		statusChanged = true
-	}
-
+	// Only the columns this request names are written. The task in context was
+	// read by middleware before this handler ran; saving that copy whole would
+	// overwrite anything the engine changed since.
+	updates := map[string]interface{}{}
 	if req.Title != "" {
-		task.Title = req.Title
+		updates["title"] = req.Title
 	}
 	if req.Description != "" {
-		task.Description = req.Description
+		updates["description"] = req.Description
 	}
 	if req.Priority != "" {
-		task.Priority = req.Priority
+		updates["priority"] = req.Priority
 	}
 	if req.GitBaseBranch != "" && req.GitBaseBranch != task.GitBaseBranch {
-		if task.Status == "in-progress" || task.Status == "in-review" || task.Status == "done" {
+		if task.Status != db.TaskStatusBacklog || req.Status != "" {
 			api.respondError(w, http.StatusConflict, "base branch cannot be changed after work has started")
 			return
 		}
@@ -315,30 +404,74 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 			api.respondError(w, http.StatusBadRequest, err.Error())
 			return
 		}
-		task.GitBaseBranch = branch
+		updates["git_base_branch"] = branch
 	}
-
+	if req.TaskType != "" && req.TaskType != task.TaskType {
+		// The type selects the phases a task goes through; changing it under
+		// a workflow in flight would leave the task in a phase it does not have.
+		if isTaskRunning(task.Status) || task.Status == db.TaskStatusBlocked {
+			api.respondError(w, http.StatusConflict, "the task type cannot be changed while the task is running; stop it first")
+			return
+		}
+		updates["task_type"] = req.TaskType
+	}
+	if req.ProviderID != nil || req.ModelGroupID != nil || req.Model != nil {
+		name := ""
+		if req.Model != nil {
+			name = *req.Model
+		}
+		model, err := api.taskModel(r, req.ProviderID, req.ModelGroupID, name)
+		if err != nil {
+			api.respondError(w, http.StatusNotFound, "provider or model group not found")
+			return
+		}
+		updates["provider_id"] = model.providerID
+		updates["model_group_id"] = model.modelGroupID
+		updates["model"] = model.model
+	}
 	if req.ProjectID != nil {
-		task.ProjectID = req.ProjectID
+		updates["project_id"] = *req.ProjectID
 	}
 	if req.AgentID != nil {
-		task.AgentID = req.AgentID
+		updates["agent_id"] = *req.AgentID
 	}
 	if req.SprintID != nil {
-		task.SprintID = *req.SprintID
+		updates["sprint_id"] = *req.SprintID
 	}
 	if req.ParentID != nil {
-		task.ParentID = req.ParentID
+		updates["parent_id"] = *req.ParentID
 	}
 	if req.IsArchived != nil {
-		task.IsArchived = *req.IsArchived
+		if *req.IsArchived && isTaskRunning(task.Status) && req.Status == "" {
+			// An archived task is never looked at again, so one that is running
+			// would be left that way.
+			api.respondError(w, http.StatusConflict, "the task is running; stop it before archiving it")
+			return
+		}
+		updates["is_archived"] = *req.IsArchived
 	}
 	if req.DueDate != nil {
 		t, _ := time.Parse(time.RFC3339, *req.DueDate)
-		task.DueDate = &t
+		updates["due_date"] = t
 	}
 
-	updatedTask, err := api.q.UpdateTask(r.Context(), task)
+	// The status goes through the engine, which owns it, before anything else
+	// is written: a move it refuses must not leave half an edit behind.
+	prevStatus := task.Status
+	if req.Status != "" {
+		var err error
+		if req.Status == db.TaskStatusTodo {
+			err = api.engine.RerunTask(r.Context(), task.ID)
+		} else {
+			err = api.engine.SetTaskStatus(r.Context(), task.ID, req.Status)
+		}
+		if err != nil {
+			api.respondEngineError(w, err)
+			return
+		}
+	}
+
+	updatedTask, err := api.q.UpdateTaskFields(r.Context(), task.ID, updates)
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
@@ -346,39 +479,235 @@ func (api *API) UpdateTask(w http.ResponseWriter, r *http.Request) {
 	task = updatedTask
 	api.hub.BroadcastEventForCompany(task.CompanyID, "task_updated", task)
 
-	if statusChanged {
-		content, _ := json.Marshal(map[string]string{"from": prevStatus, "to": task.Status})
-		if sc, err := api.q.CreateComment(r.Context(), db.Comment{
-			TaskID:      task.ID,
-			AuthorType:  "human",
-			CommentType: "status_change",
-			Content:     string(content),
-		}); err == nil {
-			api.hub.BroadcastEventForCompany(task.CompanyID, "comment_created", sc)
-		}
+	// The engine has already put the move on the task's record.
+	if task.Status != prevStatus {
 		if task.Status == db.TaskStatusDone {
 			api.reconcileDependents(r.Context(), task.ID)
+		}
+		// Git lifecycle: merge or keep the worktree on a status change. It runs
+		// in the background so the response is not held up; errors are logged.
+		if task.ProjectID != nil {
+			go api.handleGitLifecycle(task, task.Status)
 		}
 	}
 
 	api.logActivity(task.CompanyID, "task_updated", int32(task.ID), "task", "")
 
-	// Git lifecycle: handle worktree merge/reopen on status change
-	// Executed async to avoid blocking HTTP response. Errors are logged and
-	// broadcast via event hub. Tests use polling (waitForTaskStatus) to handle
-	// async execution.
-	if statusChanged && task.ProjectID != nil {
-		go api.handleGitLifecycle(task, req.Status)
-	}
-
-	// ProcessTask runs the LLM agent. Executed async because LLM calls can
-	// take minutes. The agent updates task status via tool calls, and tests
-	// poll for status changes.
-	if statusChanged {
-		go api.engine.ProcessTask(context.Background(), task.ID)
-	}
-
 	api.respondJSON(w, http.StatusOK, task)
+}
+
+// respondEngineError maps a refusal from the engine to its HTTP answer.
+func (api *API) respondEngineError(w http.ResponseWriter, err error) {
+	var blocked *engine.TaskDependencyBlockedError
+	switch {
+	case errors.As(err, &blocked):
+		api.respondJSON(w, http.StatusConflict, map[string]interface{}{"error": err.Error(), "task_id": blocked.TaskID, "blocked_by": blocked.Blockers})
+	case errors.Is(err, engine.ErrTaskRunning):
+		api.respondError(w, http.StatusConflict, err.Error())
+	default:
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+	}
+}
+
+// RerunTask sends a finished, parked or stuck task back to work. Asking for a
+// subtask reruns the task at the top of its tree.
+func (api *API) RerunTask(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	if err := api.engine.RerunTask(r.Context(), task.ID); err != nil {
+		api.respondEngineError(w, err)
+		return
+	}
+	api.respondJSON(w, http.StatusOK, map[string]interface{}{"status": "queued", "task_id": task.RootTaskID})
+}
+
+// StopTask halts a task and everything under it. A top-level task parks until
+// it is run again; a subtask is canceled and its parent deals with that.
+func (api *API) StopTask(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	if err := api.engine.StopTask(r.Context(), task.ID); err != nil {
+		api.respondEngineError(w, err)
+		return
+	}
+	stopped, err := api.q.GetTask(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, stopped)
+}
+
+// ListTaskTree returns a task and every task beneath it, parents before
+// children, each with its dependencies.
+func (api *API) ListTaskTree(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	tasks, err := api.q.ListTaskSubtree(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.attachTaskRelationSummaries(r.Context(), tasks)
+	api.respondJSON(w, http.StatusOK, tasks)
+}
+
+// ListTaskSteps returns a task's journal in order: phase changes, smart calls,
+// subtasks, questions and executor sessions. The prompt and answer of a smart
+// call are left out here; GetTaskStep returns one step in full.
+func (api *API) ListTaskSteps(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	steps, err := api.q.ListTaskStepHeads(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	api.respondJSON(w, http.StatusOK, steps)
+}
+
+func (api *API) GetTaskStep(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	stepID, err := strconv.ParseInt(chi.URLParam(r, "stepID"), 10, 64)
+	if err != nil {
+		api.respondError(w, http.StatusBadRequest, "invalid step id")
+		return
+	}
+	step, err := api.q.GetTaskStep(r.Context(), stepID)
+	if err != nil || step.TaskID != task.ID {
+		api.respondError(w, http.StatusNotFound, "step not found")
+		return
+	}
+	api.respondJSON(w, http.StatusOK, step)
+}
+
+// ListTaskDecisions returns what was decided on a task, oldest first. With
+// subtree=true it covers every task beneath it as well; the task tree gives
+// the decisions their hierarchy.
+func (api *API) ListTaskDecisions(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	if r.URL.Query().Get("subtree") != "true" {
+		decisions, err := api.q.ListDecisionsByTask(r.Context(), task.ID)
+		if err != nil {
+			api.respondError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		api.respondJSON(w, http.StatusOK, decisions)
+		return
+	}
+	subtree, err := api.q.ListTaskSubtree(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	within := make(map[int32]bool, len(subtree))
+	for _, member := range subtree {
+		within[member.ID] = true
+	}
+	all, err := api.q.ListDecisionsByRoot(r.Context(), task.RootTaskID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	decisions := make([]db.Decision, 0, len(all))
+	for _, decision := range all {
+		if within[decision.TaskID] {
+			decisions = append(decisions, decision)
+		}
+	}
+	api.respondJSON(w, http.StatusOK, decisions)
+}
+
+// DownloadTaskLogs sends everything recorded for a task and the tasks beneath
+// it as one archive, laid out as the tasks are in the app: a folder per task
+// named by its key (GL-18, with GL-18-1 inside it), holding its journal, its
+// decisions and its executor sessions under the names the sessions go by.
+func (api *API) DownloadTaskLogs(w http.ResponseWriter, r *http.Request) {
+	task := api.taskFromCtx(r) // loaded + authorized by LoadTask
+	company, err := api.q.GetCompany(r.Context(), task.CompanyID)
+	if err != nil {
+		api.respondError(w, http.StatusNotFound, "company not found")
+		return
+	}
+	tree, err := api.q.ListTaskSubtree(r.Context(), task.ID)
+	if err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	folder := func(member db.Task) string {
+		if member.RefKey != "" {
+			return member.RefKey
+		}
+		return fmt.Sprintf("task-%d", member.ID)
+	}
+	// Each task's folder sits inside its parent's.
+	byID := make(map[int32]db.Task, len(tree))
+	ids := make([]int32, 0, len(tree))
+	for _, member := range tree {
+		byID[member.ID] = member
+		ids = append(ids, member.ID)
+	}
+	var location func(member db.Task) string
+	location = func(member db.Task) string {
+		if member.ID == task.ID || member.ParentID == nil {
+			return folder(member)
+		}
+		parent, ok := byID[*member.ParentID]
+		if !ok {
+			return folder(member)
+		}
+		return location(parent) + "/" + folder(member)
+	}
+	var runs []db.Run
+	if err := api.db.Select("id", "name").Where("task_id IN ?", ids).Find(&runs).Error; err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	sessionNames := make(map[string]string, len(runs))
+	for _, run := range runs {
+		if run.Name != "" {
+			sessionNames[fmt.Sprintf("run-%d.jsonl", run.ID)] = run.Name + ".jsonl"
+		}
+	}
+
+	type logFile struct{ path, name string }
+	var files []logFile
+	paths := filesystem.NewPaths(LoadSettings().BasePath)
+	for _, member := range tree {
+		dir := paths.TaskJournalDir(company.ShortName, member.RootTaskID, member.ID)
+		entries, err := os.ReadDir(dir)
+		if err != nil {
+			continue // a task that never started has no folder
+		}
+		for _, entry := range entries {
+			if entry.IsDir() {
+				continue
+			}
+			name := entry.Name()
+			if session, ok := sessionNames[name]; ok {
+				name = session
+			}
+			files = append(files, logFile{path: filepath.Join(dir, entry.Name()), name: location(member) + "/" + name})
+		}
+	}
+	if len(files) == 0 {
+		api.respondError(w, http.StatusNotFound, "the task has no logs")
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/zip")
+	w.Header().Set("Content-Disposition", fmt.Sprintf("attachment; filename=%q", folder(task)+"-logs.zip"))
+	zw := zip.NewWriter(w)
+	defer zw.Close()
+	for _, entry := range files {
+		file, err := os.Open(entry.path)
+		if err != nil {
+			return
+		}
+		writer, err := zw.Create(entry.name)
+		if err != nil {
+			file.Close()
+			return
+		}
+		_, _ = io.Copy(writer, file)
+		file.Close()
+	}
 }
 
 func (api *API) ListTaskRuns(w http.ResponseWriter, r *http.Request) {
@@ -427,7 +756,7 @@ func (api *API) handleGitLifecycle(task db.Task, newStatus string) {
 	if branchName == "" {
 		branchName = db.TaskGitBranch(rootTask.RefKey, rootTask.ID)
 		rootTask.GitHubBranch = branchName
-		if _, updateErr := api.q.UpdateTask(ctx, rootTask); updateErr != nil {
+		if _, updateErr := api.q.UpdateTaskFields(ctx, rootTask.ID, map[string]interface{}{"git_hub_branch": branchName}); updateErr != nil {
 			fmt.Printf("Warning: failed to persist task branch %s: %v\n", branchName, updateErr)
 			return
 		}

@@ -4,12 +4,12 @@ import { normalizeRunLogEntries, parseLogContent } from './runLogParser';
 describe('parseLogContent', () => {
   it('normalizes assistant tool calls and tool results into paired entries', () => {
     const messages = parseLogContent([
-      JSON.stringify({ role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'run_new_session', arguments: '{"agent_name":"CTO"}' } }] }),
-      JSON.stringify({ role: 'tool', tool_call_id: 'c1', name: 'run_new_session', content: '{"id":42,"status":"queued"}' }),
+      JSON.stringify({ role: 'assistant', content: '', tool_calls: [{ id: 'c1', type: 'function', function: { name: 'web_fetch', arguments: '{"agent_name":"CTO"}' } }] }),
+      JSON.stringify({ role: 'tool', tool_call_id: 'c1', name: 'web_fetch', content: '{"id":42,"status":"queued"}' }),
     ].join('\n'));
 
     expect(messages.map(m => m.entry.type)).toEqual(['response', 'tool_response']);
-    expect(messages[1].entry.tool_name).toBe('run_new_session');
+    expect(messages[1].entry.tool_name).toBe('web_fetch');
   });
 
   it('keeps structured entries and legacy request lines intact', () => {
@@ -27,13 +27,13 @@ describe('normalizeRunLogEntries', () => {
   it('turns durable conversation messages into display rows', () => {
     const rows = normalizeRunLogEntries([
       { type: 'message', ts: '2026-08-19T00:00:00Z', seq: 1, content: JSON.stringify({ role: 'assistant', content: 'delegate', tool_calls: [{ id: 'c1' }] }) },
-      { type: 'message', ts: '2026-08-19T00:00:01Z', seq: 2, content: JSON.stringify({ role: 'tool', name: 'run_new_session', tool_call_id: 'c1', content: 'session 38 queued' }) },
+      { type: 'message', ts: '2026-08-19T00:00:01Z', seq: 2, content: JSON.stringify({ role: 'tool', name: 'web_fetch', tool_call_id: 'c1', content: 'session 38 queued' }) },
       { type: 'message', ts: '2026-08-19T00:00:02Z', seq: 3, content: JSON.stringify({ role: 'user', content: 'continue' }) },
     ]);
 
     expect(rows.map(row => row.entry.type)).toEqual(['response', 'tool_response', 'request']);
     expect(rows[0].entry.content).toContain('delegate');
-    expect(rows[1].entry.tool_name).toBe('run_new_session');
+    expect(rows[1].entry.tool_name).toBe('web_fetch');
     expect(rows[2].entry.content).toContain('continue');
     expect(rows.every(row => row.entry.content.startsWith('{') ? row.entry.type !== 'info' : true)).toBe(true);
   });

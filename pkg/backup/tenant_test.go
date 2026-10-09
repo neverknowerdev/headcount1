@@ -50,12 +50,28 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	sealed := fmt.Sprintf("enc:u1:%d:%s", srcUser.ID, cipherBody)
 	database.Exec("UPDATE llm_providers SET api_key = ? WHERE id = ?", sealed, prov.ID)
 
-	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, Priority: "Normal"}
+	// A task tree caught in the middle of its workflow: the root is waiting on
+	// a subtask it created, whose executor session is still running.
+	leaseUntil := time.Now().Add(time.Minute)
+	task := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, Title: "root", Status: db.TaskStatusInProgress, Priority: "Normal",
+		TaskType: "research", Mode: "managed", Phase: "execute", WaitingOn: "subtasks", LeaseOwner: "source-instance", LeaseUntil: &leaseUntil,
+		ProviderID: &prov.ID, Model: "task-model"}
 	database.Create(&task)
-	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "completed"}
+	database.Model(&task).Update("root_task_id", task.ID)
+	step := db.TaskStep{TaskID: task.ID, RootTaskID: task.ID, Kind: "smart_call", Phase: "plan", Prompt: "the full prompt", Result: "1 task"}
+	database.Create(&step)
+	child := db.Task{CompanyID: comp.ID, ProjectID: &proj.ID, SprintID: sprint.ID, AgentID: &agent.ID, ParentID: &task.ID, Title: "dig", Status: db.TaskStatusInProgress, Priority: "Normal",
+		TaskType: "research", Mode: "direct", Phase: "execute", WaitingOn: "run", RootTaskID: task.ID, Depth: 1, OriginStepID: &step.ID, OriginPhase: "plan", WorkflowPhase: "execute"}
+	database.Create(&child)
+	run := db.Run{TaskID: child.ID, AgentID: agent.ID, Status: "running", Name: "ACME-1-1-DEV"}
 	database.Create(&run)
+	database.Model(&child).Update("run_id", run.ID)
 	comment := db.Comment{TaskID: task.ID, AuthorType: "human", AuthorID: &srcUser.ID, Content: "hi"}
 	database.Create(&comment)
+	database.Create(&db.Decision{TaskID: task.ID, RootTaskID: task.ID, StepID: &step.ID, Kind: "decision", Title: "split the work"})
+	database.Create(&db.Decision{TaskID: child.ID, RootTaskID: task.ID, RunID: &run.ID, Kind: "dead_end", Title: "the docs are gone"})
+	database.Create(&db.LLMCall{CompanyID: comp.ID, RootTaskID: &task.ID, TaskID: &task.ID, AgentID: &agent.ID, Tier: "smart", ProviderID: &prov.ID, Model: "task-model", StepID: &step.ID, PromptTokens: 100, CompletionTokens: 20, Status: "ok"})
+	database.Create(&db.LLMCall{CompanyID: comp.ID, RootTaskID: &task.ID, TaskID: &child.ID, AgentID: &agent.ID, Tier: "cheap", Model: "cheap-model", RunID: &run.ID, PromptTokens: 7, CompletionTokens: 3, Status: "ok"})
 
 	srcPaths := filesystem.NewPaths(srcBase)
 
@@ -71,14 +87,18 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	os.MkdirAll(artDir, 0755)
 	artPath := filepath.Join(artDir, "report.md")
 	os.WriteFile(artPath, []byte("hello-artifact"), 0644)
-	database.Create(&db.Artifact{CompanyID: &comp.ID, ProjectID: &proj.ID, TaskID: task.ID, RunID: run.ID, Filename: "report.md", FilePath: artPath})
+	database.Create(&db.Artifact{CompanyID: &comp.ID, ProjectID: &proj.ID, TaskID: task.ID, RunID: &run.ID, Filename: "report.md", FilePath: artPath})
 
-	// Run log: logs/{short}/{rootTaskID}/run-{rootRunID}/main.log.
-	logDir := srcPaths.RunLogsDir("acme", task.ID, run.ID)
+	// Logs: logs/{short}/{rootTaskID}/task-{taskID}/ holds a task's journal and
+	// its executor sessions' run-{runID}.jsonl.
+	logDir := srcPaths.TaskJournalDir("acme", task.ID, child.ID)
 	os.MkdirAll(logDir, 0755)
-	logPath := filepath.Join(logDir, "main.log")
+	logPath := filepath.Join(logDir, fmt.Sprintf("run-%d.jsonl", run.ID))
 	os.WriteFile(logPath, []byte("hello-log"), 0644)
 	database.Exec("UPDATE runs SET log_file_path = ? WHERE id = ?", logPath, run.ID)
+	journalDir := srcPaths.TaskJournalDir("acme", task.ID, task.ID)
+	os.MkdirAll(journalDir, 0755)
+	os.WriteFile(filepath.Join(journalDir, "task.jsonl"), []byte("hello-journal"), 0644)
 
 	// --- Export. ---
 	var buf bytes.Buffer
@@ -104,6 +124,12 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	targetDB.Create(&otherSprint)
 	otherTask := db.Task{CompanyID: otherComp.ID, SprintID: otherSprint.ID, Title: "other task", Status: db.TaskStatusBacklog, Priority: "Normal"}
 	targetDB.Create(&otherTask)
+	otherAgent := db.Agent{CompanyID: otherComp.ID, Name: "other dev"}
+	targetDB.Create(&otherAgent)
+	targetDB.Create(&db.Run{TaskID: otherTask.ID, AgentID: otherAgent.ID, Status: "completed"})
+	targetDB.Create(&db.TaskStep{TaskID: otherTask.ID, RootTaskID: otherTask.ID, Kind: "note"})
+	targetDB.Create(&db.Decision{TaskID: otherTask.ID, RootTaskID: otherTask.ID, Kind: "decision", Title: "theirs"})
+	targetDB.Create(&db.LLMCall{CompanyID: otherComp.ID, TaskID: &otherTask.ID, Tier: "smart", Status: "ok"})
 
 	impUser := db.User{Email: "importer@new.io"}
 	targetDB.Create(&impUser)
@@ -116,7 +142,7 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ImportTenant: %v", err)
 	}
-	if stats.Companies != 1 || stats.Tasks != 1 || stats.Providers != 1 {
+	if stats.Companies != 1 || stats.Tasks != 2 || stats.Providers != 1 {
 		t.Fatalf("unexpected stats: %+v", stats)
 	}
 
@@ -158,19 +184,78 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 		t.Errorf("provider secret label not rewritten: got %q, want %q", gotCipher, wantCipher)
 	}
 
-	// --- Task/run/artifact graph resolves with new ids. ---
+	// --- The task tree resolves with new ids, and comes in at rest: nothing
+	// here is running it, so the root waits in the backlog and what was under
+	// way beneath it is canceled. ---
 	var impTask db.Task
-	targetDB.Where("company_id = ?", imported.ID).First(&impTask)
+	targetDB.Where("company_id = ? AND parent_id IS NULL", imported.ID).First(&impTask)
 	if impTask.ID == task.ID {
 		t.Errorf("task id not remapped")
 	}
 	if impTask.ProjectID == nil || impTask.SprintID == 0 {
 		t.Errorf("task FKs not remapped: %+v", impTask)
 	}
+	if impTask.Status != db.TaskStatusBacklog || impTask.Phase != "" || impTask.WaitingOn != "" || impTask.LeaseOwner != "" || impTask.LeaseUntil != nil {
+		t.Errorf("imported root is not at rest: status=%q phase=%q waiting_on=%q lease=%q", impTask.Status, impTask.Phase, impTask.WaitingOn, impTask.LeaseOwner)
+	}
+	if impTask.RootTaskID != impTask.ID {
+		t.Errorf("imported root's root_task_id = %d, want its own id %d", impTask.RootTaskID, impTask.ID)
+	}
+	if impTask.TaskType != "research" || impTask.Model != "task-model" || impTask.ProviderID == nil || *impTask.ProviderID != gotProv.ID {
+		t.Errorf("task type or model override lost: type=%q model=%q provider=%v", impTask.TaskType, impTask.Model, impTask.ProviderID)
+	}
+	var impStep db.TaskStep
+	targetDB.Where("task_id = ?", impTask.ID).First(&impStep)
+	if impStep.ID == 0 || impStep.RootTaskID != impTask.ID || impStep.Prompt != "the full prompt" {
+		t.Fatalf("journal step not imported with remapped ids: %+v", impStep)
+	}
+	var impChild db.Task
+	targetDB.Where("parent_id = ?", impTask.ID).First(&impChild)
+	if impChild.ID == 0 || impChild.RootTaskID != impTask.ID {
+		t.Fatalf("subtask not linked to the imported root: %+v", impChild)
+	}
+	if impChild.OriginStepID == nil || *impChild.OriginStepID != impStep.ID {
+		t.Errorf("subtask origin step = %v, want %d", impChild.OriginStepID, impStep.ID)
+	}
+	if impChild.Status != db.TaskStatusCanceled || impChild.ResultReason != "stopped" || impChild.WaitingOn != "" || impChild.RunID != nil {
+		t.Errorf("imported subtask is not at rest: status=%q reason=%q waiting_on=%q run=%v", impChild.Status, impChild.ResultReason, impChild.WaitingOn, impChild.RunID)
+	}
 	var impRun db.Run
-	targetDB.Where("task_id = ?", impTask.ID).First(&impRun)
+	targetDB.Where("task_id = ?", impChild.ID).First(&impRun)
 	if impRun.ID == 0 {
 		t.Fatalf("run not imported")
+	}
+	if impRun.Status != "canceled" {
+		t.Errorf("a session nobody is running was imported as %q", impRun.Status)
+	}
+
+	// --- Decisions and usage follow their tasks, steps and sessions. ---
+	var rootDecision, childDecision db.Decision
+	targetDB.Where("task_id = ?", impTask.ID).First(&rootDecision)
+	targetDB.Where("task_id = ?", impChild.ID).First(&childDecision)
+	if rootDecision.StepID == nil || *rootDecision.StepID != impStep.ID || rootDecision.RootTaskID != impTask.ID {
+		t.Errorf("root decision not remapped: %+v", rootDecision)
+	}
+	if childDecision.RunID == nil || *childDecision.RunID != impRun.ID || childDecision.RootTaskID != impTask.ID || childDecision.Kind != "dead_end" {
+		t.Errorf("subtask decision not remapped: %+v", childDecision)
+	}
+	var calls []db.LLMCall
+	targetDB.Where("company_id = ?", imported.ID).Order("id").Find(&calls)
+	if len(calls) != 2 {
+		t.Fatalf("usage rows imported = %d, want 2", len(calls))
+	}
+	if calls[0].StepID == nil || *calls[0].StepID != impStep.ID || calls[0].TaskID == nil || *calls[0].TaskID != impTask.ID ||
+		calls[0].ProviderID == nil || *calls[0].ProviderID != gotProv.ID || calls[0].PromptTokens != 100 {
+		t.Errorf("smart call not remapped: %+v", calls[0])
+	}
+	if calls[1].RunID == nil || *calls[1].RunID != impRun.ID || calls[1].TaskID == nil || *calls[1].TaskID != impChild.ID ||
+		calls[1].RootTaskID == nil || *calls[1].RootTaskID != impTask.ID {
+		t.Errorf("executor call not remapped: %+v", calls[1])
+	}
+	var gotArtifact db.Artifact
+	targetDB.Where("task_id = ?", impTask.ID).First(&gotArtifact)
+	if gotArtifact.RunID == nil || *gotArtifact.RunID != impRun.ID {
+		t.Errorf("artifact's run = %v, want %d", gotArtifact.RunID, impRun.ID)
 	}
 
 	// --- On-disk paths remapped and files readable. ---
@@ -194,11 +279,25 @@ func TestTenantExportImportRoundTrip(t *testing.T) {
 
 	var gotLog string
 	targetDB.Raw("SELECT log_file_path FROM runs WHERE id = ?", impRun.ID).Scan(&gotLog)
-	wantLog := filepath.Join(newPaths.RunLogsDir("acme", impTask.ID, impRun.ID), "main.log")
+	wantLog := filepath.Join(newPaths.TaskJournalDir("acme", impTask.ID, impChild.ID), fmt.Sprintf("run-%d.jsonl", impRun.ID))
 	if gotLog != wantLog {
 		t.Errorf("run log path = %q, want %q", gotLog, wantLog)
 	}
 	assertFile(t, wantLog, "hello-log")
+	assertFile(t, filepath.Join(newPaths.TaskJournalDir("acme", impTask.ID, impTask.ID), "task.jsonl"), "hello-journal")
+
+	// --- Importing the same archive again adds nothing: the journal, the
+	// decisions and the usage of a task that is already here are not doubled. ---
+	if _, err := ImportTenant(ctx, archivePath, newBase, targetDB, impUser.ID, impTeam.ID); err != nil {
+		t.Fatalf("second ImportTenant: %v", err)
+	}
+	for table, want := range map[string]int64{"tasks": 3, "task_steps": 2, "decisions": 3, "llm_calls": 3, "runs": 2} {
+		var got int64
+		targetDB.Table(table).Count(&got)
+		if got != want {
+			t.Errorf("after a second import %s has %d rows, want %d", table, got, want)
+		}
+	}
 }
 
 // TestTenantImportShortNameCollision verifies that importing a company whose
@@ -262,10 +361,10 @@ func assertFile(t *testing.T, path, want string) {
 	}
 }
 
-// TestTenantImportJoinTablesAndLinks exercises agents linked to providers/model
-// groups plus MCP servers/accounts and their join tables, verifying composite-PK
-// rows import and their FKs remap without error.
-func TestTenantImportJoinTablesAndLinks(t *testing.T) {
+// TestTenantImportModelAndMCPLinks exercises the links between a user's own
+// records: a task's model group, a default model slot's provider, and MCP
+// servers with their accounts. Each must point at the imported copy.
+func TestTenantImportModelAndMCPLinks(t *testing.T) {
 	srcBase := t.TempDir()
 	database := openTestDB(t, t.TempDir())
 	ctx := context.Background()
@@ -277,22 +376,22 @@ func TestTenantImportJoinTablesAndLinks(t *testing.T) {
 	database.Create(&db.TeamMember{TeamID: srcTeam.ID, UserID: srcUser.ID, Role: db.TeamRoleOwner})
 	comp := db.Company{Name: "J Co", ShortName: "jco", TeamID: &srcTeam.ID, UserID: &srcUser.ID}
 	database.Create(&comp)
+	sprint := db.Sprint{CompanyID: comp.ID, Name: "S"}
+	database.Create(&sprint)
 
 	prov := db.LLMProvider{Name: "JP", BaseUrl: "http://jp", UserID: &srcUser.ID}
 	database.Create(&prov)
 	group := db.ModelGroup{Name: "G", Slug: "jgroup", UserID: &srcUser.ID}
 	database.Create(&group)
 	database.Create(&db.ModelGroupMember{GroupID: group.ID, ProviderID: prov.ID, Model: "m"})
-	agent := db.Agent{CompanyID: comp.ID, Name: "a", ProviderID: &prov.ID, ModelGroupID: &group.ID}
-	database.Create(&agent)
+	database.Create(&db.DefaultModelSetting{Purpose: "smart", UserID: &srcUser.ID, ProviderID: &prov.ID, Model: "m"})
+	task := db.Task{CompanyID: comp.ID, SprintID: sprint.ID, Title: "t", Status: db.TaskStatusBacklog, Priority: "Normal", ModelGroupID: &group.ID}
+	database.Create(&task)
 
 	srv := db.MCPServer{Name: "jsrv", OwnerUserID: &srcUser.ID, Transport: "http"}
 	database.Create(&srv)
 	acct := db.MCPAccount{MCPServerID: srv.ID, Name: "Personal", UserID: &srcUser.ID}
 	database.Create(&acct)
-	database.Create(&db.AgentMCPServer{AgentID: agent.ID, MCPServerID: srv.ID, Enabled: true})
-	database.Create(&db.AgentMCPAccount{AgentID: agent.ID, MCPAccountID: acct.ID, Enabled: true})
-	database.Create(&db.AgentMCPToolFilter{AgentID: agent.ID, MCPServerID: srv.ID, ToolName: "x", Enabled: false})
 
 	var buf bytes.Buffer
 	if err := ExportTenant(ctx, &buf, srcBase, database, srcUser.ID); err != nil {
@@ -301,40 +400,48 @@ func TestTenantImportJoinTablesAndLinks(t *testing.T) {
 	archivePath := filepath.Join(t.TempDir(), "j.tar.gz")
 	os.WriteFile(archivePath, buf.Bytes(), 0644)
 
+	// The target already has a provider and a group, so new ids differ.
 	targetDB := openTestDB(t, t.TempDir())
 	impUser := db.User{Email: "imp@j.io"}
 	targetDB.Create(&impUser)
 	impTeam := db.Team{Name: "IJ"}
 	targetDB.Create(&impTeam)
 	targetDB.Create(&db.TeamMember{TeamID: impTeam.ID, UserID: impUser.ID, Role: db.TeamRoleOwner})
+	targetDB.Create(&db.LLMProvider{Name: "Own", BaseUrl: "http://own", UserID: &impUser.ID})
+	targetDB.Create(&db.ModelGroup{Name: "Own", Slug: "own", UserID: &impUser.ID})
 
 	if _, err := ImportTenant(ctx, archivePath, t.TempDir(), targetDB, impUser.ID, impTeam.ID); err != nil {
 		t.Fatalf("ImportTenant: %v", err)
 	}
 
-	var gotAgent db.Agent
-	targetDB.Where("name = ?", "a").First(&gotAgent)
-	if gotAgent.ProviderID == nil || gotAgent.ModelGroupID == nil {
-		t.Fatalf("agent links dropped: %+v", gotAgent)
-	}
 	var gotProv db.LLMProvider
-	targetDB.First(&gotProv, *gotAgent.ProviderID)
+	targetDB.Where("base_url = ?", "http://jp").First(&gotProv)
 	if gotProv.UserID == nil || *gotProv.UserID != impUser.ID {
-		t.Errorf("agent's provider not re-owned to importer")
+		t.Fatalf("provider not re-owned to importer: %+v", gotProv)
 	}
-	// Join rows reference the remapped agent.
-	var amsCount, amaCount, filterCount int64
-	targetDB.Model(&db.AgentMCPServer{}).Where("agent_id = ?", gotAgent.ID).Count(&amsCount)
-	targetDB.Model(&db.AgentMCPAccount{}).Where("agent_id = ?", gotAgent.ID).Count(&amaCount)
-	targetDB.Model(&db.AgentMCPToolFilter{}).Where("agent_id = ?", gotAgent.ID).Count(&filterCount)
-	if amsCount != 1 || amaCount != 1 || filterCount != 1 {
-		t.Errorf("join rows not remapped: ams=%d ama=%d filter=%d", amsCount, amaCount, filterCount)
+	var gotGroup db.ModelGroup
+	targetDB.Where("slug = ?", "jgroup").First(&gotGroup)
+	var gotTask db.Task
+	targetDB.Where("title = ?", "t").First(&gotTask)
+	if gotTask.ModelGroupID == nil || *gotTask.ModelGroupID != gotGroup.ID || gotGroup.ID == group.ID {
+		t.Errorf("task's model group = %v, want the imported group %d", gotTask.ModelGroupID, gotGroup.ID)
 	}
-	// The MCP server got a fresh, unique name and is owned by the importer.
+	var gotSetting db.DefaultModelSetting
+	targetDB.Where("purpose = ? AND user_id = ?", "smart", impUser.ID).First(&gotSetting)
+	if gotSetting.ProviderID == nil || *gotSetting.ProviderID != gotProv.ID {
+		t.Errorf("default model slot's provider = %v, want %d", gotSetting.ProviderID, gotProv.ID)
+	}
+	// The MCP server got a fresh, unique name and is owned by the importer,
+	// and its account points at it.
 	var gotSrv db.MCPServer
 	targetDB.Where("owner_user_id = ?", impUser.ID).First(&gotSrv)
 	if gotSrv.ID == 0 {
-		t.Errorf("mcp server not imported / re-owned")
+		t.Fatalf("mcp server not imported / re-owned")
+	}
+	var gotAcct db.MCPAccount
+	targetDB.Where("name = ?", "Personal").First(&gotAcct)
+	if gotAcct.MCPServerID != gotSrv.ID || gotAcct.UserID == nil || *gotAcct.UserID != impUser.ID {
+		t.Errorf("mcp account not relinked: %+v", gotAcct)
 	}
 }
 

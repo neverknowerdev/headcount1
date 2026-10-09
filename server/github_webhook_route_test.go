@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/engine/enginetest"
 
 	"github.com/glebarez/sqlite"
 	"github.com/go-chi/chi/v5"
@@ -22,14 +23,14 @@ import (
 	"gorm.io/gorm"
 )
 
+// webhookEngine fails its reruns with a scripted sequence of errors.
 type webhookEngine struct {
+	enginetest.Recorder
 	mu       sync.Mutex
 	errors   []error
 	runCalls int
 }
 
-func (e *webhookEngine) ProcessTask(context.Context, int32) error { return nil }
-func (e *webhookEngine) StopRun(context.Context, int32)           {}
 func (e *webhookEngine) RerunTask(context.Context, int32) error {
 	e.mu.Lock()
 	defer e.mu.Unlock()

@@ -1,10 +1,10 @@
 /**
  * E2E tests for the web_fetch and browser_use agent tools.
  *
- * Each test spins up a tiny in-process HTTP server that the agent tools
- * target, configures the mock LLM provider with a scenario (an ordered list
- * of tool calls / text replies), then runs a full task end-to-end and
- * inspects what the agent sent back to the LLM.
+ * Each test spins up a tiny in-process HTTP server that the tools target,
+ * scripts the executor session of a task (an ordered list of tool calls), then
+ * runs the task end-to-end and inspects what the tools returned to the model.
+ * The smart steps around the session are left to the mock's autopilot.
  */
 
 import * as http from 'http';
@@ -12,10 +12,11 @@ import { AddressInfo } from 'net';
 import { test, expect } from '@playwright/test';
 import type { APIRequestContext } from '@playwright/test';
 import { loadE2EEnv } from '../helpers/env';
-import { waitForTaskStatus as waitForTaskStatusRaw } from '../helpers/wait-for';
+import { waitForTaskStatus } from '../helpers/wait-for';
 import { resetE2E } from '../helpers/reset';
 import { requireFetchOK } from '../helpers/http';
 import type { ScenarioEntry } from '../fixtures/mock-provider-server';
+import { createWorkspace } from '../helpers/workflow';
 
 const env = loadE2EEnv();
 
@@ -61,60 +62,12 @@ async function startMultiRouteServer(routes: Record<string, string>): Promise<{
     };
 }
 
-/** Configure the mock LLM provider to run a specific scenario. */
+/** Script the executor session: its turns, in order. */
 async function setScenario(request: APIRequestContext, entries: ScenarioEntry[]): Promise<void> {
-    const workerRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-        data: { entries, model: 'e2e-mock-model' },
+    const res = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
+        data: { rules: [{ match: { phase: 'executor' }, replies: entries }] },
     });
-    expect(workerRes.ok(), `set worker scenario failed: ${await workerRes.text()}`).toBeTruthy();
-    const orchestratorRes = await request.post(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-        data: {
-            model: 'e2e-orchestrator-model',
-            entries: [{
-                tool_call: {
-                    id: 'orch-run-worker',
-                    name: 'run_new_session',
-                    arguments: { agent_name: 'QA', title: 'Execute tool scenario', prompt: 'Execute the assigned tool scenario and finish the task for review.' },
-                },
-            }, {
-                text: 'The worker completed the assigned scenario successfully.',
-            }, {
-                tool_call: {
-                    id: 'orchestrator-finish', name: 'finish_task',
-                    arguments: { summary: 'The delegated tool scenario completed and its evidence was verified.' },
-                },
-            }],
-        },
-    });
-    expect(orchestratorRes.ok(), `set orchestrator scenario failed: ${await orchestratorRes.text()}`).toBeTruthy();
-}
-
-/** Wait until the durable task orchestrator has observed the worker result. */
-async function waitForTaskStatus(
-    request: APIRequestContext,
-    taskId: number,
-    status: string,
-    timeoutMs: number,
-): Promise<void> {
-    await waitForTaskStatusRaw(request, taskId, status, timeoutMs);
-    const deadline = Date.now() + 30_000;
-    let lastRuns: any[] = [];
-    while (Date.now() < deadline) {
-        const taskRes = await request.get(`/api/tasks/${taskId}`);
-        if (taskRes.ok()) {
-            const task = await taskRes.json();
-            const runsRes = await request.get(`/api/runs?company_id=${task.company_id}`);
-            if (runsRes.ok()) {
-                const runs = await runsRes.json() as any[];
-                lastRuns = runs.filter((run) => run.task_id === taskId && run.kind === 'task_orchestrator');
-                if (lastRuns.length > 0 && lastRuns.every((run) => ['completed', 'failed', 'canceled'].includes(run.status))) {
-                    return;
-                }
-            }
-        }
-        await new Promise((resolve) => setTimeout(resolve, 250));
-    }
-    throw new Error(`task ${taskId} orchestrator did not settle: ${JSON.stringify(lastRuns)}`);
+    expect(res.ok(), `set scenario failed: ${await res.text()}`).toBeTruthy();
 }
 
 /** Reset the mock LLM provider to default mode and clear recorded requests. */
@@ -130,94 +83,23 @@ async function getMockRequests(request: APIRequestContext): Promise<any[]> {
 }
 
 /**
- * Set up a fresh company + LLM provider + agent via the REST API.
- * Returns the IDs needed to create and run tasks.
- */
-async function setupWorkspace(request: APIRequestContext, shortName: string): Promise<{
-    companyId: number;
-    agentId: number;
-    sprintId: number;
-}> {
-    const compRes = await request.post('/api/companies', {
-        data: { name: `Tool Test Co (${shortName})`, short_name: shortName, color: '#0ea5e9' },
-    });
-    expect(compRes.ok(), `create company: ${await compRes.text()}`).toBeTruthy();
-    const company = await compRes.json();
-
-    // The custom QA row below explicitly overrides the always-on built-in QA.
-
-    const sprintRes = await request.post('/api/sprints', {
-        data: {
-            company_id: company.id,
-            name: 'Test Sprint',
-            goal: '',
-            start_date: '2024-01-01T00:00:00Z',
-            end_date: '2024-12-31T00:00:00Z',
-        },
-    });
-    expect(sprintRes.ok(), `create sprint: ${await sprintRes.text()}`).toBeTruthy();
-    const sprint = await sprintRes.json();
-
-    const provRes = await request.post('/api/providers', {
-        data: {
-            name: 'Mock Provider',
-            base_url: env.E2E_MOCK_PROVIDER_URL,
-            api_key: 'test-key',
-            provider_type: 'openai',
-            default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
-        },
-    });
-    expect(provRes.ok(), `create provider: ${await provRes.text()}`).toBeTruthy();
-    const provider = await provRes.json();
-
-    const orchestratorRes = await request.put('/api/default-model-settings/task_orchestrator', {
-        data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
-    });
-    expect(orchestratorRes.ok(), `configure task orchestrator: ${await orchestratorRes.text()}`).toBeTruthy();
-
-    const agentRes = await request.post('/api/agents', {
-        data: {
-            company_id: company.id,
-            name: 'QA',
-            role_key: 'QA',
-            short_name: 'QA',
-            model: 'e2e-mock-model',
-            provider_id: provider.id,
-        },
-    });
-    expect(agentRes.ok(), `create agent: ${await agentRes.text()}`).toBeTruthy();
-    const agent = await agentRes.json();
-
-    return { companyId: company.id, agentId: agent.id, sprintId: sprint.id };
-}
-
-/**
- * Create a task in backlog, assign the agent, then set status → 'to-do'
- * which triggers the engine to start a run. Returns taskId.
+ * Create a research task and queue it, which starts its workflow: the plan
+ * delegates one subtask, whose executor session is the one scripted above.
  */
 async function runTask(
     request: APIRequestContext,
     companyId: number,
-    agentId: number,
     title: string,
     sprintId: number,
 ): Promise<number> {
     const taskRes = await request.post('/api/tasks', {
-        data: {
-            company_id: companyId,
-            sprint_id: sprintId,
-            title,
-            agent_id: agentId,
-        },
+        data: { company_id: companyId, sprint_id: sprintId, title, task_type: 'research' },
     });
     expect(taskRes.ok(), `create task: ${await taskRes.text()}`).toBeTruthy();
     const task = await taskRes.json();
 
-    const upd = await request.put(`/api/tasks/${task.id}`, {
-        data: { status: 'to-do', agent_id: agentId },
-    });
-    expect(upd.ok(), `update task status: ${await upd.text()}`).toBeTruthy();
+    const upd = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
+    expect(upd.ok(), `start task: ${await upd.text()}`).toBeTruthy();
 
     return task.id;
 }
@@ -247,14 +129,12 @@ function extractToolResults(requests: any[]): string[] {
 test.describe.serial('Agent tools: web_fetch and browser_use', () => {
     const SHORT = 'tool-test';
     let companyId: number;
-    let agentId: number;
     let sprintId: number;
 
     test.beforeAll(async ({ request }) => {
         await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
-        const ws = await setupWorkspace(request, SHORT);
+        const ws = await createWorkspace(request, 'Tool Test Co', SHORT);
         companyId = ws.companyId;
-        agentId = ws.agentId;
         sprintId = ws.sprintId;
     });
 
@@ -274,23 +154,20 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'wf1',
                         name: 'web_fetch',
                         arguments: { url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft1',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Fetched successfully.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Fetched successfully.' },
                     },
                 },
-                { text: 'Task complete.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: fetch test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: fetch test page', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -317,23 +194,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         await setScenario(request, [
             {
                 tool_call: {
-                    id: 'wf2',
                     name: 'web_fetch',
                     arguments: { url: deadUrl },
                 },
             },
             {
                 tool_call: {
-                    id: 'ft2',
-                    name: 'finish_task',
-                    arguments: { task_status: 'in-review', finish_status: 'Handled error.' },
+                    name: 'finish_work',
+                    arguments: { status: 'done', summary: 'Handled error.' },
                 },
             },
             { text: 'Done.' },
         ]);
 
-        const taskId = await runTask(request, companyId, agentId, 'web_fetch: connection error', sprintId);
-        await waitForTaskStatus(request, taskId, 'done', 90_000);
+        const taskId = await runTask(request, companyId, 'web_fetch: connection error', sprintId);
+        await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -352,23 +227,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'wf3',
                         name: 'web_fetch',
                         arguments: { url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft3',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Done.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Done.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: large body truncation', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: large body truncation', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -400,23 +273,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'bu1',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft4',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Navigated.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Navigated.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: navigate to test page', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: navigate to test page', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -447,7 +318,6 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 // Navigate first to load the page
                 {
                     tool_call: {
-                        id: 'bu2a',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
@@ -455,23 +325,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 // Then extract specific element text
                 {
                     tool_call: {
-                        id: 'bu2b',
                         name: 'browser_use',
                         arguments: { action: 'get_text', selector: '#target' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft5',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Extracted.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Extracted.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_text from selector', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: get_text from selector', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -494,30 +362,27 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'bu3a',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu3b',
                         name: 'browser_use',
                         arguments: { action: 'execute_js', script: 'window.__testVal' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft6',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'JS executed.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'JS executed.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: execute_js', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: execute_js', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -545,30 +410,27 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'bu4a',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu4b',
                         name: 'browser_use',
                         arguments: { action: 'get_html', selector: '#sec' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft7',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Got HTML.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Got HTML.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: get_html', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: get_html', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -602,44 +464,39 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'bu5a',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu5b',
                         name: 'browser_use',
                         arguments: { action: 'type', selector: '#inp', text: 'hello_type' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu5c',
                         name: 'browser_use',
                         arguments: { action: 'click', selector: '#btn' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu5d',
                         name: 'browser_use',
                         arguments: { action: 'get_text', selector: '#out' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft8',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Interaction done.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Interaction done.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: click and type', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: click and type', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -663,30 +520,27 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'bu6a',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'bu6b',
                         name: 'browser_use',
                         arguments: { action: 'screenshot' },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft9',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Screenshot taken.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Screenshot taken.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'browser_use: screenshot', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'browser_use: screenshot', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -710,23 +564,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
         await setScenario(request, [
             {
                 tool_call: {
-                    id: 'bu7',
                     name: 'browser_use',
                     arguments: { action: 'navigate', url: 'http://this-host-does-not-exist-headcount1.internal/page' },
                 },
             },
             {
                 tool_call: {
-                    id: 'ft10',
-                    name: 'finish_task',
-                    arguments: { task_status: 'in-review', finish_status: 'Handled error.' },
+                    name: 'finish_work',
+                    arguments: { status: 'done', summary: 'Handled error.' },
                 },
             },
             { text: 'Done.' },
         ]);
 
-        const taskId = await runTask(request, companyId, agentId, 'browser_use: unknown host error', sprintId);
-        await waitForTaskStatus(request, taskId, 'done', 120_000);
+        const taskId = await runTask(request, companyId, 'browser_use: unknown host error', sprintId);
+        await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
         const reqs = await getMockRequests(request);
         const toolResults = extractToolResults(reqs);
@@ -748,7 +600,6 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 // web_fetch first
                 {
                     tool_call: {
-                        id: 'dual1',
                         name: 'web_fetch',
                         arguments: { url: server.url },
                     },
@@ -756,23 +607,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
                 // browser_use second
                 {
                     tool_call: {
-                        id: 'dual2',
                         name: 'browser_use',
                         arguments: { action: 'navigate', url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ft11',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Both tools used.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Both tools used.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'dual tool: web_fetch + browser_use', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 120_000);
+            const taskId = await runTask(request, companyId, 'dual tool: web_fetch + browser_use', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 120_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -816,23 +665,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'md1',
                         name: 'web_fetch',
                         arguments: { url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ftmd1',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Got markdown.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Got markdown.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown default', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: to_markdown default', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -864,23 +711,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'md2',
                         name: 'web_fetch',
                         arguments: { url: server.url, to_markdown: true },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ftmd2',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Got markdown.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Got markdown.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown explicit true', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: to_markdown explicit true', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -907,23 +752,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'md3',
                         name: 'web_fetch',
                         arguments: { url: server.url, to_markdown: false },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ftmd3',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Got raw HTML.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Got raw HTML.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown=false raw HTML', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: to_markdown=false raw HTML', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);
@@ -946,23 +789,21 @@ test.describe.serial('Agent tools: web_fetch and browser_use', () => {
             await setScenario(request, [
                 {
                     tool_call: {
-                        id: 'md4',
                         name: 'web_fetch',
                         arguments: { url: server.url },
                     },
                 },
                 {
                     tool_call: {
-                        id: 'ftmd4',
-                        name: 'finish_task',
-                        arguments: { task_status: 'in-review', finish_status: 'Got content.' },
+                        name: 'finish_work',
+                        arguments: { status: 'done', summary: 'Got content.' },
                     },
                 },
                 { text: 'Done.' },
             ]);
 
-            const taskId = await runTask(request, companyId, agentId, 'web_fetch: to_markdown plain text', sprintId);
-            await waitForTaskStatus(request, taskId, 'done', 90_000);
+            const taskId = await runTask(request, companyId, 'web_fetch: to_markdown plain text', sprintId);
+            await waitForTaskStatus(request, taskId, 'in-review', 90_000);
 
             const reqs = await getMockRequests(request);
             const toolResults = extractToolResults(reqs);

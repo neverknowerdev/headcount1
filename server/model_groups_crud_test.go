@@ -94,3 +94,72 @@ func TestModelGroup_AllModelsMemberRoundTrip(t *testing.T) {
 	assert.Empty(t, created.Members[0].Model)
 	assert.True(t, created.Members[0].IsFree)
 }
+
+// A group routes between language models or between System One models, never
+// both: a model of the other kind is refused, and so is a change of kind.
+func TestModelGroup_HoldsModelsOfOneKind(t *testing.T) {
+	database := setupModelGroupsTestDB(t)
+	r := setupModelGroupsRouter(database)
+	zen := db.LLMProvider{Name: "Zen", SupportedModels: "big-pickle,jev-1.13,jev-1.13-free"}
+	require.NoError(t, database.Create(&zen).Error)
+	chat := db.LLMProvider{Name: "Chat only", SupportedModels: "m1"}
+	require.NoError(t, database.Create(&chat).Error)
+
+	send := func(method, path string, payload map[string]interface{}) (int, db.ModelGroup, string) {
+		b, _ := json.Marshal(payload)
+		w := httptest.NewRecorder()
+		r.ServeHTTP(w, httptest.NewRequest(method, path, bytes.NewReader(b)))
+		var group db.ModelGroup
+		_ = json.Unmarshal(w.Body.Bytes(), &group)
+		return w.Code, group, w.Body.String()
+	}
+	member := func(provider db.LLMProvider, model string) map[string]interface{} {
+		return map[string]interface{}{"provider_id": provider.ID, "model": model}
+	}
+
+	// The kind is taken from the models named when none is given.
+	code, classifiers, body := send(http.MethodPost, "/model-groups", map[string]interface{}{
+		"name": "Classifiers", "members": []map[string]interface{}{member(zen, "jev-1.13-free"), member(zen, "jev-1.13")},
+	})
+	require.Equal(t, http.StatusCreated, code, body)
+	assert.Equal(t, db.ModelKindSystemOne, classifiers.Kind)
+	require.Len(t, classifiers.Members, 2)
+
+	code, writers, body := send(http.MethodPost, "/model-groups", map[string]interface{}{
+		"name": "Writers", "members": []map[string]interface{}{member(zen, "big-pickle")},
+	})
+	require.Equal(t, http.StatusCreated, code, body)
+	assert.Equal(t, db.ModelKindLLM, writers.Kind)
+
+	// A mixed group is refused, and nothing of it is stored.
+	code, _, body = send(http.MethodPost, "/model-groups", map[string]interface{}{
+		"name": "Mixed", "members": []map[string]interface{}{member(zen, "big-pickle"), member(zen, "jev-1.13")},
+	})
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "jev-1.13 is a System One model and cannot be in a group of language models")
+	var count int64
+	require.NoError(t, database.Model(&db.ModelGroup{}).Where("name = ?", "Mixed").Count(&count).Error)
+	assert.Zero(t, count)
+
+	code, _, body = send(http.MethodPut, fmt.Sprintf("/model-groups/%d/", classifiers.ID), map[string]interface{}{
+		"name": "Classifiers", "members": []map[string]interface{}{member(zen, "big-pickle")},
+	})
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "big-pickle is a language model and cannot be in a group of System One models")
+	code, _, body = send(http.MethodPut, fmt.Sprintf("/model-groups/%d/", classifiers.ID), map[string]interface{}{"name": "Classifiers", "kind": "llm"})
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "kind cannot be changed")
+
+	// "All models" of a provider means all of the group's kind, so a provider
+	// with none of that kind has nothing to add.
+	code, all, body := send(http.MethodPost, "/model-groups", map[string]interface{}{
+		"name": "Every classifier", "kind": "system_one", "members": []map[string]interface{}{{"provider_id": zen.ID, "all_models": true}},
+	})
+	require.Equal(t, http.StatusCreated, code, body)
+	assert.Equal(t, db.ModelKindSystemOne, all.Kind)
+	code, _, body = send(http.MethodPost, "/model-groups", map[string]interface{}{
+		"name": "Nothing to route", "kind": "system_one", "members": []map[string]interface{}{{"provider_id": chat.ID, "all_models": true}},
+	})
+	assert.Equal(t, http.StatusBadRequest, code)
+	assert.Contains(t, body, "Chat only has no System One models")
+}

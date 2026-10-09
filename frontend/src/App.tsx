@@ -19,6 +19,7 @@ import { AddCompany } from './pages/AddCompany';
 import { ProjectSettings } from './pages/ProjectSettings';
 import { TaskPage } from './pages/TaskPage';
 import { TeamPage } from './pages/TeamPage';
+import { Usage } from './pages/Usage';
 
 function App() {
   return (
@@ -40,6 +41,7 @@ function App() {
             <Route path="/companies/:shortName/providers" element={<ProvidersManager />} />
             <Route path="/companies/:shortName/skills" element={<SkillsManager />} />
             <Route path="/companies/:shortName/mcp-servers" element={<MCPServers />} />
+            <Route path="/companies/:shortName/usage" element={<Usage />} />
             <Route path="/companies/:shortName/runs" element={<RunLogs />} />
             <Route path="/companies/:shortName/run-logs/:id" element={<RunLogDetails />} />
             <Route path="/companies/:shortName/settings" element={<Settings />} />

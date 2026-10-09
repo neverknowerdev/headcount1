@@ -47,34 +47,7 @@ func (q *AgentRepository) UpdateAgent(ctx context.Context, a Agent) (Agent, erro
 // EnsureBuiltinAgentsForCompany creates newly introduced built-in roles and
 // marks legacy rows with the same stable role key as built-in. Existing rows
 // are not overwritten: after bootstrap, the database row is authoritative.
-func (q *AgentRepository) EnsureBuiltinAgentsForCompany(ctx context.Context, companyID int32, defaults []Agent, providerID *int32, model string) error {
-	var configured Agent
-	if err := q.db.WithContext(ctx).
-		Where("company_id = ? AND (provider_id IS NOT NULL OR model_group_id IS NOT NULL)", companyID).
-		Order("id").First(&configured).Error; err != nil {
-		configured = Agent{}
-	}
-	if providerID == nil && configured.ProviderID != nil {
-		providerID = configured.ProviderID
-	}
-	if model == "" {
-		model = configured.Model
-	}
-	if providerID == nil {
-		var company Company
-		if err := q.db.WithContext(ctx).First(&company, companyID).Error; err == nil && company.UserID != nil {
-			var provider LLMProvider
-			if err := q.db.WithContext(ctx).
-				Where("user_id = ? AND enabled = ?", *company.UserID, true).
-				Order("id").First(&provider).Error; err == nil {
-				providerID = &provider.ID
-				if model == "" {
-					model = provider.DefaultModel
-				}
-			}
-		}
-	}
-
+func (q *AgentRepository) EnsureBuiltinAgentsForCompany(ctx context.Context, companyID int32, defaults []Agent) error {
 	for _, seed := range defaults {
 		var existing Agent
 		err := q.db.WithContext(ctx).
@@ -82,8 +55,6 @@ func (q *AgentRepository) EnsureBuiltinAgentsForCompany(ctx context.Context, com
 			First(&existing).Error
 		if err == gorm.ErrRecordNotFound {
 			seed.CompanyID = companyID
-			seed.ProviderID = providerID
-			seed.Model = model
 			if err := q.db.WithContext(ctx).Create(&seed).Error; err != nil {
 				return err
 			}

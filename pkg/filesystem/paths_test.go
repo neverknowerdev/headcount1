@@ -27,7 +27,7 @@ func TestPaths(t *testing.T) {
 		{"RepoDir", p.RepoDir("acme", "proj"), "/base/repos/acme/proj"},
 		{"WorktreeDir", p.WorktreeDir("acme", 42), "/base/workspace/acme/task-42"},
 		{"TaskArtifactsDir", p.TaskArtifactsDir("acme", 42), "/base/artifacts/acme/42"},
-		{"RunLogsDir", p.RunLogsDir("acme", 42, 5), "/base/logs/acme/42/run-5"},
+		{"TaskJournalDir", p.TaskJournalDir("acme", 42, 43), "/base/logs/acme/42/task-43"},
 		{"SkillDir", p.SkillDir("acme", "review"), "/base/skills/acme/review"},
 	}
 

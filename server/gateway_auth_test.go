@@ -72,6 +72,7 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	registry := runtokens.NewRegistry()
 	gw := integration.NewLLMGateway(database)
 	gw.SetRunTokenValidator(registry.Validate)
+	gw.SetCompanyTokenValidator(registry.ValidateCompany)
 	r := chi.NewRouter()
 	gw.Mount(r)
 
@@ -87,11 +88,8 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	}
 	chatBody := `{"model":"m","stream":false}`
 
-	// 1. Anonymous → 401 on every machine route.
+	// 1. Anonymous → 401.
 	require.Equal(t, http.StatusUnauthorized, post("/proxy/group/g/v1/chat/completions", chatBody, nil).Code)
-	require.Equal(t, http.StatusUnauthorized, post("/v1/chat/completions", chatBody, func(r *http.Request) {
-		r.Header.Set("X-Provider-ID", "1")
-	}).Code)
 
 	// 2. A valid run token passes.
 	token := registry.Issue(42)
@@ -116,6 +114,31 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 	})
 	require.Equal(t, http.StatusNotFound, w.Code, "a run token from another tenant must not reach owner's group")
 	registry.Revoke(77)
+
+	// 3c. A company token (a stateless workflow step, which is not a run)
+	// reaches its own company's resources, never another tenant's, cannot name
+	// a run, and stops working once its issuer revokes it.
+	companyToken, revokeCompanyToken := registry.IssueCompany(ownerCompany.ID)
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.Header.Set(runtokens.TokenHeader, companyToken)
+	})
+	require.Equal(t, http.StatusOK, w.Code, w.Body.String())
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.Header.Set(runtokens.TokenHeader, companyToken)
+		r.Header.Set("X-Run-ID", "42")
+	})
+	require.Equal(t, http.StatusForbidden, w.Code, "a company token must not write into a run's log")
+	otherCompanyToken, revokeOtherCompanyToken := registry.IssueCompany(otherCompany.ID)
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.Header.Set(runtokens.TokenHeader, otherCompanyToken)
+	})
+	require.Equal(t, http.StatusNotFound, w.Code, "a company token from another tenant must not reach owner's group")
+	revokeOtherCompanyToken()
+	revokeCompanyToken()
+	w = post("/proxy/group/g/v1/chat/completions", chatBody, func(r *http.Request) {
+		r.Header.Set(runtokens.TokenHeader, companyToken)
+	})
+	require.Equal(t, http.StatusUnauthorized, w.Code)
 
 	// 4. A revoked token stops working (the run ended).
 	registry.Revoke(42)
@@ -152,12 +175,6 @@ func TestGatewayRequiresRunTokenOrSession(t *testing.T) {
 		r.Header.Set("X-Run-ID", "77") // another tenant's run
 	})
 	require.Equal(t, http.StatusForbidden, w.Code, "a session user must not target another tenant's run")
-
-	w = post("/v1/chat/completions", chatBody, func(r *http.Request) {
-		r.AddCookie(otherCookie)
-		r.Header.Set("X-Provider-ID", "1")
-	})
-	require.Equal(t, http.StatusNotFound, w.Code, "another tenant's provider must look nonexistent")
 }
 
 // TestGatewayOpenWithoutValidator pins the legacy/local behavior: with no

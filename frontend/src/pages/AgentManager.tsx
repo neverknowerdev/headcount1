@@ -5,17 +5,6 @@ import { useParams } from 'react-router-dom';
 import { useStore } from '../store';
 import { ChevronDown, ChevronRight, Trash2 } from 'lucide-react';
 
-type AgentTemplate = {
-    name: string;
-    canonical_name?: string;
-    slug?: string;
-    description: string;
-    prompt: string;
-    best_models?: string[];
-    allowed_tools?: string[];
-    permissions?: string;
-};
-
 const AgentToggle: React.FC<{ agent: any; onToggle: (agent: any) => void }> = ({ agent, onToggle }) => {
     const action = agent.enabled === false ? 'Enable' : 'Disable';
     return (
@@ -37,10 +26,8 @@ export const AgentManager: React.FC = () => {
     const { shortName } = useParams<{shortName: string}>();
     const { selectedCompanyId } = useStore();
     const [agents, setAgents] = useState<any[]>([]);
-    const [templates, setTemplates] = useState<AgentTemplate[]>([]);
     const [showModal, setShowModal] = useState(false);
-    const [selectedTemplate, setSelectedTemplate] = useState('');
-    const [form, setForm] = useState({ name: '', description: '', system_prompt: '', permissions: '{}' });
+    const [form, setForm] = useState({ name: '', description: '', system_prompt: '' });
     const [saving, setSaving] = useState(false);
     const [expandedBuiltins, setExpandedBuiltins] = useState<Record<number, boolean>>({});
     const [deletingAgentId, setDeletingAgentId] = useState<number | null>(null);
@@ -56,44 +43,15 @@ export const AgentManager: React.FC = () => {
         }
     }, [selectedCompanyId]);
 
-    const fetchTemplates = useCallback(async () => {
-        try {
-            const res = await axios.get('/api/agent-configs');
-            setTemplates(res.data || []);
-        } catch (e) {
-            console.error(e);
-        }
-    }, []);
-
     useEffect(() => {
         // eslint-disable-next-line react-hooks/set-state-in-effect
         fetchAgents();
     }, [fetchAgents]);
 
-    useEffect(() => {
-        // eslint-disable-next-line react-hooks/set-state-in-effect
-        fetchTemplates();
-    }, [fetchTemplates]);
-
     const openModal = () => {
-        setForm({ name: '', description: '', system_prompt: '', permissions: '{}' });
-        setSelectedTemplate('');
+        setForm({ name: '', description: '', system_prompt: '' });
         setError('');
         setShowModal(true);
-    };
-
-    const selectTemplate = (name: string) => {
-        setSelectedTemplate(name);
-        const template = templates.find(item => item.name === name);
-        if (!template) {
-            setForm(current => ({ ...current, system_prompt: '', permissions: '{}' }));
-            return;
-        }
-        setForm(current => ({
-            ...current,
-            system_prompt: template.prompt || '',
-            permissions: template.permissions || '{}',
-        }));
     };
 
     const handleCreate = async () => {
@@ -105,8 +63,8 @@ export const AgentManager: React.FC = () => {
                 company_id: selectedCompanyId,
                 name: form.name.trim(),
                 description: form.description.trim(),
-                system_prompt: form.system_prompt.trim(),
-                permissions: form.permissions,
+                // A role's prompt says who is speaking; one line is enough.
+                system_prompt: form.system_prompt.trim() || `You are the ${form.name.trim()} agent.`,
             });
             setShowModal(false);
             window.location.href = `/companies/${shortName}/agents/${res.data.id}`;
@@ -142,12 +100,6 @@ export const AgentManager: React.FC = () => {
 
     const renderBuiltinCard = (agent: any) => {
         const expanded = !!expandedBuiltins[agent.id];
-        const template = templates.find(item =>
-            item.canonical_name === agent.role_key || item.name === agent.role_key || item.name === agent.name
-        );
-        const allowedTools = template?.allowed_tools || [];
-        const canonicalName = agent.role_key || template?.canonical_name || agent.name;
-        const slug = agent.short_name || template?.slug || '—';
         return (
             <div key={agent.id} data-testid={`builtin-agent-${agent.id}`} className="bg-white rounded-lg border shadow-sm">
                 <div className="flex items-center gap-2 p-4">
@@ -172,21 +124,11 @@ export const AgentManager: React.FC = () => {
                 </div>
                 {expanded && (
                     <div className="border-t px-5 py-4 space-y-4 text-sm">
-                        <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                            <div><span className="block font-semibold uppercase tracking-wide text-gray-400">Canonical system name</span><code className="text-gray-800">{canonicalName}</code></div>
-                            <div><span className="block font-semibold uppercase tracking-wide text-gray-400">Agent slug</span><code className="text-gray-800">{slug}</code></div>
-                        </div>
                         <div>
-                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System prompt</p>
+                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Prompt</p>
                             <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border whitespace-pre-wrap font-mono max-h-48 overflow-y-auto">{agent.system_prompt}</div>
                         </div>
-                        <div>
-                            <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Available tools</p>
-                            <div className="flex flex-wrap gap-1.5">
-                                {allowedTools.length > 0 ? allowedTools.map(tool => <code key={tool} className="rounded bg-gray-100 px-2 py-1 text-xs text-gray-700">{tool}</code>) : <span className="text-xs text-gray-500">All tools</span>}
-                            </div>
-                        </div>
-                        <button type="button" onClick={() => window.location.href = `/companies/${shortName}/agents/${agent.id}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">Open edit page →</button>
+                        <button type="button" onClick={() => window.location.href = `/companies/${shortName}/agents/${agent.id}`} className="text-sm font-medium text-indigo-600 hover:text-indigo-800">Edit prompt, see usage →</button>
                     </div>
                 )}
             </div>
@@ -201,7 +143,7 @@ export const AgentManager: React.FC = () => {
             </div>
             {agent.description && <p className="text-sm text-gray-600 mb-4">{agent.description}</p>}
             <div className="mt-auto">
-                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">System Prompt</p>
+                <p className="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2">Prompt</p>
                 <div className="text-xs text-gray-700 bg-gray-50 p-3 rounded border overflow-y-auto h-32 whitespace-pre-wrap font-mono">{agent.system_prompt}</div>
             </div>
             <div className="mt-4 flex items-center justify-end">
@@ -232,7 +174,7 @@ export const AgentManager: React.FC = () => {
                     <div className="flex items-center gap-2 mb-4">
                         <span className="font-semibold text-gray-700">Built-in agents</span>
                         <span className="text-xs bg-violet-100 text-violet-700 px-2 py-0.5 rounded-full">{builtinAgents.length}</span>
-                        <span className="text-xs text-gray-400">Protected built-in roles</span>
+                        <span className="text-xs text-gray-400">Roles the workflow speaks as. Their prompts are yours to extend.</span>
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
                         {builtinAgents.map(renderBuiltinCard)}
@@ -266,27 +208,6 @@ export const AgentManager: React.FC = () => {
                         <h2 className="text-lg font-semibold text-gray-900">New agent</h2>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-template">Template</label>
-                            <select
-                                id="agent-template"
-                                data-testid="agent-template"
-                                className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                value={selectedTemplate}
-                                onChange={e => selectTemplate(e.target.value)}
-                            >
-                                <option value="">Blank agent</option>
-                                {templates.map(template => (
-                                    <option key={template.name} value={template.name}>{template.name}</option>
-                                ))}
-                            </select>
-                            {selectedTemplate && (
-                                <p className="mt-1 text-xs text-gray-500">
-                                    Copied the template prompt and {templates.find(template => template.name === selectedTemplate)?.allowed_tools?.length || 0} tool settings. You can edit the prompt below.
-                                </p>
-                            )}
-                        </div>
-
-                        <div>
                             <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-name">Name <span className="text-red-500">*</span></label>
                             <input
                                 id="agent-name"
@@ -311,12 +232,12 @@ export const AgentManager: React.FC = () => {
                         </div>
 
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-system-prompt">System prompt</label>
+                            <label className="block text-sm font-medium text-gray-700 mb-1" htmlFor="agent-system-prompt">Prompt</label>
                             <textarea
                                 id="agent-system-prompt"
                                 className="w-full border rounded-lg px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 resize-none"
                                 rows={4}
-                                placeholder="Optional — you can set this later in agent settings."
+                                placeholder="Optional — defaults to “You are the <name> agent.”"
                                 value={form.system_prompt}
                                 onChange={e => setForm(f => ({ ...f, system_prompt: e.target.value }))}
                             />

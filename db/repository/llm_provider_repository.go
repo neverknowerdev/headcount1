@@ -128,6 +128,13 @@ func (q *LLMProviderRepository) EnsureBuiltinLLMProvidersForUser(ctx context.Con
 // order changes. A nil/empty models list is a no-op — a transient discovery
 // failure should never blank out a previously known-good catalog.
 func (q *LLMProviderRepository) UpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error {
+	return q.replaceModelCatalog(ctx, providerID, models, false)
+}
+
+// replaceModelCatalog stores a discovered catalog, each model under its kind.
+// The default model is re-picked when forced, when there is none, or when it
+// is no longer in the catalog.
+func (q *LLMProviderRepository) replaceModelCatalog(ctx context.Context, providerID int32, models []string, repickDefault bool) error {
 	if len(models) == 0 {
 		return nil
 	}
@@ -135,13 +142,43 @@ func (q *LLMProviderRepository) UpdateLLMProviderModelCatalog(ctx context.Contex
 	if err := q.db.WithContext(ctx).First(&existing, providerID).Error; err != nil {
 		return err
 	}
-	updates := map[string]any{"supported_models": strings.Join(models, ",")}
-	if existing.DefaultModel == "" || !slices.Contains(models, existing.DefaultModel) {
+	llm, systemOne := SplitModelCatalog(models)
+	if repickDefault || (existing.DefaultModel != "" && !slices.Contains(models, existing.DefaultModel)) {
 		// models is ordered by the caller (e.g. pkg/llmdiscovery's
 		// sortByPriority) with its preferred default first.
-		updates["default_model"] = models[0]
+		existing.DefaultModel = ""
 	}
-	return q.db.WithContext(ctx).Model(&existing).Updates(updates).Error
+	existing.SupportedModels, existing.SystemOneModels = strings.Join(llm, ","), strings.Join(systemOne, ",")
+	existing.SortCatalog()
+	return q.db.WithContext(ctx).Model(&LLMProvider{}).Where("id = ?", providerID).Updates(map[string]any{
+		"supported_models":  existing.SupportedModels,
+		"system_one_models": existing.SystemOneModels,
+		"default_model":     existing.DefaultModel,
+	}).Error
+}
+
+// SortLLMProviderCatalogs files the models of every provider under their
+// kind. Run at startup, it brings rows written before the kinds were told
+// apart into line: a System One model that was listed as a language model
+// moves to where it belongs.
+func (q *LLMProviderRepository) SortLLMProviderCatalogs(ctx context.Context) error {
+	var providers []LLMProvider
+	if err := q.db.WithContext(ctx).Find(&providers).Error; err != nil {
+		return err
+	}
+	for _, provider := range providers {
+		if !provider.SortCatalog() {
+			continue
+		}
+		if err := q.db.WithContext(ctx).Model(&LLMProvider{}).Where("id = ?", provider.ID).Updates(map[string]any{
+			"supported_models":  provider.SupportedModels,
+			"system_one_models": provider.SystemOneModels,
+			"default_model":     provider.DefaultModel,
+		}).Error; err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ForceUpdateLLMProviderModelCatalog replaces a provider's model catalog and
@@ -150,11 +187,5 @@ func (q *LLMProviderRepository) UpdateLLMProviderModelCatalog(ctx context.Contex
 // alone. Used for explicit, user-triggered re-discovery — getting the
 // current best pick is exactly the point of that action.
 func (q *LLMProviderRepository) ForceUpdateLLMProviderModelCatalog(ctx context.Context, providerID int32, models []string) error {
-	if len(models) == 0 {
-		return nil
-	}
-	return q.db.WithContext(ctx).Model(&LLMProvider{}).Where("id = ?", providerID).Updates(map[string]any{
-		"supported_models": strings.Join(models, ","),
-		"default_model":    models[0],
-	}).Error
+	return q.replaceModelCatalog(ctx, providerID, models, true)
 }

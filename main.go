@@ -195,8 +195,6 @@ func run() error {
 		return handleStartupFailure(upd, basePath, sqlDB, dialect, candidateManifest, currentBuild, err)
 	}
 
-	recoverStaleRuns(database)
-
 	// Seed predefined MCP servers (headcount1, github, google-docs) if not present.
 	if err := db.New(database).EnsureBuiltinMCPServers(context.Background()); err != nil {
 		log.Printf("Warning: failed to seed built-in MCP servers: %v", err)
@@ -228,10 +226,16 @@ func run() error {
 		log.Printf("Warning: failed to list companies for built-in agent seeding: %v", err)
 	} else {
 		for _, company := range companies {
-			if err := db.New(database).EnsureBuiltinAgentsForCompany(context.Background(), company.ID, agentdefaults.Rows(company.ID), nil, ""); err != nil {
+			if err := db.New(database).EnsureBuiltinAgentsForCompany(context.Background(), company.ID, agentdefaults.Rows(company.ID)); err != nil {
 				log.Printf("Warning: failed to seed built-in agents for %s: %v", company.Name, err)
 			}
 		}
+	}
+	// File every provider's models under their kind. Rows written before
+	// System One models were told apart from language models list them
+	// together; this moves each to where it belongs.
+	if err := db.New(database).SortLLMProviderCatalogs(context.Background()); err != nil {
+		log.Printf("Warning: failed to sort provider model catalogs: %v", err)
 	}
 	// Seed the known provider presets (OpenCode Go, MiniMax, ...) users can
 	// pick from a dropdown when adding a provider. These are a global catalog;
@@ -325,15 +329,6 @@ func run() error {
 	eng := engine.NewNativeEngine(database, hub)
 	log.Println("Using native engine")
 
-	// Pick up sessions a previous graceful shutdown (e.g. applying an
-	// auto-update) durably paused mid-flight. The automatic startup policy is
-	// intentionally limited to update-paused sessions; explicit failed/stale
-	// recovery uses the same engine ResumeSession primitive later.
-	go eng.ResumeEligibleSessions(context.Background())
-	go eng.ResumeWaitingOrchestrators(context.Background())
-	// Reconcile queued tasks after restart so a prerequisite completion or
-	// dependency removal is not stranded in the crash window before launch.
-	go eng.ReconcileQueuedTasks(context.Background())
 	// Session workspaces are durable by design. Remove them only for tasks that
 	// have been Done for the retention period, so forks and recovery remain
 	// possible during the post-completion window.
@@ -421,6 +416,7 @@ func run() error {
 		// Per-run token enforcement: only live agent runs (engine-issued
 		// tokens) or authenticated sessions may use the proxy.
 		gw.SetRunTokenValidator(runtokens.Default().Validate)
+		gw.SetCompanyTokenValidator(runtokens.Default().ValidateCompany)
 		gw.Mount(r)
 
 		// Everything else — the human-facing API, including /ws — requires a
@@ -494,9 +490,19 @@ func run() error {
 	httpServer := &http.Server{Addr: ":" + port, Handler: r}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	// The startup sweep handles runs abandoned before this process started;
-	// the monitor covers stalls that happen while the server remains up.
-	eng.StartLivenessMonitor(ctx, configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", time.Minute), configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute))
+	// Start moving tasks once the server answers: a task whose model is a
+	// model group reaches it through this process's own gateway. The engine
+	// first resumes the sessions a planned restart paused; its sweep then
+	// finds every task the previous process left unfinished, and keeps
+	// finding any that stall while the server stays up.
+	go func() {
+		waitForListener(ctx, port, 30*time.Second)
+		eng.Start(ctx, engine.Options{
+			SweepInterval: configuredDuration("HEADCOUNT1_LIVENESS_INTERVAL", 30*time.Second),
+			StaleAfter:    configuredDuration("HEADCOUNT1_STALE_AFTER", 2*time.Minute),
+			ModelBackoff:  configuredDuration("HEADCOUNT1_MODEL_BACKOFF", 0),
+		})
+	}()
 
 	serverErr := make(chan error, 1)
 	go func() {
@@ -712,28 +718,17 @@ func newCompanyRecipientsResolver(database *gorm.DB) func(companyID int32) ([]in
 	}
 }
 
-func recoverStaleRuns(database *gorm.DB) {
-	q := db.New(database)
-	ctx := context.Background()
-
-	staleRuns, err := q.GetStaleRunningRuns(ctx, 10*time.Minute)
-	if err != nil {
-		log.Printf("Warning: failed to check for stale runs: %v", err)
-		return
-	}
-
-	if len(staleRuns) == 0 {
-		return
-	}
-
-	log.Printf("Recovering %d stale run(s)...", len(staleRuns))
-	for _, run := range staleRuns {
-		log.Printf("Marking run %d (task %d) stale due to inactivity", run.ID, run.TaskID)
-		if changed, markErr := q.MarkRunStale(ctx, run.ID, "server restarted while run was in progress"); markErr != nil {
-			log.Printf("Warning: failed to mark run %d stale: %v", run.ID, markErr)
-		} else if changed {
-			log.Printf("Run %d is recoverable via ResumeSession", run.ID)
+// waitForListener blocks until the server's port accepts connections, the
+// deadline passes, or ctx ends.
+func waitForListener(ctx context.Context, port string, deadline time.Duration) {
+	until := time.Now().Add(deadline)
+	for time.Now().Before(until) && ctx.Err() == nil {
+		connection, err := net.DialTimeout("tcp", net.JoinHostPort("127.0.0.1", port), 500*time.Millisecond)
+		if err == nil {
+			_ = connection.Close()
+			return
 		}
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 

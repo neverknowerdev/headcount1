@@ -1,312 +1,104 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
 import { useParams, Link } from 'react-router-dom';
+import { ArrowLeft, Save } from 'lucide-react';
+import { UsagePanel } from '../components/UsagePanel';
+import { RunTree } from '../components/RunTree';
+import type { RunTreeData } from '../components/RunTree';
+import { errorMessage } from '../lib/workflow';
 
-import { ArrowLeft, Save, ChevronDown, ChevronRight } from 'lucide-react';
-import { ProviderOrGroupSelect, describeGroupModels } from '../components/ProviderOrGroupSelect';
-
-type WorkerPolicyMode = 'inherit' | 'deny' | 'custom';
-
-const WORKER_UNAVAILABLE_TOOLS = [
-    'create_task', 'create_subtask', 'get_task', 'ask_human',
-    'run_worker', 'worker_list', 'get_worker_info', 'stop_worker',
-    'ask_task_owner', 'answer_message',
-];
-
-function parseWorkerPolicy(raw: string) {
-    if (!raw.trim()) return { mode: 'inherit' as WorkerPolicyMode, values: [] as string[] };
-    try {
-        const parsed = JSON.parse(raw);
-        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-            return { mode: 'custom' as WorkerPolicyMode, values: [] as string[] };
-        }
-        const mode: WorkerPolicyMode = parsed.mode === 'inherit' || parsed.mode === 'deny' || parsed.mode === 'custom' ? parsed.mode : 'custom';
-        const values = parsed[mode === 'deny' ? 'denied' : 'allowed'];
-        return { mode, values: Array.isArray(values) ? values.filter((value: unknown): value is string => typeof value === 'string') : [] };
-    } catch {
-        return { mode: 'custom' as WorkerPolicyMode, values: [] as string[] };
-    }
+interface Agent {
+    id: number;
+    company_id: number;
+    name: string;
+    role_key: string;
+    short_name: string;
+    description: string;
+    system_prompt: string;
+    builtin: boolean;
+    enabled: boolean;
 }
 
-function parsePermissions(raw: string): Record<string, string> {
-    try {
-        const parsed = JSON.parse(raw || '{}');
-        return parsed && typeof parsed === 'object' ? parsed : {};
-    } catch {
-        return {};
-    }
+interface RoleConfig {
+    name: string;
+    prompt: string;
 }
 
-function parseAllowedMCPs(raw: string): string[] | null {
-    if (!raw.trim()) return null;
-    try {
-        const parsed = JSON.parse(raw);
-        return Array.isArray(parsed) ? parsed.filter((name): name is string => typeof name === 'string') : [];
-    } catch {
-        return [];
-    }
-}
-
+// An agent is a role: a name, a description and a short prompt that says who
+// is speaking. Which model runs and which tools are available belong to the
+// task and its workflow, not to the agent.
 export const AgentDetails: React.FC = () => {
-    const { id, shortName } = useParams<{id: string, shortName: string}>();
-    const [agent, setAgent] = useState<any>(null);
-    const [stats, setStats] = useState<any>(null);
-    const [toolNames, setToolNames] = useState<string[]>([]);
-    const [providers, setProviders] = useState<any[]>([]);
-    const [activeTab, setActiveTab] = useState('overview');
-    const [runs, setRuns] = useState<any[]>([]);
-    const [mcpServers, setMcpServers] = useState<any[]>([]);
-    const [mcpAccountAssignments, setMcpAccountAssignments] = useState<Record<number, boolean>>({});
-    const [codegraphAssignments, setCodegraphAssignments] = useState<Record<number, boolean>>({}); // serverID → enabled (default true)
-    // toolFilters: serverID → toolName → enabled (undefined = enabled by default)
-    const [toolFilters, setToolFilters] = useState<Record<number, Record<string, boolean>>>({});
-    const [expandedToolServers, setExpandedToolServers] = useState<Record<number, boolean>>({});
-    // key: `${serverId}:${toolName}` → whether description is expanded
-    const [expandedToolDesc, setExpandedToolDesc] = useState<Record<string, boolean>>({});
+    const { id, shortName } = useParams<{ id: string; shortName: string }>();
+    const [agent, setAgent] = useState<Agent | null>(null);
+    const [roles, setRoles] = useState<RoleConfig[]>([]);
+    const [sessions, setSessions] = useState<RunTreeData>({ runs: [], tasks: [] });
+    const [activeTab, setActiveTab] = useState('role');
+    const [form, setForm] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '' });
     const [saveState, setSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
     const [saveError, setSaveError] = useState<string | null>(null);
-    const [mcpSaveState, setMcpSaveState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
-    const [mcpSaveError, setMcpSaveError] = useState<string | null>(null);
-    const [workerToolMode, setWorkerToolMode] = useState<WorkerPolicyMode>('inherit');
-    const [workerToolValues, setWorkerToolValues] = useState<string[]>([]);
-    const [workerMcpMode, setWorkerMcpMode] = useState<WorkerPolicyMode>('inherit');
-    const [workerMcpValues, setWorkerMcpValues] = useState<string[]>([]);
 
-    const [modelGroups, setModelGroups] = useState<any[]>([]);
-    const [agentConfigs, setAgentConfigs] = useState<any[]>([]);
-    const [formData, setFormData] = useState({ name: '', role_key: '', short_name: '', description: '', system_prompt: '', model: '', provider_id: '', model_group_id: '', chat_type: 'message_history', reasoning_level: '', allowed_mcps: '', permissions: '{}', can_use_workers: false });
-
-    const fetchData = useCallback(async () => {
-        try {
-            const [agentRes, statsRes, provRes, groupRes, toolNamesRes, agentConfigRes] = await Promise.all([
-                axios.get(`/api/agents/${id}`),
-                axios.get(`/api/agents/${id}/stats`),
-                axios.get('/api/providers'),
-                axios.get('/api/model-groups'),
-                axios.get('/api/tool-names'),
-                axios.get('/api/agent-configs')
-            ]);
-            setAgent(agentRes.data);
-            setStats(statsRes.data);
-            setProviders(provRes.data || []);
-            setModelGroups(groupRes.data || []);
-            setToolNames(toolNamesRes.data || []);
-            setAgentConfigs(agentConfigRes.data || []);
-            setFormData({
-                name: agentRes.data.name,
-                role_key: agentRes.data.role_key || '',
-                short_name: agentRes.data.short_name || '',
-                description: agentRes.data.description || '',
-                system_prompt: agentRes.data.system_prompt,
-                model: agentRes.data.model || '',
-                provider_id: agentRes.data.provider_id?.toString() || '',
-                model_group_id: agentRes.data.model_group_id?.toString() || '',
-                chat_type: agentRes.data.chat_type || 'message_history',
-                reasoning_level: agentRes.data.reasoning_level || '',
-                allowed_mcps: agentRes.data.allowed_mcps || '',
-                permissions: agentRes.data.permissions || '{}',
-                can_use_workers: !!agentRes.data.can_use_workers
-            });
-            const workerTools = parseWorkerPolicy(agentRes.data.worker_permissions || '');
-            setWorkerToolMode(workerTools.mode);
-            setWorkerToolValues(workerTools.values);
-            const workerMcps = parseWorkerPolicy(agentRes.data.worker_allowed_mcps || '');
-            setWorkerMcpMode(workerMcps.mode);
-            setWorkerMcpValues(workerMcps.values);
-        } catch (e) {
-            console.error(e);
-        }
-        try {
-            const runsRes = await axios.get(`/api/agents/${id}/runs`);
-            setRuns(runsRes.data || []);
-        } catch (e) {
-            console.error(e);
-        }
-    }, [id]);
-
-    const fetchMCPData = useCallback(async () => {
-        if (!id || !agent?.company_id) return;
-        try {
-            const [serversRes, assignRes, toolFilterRes] = await Promise.all([
-                axios.get(`/api/mcp-servers?company_id=${agent.company_id}`),
-                axios.get(`/api/agents/${id}/mcp-accounts`),
-                axios.get(`/api/agents/${id}/mcp-tool-filters`),
-            ]);
-            setMcpServers(serversRes.data || []);
-            const data = assignRes.data || {};
-            const accountMap: Record<number, boolean> = {};
-            for (const a of (data.accounts || [])) {
-                accountMap[a.mcp_account_id] = a.enabled;
-            }
-            setMcpAccountAssignments(accountMap);
-            const cgMap: Record<number, boolean> = {};
-            for (const cg of (data.codegraph || [])) {
-                cgMap[cg.server_id] = cg.enabled;
-            }
-            setCodegraphAssignments(cgMap);
-            // toolFilterRes.data is map[serverID]map[toolName]enabled (numbers as string keys from JSON)
-            const rawFilters = toolFilterRes.data || {};
-            const parsedFilters: Record<number, Record<string, boolean>> = {};
-            for (const [serverIdStr, toolMap] of Object.entries(rawFilters)) {
-                parsedFilters[parseInt(serverIdStr)] = toolMap as Record<string, boolean>;
-            }
-            setToolFilters(parsedFilters);
-        } catch (e) {
-            console.error(e);
-        }
-    }, [id, agent?.company_id]);
+    // applyAgent puts a loaded agent on the page and into the form.
+    const applyAgent = useCallback((loaded: Agent) => {
+        setAgent(loaded);
+        setForm({
+            name: loaded.name,
+            role_key: loaded.role_key || '',
+            short_name: loaded.short_name || '',
+            description: loaded.description || '',
+            system_prompt: loaded.system_prompt || '',
+        });
+    }, []);
 
     useEffect(() => {
-        fetchData();
-    }, [fetchData]);
+        let current = true;
+        Promise.all([axios.get(`/api/agents/${id}`), axios.get('/api/agent-configs'), axios.get(`/api/agents/${id}/runs?tree=true`)])
+            .then(([agentRes, rolesRes, runsRes]) => {
+                if (!current) return;
+                applyAgent(agentRes.data);
+                setRoles(rolesRes.data || []);
+                setSessions({ runs: runsRes.data?.runs || [], tasks: runsRes.data?.tasks || [] });
+            })
+            .catch(e => console.error(e));
+        return () => { current = false; };
+    }, [id, applyAgent]);
 
-    useEffect(() => {
-        if (activeTab === 'tools') fetchMCPData();
-    }, [activeTab, fetchMCPData]);
-
-    const handleSaveMCPAssignments = async () => {
-        setMcpSaveState('saving');
-        setMcpSaveError(null);
-        try {
-            const accounts = Object.entries(mcpAccountAssignments).map(([accountId, enabled]) => ({
-                mcp_account_id: parseInt(accountId),
-                enabled,
-            }));
-            const codegraph = Object.entries(codegraphAssignments).map(([serverId, enabled]) => ({
-                server_id: parseInt(serverId),
-                enabled,
-            }));
-            // Build tool filter payload: array of {mcp_server_id, tool_name, enabled}
-            const toolFilterPayload: {mcp_server_id: number; tool_name: string; enabled: boolean}[] = [];
-            for (const [serverIdStr, toolMap] of Object.entries(toolFilters)) {
-                const serverId = parseInt(serverIdStr);
-                for (const [toolName, enabled] of Object.entries(toolMap)) {
-                    toolFilterPayload.push({ mcp_server_id: serverId, tool_name: toolName, enabled });
-                }
-            }
-            const agentPayload = {
-                ...formData,
-                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
-                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
-                worker_permissions: JSON.stringify({ mode: workerToolMode, [workerToolMode === 'deny' ? 'denied' : 'allowed']: workerToolValues }),
-                worker_allowed_mcps: JSON.stringify({ mode: workerMcpMode, [workerMcpMode === 'deny' ? 'denied' : 'allowed']: workerMcpValues }),
-            };
-            await Promise.all([
-                axios.put(`/api/agents/${id}/mcp-accounts`, { accounts, codegraph }),
-                axios.put(`/api/agents/${id}/mcp-tool-filters`, toolFilterPayload),
-                axios.put(`/api/agents/${id}`, agentPayload),
-            ]);
-            setMcpSaveState('saved');
-            setTimeout(() => setMcpSaveState('idle'), 2000);
-        } catch (e: any) {
-            const msg = e.response?.data?.error || e.message || 'Save failed';
-            setMcpSaveError(msg);
-            setMcpSaveState('error');
-        }
-    };
-
-    const handleSave = async (e: React.FormEvent) => {
-        e.preventDefault();
+    const save = async (values: typeof form) => {
         setSaveState('saving');
         setSaveError(null);
         try {
-            const payload = {
-                ...formData,
-                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
-                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
-                worker_permissions: JSON.stringify({ mode: workerToolMode, [workerToolMode === 'deny' ? 'denied' : 'allowed']: workerToolValues }),
-                worker_allowed_mcps: JSON.stringify({ mode: workerMcpMode, [workerMcpMode === 'deny' ? 'denied' : 'allowed']: workerMcpValues }),
-            };
-            await axios.put(`/api/agents/${id}`, payload);
-            fetchData();
+            const res = await axios.put(`/api/agents/${id}`, values);
+            applyAgent(res.data);
             setSaveState('saved');
             setTimeout(() => setSaveState('idle'), 2000);
-        } catch (e: any) {
-            setSaveError(e.response?.data?.error || e.message || 'Save failed');
-            setSaveState('error');
-        }
-    };
-
-    const restoreBuiltinDefaults = async () => {
-        if (!builtinConfig) return;
-        setSaveState('saving');
-        setSaveError(null);
-        const defaults = {
-            ...formData,
-            system_prompt: builtinConfig.prompt,
-            permissions: builtinConfig.permissions || '{}',
-            allowed_mcps: JSON.stringify(builtinConfig.allowed_mcps || []),
-            can_use_workers: !!builtinConfig.can_use_workers,
-        };
-        try {
-            await axios.put(`/api/agents/${id}`, {
-                ...defaults,
-                provider_id: formData.model_group_id ? null : (formData.provider_id ? parseInt(formData.provider_id) : null),
-                model_group_id: formData.model_group_id ? parseInt(formData.model_group_id) : null,
-            });
-            setFormData(defaults);
-            await fetchData();
-            setSaveState('saved');
-            setTimeout(() => setSaveState('idle'), 2000);
-        } catch (e: any) {
-            setSaveError(e.response?.data?.error || e.message || 'Restore failed');
+        } catch (e) {
+            setSaveError(errorMessage(e, 'Save failed'));
             setSaveState('error');
         }
     };
 
     if (!agent) return <div>Loading...</div>;
 
-    const mainPermissions = parsePermissions(formData.permissions);
-    const workerToolOptions = [...new Set([...toolNames, ...WORKER_UNAVAILABLE_TOOLS])];
-    const workerMcpOptions = mcpServers
-        .filter((server: any) => server.name !== 'headcount1' && !server.project_id)
-        .filter((server: any, index: number, all: any[]) => all.findIndex(candidate => candidate.name === server.name) === index);
-    const toggleWorkerTool = (name: string, checked: boolean) => {
-        setWorkerToolValues(previous => checked ? [...new Set([...previous, name])] : previous.filter(item => item !== name));
-    };
-    const toggleWorkerMcp = (name: string, checked: boolean) => {
-        setWorkerMcpValues(previous => checked ? [...new Set([...previous, name])] : previous.filter(item => item !== name));
-    };
-    const WorkerModeSelector = ({ name, value, onChange }: { name: string; value: WorkerPolicyMode; onChange: (mode: WorkerPolicyMode) => void }) => (
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-2">
-            {[
-                { mode: 'inherit' as const, title: 'Inherit from parent', description: 'Use the parent agent’s effective access.' },
-                { mode: 'deny' as const, title: 'Deny selected', description: 'Block only selected items; inherit everything else.' },
-                { mode: 'custom' as const, title: 'Custom allowlist', description: 'Allow only the selected items.' },
-            ].map(option => (
-                <label key={option.mode} className={`border rounded-lg p-3 cursor-pointer ${value === option.mode ? 'border-indigo-500 bg-indigo-50 ring-1 ring-indigo-200' : 'border-gray-200 hover:border-gray-300'}`}>
-                    <input type="radio" name={`worker-policy-${name}`} checked={value === option.mode} onChange={() => onChange(option.mode)} className="sr-only" />
-                    <span className="block text-sm font-semibold text-gray-900">{option.title}</span>
-                    <span className="block text-xs text-gray-500 mt-1">{option.description}</span>
-                </label>
-            ))}
-        </div>
-    );
-    const builtinConfig = agent.builtin
-        ? agentConfigs.find(config => config.canonical_name === agent.role_key || config.name === agent.role_key || config.name === agent.name)
-        : null;
-    const canonicalName = agent.role_key || agent.name || '—';
-    const agentSlug = agent.short_name || '—';
+    const defaultPrompt = agent.builtin ? roles.find(role => role.name === agent.role_key || role.name === agent.name)?.prompt : undefined;
 
     return (
-        <div className="h-full flex flex-col">
+        <div className="flex h-full flex-col">
             <div className="mb-6 flex items-center space-x-4">
                 <Link to={`/companies/${shortName}/agents`} className="text-gray-500 hover:text-gray-900"><ArrowLeft size={20} /></Link>
                 <h1 className="text-2xl font-bold">{agent.name}</h1>
+                {agent.builtin && <span className="rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-600">built-in role</span>}
             </div>
 
-            <div className="border-b mb-6">
+            <div className="mb-6 border-b">
                 <nav className="-mb-px flex space-x-8">
                     {[
-                        { key: 'overview', label: 'Overview' },
-                        { key: 'logs', label: 'Logs' },
-                        { key: 'settings', label: 'Settings' },
-                        { key: 'tools', label: 'Tools & MCPs' },
+                        { key: 'role', label: 'Role' },
+                        { key: 'usage', label: 'Usage' },
+                        { key: 'sessions', label: 'Sessions' },
                     ].map(({ key, label }) => (
                         <button
                             key={key}
                             onClick={() => setActiveTab(key)}
-                            className={`${activeTab === key ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:text-gray-700 hover:border-gray-300'} whitespace-nowrap py-4 px-1 border-b-2 font-medium text-sm`}
+                            className={`${activeTab === key ? 'border-indigo-500 text-indigo-600' : 'border-transparent text-gray-500 hover:border-gray-300 hover:text-gray-700'} whitespace-nowrap border-b-2 px-1 py-4 text-sm font-medium`}
                         >
                             {label}
                         </button>
@@ -315,513 +107,67 @@ export const AgentDetails: React.FC = () => {
             </div>
 
             <div className="flex-1 overflow-y-auto">
-                {activeTab === 'overview' && (
-                    <div className="space-y-6">
-                        <div className="bg-white p-6 rounded-lg shadow border" data-testid="agent-identity">
-                            <h3 className="font-bold mb-4">Agent identity</h3>
-                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 text-sm">
-                                <div><p className="text-gray-500 mb-1">Canonical system name</p><code className="font-mono text-gray-900">{canonicalName}</code></div>
-                                <div><p className="text-gray-500 mb-1">Agent slug</p><code className="font-mono text-gray-900">{agentSlug}</code></div>
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
-                            <div className="bg-white p-4 rounded-lg shadow border">
-                                <p className="text-sm text-gray-500 mb-1">Total Requests</p>
-                                <p className="text-2xl font-bold">{stats?.total_requests || 0}</p>
-                            </div>
-                            <div className="bg-white p-4 rounded-lg shadow border">
-                                <p className="text-sm text-gray-500 mb-1">Total Tokens</p>
-                                <p className="text-2xl font-bold">{stats?.total_tokens || 0}</p>
-                            </div>
-                            <div className="bg-white p-4 rounded-lg shadow border">
-                                <p className="text-sm text-gray-500 mb-1">Prompt Tokens</p>
-                                <p className="text-2xl font-bold">{stats?.prompt_tokens || 0}</p>
-                            </div>
-                            <div className="bg-white p-4 rounded-lg shadow border">
-                                <p className="text-sm text-gray-500 mb-1">Completion Tokens</p>
-                                <p className="text-2xl font-bold">{stats?.completion_tokens || 0}</p>
-                            </div>
-                        </div>
-
-                        <div className="bg-white p-6 rounded-lg shadow border">
-                            <h3 className="font-bold mb-4">Configuration</h3>
-                            <div className="space-y-4">
-                                <div>
-                                    <p className="text-sm text-gray-500 mb-1">{agent.model_group_id ? 'Model Group' : 'Active Provider'}</p>
-                                    <p className="font-medium">
-                                        {agent.model_group_id
-                                            ? <>{modelGroups.find(g => g.id === agent.model_group_id)?.name || `Group #${agent.model_group_id}`} <span className="ml-1 text-xs font-normal bg-indigo-100 text-indigo-700 px-2 py-0.5 rounded-full">auto-routing</span></>
-                                            : (providers.find(p => p.id === agent.provider_id)?.name || 'None')}
-                                    </p>
-                                </div>
-                                <div>
-                                    <p className="text-sm text-gray-500 mb-1">{agent.model_group_id ? 'Models' : 'Active Model'}</p>
-                                    <p className="font-medium">
-                                        {agent.model_group_id
-                                            ? describeGroupModels(modelGroups.find(g => g.id === agent.model_group_id))
-                                            : (agent.model || 'None')}
-                                    </p>
-                                </div>
-                                <div className="pt-2">
-                                    <p className="text-sm text-gray-500 mb-2">Proxy URL for CLI</p>
-                                    <p className="font-mono text-sm bg-gray-100 p-2 rounded break-all">
-                                        {window.location.protocol}//{window.location.host}/api/proxy/agent/{agent.id}/v1/chat/completions
-                                    </p>
-                                    <p className="mt-1 text-xs text-gray-400">
-                                        Requests must carry your login session (cookie) or an agent run token — anonymous calls are rejected.
-                                    </p>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {activeTab === 'logs' && (
-                    <div className="space-y-4">
-                        {runs.length === 0 ? (
-                            <p className="text-sm text-gray-500 italic">No runs yet.</p>
-                        ) : (
-                            runs.map((r: any) => (
-                                <details key={r.id} className="bg-gray-50 border rounded p-4 text-sm">
-                                    <summary className="font-semibold cursor-pointer text-indigo-700">Run #{r.id} for Task #{r.task_id} ({r.status})</summary>
-                                    <pre className="mt-2 text-xs bg-gray-900 text-green-400 p-2 rounded overflow-x-auto whitespace-pre-wrap">
-                                        {r.log_content}
-                                    </pre>
-                                </details>
-                            ))
-                        )}
-                    </div>
-                )}
-
-
-                {activeTab === 'tools' && (
-                    <div className="max-w-2xl space-y-6">
-                        <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-4">
-                            <h3 className="font-bold text-lg mb-4">Tools & Permissions</h3>
-                            <label className="flex items-start gap-3 rounded border bg-indigo-50 p-3">
-                                <input type="checkbox" checked={formData.can_use_workers} onChange={e => setFormData({...formData, can_use_workers: e.target.checked})} className="mt-0.5 h-4 w-4 text-indigo-600" />
-                                <span><span className="block text-sm font-medium text-gray-900">Can use helper workers</span><span className="block text-xs text-gray-600 mt-1">Allows bounded ephemeral research and verification workers. Workers cannot create tasks, change task state, or write artifacts.</span></span>
-                            </label>
-                            <div className="pt-4">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Basic tools</label>
-                                <div className="space-y-2">
-                                    {toolNames.map(tool => {
-                                        const isEnabled = mainPermissions[tool] !== 'deny';
-                                        return (
-                                            <div key={tool} className="flex items-center">
-                                                <input
-                                                    type="checkbox"
-                                                    id={`tool-${tool}`}
-                                                    checked={isEnabled}
-                                                    onChange={(e) => {
-                                                        const newPerms = { ...mainPermissions };
-                                                        if (e.target.checked) {
-                                                            newPerms[tool] = 'allow';
-                                                        } else {
-                                                            newPerms[tool] = 'deny';
-                                                        }
-                                                        setFormData({ ...formData, permissions: JSON.stringify(newPerms) });
-                                                    }}
-                                                    className="h-4 w-4 text-indigo-600 focus:ring-indigo-500 border-gray-300 rounded"
-                                                />
-                                                <label htmlFor={`tool-${tool}`} className="ml-2 block text-sm text-gray-900">
-                                                    {tool}
-                                                </label>
-                                            </div>
-                                        );
-                                    })}
-                                </div>
-                            </div>
-                            <div className="pt-4 border-t">
-                                <label className="block text-sm font-medium text-gray-700 mb-2">Effective capabilities</label>
-                                <div className="space-y-2 text-sm">
-                                    {['finish_task', 'report_status', 'ask_task_owner', 'artifact tools', 'session lifecycle'].map(capability => (
-                                        <label key={capability} className="flex items-center gap-2 text-gray-600"><input type="checkbox" checked readOnly disabled className="h-4 w-4" />{capability}<span className="text-xs text-gray-400">derived / read-only</span></label>
-                                    ))}
-                                    <p className="text-xs text-gray-500 pt-1">Connected MCP access is editable below.</p>
-                                </div>
-                            </div>
-                            <div className="pt-4 border-t mt-6 flex items-center gap-3">
-                                <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
-                                    <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
-                                </button>
-                                {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
-                                {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
-                            </div>
-                        </form>
-
-                        {formData.can_use_workers && (
-                            <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border space-y-5">
-                                <div className="flex items-start justify-between gap-4">
-                                    <div>
-                                        <h3 className="font-bold text-lg">Worker settings</h3>
-                                        <p className="text-sm text-gray-500 mt-1">Controls the tools and MCPs available to helper workers launched by {agent.name}.</p>
-                                    </div>
-                                    <span className="text-xs font-medium text-indigo-700 bg-indigo-100 rounded-full px-2.5 py-1 whitespace-nowrap">Worker enabled</span>
-                                </div>
-                                <div className="rounded-lg border border-indigo-100 bg-indigo-50 px-3 py-2 text-xs text-indigo-800">
-                                    Workers use a separate, bounded runtime. They cannot manage tasks, change task state, or write artifacts; lifecycle and status tools remain available.
-                                </div>
-
-                                <div className="space-y-2">
-                                    <div>
-                                        <h4 className="text-sm font-semibold text-gray-900">Tools</h4>
-                                        <p className="text-xs text-gray-500">Choose how the worker tool set is derived from the parent.</p>
-                                    </div>
-                                    <WorkerModeSelector name="tools" value={workerToolMode} onChange={setWorkerToolMode} />
-                                    {workerToolMode !== 'inherit' && <p className="text-xs text-gray-500">{workerToolMode === 'deny' ? 'Checked tools are blocked for workers.' : 'Checked tools are the only configurable tools workers may use.'}</p>}
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-2 pt-2">
-                                        {workerToolOptions.map(tool => {
-                                            const unavailable = WORKER_UNAVAILABLE_TOOLS.includes(tool);
-                                            const disabled = workerToolMode === 'inherit' || unavailable;
-                                            return (
-                                                <label key={tool} className={`flex items-center gap-3 rounded-md border px-3 py-2 ${disabled ? 'bg-gray-50 text-gray-400' : 'hover:bg-gray-50 cursor-pointer'}`}>
-                                                    <input
-                                                        type="checkbox"
-                                                        checked={workerToolMode !== 'inherit' && workerToolValues.includes(tool)}
-                                                        disabled={disabled}
-                                                        onChange={event => toggleWorkerTool(tool, event.target.checked)}
-                                                        className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
-                                                    />
-                                                    <span className="text-sm font-mono flex-1">{tool}</span>
-                                                    {unavailable && <span className="text-[10px] uppercase tracking-wide font-semibold text-gray-400">Unavailable</span>}
-                                                </label>
-                                            );
-                                        })}
-                                    </div>
-                                </div>
-
-                                <div className="space-y-2 pt-2 border-t">
-                                    <div>
-                                        <h4 className="text-sm font-semibold text-gray-900">MCP servers</h4>
-                                        <p className="text-xs text-gray-500">Apply the same inheritance rule to connected MCP servers. Per-tool filters remain available below.</p>
-                                    </div>
-                                    <WorkerModeSelector name="mcps" value={workerMcpMode} onChange={setWorkerMcpMode} />
-                                    {workerMcpMode !== 'inherit' && <p className="text-xs text-gray-500">{workerMcpMode === 'deny' ? 'Checked MCP servers are blocked for workers.' : 'Checked MCP servers are the only MCPs workers may use.'}</p>}
-                                    <div className="space-y-2 pt-2">
-                                        {workerMcpOptions.length === 0 ? (
-                                            <p className="text-sm text-gray-500 italic">No connected MCP servers yet.</p>
-                                        ) : workerMcpOptions.map((server: any) => (
-                                            <label key={server.id} className={`flex items-center gap-3 rounded-md border px-3 py-2 ${workerMcpMode === 'inherit' ? 'bg-gray-50 text-gray-400' : 'hover:bg-gray-50 cursor-pointer'}`}>
-                                                <input type="checkbox" checked={workerMcpMode !== 'inherit' && workerMcpValues.includes(server.name)} disabled={workerMcpMode === 'inherit'} onChange={event => toggleWorkerMcp(server.name, event.target.checked)} className="h-4 w-4 text-indigo-600 border-gray-300 rounded" />
-                                                <span className="text-sm font-medium flex-1">{server.display_name || server.name}</span>
-                                                <span className="text-xs text-gray-400 font-mono">{server.name}</span>
-                                            </label>
-                                        ))}
-                                    </div>
-                                </div>
-
-                                <div className="pt-3 border-t flex items-center gap-3">
-                                    <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
-                                        <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Worker Settings'}
-                                    </button>
-                                    {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
-                                    {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
-                                </div>
-                            </form>
-                        )}
-
-                        <div className="bg-white p-6 rounded-lg shadow border space-y-4">
-                            <div className="flex items-center justify-between mb-2">
-                                <h3 className="font-bold text-lg">Tools & MCPs</h3>
-                                <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-indigo-600 hover:text-indigo-800">Manage Tools & MCPs</Link>
-                            </div>
-
-                            {/* Headcount1 — always on */}
-                            {(() => {
-                                const p2 = mcpServers.find((s: any) => s.name === 'headcount1');
-                                if (!p2) return null;
-                                return (
-                                    <div className="flex items-center gap-3 p-3 bg-indigo-50 rounded-lg border border-indigo-100">
-                                        <input type="checkbox" checked disabled className="h-4 w-4 text-indigo-600 border-gray-300 rounded opacity-60" />
-                                        <div className="flex-1 min-w-0">
-                                            <span className="text-sm font-medium text-gray-900">{p2.display_name}</span>
-                                            <span className="ml-2 text-xs text-indigo-600 font-medium">Always On</span>
-                                            <p className="text-xs text-gray-500 mt-0.5">{p2.description}</p>
-                                        </div>
-                                    </div>
-                                );
-                            })()}
-
-                            {/* Optional connected MCPs — grouped by server, per-account checkboxes + per-tool filters */}
-                            {(() => {
-                                const optional = mcpServers.filter((s: any) => s.name !== 'headcount1' && !s.builtin && !s.project_id);
-                                const builtin = mcpServers.filter((s: any) => s.name !== 'headcount1' && s.builtin && !s.project_id);
-                                const allExternal = [...builtin, ...optional];
-                                if (allExternal.length === 0) return (
-                                    <p className="text-sm text-gray-500 italic">No additional MCP servers connected. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-600 hover:underline">Connect one</Link>.</p>
-                                );
-                                const allowed = parseAllowedMCPs(formData.allowed_mcps);
-                                const allNames = allExternal.map((srv: any) => srv.name);
-                                const isAllowed = (name: string) => allowed === null || allowed.includes(name);
-                                const toggleAllowed = (name: string, enabled: boolean) => {
-                                    const next = new Set(allowed === null ? allNames : allowed);
-                                    if (enabled) next.add(name); else next.delete(name);
-                                    const values = allNames.every((candidate: string) => next.has(candidate)) ? '' : JSON.stringify(allNames.filter((candidate: string) => next.has(candidate)));
-                                    setFormData(prev => ({ ...prev, allowed_mcps: values }));
-                                };
-                                return (
-                                    <div className="space-y-3">
-                                        <div className="border border-indigo-100 rounded-lg bg-indigo-50 p-3" data-testid="connected-mcp-access">
-                                            <p className="text-sm font-semibold text-indigo-900">Connected MCP access</p>
-                                            <p className="text-xs text-indigo-700 mt-1">Choose which connected MCP servers this agent may use. No checked servers disables MCP access; selecting every server stores the default all-enabled policy.</p>
-                                            <div className="mt-2 grid grid-cols-1 sm:grid-cols-2 gap-2">
-                                                {allExternal.map((srv: any) => (
-                                                    <label key={`allowed-${srv.id}`} className="flex items-center gap-2 text-sm text-gray-800 cursor-pointer">
-                                                        <input
-                                                            type="checkbox"
-                                                            aria-label={`Allow ${srv.display_name || srv.name}`}
-                                                            checked={isAllowed(srv.name)}
-                                                            onChange={e => toggleAllowed(srv.name, e.target.checked)}
-                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded"
-                                                        />
-                                                        {srv.display_name || srv.name}
-                                                    </label>
-                                                ))}
-                                            </div>
-                                        </div>
-                                        {allExternal.map((srv: any) => {
-                                            const accounts: any[] = srv.accounts || [];
-                                            const hasEnabledAccount = accounts.some((acc: any) => !!mcpAccountAssignments[acc.id]);
-                                            // Parse cached tools for this server
-                                            let cachedTools: {name: string; description?: string}[] = [];
-                                            try { if (srv.tools_cache) cachedTools = JSON.parse(srv.tools_cache); } catch {}
-                                            const serverToolFilters = toolFilters[srv.id] || {};
-                                            const toolsExpanded = !!expandedToolServers[srv.id];
-                                            return (
-                                                <div key={srv.id} className="border border-gray-100 rounded-lg overflow-hidden">
-                                                    <div className="flex items-center justify-between px-3 py-2 bg-gray-50 border-b border-gray-100">
-                                                        <span className="text-sm font-semibold text-gray-800">{srv.display_name || srv.name}</span>
-                                                        {accounts.length === 0 && (
-                                                            <Link to={`/companies/${shortName}/mcp-servers`} className="text-xs text-amber-600 hover:text-amber-800">Not connected</Link>
-                                                        )}
-                                                    </div>
-                                                    {accounts.length === 0 ? (
-                                                        <p className="px-3 py-2 text-xs text-gray-400 italic">No accounts configured. <Link to={`/companies/${shortName}/mcp-servers`} className="text-indigo-500 hover:underline">Authorize</Link>.</p>
-                                                    ) : (
-                                                        <>
-                                                            <div className="divide-y divide-gray-50">
-                                                                {accounts.map((acc: any) => (
-                                                                    <label key={acc.id} className="flex items-center gap-3 px-3 py-2 hover:bg-gray-50 cursor-pointer">
-                                                                        <input
-                                                                            type="checkbox"
-                                                                            checked={!!mcpAccountAssignments[acc.id]}
-                                                                            onChange={e => setMcpAccountAssignments(prev => ({ ...prev, [acc.id]: e.target.checked }))}
-                                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
-                                                                        />
-                                                                        <div className="min-w-0">
-                                                                            <span className="text-sm text-gray-900 font-medium">{acc.name}</span>
-                                                                            {!acc.has_token && <span className="ml-2 text-xs text-amber-500">No token</span>}
-                                                                        </div>
-                                                                    </label>
-                                                                ))}
-                                                            </div>
-                                                            {hasEnabledAccount && cachedTools.length > 0 && (
-                                                                <div className="border-t border-gray-100">
-                                                                    <button
-                                                                        type="button"
-                                                                        onClick={() => setExpandedToolServers(prev => ({ ...prev, [srv.id]: !prev[srv.id] }))}
-                                                                        className="w-full flex items-center gap-1.5 px-3 py-1.5 text-xs text-gray-500 hover:text-gray-700 hover:bg-gray-50"
-                                                                    >
-                                                                        {toolsExpanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-                                                                        <span>
-                                                                            {cachedTools.length} tool{cachedTools.length !== 1 ? 's' : ''}
-                                                                            {Object.values(serverToolFilters).some(v => !v) && (
-                                                                                <span className="ml-1 text-amber-600">
-                                                                                    ({Object.values(serverToolFilters).filter(v => !v).length} disabled)
-                                                                                </span>
-                                                                            )}
-                                                                        </span>
-                                                                    </button>
-                                                                    {toolsExpanded && (
-                                                                        <div className="px-3 pb-2 space-y-1">
-                                                                            <div className="flex gap-3 pb-1 border-b border-gray-100 mb-1">
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => setToolFilters(prev => ({
-                                                                                        ...prev,
-                                                                                        [srv.id]: Object.fromEntries(cachedTools.map((t: any) => [t.name, true])),
-                                                                                    }))}
-                                                                                    className="text-xs text-indigo-600 hover:text-indigo-800"
-                                                                                >Select all</button>
-                                                                                <button
-                                                                                    type="button"
-                                                                                    onClick={() => setToolFilters(prev => ({
-                                                                                        ...prev,
-                                                                                        [srv.id]: Object.fromEntries(cachedTools.map((t: any) => [t.name, false])),
-                                                                                    }))}
-                                                                                    className="text-xs text-gray-500 hover:text-gray-700"
-                                                                                >Unselect all</button>
-                                                                            </div>
-                                                                            {cachedTools.map((tool: any) => {
-                                                                                const isEnabled = serverToolFilters[tool.name] !== false;
-                                                                                const descKey = `${srv.id}:${tool.name}`;
-                                                                                const descExpanded = !!expandedToolDesc[descKey];
-                                                                                return (
-                                                                                    <div key={tool.name} className="flex items-start gap-2 py-0.5">
-                                                                                        <input
-                                                                                            type="checkbox"
-                                                                                            checked={isEnabled}
-                                                                                            onChange={e => {
-                                                                                                setToolFilters(prev => ({
-                                                                                                    ...prev,
-                                                                                                    [srv.id]: {
-                                                                                                        ...(prev[srv.id] || {}),
-                                                                                                        [tool.name]: e.target.checked,
-                                                                                                    },
-                                                                                                }));
-                                                                                            }}
-                                                                                            className="h-3.5 w-3.5 text-indigo-600 border-gray-300 rounded flex-shrink-0 mt-0.5 cursor-pointer"
-                                                                                        />
-                                                                                        <div
-                                                                                            className="min-w-0 flex-1 cursor-pointer"
-                                                                                            onClick={() => tool.description && setExpandedToolDesc(prev => ({ ...prev, [descKey]: !prev[descKey] }))}
-                                                                                        >
-                                                                                            <span className="text-xs font-mono text-gray-800">{tool.name}</span>
-                                                                                            {tool.description && (
-                                                                                                <p className={`text-xs text-gray-400 ${descExpanded ? '' : 'truncate'}`}>{tool.description}</p>
-                                                                                            )}
-                                                                                        </div>
-                                                                                    </div>
-                                                                                );
-                                                                            })}
-                                                                        </div>
-                                                                    )}
-                                                                </div>
-                                                            )}
-                                                        </>
-                                                    )}
-                                                </div>
-                                            );
-                                        })}
-                                    </div>
-                                );
-                            })()}
-
-                            {/* CodeGraph servers — checkboxes to enable/disable per agent */}
-                            {(() => {
-                                const codegraph = mcpServers.filter((s: any) => !!s.project_id);
-                                if (codegraph.length === 0) return null;
-                                return (
-                                    <div>
-                                        <p className="text-xs font-semibold text-gray-400 uppercase tracking-wider mb-2">CodeGraph (auto-attached per project)</p>
-                                        <div className="space-y-2">
-                                            {codegraph.map((srv: any) => {
-                                                const ready = srv.init_status === 'ready';
-                                                const initializing = srv.init_status === 'initializing';
-                                                const enabled = srv.id in codegraphAssignments ? codegraphAssignments[srv.id] : true;
-                                                return (
-                                                    <label key={srv.id} className={`border rounded-lg px-3 py-2 flex items-center gap-3 cursor-pointer ${ready ? 'border-green-100 bg-green-50' : 'border-gray-100 bg-gray-50'}`}>
-                                                        <input
-                                                            type="checkbox"
-                                                            checked={enabled}
-                                                            onChange={e => setCodegraphAssignments(prev => ({ ...prev, [srv.id]: e.target.checked }))}
-                                                            className="h-4 w-4 text-indigo-600 border-gray-300 rounded flex-shrink-0"
-                                                        />
-                                                        <span className="text-sm font-medium text-gray-800 flex-1">{srv.display_name || srv.name}</span>
-                                                        {ready ? (
-                                                            <span className="text-xs text-green-700 font-medium">Ready</span>
-                                                        ) : initializing ? (
-                                                            <span className="text-xs text-amber-600 font-medium">Initializing…</span>
-                                                        ) : srv.init_status?.startsWith('error:') ? (
-                                                            <span className="text-xs text-red-500 font-medium">Init failed</span>
-                                                        ) : (
-                                                            <span className="text-xs text-gray-400">Not initialized</span>
-                                                        )}
-                                                    </label>
-                                                );
-                                            })}
-                                        </div>
-                                        <p className="text-xs text-gray-400 mt-1.5">When enabled, codegraph tools are attached to runs for tasks that belong to that project — not for every task. Uncheck to disable for this agent.</p>
-                                    </div>
-                                );
-                            })()}
-
-                            <div className="pt-3 border-t flex items-center gap-3">
-                                <button
-                                    onClick={handleSaveMCPAssignments}
-                                    disabled={mcpSaveState === 'saving'}
-                                    className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 text-sm disabled:opacity-60"
-                                >
-                                    <Save size={14} className="mr-2" />
-                                    {mcpSaveState === 'saving' ? 'Saving…' : 'Save'}
-                                </button>
-                                {mcpSaveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
-                                {mcpSaveState === 'error' && <span className="text-sm text-red-600">{mcpSaveError}</span>}
-                            </div>
-                        </div>
-                    </div>
-                )}
-
-                {activeTab === 'settings' && (
-                    <form onSubmit={handleSave} className="bg-white p-6 rounded-lg shadow border max-w-2xl space-y-4">
-                        <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Name</label>
-                            <input type="text" required value={formData.name} onChange={e => setFormData({...formData, name: e.target.value})} className="w-full border rounded p-2" />
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                {activeTab === 'role' && (
+                    <form
+                        onSubmit={e => { e.preventDefault(); save(form); }}
+                        className="max-w-2xl space-y-4 rounded-lg border bg-white p-6 shadow"
+                        data-testid="agent-role"
+                    >
+                        <p className="text-sm text-gray-500">
+                            An agent is a role in the workflow. Its prompt only says who is speaking; what to do, with which model and which tools, comes from the task.
+                        </p>
+                        <div className="grid grid-cols-1 gap-4 md:grid-cols-3">
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Canonical system name</label>
-                                <input type="text" value={formData.role_key} disabled={agent.builtin} onChange={e => setFormData({...formData, role_key: e.target.value})} className="w-full border rounded p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
-                                <p className="mt-1 text-xs text-gray-500">Stable identity used for delegation{agent.builtin ? '; built-in value is protected.' : '.'}</p>
+                                <label className="mb-1 block text-sm font-medium text-gray-700">Name</label>
+                                <input type="text" required value={form.name} disabled={agent.builtin} onChange={e => setForm({ ...form, name: e.target.value })} className="w-full rounded border p-2 disabled:bg-gray-100 disabled:text-gray-500" />
                             </div>
                             <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Agent slug</label>
-                                <input type="text" value={formData.short_name} disabled={agent.builtin} onChange={e => setFormData({...formData, short_name: e.target.value})} className="w-full border rounded p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
+                                <label className="mb-1 block text-sm font-medium text-gray-700">Role</label>
+                                <input type="text" value={form.role_key} disabled={agent.builtin} onChange={e => setForm({ ...form, role_key: e.target.value })} className="w-full rounded border p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
+                            </div>
+                            <div>
+                                <label className="mb-1 block text-sm font-medium text-gray-700">Short name</label>
+                                <input type="text" value={form.short_name} disabled={agent.builtin} onChange={e => setForm({ ...form, short_name: e.target.value })} className="w-full rounded border p-2 disabled:bg-gray-100 disabled:text-gray-500" placeholder="e.g. CTO" />
                             </div>
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">Description</label>
-                            <input type="text" value={formData.description} onChange={e => setFormData({...formData, description: e.target.value})} className="w-full border rounded p-2" />
-                        </div>
-                        <ProviderOrGroupSelect
-                            label="LLM Provider or Model Group"
-                            providers={providers}
-                            modelGroups={modelGroups}
-                            manageLinkTo={`/companies/${shortName}/providers`}
-                            modelRequired
-                            value={{ provider_id: formData.provider_id, model_group_id: formData.model_group_id, model: formData.model }}
-                            onChange={v => setFormData({ ...formData, provider_id: v.provider_id, model_group_id: v.model_group_id, model: v.model })}
-                        />
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Chat type</label>
-                                <select value={formData.chat_type} onChange={e => setFormData({...formData, chat_type: e.target.value})} className="w-full border rounded p-2">
-                                    <option value="message_history">Message history</option>
-                                    <option value="compact_thinking">Compact thinking</option>
-                                </select>
-                            </div>
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Reasoning level</label>
-                                <select value={formData.reasoning_level} onChange={e => setFormData({...formData, reasoning_level: e.target.value})} className="w-full border rounded p-2">
-                                    <option value="">Provider default</option>
-                                    <option value="minimal">Minimal</option>
-                                    <option value="low">Low</option>
-                                    <option value="medium">Medium</option>
-                                    <option value="high">High</option>
-                                    <option value="max">Max</option>
-                                </select>
-                            </div>
-                        </div>
-                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                            <div>
-                                <label className="block text-sm font-medium text-gray-700 mb-1">Allowed MCPs (JSON array)</label>
-                                <textarea rows={2} value={formData.allowed_mcps} onChange={e => setFormData({...formData, allowed_mcps: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" placeholder='["github"]' />
-                            </div>
+                            <label className="mb-1 block text-sm font-medium text-gray-700">Description</label>
+                            <input type="text" value={form.description} onChange={e => setForm({ ...form, description: e.target.value })} className="w-full rounded border p-2" />
                         </div>
                         <div>
-                            <label className="block text-sm font-medium text-gray-700 mb-1">System Prompt</label>
-                            <textarea required rows={5} value={formData.system_prompt} onChange={e => setFormData({...formData, system_prompt: e.target.value})} className="w-full border rounded p-2 font-mono text-sm" />
+                            <label htmlFor="agent-prompt" className="mb-1 block text-sm font-medium text-gray-700">Prompt</label>
+                            <textarea id="agent-prompt" required rows={6} value={form.system_prompt} onChange={e => setForm({ ...form, system_prompt: e.target.value })} className="w-full rounded border p-2 font-mono text-sm" />
+                            <p className="mt-1 text-xs text-gray-500">
+                                Starts as one line. Add what this role should always know about your company: its product, its standards, its tone.
+                            </p>
                         </div>
-                        <div className="pt-4 flex items-center gap-3">
-                            <button type="submit" disabled={saveState === 'saving'} className="bg-indigo-600 text-white px-4 py-2 rounded flex items-center hover:bg-indigo-700 disabled:opacity-60">
+                        <div className="flex items-center gap-3 pt-2">
+                            <button type="submit" disabled={saveState === 'saving'} className="flex items-center rounded bg-indigo-600 px-4 py-2 text-white hover:bg-indigo-700 disabled:opacity-60">
                                 <Save size={16} className="mr-2" /> {saveState === 'saving' ? 'Saving…' : 'Save Changes'}
                             </button>
-                            {agent.builtin && <button type="button" onClick={restoreBuiltinDefaults} disabled={saveState === 'saving'} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60">Restore default</button>}
+                            {defaultPrompt && form.system_prompt !== defaultPrompt && (
+                                <button type="button" onClick={() => save({ ...form, system_prompt: defaultPrompt })} disabled={saveState === 'saving'} className="rounded border border-gray-300 px-4 py-2 text-sm text-gray-700 hover:bg-gray-50 disabled:opacity-60">
+                                    Restore default
+                                </button>
+                            )}
                             {saveState === 'saved' && <span className="text-sm text-green-600">Saved</span>}
                             {saveState === 'error' && <span className="text-sm text-red-600">{saveError}</span>}
                         </div>
                     </form>
+                )}
+
+                {activeTab === 'usage' && (
+                    <UsagePanel
+                        reportUrl={`/api/usage?company_id=${agent.company_id}&agent_id=${agent.id}&group_by=root_task,phase,phase_tier,model`}
+                        callsQuery={`company_id=${agent.company_id}&agent_id=${agent.id}`}
+                        dimensions={['root_task', 'phase', 'model']}
+                    />
+                )}
+
+                {activeTab === 'sessions' && (
+                    <div className="rounded-lg border bg-white p-4" data-testid="agent-sessions">
+                        <RunTree data={sessions} companyPath={`/companies/${shortName}`} emptyText="This role has not run an executor session yet." />
+                    </div>
                 )}
             </div>
         </div>

@@ -16,6 +16,12 @@ const (
 	ProviderPresetOpenCodeGo = "opencode-go"
 	ProviderPresetMiniMax    = "minimax"
 	ProviderPresetDeepSeek   = "deepseek"
+	// ProviderPresetTypeSafe is TypeSafe's Jev: a classifier, not a language
+	// model. It can only fill the classifier slot of Default Models.
+	ProviderPresetTypeSafe = "typesafe"
+	// ProviderPresetSurplus is AI Surplus, a marketplace that routes each
+	// request to the cheapest offer for the model asked for.
+	ProviderPresetSurplus = "surplus"
 )
 
 func (q *ProviderPresetRepository) ListProviderPresets(ctx context.Context) ([]ProviderPreset, error) {
@@ -53,6 +59,18 @@ func (q *ProviderPresetRepository) EnsureProviderPresets(ctx context.Context) er
 			Name:         "DeepSeek",
 			BaseUrl:      "https://api.deepseek.com/v1",
 			ProviderType: "openai",
+		},
+		{
+			Key:          ProviderPresetSurplus,
+			Name:         "AI Surplus",
+			BaseUrl:      "https://aisurplus.io/v1",
+			ProviderType: "openai",
+		},
+		{
+			Key:          ProviderPresetTypeSafe,
+			Name:         "TypeSafe (Jev classifier)",
+			BaseUrl:      "https://api.typesafe.ai/v1",
+			ProviderType: "typesafe",
 		},
 	}
 

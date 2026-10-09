@@ -32,7 +32,7 @@ func setupLoggerTest(t *testing.T) (*logging.ProxyLogger, *db.Queries, int32, st
 	require.NoError(t, err)
 
 	basePath := t.TempDir()
-	logger, err := logging.NewSessionLoggerWithHub(basePath, "test-co", 1, run.ID, run.ID, nil, q)
+	logger, err := logging.NewTaskRunLogger(basePath, "test-co", 1, 1, run.ID, nil, q)
 	require.NoError(t, err)
 	t.Cleanup(func() { logger.Close() })
 	return logger, q, run.ID, basePath
@@ -89,7 +89,7 @@ func readEntries(t *testing.T, path string) []map[string]interface{} {
 func TestProxyLoggerJSONL(t *testing.T) {
 	logger, q, runID, _ := setupLoggerTest(t)
 
-	assert.Equal(t, "main.jsonl", filepath.Base(logger.FilePath()))
+	assert.Equal(t, "run-1.jsonl", filepath.Base(logger.FilePath()))
 
 	reqBody := `{"messages":[{"role":"system","content":"be helpful"},{"role":"user","content":"hi"}],"tools":[]}`
 	logger.LogRequest("gpt-test", "coder", "openai", []byte(reqBody))
@@ -105,13 +105,10 @@ func TestProxyLoggerJSONL(t *testing.T) {
 	})
 
 	logger.LogInfo("plain info line")
-	logger.LogSessionStarted(2, 3, "qa", "Verify things", "session-2.jsonl")
-	logger.LogSessionEnded(2, "completed", "all good")
-	logger.LogModelSwitch("openai", "gpt-a", "other", "gpt-b", "rate limited")
-	logger.LogOutcome("completed", "finish_task", "done", "coder", 1, "Implemented the feature.")
+	logger.LogOutcome("completed", "finish_work", "done", "coder", 1, "Implemented the feature.")
 
 	entries := readEntries(t, logger.FilePath())
-	require.Len(t, entries, 8)
+	require.Len(t, entries, 5)
 
 	byType := map[string]map[string]interface{}{}
 	var types []string
@@ -121,7 +118,7 @@ func TestProxyLoggerJSONL(t *testing.T) {
 		byType[typ] = e
 		assert.NotEmpty(t, e["ts"], "entry %s must carry a timestamp", typ)
 	}
-	assert.Equal(t, []string{"request", "response", "tool_response", "info", "session_started", "session_ended", "model_switch", "outcome"}, types)
+	assert.Equal(t, []string{"request", "response", "tool_response", "info", "outcome"}, types)
 
 	assert.Equal(t, reqBody, byType["request"]["content"])
 	assert.Equal(t, "coder", byType["request"]["agent_name"])
@@ -135,14 +132,12 @@ func TestProxyLoggerJSONL(t *testing.T) {
 	assert.Equal(t, bigOutput, byType["tool_response"]["content"], "file keeps the full tool output")
 	assert.Equal(t, "call_1", byType["tool_response"]["tool_call_id"])
 
-	assert.Equal(t, "session-2.jsonl", byType["session_started"]["log_file"])
-
 	// The outcome entry — the trajectory's training label — is the last
 	// line and is self-describing (run/task/agent identity embedded).
 	outcome := entries[len(entries)-1]
 	assert.Equal(t, "outcome", outcome["type"])
 	assert.Equal(t, "completed", outcome["status"])
-	assert.Equal(t, "finish_task", outcome["end_reason"])
+	assert.Equal(t, "finish_work", outcome["end_reason"])
 	assert.Equal(t, "done", outcome["task_status"])
 	assert.Equal(t, "Implemented the feature.", outcome["content"])
 	assert.Equal(t, float64(runID), outcome["run_id"])
@@ -172,13 +167,13 @@ func TestProxyLoggerJSONL(t *testing.T) {
 	}
 }
 
-// TestSessionLoggerFileNames verifies delegated child sessions log to
-// session-{runID}.jsonl in the root run's folder.
-func TestSessionLoggerFileNames(t *testing.T) {
+// TestTaskRunLoggerFileNames verifies an executor session logs into its
+// task's own folder inside the tree's log folder.
+func TestTaskRunLoggerFileNames(t *testing.T) {
 	basePath := t.TempDir()
-	logger, err := logging.NewSessionLoggerWithHub(basePath, "test-co", 7, 10, 11, nil, nil)
+	logger, err := logging.NewTaskRunLogger(basePath, "test-co", 7, 9, 11, nil, nil)
 	require.NoError(t, err)
 	defer logger.Close()
-	assert.Equal(t, "session-11.jsonl", filepath.Base(logger.FilePath()))
-	assert.Contains(t, logger.FilePath(), filepath.Join("logs", "test-co", "7", "run-10"))
+	assert.Equal(t, "run-11.jsonl", filepath.Base(logger.FilePath()))
+	assert.Contains(t, logger.FilePath(), filepath.Join("logs", "test-co", "7", "task-9"))
 }

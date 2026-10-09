@@ -352,18 +352,9 @@ export const AddCompany: React.FC = () => {
                 finalProviderId = providerRes.data.id;
             }
 
-            // Every task now requires an explicit task-orchestrator model. The
-            // onboarding provider is the user's deliberate choice, so make it
-            // the initial control-plane default instead of leaving the first
-            // task blocked on a setting that is invisible during setup.
-            if (finalProviderId && finalProviderModel) {
-                await axios.put('/api/default-model-settings/task_orchestrator', {
-                    provider_id: finalProviderId,
-                    model: finalProviderModel,
-                });
-            }
-
-            // 2. Create Company
+            // 2. Create Company. The model chosen here becomes the smart and the
+            // cheap default where those are still unset, so the first task can
+            // run without a visit to Default Models.
             const companyRes = await axios.post('/api/companies', {
                 name,
                 short_name: shortName,

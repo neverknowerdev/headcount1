@@ -4,6 +4,7 @@ import * as path from 'path';
 import { loadE2EEnv } from '../helpers/env';
 import { waitForTaskStatus } from '../helpers/wait-for';
 import { resetE2E } from '../helpers/reset';
+import { call, finishWork, setScenario, startTask } from '../helpers/workflow';
 
 /**
  * SQLite-backend edge cases.
@@ -115,22 +116,22 @@ test.describe.serial('SQLite export/import round-trip', () => {
         await resetE2E(request, env.E2E_MOCK_PROVIDER_URL);
     });
 
-    test('backup, wipe, restore preserves the full company tree and run logs', async ({ request }) => {
+    test('backup, wipe, restore preserves the full company tree, its workflow record and run logs', async ({ request }) => {
         test.setTimeout(120_000);
 
         // ── Seed: provider → company → project/sprint/agent/skill/mcp → task ──
         const provider = await postJSON(request, '/api/providers', {
             name: 'e2e-mock', base_url: env.E2E_MOCK_PROVIDER_URL, api_key: 'test-key',
-            provider_type: 'openai', default_model: 'e2e-mock-model',
-            supported_models: 'e2e-mock-model,e2e-orchestrator-model',
+            provider_type: 'openai', default_model: 'e2e-smart-model',
+            supported_models: 'e2e-smart-model,e2e-cheap-model',
         });
-        const orchestratorSetting = await request.put('/api/default-model-settings/task_orchestrator', {
-            data: { provider_id: provider.id, model: 'e2e-orchestrator-model' },
-        });
-        expect(orchestratorSetting.ok(), await orchestratorSetting.text()).toBeTruthy();
         const company = await postJSON(request, '/api/companies', {
-            name: 'Backup Co', short_name: 'backup-co', color: '#0ea5e9',
+            name: 'Backup Co', short_name: 'backup-co', color: '#0ea5e9', provider_id: provider.id, model: 'e2e-smart-model',
         });
+        const cheapSetting = await request.put('/api/default-model-settings/cheap', {
+            data: { provider_id: provider.id, model: 'e2e-cheap-model' },
+        });
+        expect(cheapSetting.ok(), await cheapSetting.text()).toBeTruthy();
         const project = await postJSON(request, '/api/projects', {
             company_id: company.id, name: 'Web App', description: 'the primary web application',
         });
@@ -138,8 +139,7 @@ test.describe.serial('SQLite export/import round-trip', () => {
             company_id: company.id, name: 'Sprint 1', goal: 'ship the greeting',
         });
         const agent = await postJSON(request, '/api/agents', {
-            company_id: company.id, name: 'Runner', system_prompt: 'You do the work.',
-            model: 'e2e-mock-model', provider_id: provider.id,
+            company_id: company.id, name: 'Runner', system_prompt: 'You are the Runner agent. We sell boats.',
         });
         const skill = await postJSON(request, '/api/skills', {
             company_id: company.id, name: 'greeting-skill', description: 'knows how to greet',
@@ -151,62 +151,36 @@ test.describe.serial('SQLite export/import round-trip', () => {
         await postJSON(request, `/api/mcp-servers/${mcp.id}/accounts`, {
             name: 'Primary', auth_token: 'super-secret-token',
         });
-        // The executed task carries no project (mirrors the orchestration spec:
-        // a project would pull in repo/workspace setup the run doesn't need).
+        // The executed task carries no project (a project would pull in
+        // repo/workspace setup the run doesn't need).
         const task = await postJSON(request, '/api/tasks', {
-            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id,
+            company_id: company.id, sprint_id: sprint.id, agent_id: agent.id, task_type: 'research',
             title: 'Do the thing', description: 'a task to execute',
         });
 
-        // ── Produce a real run with log entries via the mock provider ────────
-        const workerScenario = {
-            entries: [
-                { tool_call: { id: 'r1', name: 'report_status', arguments: { status: 'Working on it' } } },
-                { tool_call: { id: 'r2', name: 'finish_task', arguments: { task_status: 'in-review', finish_status: 'All done.' } } },
-            ],
-        };
-        const workerScenarioResponse = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                ...workerScenario,
-                model: 'e2e-mock-model',
-            }),
-        });
-        expect(workerScenarioResponse.ok).toBeTruthy();
-        const orchestratorScenarioResponse = await fetch(`${env.E2E_MOCK_PROVIDER_URL}/__test/set-scenario`, {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({
-                model: 'e2e-orchestrator-model',
-                entries: [{ tool_call: { id: 'launch-worker', name: 'run_new_session', arguments: {
-                    agent_name: 'Runner', title: 'Complete assigned task', prompt: 'Complete the assigned task and finish it for review.',
-                } } }, { tool_call: { id: 'orchestrator-finish', name: 'finish_task', arguments: {
-                    summary: 'The assigned worker completed successfully and the result was verified.',
-                } } }],
-            }),
-        });
-        expect(orchestratorScenarioResponse.ok).toBeTruthy();
-
-        const kick = await request.put(`/api/tasks/${task.id}`, { data: { status: 'to-do' } });
-        expect(kick.ok()).toBeTruthy();
-        await waitForTaskStatus(request, task.id, 'done', 90_000);
-        await expect.poll(async () => {
-            const rs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
-            const worker = (rs as any[]).find((run) => run.kind === 'agent_session');
-            return worker?.status ?? '';
-        }, { timeout: 30_000, message: 'run should complete' }).toBe('completed');
-        await expect.poll(async () => {
-            const rs = await (await request.get(`/api/tasks/${task.id}/runs`)).json();
-            const orchestrator = (rs as any[]).find((run) => run.kind === 'task_orchestrator');
-            return orchestrator?.status ?? '';
-        }, { timeout: 30_000, message: 'orchestrator should complete before backup' }).toBe('completed');
+        // ── Run it through the workflow: the smart steps are the mock's
+        // autopilot; the executor uses a tool and records a decision, so there
+        // is a real session log and a real decision to carry across. ─────────
+        await setScenario([
+            { match: { phase: 'executor' }, replies: [
+                call('ls', { path: '.' }),
+                finishWork('done', 'All done.', { decisions: [{ title: 'Looked before answering', detail: 'Listed the workspace first.', reason: 'To be sure.' }] }),
+            ] },
+        ]);
+        await startTask(request, task.id);
+        await waitForTaskStatus(request, task.id, 'in-review', 90_000);
 
         // ── Snapshot BEFORE the backup ───────────────────────────────────────
         const before = await snapshot(request, company.id, task.id);
-        // Sanity: the run really has log entries (otherwise the round-trip
-        // check below would be vacuously true).
-        expect(before.runs).toHaveLength(2);
-        const beforeWorker = before.runs.find((run: any) => run.kind === 'agent_session');
-        expect(beforeWorker).toBeTruthy();
-        expect(Array.isArray(beforeWorker.log_entries)).toBe(true);
-        expect(beforeWorker.log_entries.length).toBeGreaterThan(0);
+        // Sanity: there really is a workflow record and a session log
+        // (otherwise the round-trip check below would be vacuously true).
+        expect(before.tree).toHaveLength(2);
+        expect(before.runs).toHaveLength(1);
+        expect(Array.isArray(before.runs[0].log_entries)).toBe(true);
+        expect(before.runs[0].log_entries.length).toBeGreaterThan(0);
+        expect(before.steps.length).toBeGreaterThan(4);
+        expect(before.decisions.length).toBeGreaterThan(3);
+        expect(before.usage.totals.calls).toBe(5);
         expect(before.mcp?.accounts?.[0]?.has_token).toBe(true);
 
         // ── Back up, then wipe ───────────────────────────────────────────────
@@ -242,29 +216,36 @@ test.describe.serial('SQLite export/import round-trip', () => {
         expect(after.mcp.accounts.map((a) => pick(a, MCP_ACCOUNT_KEYS)))
             .toEqual(before.mcp.accounts.map((a) => pick(a, MCP_ACCOUNT_KEYS)));
 
-        // The run and — crucially — its log entries come back intact.
-        expect(after.runs).toHaveLength(2);
-        for (const beforeRun of before.runs) {
-            const afterRun = after.runs.find((run: any) => run.kind === beforeRun.kind);
-            expect(afterRun, `missing restored ${beforeRun.kind} run`).toBeTruthy();
-            expect(pick(afterRun, RUN_KEYS)).toEqual(pick(beforeRun, RUN_KEYS));
-            expect(afterRun.log_entries).toEqual(beforeRun.log_entries);
-        }
+        // The executor session and — crucially — its log entries come back intact.
+        expect(after.runs.map((run: any) => pick(run, RUN_KEYS))).toEqual(before.runs.map((run: any) => pick(run, RUN_KEYS)));
+        expect(after.runs[0].log_entries).toEqual(before.runs[0].log_entries);
+
+        // So does the task's whole workflow record: the tree of subtasks with
+        // where each stands, the journal with every smart prompt, the
+        // decisions, and the usage ledger down to the last call.
+        expect(after.tree.map((t: any) => pick(t, TREE_KEYS))).toEqual(before.tree.map((t: any) => pick(t, TREE_KEYS)));
+        expect(after.steps).toEqual(before.steps);
+        expect(after.firstSmartStep.prompt).toBeTruthy();
+        expect(after.firstSmartStep).toEqual(before.firstSmartStep);
+        expect(after.decisions).toEqual(before.decisions);
+        expect(after.usage).toEqual(before.usage);
+        expect(after.calls).toEqual(before.calls);
     });
 });
 
 const COMPANY_KEYS = ['id', 'name', 'short_name', 'description', 'color'];
 const PROJECT_KEYS = ['id', 'company_id', 'name', 'description'];
 const SPRINT_KEYS = ['id', 'company_id', 'name', 'goal'];
-const AGENT_KEYS = ['id', 'company_id', 'name', 'system_prompt', 'model', 'provider_id'];
+const AGENT_KEYS = ['id', 'company_id', 'name', 'role_key', 'system_prompt', 'builtin', 'enabled'];
 const SKILL_KEYS = ['id', 'company_id', 'name', 'description'];
-const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status'];
+const TASK_KEYS = ['id', 'company_id', 'sprint_id', 'agent_id', 'title', 'description', 'status', 'task_type'];
+const TREE_KEYS = [
+    'id', 'parent_id', 'root_task_id', 'depth', 'title', 'status', 'task_type', 'mode', 'phase', 'waiting_on',
+    'origin_step_id', 'origin_phase', 'workflow_phase', 'result_reason', 'result_summary', 'refined_description', 'acceptance_criteria',
+];
 const MCP_KEYS = ['id', 'name', 'transport', 'url', 'display_name', 'auth_type'];
 const MCP_ACCOUNT_KEYS = ['id', 'mcp_server_id', 'name', 'has_token'];
-const RUN_KEYS = [
-    'id', 'task_id', 'agent_id', 'kind', 'name', 'parent_run_id', 'root_run_id',
-    'status', 'latest_reported_status', 'result_description',
-];
+const RUN_KEYS = ['id', 'task_id', 'agent_id', 'name', 'status', 'attempt', 'report', 'result_description'];
 
 function pick(obj: any, keys: string[]): Record<string, unknown> {
     return Object.fromEntries(keys.map((k) => [k, obj?.[k]]));
@@ -290,6 +271,8 @@ async function snapshot(request: APIRequestContext, companyId: number, taskId: n
     };
     const companies = await get('/api/companies');
     const mcpServers = await get(`/api/mcp-servers?company_id=${companyId}`);
+    const tree = await get(`/api/tasks/${taskId}/tree`);
+    const steps = await get(`/api/tasks/${taskId}/steps`);
     return {
         company: (companies as any[]).find((c) => c.id === companyId),
         projects: await get(`/api/projects?company_id=${companyId}`),
@@ -298,6 +281,12 @@ async function snapshot(request: APIRequestContext, companyId: number, taskId: n
         skills: await get(`/api/skills?company_id=${companyId}`),
         tasks: await get(`/api/tasks?company_id=${companyId}`),
         mcp: (mcpServers as any[]).find((s) => s.name === 'e2e-notes'),
-        runs: await get(`/api/tasks/${taskId}/runs`),
+        tree,
+        runs: await get(`/api/tasks/${tree[tree.length - 1].id}/runs`),
+        steps,
+        firstSmartStep: await get(`/api/tasks/${taskId}/steps/${steps.find((step: any) => step.kind === 'smart_call').id}`),
+        decisions: await get(`/api/tasks/${taskId}/decisions?subtree=true`),
+        usage: await get(`/api/tasks/${taskId}/usage`),
+        calls: (await get(`/api/usage/calls?company_id=${companyId}`)).calls,
     };
 }

@@ -3,20 +3,27 @@ package endpoints
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"regexp"
 	"strings"
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 )
 
-// respondReplaceMembersErr maps a replaceGroupMembers failure to a status: an
+// respondReplaceMembersErr maps a refused set of group members to a status: an
 // ownership violation on a referenced provider is a client error (400), not a
 // server error.
 func (api *API) respondReplaceMembersErr(w http.ResponseWriter, err error) {
 	if errors.Is(err, errNotOwned) {
 		api.respondError(w, http.StatusBadRequest, "one or more members reference a provider you do not own")
+		return
+	}
+	var wrongKind *groupKindError
+	if errors.As(err, &wrongKind) {
+		api.respondError(w, http.StatusBadRequest, wrongKind.Error())
 		return
 	}
 	api.respondError(w, http.StatusInternalServerError, err.Error())
@@ -30,9 +37,35 @@ type modelGroupMemberReq struct {
 }
 
 type modelGroupReq struct {
-	Name        string                `json:"name"`
-	Description string                `json:"description"`
-	Members     []modelGroupMemberReq `json:"members"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	// Kind is the kind of models the group routes between. Left out, it is
+	// taken from the members named.
+	Kind    string                `json:"kind"`
+	Members []modelGroupMemberReq `json:"members"`
+}
+
+// groupKindError is a member that does not belong in a group of its kind.
+type groupKindError struct{ detail string }
+
+func (e *groupKindError) Error() string { return e.detail }
+
+func kindLabel(kind string) string {
+	if kind == models.ModelKindSystemOne {
+		return "System One"
+	}
+	return "language"
+}
+
+// kindOfMembers is the kind a group has when none was given: that of the
+// models named in it, language models when it names none.
+func kindOfMembers(members []modelGroupMemberReq) string {
+	for _, member := range members {
+		if !member.AllModels && strings.TrimSpace(member.Model) != "" {
+			return models.ModelKind(member.Model)
+		}
+	}
+	return models.ModelKindLLM
 }
 
 var slugCleanRe = regexp.MustCompile(`[^a-z0-9]+`)
@@ -67,19 +100,35 @@ func (api *API) CreateModelGroup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	kind := req.Kind
+	if kind == "" {
+		kind = kindOfMembers(req.Members)
+	}
+	if !models.IsModelKind(kind) {
+		api.respondError(w, http.StatusBadRequest, "kind must be llm or system_one")
+		return
+	}
+	// Checked before anything is stored, so a refused group leaves no trace.
+	members, err := api.groupMembers(r, kind, req.Members)
+	if err != nil {
+		api.respondReplaceMembersErr(w, err)
+		return
+	}
+
 	uid := api.currentUserID(r)
 	group, err := api.q.CreateModelGroup(r.Context(), db.ModelGroup{
 		Name:        req.Name,
 		Slug:        slug,
 		UserID:      &uid,
 		Description: req.Description,
+		Kind:        kind,
 	})
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondReplaceMembersErr(w, err)
+	if err := api.q.ReplaceModelGroupMembers(r.Context(), group.ID, members); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -94,6 +143,19 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 	}
 
 	group := api.modelGroupFromCtx(r) // loaded + authorized by LoadModelGroup
+	if !models.IsModelKind(group.Kind) {
+		group.Kind = models.ModelKindLLM
+	}
+	if req.Kind != "" && req.Kind != group.Kind {
+		// Whatever uses the group chose it for its kind.
+		api.respondError(w, http.StatusBadRequest, "a group's kind cannot be changed: create another group for "+kindLabel(req.Kind)+" models")
+		return
+	}
+	members, err := api.groupMembers(r, group.Kind, req.Members)
+	if err != nil {
+		api.respondReplaceMembersErr(w, err)
+		return
+	}
 	if strings.TrimSpace(req.Name) != "" {
 		group.Name = req.Name
 	}
@@ -102,8 +164,8 @@ func (api *API) UpdateModelGroup(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := api.replaceGroupMembers(r, group.ID, req.Members); err != nil {
-		api.respondReplaceMembersErr(w, err)
+	if err := api.q.ReplaceModelGroupMembers(r.Context(), group.ID, members); err != nil {
+		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
 	group, _ = api.q.GetModelGroup(r.Context(), group.ID)
@@ -119,7 +181,11 @@ func (api *API) DeleteModelGroup(w http.ResponseWriter, r *http.Request) {
 	api.respondJSON(w, http.StatusOK, map[string]string{"status": "ok"})
 }
 
-func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers []modelGroupMemberReq) error {
+// groupMembers turns the members a client named into the rows of a group of
+// the given kind, refusing a provider the caller may not use and a model of
+// the other kind: a group routes between language models or between System
+// One models, never both.
+func (api *API) groupMembers(r *http.Request, kind string, reqMembers []modelGroupMemberReq) ([]db.ModelGroupMember, error) {
 	members := make([]db.ModelGroupMember, 0, len(reqMembers))
 	for _, m := range reqMembers {
 		if m.ProviderID == 0 {
@@ -133,17 +199,24 @@ func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers [
 		// shared/builtin providers (UserID nil) are allowed.
 		prov, err := api.q.GetLLMProvider(r.Context(), m.ProviderID)
 		if err != nil {
-			return errNotOwned
+			return nil, errNotOwned
 		}
 		if prov.UserID != nil && *prov.UserID != api.currentUserID(r) {
-			return errNotOwned
+			return nil, errNotOwned
 		}
 		if m.AllModels {
+			if len(prov.ModelsOfKind(kind)) == 0 {
+				return nil, &groupKindError{fmt.Sprintf("%s has no %s models to add to this group", prov.Name, kindLabel(kind))}
+			}
 			members = append(members, db.ModelGroupMember{ProviderID: m.ProviderID, AllModels: true, IsFree: m.IsFree})
 			continue
 		}
 		if strings.TrimSpace(m.Model) == "" {
 			continue
+		}
+		if models.ModelKind(m.Model) != kind {
+			return nil, &groupKindError{fmt.Sprintf("%s is a %s model and cannot be in a group of %s models",
+				strings.TrimSpace(m.Model), kindLabel(models.ModelKind(m.Model)), kindLabel(kind))}
 		}
 		members = append(members, db.ModelGroupMember{
 			ProviderID: m.ProviderID,
@@ -151,7 +224,7 @@ func (api *API) replaceGroupMembers(r *http.Request, groupID int32, reqMembers [
 			IsFree:     m.IsFree,
 		})
 	}
-	return api.q.ReplaceModelGroupMembers(r.Context(), groupID, members)
+	return members, nil
 }
 
 // memberStatWindow aggregates stats for one provider+model over one window.

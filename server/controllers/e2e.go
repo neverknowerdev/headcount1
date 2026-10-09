@@ -28,19 +28,19 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// A reset must never race an agent goroutine that is still writing to the
+	// A reset must never race the engine while it is still writing to the
 	// database. The browser suite deliberately reuses one server process, so a
 	// previous test that timed out can otherwise repopulate rows after this
-	// handler deletes them. Serialize resets and stop active runs first.
+	// handler deletes them. Serialize resets and stop all work first.
 	e2eResetMu.Lock()
 	defer e2eResetMu.Unlock()
 	// PostgreSQL can take longer to flush the final run-log/bookkeeping writes
-	// after a large orchestration scenario; keep the wait bounded but allow that
-	// legitimate drain to finish before deleting shared E2E state.
+	// after a large scenario; keep the wait bounded but allow that legitimate
+	// drain to finish before deleting shared E2E state.
 	resetCtx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
-	if err := api.stopE2ERuns(resetCtx); err != nil {
-		api.respondError(w, http.StatusConflict, "cannot reset E2E database while runs are active: "+err.Error())
+	if err := api.stopE2EWork(resetCtx); err != nil {
+		api.respondError(w, http.StatusConflict, "cannot reset E2E database while tasks are running: "+err.Error())
 		return
 	}
 
@@ -50,28 +50,26 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	// default-model settings all reference users/teams and must go first.
 	tables := []string{
 		"activity_logs",
-		"proxy_request_logs",
 		"model_request_stats",
 		"model_group_members",
 		"model_groups",
 		"default_model_settings",
-		"run_events",
-		"run_status_reports",
+		"llm_calls",
+		"decisions",
+		"task_steps",
+		"artifacts",
 		"runs",
 		"comments",
 		"attachments",
 		"tasks",
 		"skills",
-		"agent_mcp_accounts",
 		"agents",
 		"llm_providers",
 		"sprints",
 		"projects",
 		"companies",
 		// MCP tables — clear dependents before mcp_servers (FK order)
-		"agent_mcp_tool_filters",
 		"mcp_tool_stats",
-		"agent_mcp_servers",
 		"mcp_accounts",
 		"mcp_servers",
 		// Identity graph last (everything above may reference users/teams).
@@ -159,20 +157,33 @@ func (api *API) WipeDB(w http.ResponseWriter, r *http.Request) {
 	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
 }
 
-// stopE2ERuns cancels every process-local running session and waits for both
-// the database terminal transition and the engine goroutines to drain. The
-// latter matters because a session can finish its control-plane update before
-// its final bookkeeping writes have returned. It is intentionally bounded so
-// a broken engine cannot turn a test reset into a CI-job-sized hang.
-func (api *API) stopE2ERuns(ctx context.Context) error {
-	activeStatuses := []string{"running", "resuming", "waiting"}
+// stopE2EWork stops every task the workflow is working on and waits for its
+// executor sessions to end. Stopping a task waits out the step it is in the
+// middle of and cancels everything beneath it, so once this returns nothing is
+// left that would write to the tables about to be emptied. It is bounded so a
+// broken engine cannot turn a test reset into a CI-job-sized hang.
+func (api *API) stopE2EWork(ctx context.Context) error {
+	working := []string{db.TaskStatusTodo, db.TaskStatusDependsOnTask, db.TaskStatusInProgress, db.TaskStatusBlocked}
+	sessions := []string{"running", "resuming"}
 	type runQuiescer interface {
 		WaitForActiveRuns(context.Context)
 	}
 	quiescer, canWaitForGoroutines := api.engine.(runQuiescer)
 	for {
+		var taskIDs []int32
+		// Parents first: stopping one cancels its whole tree.
+		if err := api.db.WithContext(ctx).Model(&db.Task{}).
+			Where("status IN ? AND waiting_on <> ?", working, "operator").
+			Order("depth, id").Pluck("id", &taskIDs).Error; err != nil {
+			return fmt.Errorf("list running tasks: %w", err)
+		}
+		for _, id := range taskIDs {
+			if err := api.engine.StopTask(ctx, id); err != nil {
+				return fmt.Errorf("stop task %d: %w", id, err)
+			}
+		}
 		var runs []db.Run
-		if err := api.db.WithContext(ctx).Where("status IN ?", activeStatuses).Find(&runs).Error; err != nil {
+		if err := api.db.WithContext(ctx).Where("status IN ?", sessions).Find(&runs).Error; err != nil {
 			return fmt.Errorf("list active runs: %w", err)
 		}
 		for _, run := range runs {
@@ -182,10 +193,10 @@ func (api *API) stopE2ERuns(ctx context.Context) error {
 			quiescer.WaitForActiveRuns(ctx)
 		}
 		var active int64
-		if err := api.db.WithContext(ctx).Model(&db.Run{}).Where("status IN ?", activeStatuses).Count(&active).Error; err != nil {
+		if err := api.db.WithContext(ctx).Model(&db.Run{}).Where("status IN ?", sessions).Count(&active).Error; err != nil {
 			return fmt.Errorf("check active runs: %w", err)
 		}
-		if active == 0 {
+		if active == 0 && len(taskIDs) == 0 {
 			return nil
 		}
 		select {

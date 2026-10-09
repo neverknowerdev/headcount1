@@ -1,12 +1,14 @@
 package endpoints
 
 import (
+	"context"
 	"encoding/json"
 	"log"
 	"net/http"
 	"os"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/pkg/agentdefaults"
 	"agent-orchestrator/pkg/filesystem"
 )
@@ -47,17 +49,19 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		comp.TeamID = &membership.TeamID
 	}
 	if req.ProviderID != nil {
-		if err := api.authorizeAgentBindings(r, req.ProviderID, nil); err != nil {
+		if err := api.authorizeModelBinding(r, req.ProviderID, nil); err != nil {
 			api.respondError(w, http.StatusNotFound, "provider not found")
 			return
 		}
 	} else {
 		// API clients often create the provider immediately before the company
 		// and omit the optional binding. Use the user's first enabled provider so
-		// the newly seeded built-ins are runnable from the first task.
+		// the first task has a model to run on.
 		if providers, err := api.q.ListLLMProvidersForUser(r.Context(), api.currentUserID(r)); err == nil {
 			for _, provider := range providers {
-				if provider.Enabled {
+				// A task runs on a language model; a provider that serves
+				// only System One models has none.
+				if provider.Enabled && len(provider.ModelsOfKind(models.ModelKindLLM)) > 0 {
 					providerID := provider.ID
 					req.ProviderID = &providerID
 					if req.Model == "" {
@@ -73,9 +77,15 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 		api.respondError(w, http.StatusInternalServerError, err.Error())
 		return
 	}
-	if err := api.q.EnsureBuiltinAgentsForCompany(r.Context(), comp.ID, agentdefaults.Rows(comp.ID), req.ProviderID, req.Model); err != nil {
+	if err := api.q.EnsureBuiltinAgentsForCompany(r.Context(), comp.ID, agentdefaults.Rows(comp.ID)); err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to seed built-in agents: "+err.Error())
 		return
+	}
+	if req.ProviderID != nil && req.Model != "" && !models.IsSystemOneModel(req.Model) {
+		if err := api.fillModelTiers(r.Context(), uid, *req.ProviderID, req.Model); err != nil {
+			api.respondError(w, http.StatusInternalServerError, "failed to set default models: "+err.Error())
+			return
+		}
 	}
 
 	settings := LoadSettings()
@@ -88,6 +98,28 @@ func (api *API) CreateCompany(w http.ResponseWriter, r *http.Request) {
 	api.logActivity(comp.ID, "company_created", int32(comp.ID), "company", "")
 
 	api.respondJSON(w, http.StatusCreated, comp)
+}
+
+// fillModelTiers points the user's smart and cheap model slots at a provider
+// model where they are still empty, so a first company can run tasks without
+// a visit to Default Models. A slot the user already configured is left alone.
+func (api *API) fillModelTiers(ctx context.Context, userID, providerID int32, model string) error {
+	if err := api.q.EnsureDefaultModelSettingsForUser(ctx, userID); err != nil {
+		return err
+	}
+	for _, purpose := range []string{db.PurposeSmart, db.PurposeCheap} {
+		setting, err := api.q.GetDefaultModelSetting(ctx, userID, purpose)
+		if err != nil {
+			return err
+		}
+		if setting.ProviderID != nil || setting.ModelGroupID != nil {
+			continue
+		}
+		if _, err := api.q.UpdateDefaultModelSetting(ctx, userID, purpose, &providerID, model, nil); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (api *API) UpdateCompany(w http.ResponseWriter, r *http.Request) {

@@ -2,7 +2,6 @@ package repository
 
 import (
 	"context"
-	"strings"
 
 	. "agent-orchestrator/db/models"
 	"gorm.io/gorm"
@@ -29,18 +28,24 @@ func (r *ModelGroupMemberRepository) ReplaceModelGroupMembers(ctx context.Contex
 	})
 }
 
-func ExpandModelGroupMembers(members []ModelGroupMember) []ModelGroupMember {
-	result := make([]ModelGroupMember, 0, len(members))
-	for _, member := range members {
+// ExpandModelGroupMembers resolves a group's members to the concrete models
+// it routes between. A member that stands for all of a provider's models
+// stands for those of the group's kind: a group of System One models never
+// reaches a language model, or the other way round.
+func ExpandModelGroupMembers(group ModelGroup) []ModelGroupMember {
+	kind := group.Kind
+	if !IsModelKind(kind) {
+		kind = ModelKindLLM
+	}
+	result := make([]ModelGroupMember, 0, len(group.Members))
+	for _, member := range group.Members {
 		if !member.AllModels {
-			result = append(result, member)
+			if ModelKind(member.Model) == kind {
+				result = append(result, member)
+			}
 			continue
 		}
-		for _, model := range strings.Split(member.Provider.SupportedModels, ",") {
-			model = strings.TrimSpace(model)
-			if model == "" {
-				continue
-			}
+		for _, model := range member.Provider.ModelsOfKind(kind) {
 			expanded := member
 			expanded.Model, expanded.AllModels = model, false
 			result = append(result, expanded)

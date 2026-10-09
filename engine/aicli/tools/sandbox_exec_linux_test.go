@@ -67,6 +67,45 @@ func TestReadRootsExcluding(t *testing.T) {
 	}
 }
 
+// Hiding the data root grants every sibling along its path instead, and some
+// of those are plain files: a home directory has dotfiles, /tmp has whatever
+// other programs left there. The shell must still run.
+func TestSandboxRunsWithFilesBesideTheHiddenDataRoot(t *testing.T) {
+	if landlockABI() == 0 {
+		t.Skip("kernel lacks Landlock support")
+	}
+	// Under the home directory: temp dirs are writable to the shell, so a data
+	// root there could not be hidden at all.
+	base := outsideDir(t)
+	dataRoot := filepath.Join(base, "data")
+	workspace := filepath.Join(dataRoot, "workspace", "acme", "task-1")
+	notes := filepath.Join(base, "notes.txt")
+	secret := filepath.Join(dataRoot, "secret.db")
+	if err := os.MkdirAll(workspace, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(notes, []byte("NOTES"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secret, []byte("SECRET"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	SetHiddenReadDirs([]string{dataRoot})
+	t.Cleanup(func() { SetHiddenReadDirs(nil) })
+
+	if out := execBash(t, workspace, "echo run >> runs.log && cat runs.log"); strings.TrimSpace(out) != "run" {
+		t.Fatalf("the shell must run inside its workspace, got: %q", out)
+	}
+	// The file beside the data root is readable; what is inside it is not.
+	// Paths go through a variable so the kernel, not path validation, decides.
+	if out := execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F"`, notes)); !strings.Contains(out, "NOTES") {
+		t.Errorf("a file beside the data root must be readable, got: %q", out)
+	}
+	if out := execBash(t, workspace, fmt.Sprintf(`F=%s; cat "$F" 2>/dev/null || echo BLOCKED`, secret)); !strings.Contains(out, "BLOCKED") || strings.Contains(out, "SECRET") {
+		t.Errorf("the data root must stay hidden, got: %q", out)
+	}
+}
+
 func execBash(t *testing.T, workspace, command string) string {
 	t.Helper()
 	args, err := json.Marshal(map[string]string{"command": command})

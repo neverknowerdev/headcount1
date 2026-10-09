@@ -37,7 +37,6 @@ type MCPServer struct {
 	ProjectID     *int32       `json:"project_id" gorm:"index"`
 	Project       *Project     `json:"project,omitempty" gorm:"foreignKey:ProjectID;constraint:OnDelete:CASCADE;"`
 	Accounts      []MCPAccount `json:"accounts,omitempty" gorm:"foreignKey:MCPServerID"`
-	Agents        []Agent      `json:"agents,omitempty" gorm:"many2many:agent_mcp_servers;"`
 	CreatedAt     time.Time    `json:"created_at"`
 	UpdatedAt     time.Time    `json:"updated_at"`
 }

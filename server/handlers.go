@@ -251,6 +251,14 @@ func (s *Server) Mount(r chi.Router) {
 			r.Put("/status", api.UpdateTask)
 			r.Get("/runs", api.ListTaskRuns)
 			r.Post("/rerun", api.RerunTask)
+			r.Post("/stop", api.StopTask)
+			r.Get("/tree", api.ListTaskTree)
+			r.Get("/steps", api.ListTaskSteps)
+			r.Get("/steps/{stepID}", api.GetTaskStep)
+			r.Get("/decisions", api.ListTaskDecisions)
+			r.Get("/usage", api.GetTaskUsage)
+			r.Get("/errors", api.ListTaskErrors)
+			r.Get("/logs/download", api.DownloadTaskLogs)
 			r.Get("/artifacts", api.ListTaskArtifacts)
 			r.Get("/artifacts/download", api.DownloadTaskArtifacts)
 		})
@@ -259,7 +267,6 @@ func (s *Server) Mount(r chi.Router) {
 	r.Get("/artifacts/{id}/download", api.DownloadArtifact)
 
 	r.Get("/agent-configs", api.ListAgentConfigs)
-	r.Get("/tool-names", api.GetToolNames)
 
 	r.Route("/agents", func(r chi.Router) {
 		r.Get("/", api.ListAgents)
@@ -269,7 +276,6 @@ func (s *Server) Mount(r chi.Router) {
 			r.Get("/", api.GetAgent)
 			r.Put("/", api.UpdateAgent)
 			r.Delete("/", api.DeleteAgent)
-			r.Get("/stats", api.GetAgentStats)
 			r.Get("/runs", api.ListAgentRuns)
 		})
 	})
@@ -289,16 +295,19 @@ func (s *Server) Mount(r chi.Router) {
 	})
 
 	r.Route("/runs", func(r chi.Router) {
-		r.Get("/session/{sessionID}", api.GetRunBySessionID)
 		r.Get("/", api.ListCompanyRuns)
 		r.Route("/{id}", func(r chi.Router) {
 			r.Use(api.LoadRun)
 			r.Get("/", api.GetRun)
-			r.Get("/children", api.ListChildRuns)
-			r.Get("/download", api.DownloadRunLogs)
 			r.Get("/log/download", api.DownloadRunLog)
 			r.Post("/stop", api.StopRun)
 		})
+	})
+
+	r.Route("/usage", func(r chi.Router) {
+		r.Get("/", api.GetUsage)
+		r.Get("/calls", api.ListUsageCalls)
+		r.Get("/calls/{id}", api.GetUsageCall)
 	})
 
 	r.Route("/providers", func(r chi.Router) {
@@ -384,24 +393,6 @@ func (s *Server) Mount(r chi.Router) {
 		r.Put("/", api.UpdateMCPAccount)
 		r.Delete("/", api.DeleteMCPAccount)
 		r.Post("/discover", api.DiscoverMCPAccountTools)
-	})
-
-	r.Route("/agents/{id}/mcp-servers", func(r chi.Router) {
-		r.Use(api.LoadAgent)
-		r.Get("/", api.GetAgentMCPServers)
-		r.Put("/", api.SetAgentMCPServers)
-	})
-
-	r.Route("/agents/{id}/mcp-accounts", func(r chi.Router) {
-		r.Use(api.LoadAgent)
-		r.Get("/", api.GetAgentMCPAccounts)
-		r.Put("/", api.SetAgentMCPAccounts)
-	})
-
-	r.Route("/agents/{id}/mcp-tool-filters", func(r chi.Router) {
-		r.Use(api.LoadAgent)
-		r.Get("/", api.GetAgentMCPToolFilters)
-		r.Put("/", api.SetAgentMCPToolFilters)
 	})
 }
 

@@ -37,6 +37,12 @@ jobs:
           npm install
           npm run build
 
+      - name: Check that removed concepts stay removed
+        run: ./scripts/check-removed-concepts.sh
+
+      - name: Check migration checksums
+        run: go run ./db/migrations/gensum -check
+
       - name: Run unit tests
         run: |
           git config --global user.name "CI Test"

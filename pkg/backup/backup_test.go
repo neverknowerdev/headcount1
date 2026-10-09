@@ -59,9 +59,9 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	uploads := filepath.Join(basePath, "uploads", "1")
 	os.MkdirAll(uploads, 0755)
 	os.WriteFile(filepath.Join(uploads, "a.txt"), []byte("upload"), 0644)
-	logsDir := filepath.Join(basePath, "logs", "acme", "1", "run-1")
+	logsDir := filepath.Join(basePath, "logs", "acme", "1", "task-1")
 	os.MkdirAll(logsDir, 0755)
-	os.WriteFile(filepath.Join(logsDir, "main.log"), []byte("log"), 0644)
+	os.WriteFile(filepath.Join(logsDir, "run-1.jsonl"), []byte("log"), 0644)
 	sshDir := filepath.Join(basePath, "ssh")
 	os.MkdirAll(sshDir, 0700)
 	os.WriteFile(filepath.Join(sshDir, "id_rsa"), []byte("key"), 0600)
@@ -112,7 +112,7 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	// Files restored.
 	for _, f := range []string{
 		filepath.Join(newBase, "uploads", "1", "a.txt"),
-		filepath.Join(newBase, "logs", "acme", "1", "run-1", "main.log"),
+		filepath.Join(newBase, "logs", "acme", "1", "task-1", "run-1.jsonl"),
 	} {
 		if _, err := os.Stat(f); err != nil {
 			t.Errorf("file not restored: %s", f)
@@ -132,7 +132,12 @@ func TestBackupRestoreRoundTrip(t *testing.T) {
 	}
 }
 
-func TestBackupRestoreInterruptsSnapshotActiveRuns(t *testing.T) {
+// A restore puts the database back exactly as it was, work in flight
+// included: the engine finds on its first sweep that nobody is running those
+// sessions and recovers their tasks as it does after any crash. So a task's
+// workflow state, its journal, its decisions and its usage all come back as
+// they were, under their original ids.
+func TestBackupRestoreKeepsWorkflowState(t *testing.T) {
 	basePath := t.TempDir()
 	database := openTestDB(t, t.TempDir())
 
@@ -140,17 +145,30 @@ func TestBackupRestoreInterruptsSnapshotActiveRuns(t *testing.T) {
 	if err := database.Create(&company).Error; err != nil {
 		t.Fatal(err)
 	}
-	agent := db.Agent{CompanyID: company.ID, Name: "worker"}
+	agent := db.Agent{CompanyID: company.ID, Name: "Coder"}
 	if err := database.Create(&agent).Error; err != nil {
 		t.Fatal(err)
 	}
 	agentID := agent.ID
-	task := db.Task{CompanyID: company.ID, AgentID: &agentID, Title: "active task", Status: db.TaskStatusInProgress}
+	task := db.Task{CompanyID: company.ID, AgentID: &agentID, Title: "active task", Status: db.TaskStatusInProgress,
+		TaskType: "coding", Mode: "direct", Phase: "execute", WaitingOn: "run"}
 	if err := database.Create(&task).Error; err != nil {
 		t.Fatal(err)
 	}
-	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "waiting"}
+	run := db.Run{TaskID: task.ID, AgentID: agent.ID, Status: "running"}
 	if err := database.Create(&run).Error; err != nil {
+		t.Fatal(err)
+	}
+	step := db.TaskStep{TaskID: task.ID, RootTaskID: task.ID, Kind: "run_started", RunID: &run.ID, Prompt: "brief"}
+	if err := database.Create(&step).Error; err != nil {
+		t.Fatal(err)
+	}
+	decision := db.Decision{TaskID: task.ID, RootTaskID: task.ID, RunID: &run.ID, Kind: "assumption", Title: "the API is stable"}
+	if err := database.Create(&decision).Error; err != nil {
+		t.Fatal(err)
+	}
+	call := db.LLMCall{CompanyID: company.ID, TaskID: &task.ID, Tier: "cheap", Model: "m", RunID: &run.ID, PromptTokens: 12, Status: "ok"}
+	if err := database.Create(&call).Error; err != nil {
 		t.Fatal(err)
 	}
 
@@ -158,19 +176,90 @@ func TestBackupRestoreInterruptsSnapshotActiveRuns(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	for _, table := range []string{"llm_calls", "decisions", "task_steps", "runs", "tasks", "agents", "companies"} {
+		database.Exec("DELETE FROM " + table)
+	}
 	if err := RestoreBackup(archivePath, t.TempDir(), database); err != nil {
 		t.Fatal(err)
 	}
 
-	var restored db.Run
-	if err := database.First(&restored, run.ID).Error; err != nil {
+	var restoredTask db.Task
+	if err := database.First(&restoredTask, task.ID).Error; err != nil {
 		t.Fatal(err)
 	}
-	if restored.Status != "interrupted" {
-		t.Fatalf("restored active run status = %q, want interrupted", restored.Status)
+	if restoredTask.Status != db.TaskStatusInProgress || restoredTask.Phase != "execute" || restoredTask.WaitingOn != "run" || restoredTask.TaskType != "coding" {
+		t.Errorf("task workflow state changed by restore: %+v", restoredTask)
 	}
-	if restored.EndedAt == nil {
-		t.Fatal("restored interrupted run should have ended_at")
+	var restoredRun db.Run
+	if err := database.First(&restoredRun, run.ID).Error; err != nil {
+		t.Fatal(err)
+	}
+	if restoredRun.Status != "running" {
+		t.Errorf("restored run status = %q, want it left running for the engine to recover", restoredRun.Status)
+	}
+	var restoredStep db.TaskStep
+	if err := database.First(&restoredStep, step.ID).Error; err != nil || restoredStep.Prompt != "brief" || restoredStep.RunID == nil || *restoredStep.RunID != run.ID {
+		t.Errorf("journal step not restored: %+v (%v)", restoredStep, err)
+	}
+	var restoredDecision db.Decision
+	if err := database.First(&restoredDecision, decision.ID).Error; err != nil || restoredDecision.Title != "the API is stable" {
+		t.Errorf("decision not restored: %+v (%v)", restoredDecision, err)
+	}
+	var restoredCall db.LLMCall
+	if err := database.First(&restoredCall, call.ID).Error; err != nil || restoredCall.PromptTokens != 12 {
+		t.Errorf("usage row not restored: %+v (%v)", restoredCall, err)
+	}
+}
+
+// An archive written before the workflow engine carries columns, statuses and
+// whole tables this version no longer has. What still has a place is restored;
+// the rest is left behind instead of failing the row.
+func TestRestoreAcceptsArchiveFromOlderVersion(t *testing.T) {
+	database := openTestDB(t, t.TempDir())
+	archive := t.TempDir()
+	write := func(rel, body string) {
+		t.Helper()
+		path := filepath.Join(archive, "entities", filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(path), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	write("companies/old/company.json", `{"id": 1, "name": "Old Co", "short_name": "old"}`)
+	write("companies/old/sprints/1.json", `{"id": 1, "company_id": 1, "name": "S"}`)
+	write("companies/old/agents/1.json", `{"id": 1, "company_id": 1, "name": "CEO", "role_key": "CEO", "builtin": true, "enabled": true,
+		"system_prompt": "legacy prompt", "model": "strong-model", "chat_type": "compact_thinking", "permissions": "{}", "can_use_workers": true}`)
+	write("companies/old/tasks/1/task.json", `{"id": 1, "company_id": 1, "sprint_id": 1, "agent_id": 1, "title": "old task",
+		"status": "refinement", "priority": "Normal", "orchestrator_run_id": 1}`)
+	write("companies/old/tasks/1/runs/1.json", `{"id": 1, "task_id": 1, "agent_id": 1, "status": "waiting", "kind": "task_orchestrator", "root_run_id": 1}`)
+	write("agent-mcp-servers.json", `[{"agent_id": 1, "mcp_server_id": 1, "enabled": true}]`)
+
+	if err := restoreEntities(archive, database); err != nil {
+		t.Fatal(err)
+	}
+
+	var agent db.Agent
+	if err := database.First(&agent, 1).Error; err != nil {
+		t.Fatalf("agent from an older archive was not restored: %v", err)
+	}
+	if agent.SystemPrompt != "legacy prompt" || !agent.Builtin {
+		t.Errorf("agent restored wrong: %+v", agent)
+	}
+	var task db.Task
+	if err := database.First(&task, 1).Error; err != nil {
+		t.Fatalf("task from an older archive was not restored: %v", err)
+	}
+	if task.Status != db.TaskStatusBacklog || task.AgentID == nil || *task.AgentID != 1 {
+		t.Errorf("task restored wrong: status=%q agent=%v", task.Status, task.AgentID)
+	}
+	var run db.Run
+	if err := database.First(&run, 1).Error; err != nil {
+		t.Fatalf("run from an older archive was not restored: %v", err)
+	}
+	if run.Status != "failed" || run.EndedAt == nil {
+		t.Errorf("a session in a status this version does not have was restored as %q (ended_at %v)", run.Status, run.EndedAt)
 	}
 }
 

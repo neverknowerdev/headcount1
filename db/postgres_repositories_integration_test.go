@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"agent-orchestrator/db"
+	"agent-orchestrator/db/models"
 	"agent-orchestrator/db/repository"
 	"agent-orchestrator/pkg/secrets"
 
@@ -166,9 +167,6 @@ func repositoryIntegrationArg(t *testing.T, repoName, methodName string, index i
 		case reflect.Int64:
 			return reflect.ValueOf([]int64{1}).Convert(typ)
 		case reflect.String:
-			if typ.Elem() == reflect.TypeOf(db.RunEventType("")) {
-				return reflect.ValueOf([]db.RunEventType{db.RunEventTypeSessionMessage}).Convert(typ)
-			}
 			return reflect.ValueOf([]string{"running", "paused", "done"}).Convert(typ)
 		case reflect.Uint8:
 			if methodName == "GetCredentialByCredentialID" {
@@ -177,7 +175,20 @@ func repositoryIntegrationArg(t *testing.T, repoName, methodName string, index i
 			return reflect.ValueOf([]byte("credential")).Convert(typ)
 		}
 	}
+	if typ.Kind() == reflect.Func {
+		// A callback (a workflow transition's body): do nothing, report success.
+		return reflect.MakeFunc(typ, func([]reflect.Value) []reflect.Value {
+			results := make([]reflect.Value, typ.NumOut())
+			for i := range results {
+				results[i] = reflect.Zero(typ.Out(i))
+			}
+			return results
+		})
+	}
 	if typ.Kind() == reflect.Map {
+		if methodName == "UpdateTaskFields" {
+			return reflect.ValueOf(map[string]interface{}{"title": "integration", "status": db.TaskStatusDone}).Convert(typ)
+		}
 		if methodName == "AppendRunLogEntry" {
 			return reflect.ValueOf(map[string]interface{}{"type": "integration", "message": "postgres"}).Convert(typ)
 		}
@@ -222,14 +233,11 @@ func repositoryStringArgument(repoName, methodName string, index, callIndex int)
 	case "GetModelGroupByKey":
 		return "fixture-group"
 	case "GetDefaultModelSetting", "UpdateDefaultModelSetting":
-		return repository.PurposeTaskOrchestrator
-	case "EnqueueRoutedEvent":
-		// The routed-message API accepts a RunEventType directly rather than
-		// a RunEvent struct, so it does not pass through the Create*/Save*
-		// fixture normalization below.
-		if index == 3 {
-			return string(db.RunEventTypeSessionMessage)
-		}
+		return repository.PurposeSmart
+	case "UsageBy":
+		return repository.UsageByTask
+	case "AcquireTaskLease", "RenewTaskLease", "ReleaseTaskLease":
+		return "integration-owner"
 	case "GetArtifactByTaskAndFilename":
 		return "fixture.md"
 	case "GetProviderPresetByKey":
@@ -327,7 +335,11 @@ func repositoryStringArgument(repoName, methodName string, index, callIndex int)
 func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, callIndex int) any {
 	copy := reflect.New(typ).Elem()
 	copy.Set(reflect.ValueOf(value))
-	if strings.HasPrefix(methodName, "Create") || strings.HasPrefix(methodName, "Save") {
+	inserts := false
+	for _, prefix := range []string{"Create", "Save", "Append", "Record"} {
+		inserts = inserts || strings.HasPrefix(methodName, prefix)
+	}
+	if inserts {
 		if field := copy.FieldByName("ID"); field.IsValid() && field.CanSet() && field.Kind() >= reflect.Int && field.Kind() <= reflect.Int64 {
 			field.SetInt(0)
 		}
@@ -357,13 +369,8 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 				field.SetString(db.TaskStatusTodo)
 			}
 		}
-		if copy.Type() == reflect.TypeOf(db.Run{}) {
-			if field := copy.FieldByName("Kind"); field.IsValid() && field.CanSet() {
-				field.SetString(db.RunKindAgentSession)
-			}
-		}
-		if field := copy.FieldByName("EventType"); field.IsValid() && field.CanSet() && field.Kind() == reflect.String {
-			field.SetString(string(db.RunEventTypeLifecycleStatus))
+		if copy.Type() == reflect.TypeOf(db.LLMCall{}) {
+			copy.FieldByName("Status").SetString(models.LLMCallOK)
 		}
 		if copy.Type() == reflect.TypeOf(db.TaskRelation{}) {
 			if field := copy.FieldByName("Kind"); field.IsValid() && field.CanSet() {
@@ -376,17 +383,18 @@ func repositoryFixtureArgument(value any, typ reflect.Type, methodName string, c
 
 func prepareRepositoryMethodFixture(t *testing.T, database *gorm.DB, repoName, methodName string) func() {
 	t.Helper()
-	if repoName == "RunEventRepository" && methodName == "AnswerPendingMessage" {
-		require.NoError(t, database.Exec("UPDATE run_events SET source_run_id = 1, target_run_id = 1, event_type = 'session_message', consumed_at = NULL WHERE id = 1").Error)
-		return func() {
-			_ = database.Exec("UPDATE run_events SET source_run_id = NULL, target_run_id = NULL, event_type = 'run_status', consumed_at = NULL WHERE id = 1").Error
-		}
-	}
 	if repoName == "RunRepository" && methodName == "MarkRunResumeStarted" {
 		lease := time.Now().UTC().Add(time.Hour).Format(time.RFC3339Nano)
 		require.NoError(t, database.Exec("UPDATE runs SET status = 'resuming', recovery = jsonb_build_object('resume_lease_owner', 'integration-owner', 'resume_lease_until', ?::timestamptz) WHERE id = 1", lease).Error)
 		return func() {
 			_ = database.Exec("UPDATE runs SET status = 'running', recovery = '{}'::jsonb WHERE id = 1").Error
+		}
+	}
+	if repoName == "WorkflowRepository" && (methodName == "WorkflowTransition" || methodName == "RenewTaskLease" || methodName == "ReleaseTaskLease") {
+		// These act on a lease that is held; give the fixture task one.
+		require.NoError(t, database.Exec("UPDATE tasks SET lease_owner = 'integration-owner', lease_until = now() + interval '1 hour' WHERE id = 1").Error)
+		return func() {
+			_ = database.Exec("UPDATE tasks SET lease_owner = '', lease_until = NULL WHERE id = 1").Error
 		}
 	}
 	return func() {}
@@ -451,9 +459,9 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&group)
 	groupMember := db.ModelGroupMember{ID: 1, GroupID: 1, ProviderID: 1, Model: "fixture-model"}
 	insert(&groupMember)
-	defaultSetting := db.DefaultModelSetting{ID: 1, Purpose: repository.PurposeTaskOrchestrator, UserID: ptrInt32(1), ProviderID: ptrInt32(1), Model: "fixture-model", ModelGroupID: ptrInt32(1)}
+	defaultSetting := db.DefaultModelSetting{ID: 1, Purpose: repository.PurposeSmart, UserID: ptrInt32(1), ProviderID: ptrInt32(1), Model: "fixture-model", ModelGroupID: ptrInt32(1)}
 	insert(&defaultSetting)
-	agent := db.Agent{ID: 1, CompanyID: 1, Name: "fixture-agent", RoleKey: "fixture-agent", SystemPrompt: "integration", ProviderID: ptrInt32(1), ModelGroupID: ptrInt32(1), Model: "fixture-model", ChatType: "message_history"}
+	agent := db.Agent{ID: 1, CompanyID: 1, Name: "fixture-agent", RoleKey: "fixture-agent", SystemPrompt: "integration"}
 	insert(&agent)
 	skill := db.Skill{ID: 1, CompanyID: 1, Name: "fixture-skill", LocalPath: "/tmp/fixture-skill"}
 	insert(&skill)
@@ -467,34 +475,22 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&run)
 	completedRun := db.Run{ID: 2, TaskID: 2, AgentID: 1, Name: "fixture-completed-run", Status: "completed", SessionID: "fixture-session-done", StartedAt: now.Add(-time.Hour), EndedAt: ptrTime(now.Add(-time.Minute))}
 	insert(&completedRun)
-	runEvent := db.RunEvent{ID: 1, TaskID: 1, RunID: 1, EventType: db.RunEventTypeLifecycleStatus, Payload: "{}", DedupeKey: "event-1", CreatedAt: now}
-	insert(&runEvent)
-	runStatusReport := db.RunStatusReport{ID: 1, RunID: 1, Status: "running", MessageID: 1, ReportedAt: now}
-	insert(&runStatusReport)
 	relation := db.TaskRelation{ID: 1, CompanyID: 1, SourceTaskID: 1, TargetTaskID: 2, Kind: db.TaskRelationDependsOn}
 	insert(&relation)
 	comment := db.Comment{ID: 1, TaskID: 1, AuthorType: "user", AuthorID: ptrInt32(1), Content: "fixture comment", RunID: ptrInt32(1)}
 	insert(&comment)
 	attachment := db.Attachment{ID: 1, TaskID: 1, CommentID: ptrInt32(1), Filename: "fixture.txt", FilePath: "/tmp/fixture.txt", MimeType: "text/plain"}
 	insert(&attachment)
-	artifact := db.Artifact{ID: 1, CompanyID: ptrInt32(1), ProjectID: ptrInt32(1), TaskID: 1, RunID: 1, Filename: "fixture.md", FilePath: "/tmp/fixture.md", Content: "fixture"}
+	artifact := db.Artifact{ID: 1, CompanyID: ptrInt32(1), ProjectID: ptrInt32(1), TaskID: 1, RunID: ptrInt32(1), Filename: "fixture.md", FilePath: "/tmp/fixture.md", Content: "fixture"}
 	insert(&artifact)
 	activity := db.ActivityLog{ID: 1, CompanyID: 1, Action: "fixture", EntityID: 1, EntityType: "task", Details: "{}"}
 	insert(&activity)
-	proxyLog := db.ProxyRequestLog{ID: 1, AgentID: 1, ProviderID: 1, Model: "fixture-model"}
-	insert(&proxyLog)
 	server := db.MCPServer{ID: 1, Name: db.MCPServerNameGitHub, DisplayName: "GitHub", Transport: db.MCPTransportBuiltin, AuthType: db.MCPAuthTypeGitHubApp, Enabled: true, Builtin: true, ProjectID: ptrInt32(1)}
 	insert(&server)
 	secondServer := db.MCPServer{ID: 2, Name: "fixture-server-2", DisplayName: "Fixture server", Transport: "stdio", Enabled: true}
 	insert(&secondServer)
 	account := db.MCPAccount{ID: 1, MCPServerID: 1, Name: "fixture-account", AuthTokenEncrypted: sealed, UserID: ptrInt32(1)}
 	insert(&account)
-	agentServer := db.AgentMCPServer{AgentID: 1, MCPServerID: 1, Enabled: true}
-	insert(&agentServer)
-	agentAccount := db.AgentMCPAccount{AgentID: 1, MCPAccountID: 1, Enabled: true}
-	insert(&agentAccount)
-	toolFilter := db.AgentMCPToolFilter{AgentID: 1, MCPServerID: 1, ToolName: "search", Enabled: true}
-	insert(&toolFilter)
 	toolStat := db.MCPToolStat{ID: 1, MCPServerID: 1, ToolName: "search", CallCount: 1}
 	insert(&toolStat)
 	githubConnection := db.GitHubConnection{ID: 1, InstallationID: 1001, MCPAccountID: 1, UserID: 1, AccountLogin: "fixture", ConnectedAt: now}
@@ -525,6 +521,12 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 	insert(&webauthnCredential)
 	webauthnSession := db.WebAuthnSession{ID: 1, UserID: ptrInt32(1), Purpose: "login", Data: "{}", ExpiresAt: now.Add(time.Hour)}
 	insert(&webauthnSession)
+	taskStep := db.TaskStep{ID: 1, TaskID: 1, RootTaskID: 1, Kind: models.StepNote, Result: "fixture step", CreatedAt: now}
+	insert(&taskStep)
+	decision := db.Decision{ID: 1, TaskID: 1, RootTaskID: 1, StepID: ptrInt64(1), Kind: models.DecisionKindDecision, Title: "fixture decision", CreatedAt: now}
+	insert(&decision)
+	llmCall := db.LLMCall{ID: 1, CompanyID: 1, RootTaskID: ptrInt32(1), TaskID: ptrInt32(1), AgentID: ptrInt32(1), AgentName: "fixture-agent", Tier: models.TierSmart, Model: "fixture-model", StepID: ptrInt64(1), PromptTokens: 10, CompletionTokens: 5, Status: models.LLMCallOK, CreatedAt: now}
+	insert(&llmCall)
 
 	return map[reflect.Type]any{
 		reflect.TypeOf(db.User{}):                                 user,
@@ -545,16 +547,10 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 		reflect.TypeOf(db.Comment{}):                              comment,
 		reflect.TypeOf(db.Attachment{}):                           attachment,
 		reflect.TypeOf(db.Run{}):                                  run,
-		reflect.TypeOf(db.RunEvent{}):                             runEvent,
-		reflect.TypeOf(db.RunStatusReport{}):                      runStatusReport,
 		reflect.TypeOf(db.Artifact{}):                             artifact,
 		reflect.TypeOf(db.ActivityLog{}):                          activity,
-		reflect.TypeOf(db.ProxyRequestLog{}):                      proxyLog,
 		reflect.TypeOf(db.MCPServer{}):                            server,
 		reflect.TypeOf(db.MCPAccount{}):                           account,
-		reflect.TypeOf(db.AgentMCPServer{}):                       agentServer,
-		reflect.TypeOf(db.AgentMCPAccount{}):                      agentAccount,
-		reflect.TypeOf(db.AgentMCPToolFilter{}):                   toolFilter,
 		reflect.TypeOf(db.MCPToolStat{}):                          toolStat,
 		reflect.TypeOf(db.GitHubConnection{}):                     githubConnection,
 		reflect.TypeOf(db.GitHubIdentity{}):                       identity,
@@ -569,6 +565,11 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 		reflect.TypeOf(db.UserGitCredential{}):                    userCredential,
 		reflect.TypeOf(db.WebAuthnCredential{}):                   webauthnCredential,
 		reflect.TypeOf(db.WebAuthnSession{}):                      webauthnSession,
+		reflect.TypeOf(db.TaskStep{}):                             taskStep,
+		reflect.TypeOf(db.Decision{}):                             decision,
+		reflect.TypeOf(db.LLMCall{}):                              llmCall,
+		reflect.TypeOf(db.UsageFilter{}):                          db.UsageFilter{CompanyID: 1, SubtreeOf: ptrInt32(1), From: ptrTime(now.Add(-time.Hour))},
+		reflect.TypeOf(db.TransitionGuard{}):                      db.TransitionGuard{TaskID: 1, LeaseOwner: "integration-owner", Status: db.TaskStatusTodo},
 		reflect.TypeOf(db.RunRecovery{}):                          db.RunRecovery{CheckpointPhase: db.CheckpointPhaseBeforeTools},
 		reflect.TypeOf(db.RunTokenStats{}):                        db.RunTokenStats{PromptTokens: 1, CompletionTokens: 2, TotalTokens: 3},
 		reflect.TypeOf(repository.SaveGitHubOAuthAccountParams{}): repository.SaveGitHubOAuthAccountParams{State: db.GitHubOAuthState{ID: "state-create", MCPServerID: 1, UserID: 1, ExpiresAt: now.Add(time.Hour)}, GitHubUserID: 9002, GitHubLogin: "fixture-create", SealedToken: sealed, Installations: []repository.GitHubInstallationRecord{{InstallationID: 1002, AccountLogin: "fixture"}}, ConnectedAt: now},
@@ -576,5 +577,7 @@ func seedRepositoryFixtures(t *testing.T, database *gorm.DB) map[reflect.Type]an
 }
 
 func ptrInt32(value int32) *int32 { return &value }
+
+func ptrInt64(value int64) *int64 { return &value }
 
 func ptrTime(value time.Time) *time.Time { return &value }

@@ -12,3 +12,13 @@ database-level `CHECK` validation with the same allowed values in both engines,
 which gives the application the same validation without relying on a
 PostgreSQL-only `CREATE TYPE`. PostgreSQL uses named constraints; SQLite uses
 guard columns because SQLite cannot add a table constraint in place.
+
+Each directory also carries an `atlas.sum` with the checksum of every
+`.up.sql` file, for the Atlas CLI. After adding or changing a migration,
+regenerate both from the repository root:
+
+```sh
+go run ./db/migrations/gensum
+```
+
+`go run ./db/migrations/gensum -check` verifies them without writing.
