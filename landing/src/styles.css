@@ -376,6 +376,27 @@ em{font-style:italic}
 .legal b{font-weight:600;color:var(--ink)}
 .legal section a,.legal .lede a{color:var(--p-text);text-decoration:underline;text-underline-offset:3px}
 
+/* ---------- contact ---------- */
+.contact-hero{padding-top:88px;padding-bottom:24px;display:flex;flex-direction:column;gap:18px}
+.contact-hero .lede{max-width:640px}
+.channels{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:16px;margin-top:28px}
+.channel{position:relative;display:flex;flex-direction:column;gap:10px;padding:24px 24px 28px;color:var(--ink);transition:border-color .2s var(--ease),transform .2s var(--ease)}
+.channel:hover{border-color:var(--p-l);transform:translateY(-2px);color:var(--ink)}
+.channel-label{font-family:var(--serif);font-weight:400;font-size:21px;line-height:1.2;letter-spacing:-0.01em;overflow-wrap:anywhere}
+.channel-desc{font-size:14px;line-height:1.55;color:var(--mut);padding-right:28px}
+.channel-go{position:absolute;right:22px;bottom:22px;color:var(--p-text);font-size:18px}
+#story .split{align-items:start}
+.story{display:flex;flex-direction:column;gap:18px}
+.story p{font-size:17px;line-height:1.65;color:var(--ink2);text-wrap:pretty}
+.story p:first-child{font-family:var(--serif);font-size:24px;line-height:1.4;color:var(--ink)}
+.ceo-human{min-width:300px;gap:10px;transition:transform .2s var(--ease)}
+.ceo-human:hover{color:var(--bg);transform:translateY(-2px)}
+.ceo-person{display:flex;align-items:center;gap:12px}
+.ceo-id{display:flex;flex-direction:column;gap:2px;flex:1}
+.avatar{width:42px;height:42px;border-radius:50%;background:var(--p-l);color:var(--ink);display:grid;place-items:center;font-family:var(--serif);font-size:18px;font-style:italic;flex-shrink:0}
+.ceo-x{font-family:var(--mono);font-size:11.5px;color:var(--p-dl)}
+.team-note{margin-top:20px;font-size:13px;color:var(--dim);text-align:center}
+
 /* ---------- tablet ---------- */
 @media (max-width:1023px){
   .nav-links{display:none}
@@ -391,6 +412,7 @@ em{font-style:italic}
   .col{flex:0 0 220px;scroll-snap-align:start}
   .chain{grid-template-columns:1fr 1fr}
   .sec-grid{grid-template-columns:1fr 1fr}
+  .channels{grid-template-columns:1fr}
 }
 @media (max-width:859px){
   .split,.privacy .split{grid-template-columns:1fr;gap:20px;align-items:start}
@@ -455,6 +477,9 @@ em{font-style:italic}
   .final{padding-top:88px;padding-bottom:72px}
   .final h2{font-size:40px}
   .legal{padding-top:56px;padding-bottom:80px}
+  .contact-hero{padding-top:56px}
+  .ceo-human{min-width:0;width:100%}
+  .story p:first-child{font-size:21px}
   .legal h2{font-size:24px}
   .cmd{font-size:12.5px}
 }

@@ -5,6 +5,8 @@ import { legalPages } from './src/legal.mjs';
 
 const APP_URL = 'https://app.headcount1.ai';
 const GITHUB_URL = 'https://github.com/neverknowerdev/headcount1';
+const X_URL = 'https://x.com/neverknower_dev';
+const CONTACT_EMAIL = 'hello@headcount1.ai';
 const TITLE = 'headcount1 — hire an AI company';
 const DESCRIPTION = 'headcount1 staffs your project with a CEO, a CTO, coders, QA, designers and marketers. They plan, build and verify the work themselves and route every step to the best-value model.';
 
@@ -173,6 +175,7 @@ const nav = home => `<header class="nav">
       <a href="${home}#privacy">Privacy</a>
       <a href="${home}#pricing">Pricing</a>
       <a href="${home}#faq">FAQ</a>
+      <a href="/contact">Contact</a>
     </nav>
     ${star}
   </div>
@@ -182,6 +185,7 @@ const footer = `<footer class="foot">
   <div class="wrap foot-in">
     <span>headcount1 · AI agent orchestration</span>
     <nav class="foot-links" aria-label="Footer">
+      <a href="/contact">Contact</a>
       <a href="/terms">Terms</a>
       <a href="/privacy">Privacy</a>
       <a href="${GITHUB_URL}">GitHub</a>
@@ -527,6 +531,90 @@ ${each(faqs, ([q, a], i) => `    <details name="faq"${i ? '' : ' open'}><summary
 
 ${footer}`;
 
+// ---------- contact page ----------
+const story = [
+  'headcount1 started with a simple frustration: AI coding agents were good at a single task and bad at running a project. Someone still had to write the specs, pick the model, check the work, and answer the same questions again and again.',
+  'So the idea was to stop treating agents as tools and to staff them like a company: a CEO who owns the outcome, a CTO who writes the specs, coders who build, QA who verify, and designers and marketers around them. The human sets the direction and steps in only when a decision is really theirs.',
+  'The second half of the idea is cost. Most harnesses run every step on one flagship model and resend the whole chat history. headcount1 routes each step to the cheapest model that fits it and gives smart models a short brief instead of a transcript.',
+  'It is built in the open, as a single Go binary you can self-host, by one person working with a team of AI agents. They also help build headcount1 itself.',
+];
+
+const channels = [
+  ['Email', CONTACT_EMAIL, `mailto:${CONTACT_EMAIL}`, 'Questions, feedback, partnerships and press. A person reads every message.'],
+  ['X', '@neverknower_dev', X_URL, 'Product updates, build-in-public notes, and the quickest way to reach me.'],
+  ['GitHub', 'neverknowerdev/headcount1', GITHUB_URL, 'Bug reports, feature requests and pull requests are welcome.'],
+];
+
+const contactBody = () => `
+${nav('/')}
+
+<main>
+<section class="wrap contact-hero">
+  <span class="eyebrow">Contact</span>
+  <h1 class="h-lg">Talk to the <em class="accent">human.</em></h1>
+  <p class="lede">headcount1 is built by one person and a company of AI agents. Write to us about anything: a bug, an idea, a partnership, or just how you are using it.</p>
+  <div class="channels">
+${each(channels, ([name, label, href, desc]) => `    <a class="card channel" href="${esc(href)}"${href.startsWith('http') ? ' rel="noopener"' : ''}>
+      <span class="eyebrow">${name}</span>
+      <b class="channel-label">${esc(label)}</b>
+      <span class="channel-desc">${esc(desc)}</span>
+      <span class="channel-go" aria-hidden="true">→</span>
+    </a>`)}
+  </div>
+</section>
+
+<section id="story" class="wrap sec">
+  <div class="split">
+    <div class="stack">
+      <span class="eyebrow">The story</span>
+      <h2 class="h-lg">Why hire an <em class="accent">AI company?</em></h2>
+    </div>
+    <div class="story">
+${each(story, t => `      <p>${esc(t)}</p>`)}
+    </div>
+  </div>
+</section>
+
+<section id="team" class="wrap sec">
+  <div class="stack" style="margin-bottom:48px;max-width:760px">
+    <span class="eyebrow">The team</span>
+    <h2 class="h-lg">One human. <em class="accent">A company of agents.</em></h2>
+  </div>
+  <div class="card shadow org">
+    <div class="org-bar">
+      <span>headcount1 / org chart</span>
+      <span><span class="dot pulse"></span>1 human · ${depts.reduce((n, d) => n + 1 + d.team.length, 0)} agents</span>
+    </div>
+    <div class="org-tree">
+      <a class="ceo ceo-human" href="${X_URL}" rel="noopener">
+        <div class="ceo-person">
+          <span class="avatar" aria-hidden="true">nk</span>
+          <div class="ceo-id">
+            <div class="ceo-top"><b>neverknower</b><span>human</span></div>
+            <span>Founder &amp; CEO</span>
+          </div>
+        </div>
+        <span>Sets the direction, makes the product calls, and answers when an agent asks.</span>
+        <span class="ceo-x">@neverknower_dev on X →</span>
+      </a>
+      <div class="org-stem"></div>
+      <div class="depts">
+${each(depts, d => `        <div class="dept">
+          <div class="lead"><b>${esc(d.lead)}</b><span>${esc(d.model)}</span></div>
+          <div class="team">
+${each(d.team, ([name, state]) => `            <div class="member"><span>${esc(name)}</span><span class="state ${state}">${state}</span></div>`)}
+          </div>
+        </div>`)}
+      </div>
+    </div>
+  </div>
+  <p class="team-note">Every agent is an AI. The roles and models shown here are the defaults headcount1 ships with.</p>
+</section>
+</main>
+
+${footer}`;
+
+
 const block = b => Array.isArray(b) ? `<ul>\n${each(b, li => `  <li><span>${li}</span></li>`)}\n</ul>` : `<p>${b}</p>`;
 
 const legalBody = doc => `
@@ -585,6 +673,11 @@ mkdirSync(new URL('assets/', dist), { recursive: true });
 cpSync(new URL('public/', root), dist, { recursive: true });
 writeFileSync(new URL('index.html', dist), html);
 writeFileSync(new URL(jsName, dist), js);
+writeFileSync(new URL('contact.html', dist), page({
+  title: 'Contact — headcount1',
+  description: 'Get in touch with headcount1: email, X and GitHub, the story behind the project, and the team of one human and a company of AI agents.',
+  body: contactBody(),
+}));
 // Served at /terms and /privacy.
 for (const doc of legalPages({ APP_URL, GITHUB_URL })) {
   writeFileSync(new URL(`${doc.slug}.html`, dist), page({ title: `${doc.title} — headcount1`, description: doc.description, body: legalBody(doc) }));
