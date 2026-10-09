@@ -1,3 +1,5 @@
+import { Attribution } from '../components/Attribution';
+
 // Shared layout + form primitives for the unauthenticated pages
 // (login / register / forgot / reset), styled after the AddCompany wizard.
 export function AuthShell({ title, subtitle, children }: {
@@ -16,6 +18,9 @@ export function AuthShell({ title, subtitle, children }: {
                     <h2 className="mb-1 text-xl font-semibold text-gray-900">{title}</h2>
                     {subtitle && <p className="mb-4 text-sm text-gray-500">{subtitle}</p>}
                     {children}
+                </div>
+                <div className="mt-6 text-center">
+                    <Attribution />
                 </div>
             </div>
         </div>

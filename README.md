@@ -2,7 +2,7 @@
 
 **Hire an AI company.** headcount1 is an open-source agent orchestrator. It staffs your project with a CEO, a CTO, coders, QA, designers and marketers that take tasks from a board, plan and delegate the work, build it in a sandbox, verify it, and come back to you only when a decision is yours.
 
-[Website](https://headcount1.ai) · [Cloud version](https://app.headcount1.ai) · [Follow @neverknowerdev on X](https://x.com/neverknowerdev)
+[Website](https://headcount1.ai) · [Cloud version](https://app.headcount1.ai) · [Follow @neverknower_dev on X](https://x.com/neverknower_dev)
 
 It ships as a single Go binary with the React web UI embedded, and runs on SQLite out of the box or on PostgreSQL.
 
@@ -129,4 +129,4 @@ Contributions are welcome under the [Contributor License Agreement](CLA.md). See
 
 ## Author
 
-headcount1 is built by neverknower. Follow [@neverknowerdev on X](https://x.com/neverknowerdev) for updates, and see [headcount1.ai](https://headcount1.ai) for the product. headcount1 Cloud is operated by GMGM sp. z o.o.
+headcount1 is built by neverknower. Follow [@neverknower_dev on X](https://x.com/neverknower_dev) for updates, and see [headcount1.ai](https://headcount1.ai) for the product. headcount1 Cloud is operated by GMGM sp. z o.o.
