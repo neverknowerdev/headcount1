@@ -101,8 +101,11 @@ export function register(email: string, inviteToken?: string, acceptTerms = fals
         { email, invite_token: inviteToken || '', accept_terms: acceptTerms }, 'create');
 }
 
-export function login(email: string) {
-    return runCeremony('/api/auth/login/begin', '/api/auth/login/finish', { email }, 'get');
+// login is usernameless: every passkey is a discoverable (resident) credential,
+// so the browser lists this site's passkeys and the server identifies the
+// account from the chosen one — no email needed.
+export function login() {
+    return runCeremony('/api/auth/login/begin', '/api/auth/login/finish', {}, 'get');
 }
 
 // unlock re-warms the encryption vault after a crash (session already valid).

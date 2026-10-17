@@ -341,36 +341,25 @@ func (api *API) validReenrollTicket(r *http.Request, user db.User) bool {
 
 // ── login (existing account) ─────────────────────────────────────────────────
 
+// LoginBegin starts a usernameless (discoverable-credential) login: every
+// passkey is registered as a resident key, so the authenticator itself knows
+// which account it belongs to and the browser offers the user's passkeys for
+// this site without asking for an email first. The options carry no
+// allowCredentials and the ceremony is bound to no user — the account is
+// resolved from the assertion's userHandle at finish. Any request body (older
+// clients still send {email}) is ignored.
 func (api *API) LoginBegin(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Email string `json:"email"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		api.respondError(w, http.StatusBadRequest, "invalid payload")
-		return
-	}
 	wa, err := webauthnRP()
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "webauthn not configured")
 		return
 	}
-	user, err := api.q.GetUserByEmail(r.Context(), db.NormalizeEmail(req.Email))
-	if err != nil {
-		api.respondError(w, http.StatusNotFound, "no account for that email")
-		return
-	}
-	wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
-	if len(wu.creds) == 0 {
-		api.respondError(w, http.StatusBadRequest, "this account has no passkey — use account recovery")
-		return
-	}
-	options, sessionData, err := wa.BeginLogin(wu, webauthn.WithAssertionExtensions(prfExtension()), webauthn.WithUserVerification(protocol.VerificationRequired))
+	options, sessionData, err := wa.BeginDiscoverableLogin(webauthn.WithAssertionExtensions(prfExtension()), webauthn.WithUserVerification(protocol.VerificationRequired))
 	if err != nil {
 		api.respondError(w, http.StatusInternalServerError, "failed to start login: "+err.Error())
 		return
 	}
-	uid := user.ID
-	api.stashChallenge(w, r, &uid, "login", sessionData, map[string]any{"options": options})
+	api.stashChallenge(w, r, nil, "login", sessionData, map[string]any{"options": options})
 }
 
 func (api *API) LoginFinish(w http.ResponseWriter, r *http.Request) {
@@ -450,27 +439,63 @@ func (api *API) finishAssertion(w http.ResponseWriter, r *http.Request, purpose 
 		}
 	}
 	sess, err := api.q.ConsumeWebAuthnSession(r.Context(), body.SessionID, purpose, expectUser)
-	if err != nil || sess.UserID == nil {
+	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "session expired — start over")
 		return
 	}
-	user, err := api.q.GetUser(r.Context(), *sess.UserID)
-	if err != nil {
-		api.respondError(w, http.StatusBadRequest, "account not found")
+	// Login ceremonies are discoverable (no user bound at begin); unlock and
+	// reauth are always bound to the authenticated user.
+	discoverable := purpose == "login"
+	if !discoverable && sess.UserID == nil {
+		api.respondError(w, http.StatusBadRequest, "session expired — start over")
 		return
 	}
 	wa, _ := webauthnRP()
 	_, sessionData, _ := decodeStash(sess.Data)
-	wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
+	if sessionData == nil {
+		api.respondError(w, http.StatusBadRequest, "session expired — start over")
+		return
+	}
 	parsed, err := protocol.ParseCredentialRequestResponseBody(bytes.NewReader(body.Credential))
 	if err != nil {
 		api.respondError(w, http.StatusBadRequest, "invalid assertion: "+err.Error())
 		return
 	}
-	validated, err := wa.ValidateLogin(wu, *sessionData, parsed)
+	var (
+		user      db.User
+		validated *webauthn.Credential
+	)
+	if discoverable {
+		// Resolve the account from the passkey's userHandle (our WebAuthnID,
+		// the decimal user id). go-webauthn then checks the handle matches and
+		// that the credential is one of that user's.
+		var wu webauthnUser
+		_, validated, err = wa.ValidatePasskeyLogin(func(_, userHandle []byte) (webauthn.User, error) {
+			id, perr := strconv.ParseInt(string(userHandle), 10, 32)
+			if perr != nil {
+				return nil, errors.New("malformed user handle")
+			}
+			u, gerr := api.q.GetUser(r.Context(), int32(id))
+			if gerr != nil {
+				return nil, errors.New("no account for this passkey")
+			}
+			wu = webauthnUser{user: u}.loadCredsFor(r.Context(), api.q)
+			return wu, nil
+		}, *sessionData, parsed)
+		user = wu.user
+	} else {
+		user, err = api.q.GetUser(r.Context(), *sess.UserID)
+		if err != nil {
+			api.respondError(w, http.StatusBadRequest, "account not found")
+			return
+		}
+		wu := webauthnUser{user: user}.loadCredsFor(r.Context(), api.q)
+		validated, err = wa.ValidateLogin(wu, *sessionData, parsed)
+	}
 	if err != nil {
 		// Log the real reason server-side (origin/RPID/challenge/credential
-		// mismatch, ...) — the client only ever sees the generic message.
+		// mismatch, unknown passkey, ...) — the client only ever sees the
+		// generic message.
 		log.Printf("webauthn: %s assertion failed for user %d: %v", purpose, user.ID, err)
 		api.respondError(w, http.StatusUnauthorized, "assertion failed")
 		return
