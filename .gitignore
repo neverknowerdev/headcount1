@@ -16,3 +16,6 @@ tmp/
 headcount1
 
 landing/dist/
+e2e/.env.live
+e2e/playwright-report-live/
+e2e/test-results-live/
