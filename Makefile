@@ -1,4 +1,4 @@
-.PHONY: build dev setup e2e run run-dev
+.PHONY: build dev setup e2e e2e-live e2e-live-full run run-dev
 
 VERSION := $(shell ./scripts/version.sh 2>/dev/null || echo "dev")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
@@ -34,3 +34,12 @@ dev:
 
 e2e: build-frontend
 	cd e2e && npm run test
+
+# Real models doing real tasks through the UI. Needs credentials in
+# e2e/.env.live (see e2e/live/README.md); every spec skips without them.
+e2e-live: build
+	cd e2e && npx playwright test -c playwright.live.config.ts
+
+# Also the slow multi-agent specs tagged @full.
+e2e-live-full: build
+	cd e2e && E2E_LIVE_FULL=1 npx playwright test -c playwright.live.config.ts

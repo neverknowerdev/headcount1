@@ -1,0 +1,66 @@
+name: E2E Live (real agents)
+# Real models doing real tasks through the UI. Manual only: it spends money.
+on:
+  workflow_dispatch:
+    inputs:
+      full:
+        description: Also run the slow @full specs (multi-agent)
+        type: boolean
+        default: false
+      spec:
+        description: Run one spec file only, e.g. live/02_coding_slugify.spec.ts
+        type: string
+        default: ''
+
+concurrency:
+  group: e2e-live
+  cancel-in-progress: false
+
+jobs:
+  live:
+    timeout-minutes: 180
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v4
+
+    - uses: actions/setup-go@v5
+      with:
+        go-version: '1.26.4'
+
+    - uses: actions/setup-node@v4
+      with:
+        node-version: 20
+
+    - name: Build
+      run: |
+        cd frontend && npm install && npm run build && cd ..
+        go build -o agent-orchestrator .
+
+    - name: Install E2E dependencies
+      run: |
+        cd e2e
+        npm install
+        npx playwright install --with-deps chromium
+
+    - name: Run live specs (SQLite)
+      run: |
+        cd e2e
+        npx playwright test -c playwright.live.config.ts ${{ inputs.spec }}
+      env:
+        E2E_MODE: true
+        E2E_LIVE_FULL: ${{ inputs.full && '1' || '' }}
+        E2E_LIVE_BASE_URL: ${{ vars.E2E_LIVE_BASE_URL }}
+        E2E_LIVE_SMART_MODEL: ${{ vars.E2E_LIVE_SMART_MODEL }}
+        E2E_LIVE_CHEAP_MODEL: ${{ vars.E2E_LIVE_CHEAP_MODEL }}
+        E2E_LIVE_API_KEY: ${{ secrets.E2E_LIVE_API_KEY }}
+        E2E_LIVE_TYPESAFE_KEY: ${{ secrets.E2E_LIVE_TYPESAFE_KEY }}
+
+    - name: Upload report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: e2e-live-report
+        path: |
+          e2e/playwright-report-live/
+          e2e/test-results-live/
+        retention-days: 14
