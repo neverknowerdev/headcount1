@@ -25,6 +25,9 @@ Git integration (Workers & Pages → Create → Import a repository):
 | Build command | `node build.mjs` |
 | Deploy command | `npx wrangler deploy` |
 | Path (Advanced settings) | `/landing` |
+| Build watch paths (Settings → Build) | Include `landing/*` |
+
+The build watch paths make Cloudflare skip the build, including pull request previews, when a push doesn't touch `landing/`. They live only in the dashboard, so set them there; a change to this file alone does nothing.
 
 Or deploy from your machine:
 
