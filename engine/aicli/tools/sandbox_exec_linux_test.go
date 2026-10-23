@@ -32,10 +32,13 @@ func TestReadRootsExcluding(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	roots := readRootsExcluding([]string{secretDir, sealed})
+	roots, files := readRootsExcluding([]string{secretDir, sealed})
 	set := map[string]bool{}
 	for _, r := range roots {
 		set[r] = true
+	}
+	for _, f := range files {
+		set[f] = true
 	}
 
 	// The excluded paths must NOT be granted.
@@ -59,11 +62,72 @@ func TestReadRootsExcluding(t *testing.T) {
 		t.Errorf("expected a top-level system root (/usr or /bin) to be granted, roots=%v", roots)
 	}
 	// Empty / root-only excludes are refused (never hide all of "/").
-	if r := readRootsExcluding(nil); r != nil {
-		t.Errorf("nil excludes must yield nil (fall back to RODirs(\"/\")), got %v", r)
+	if d, f := readRootsExcluding(nil); d != nil || f != nil {
+		t.Errorf("nil excludes must yield nil (fall back to RODirs(\"/\")), got %v %v", d, f)
 	}
-	if r := readRootsExcluding([]string{"/"}); r != nil {
-		t.Errorf(`excluding "/" must be refused, got %v`, r)
+	if d, f := readRootsExcluding([]string{"/"}); d != nil || f != nil {
+		t.Errorf(`excluding "/" must be refused, got %v %v`, d, f)
+	}
+}
+
+// TestReadRootsExcludingSplitsFilesFromDirs pins the classification that keeps
+// the ruleset valid: a regular file sitting next to the hidden subtree (a real
+// host has /swapfile, /initrd.img, /vmlinuz there) must be reported as a FILE.
+// Granting it directory access rights makes landlock_add_rule return EINVAL,
+// which fails the whole ruleset — every sandboxed command then exits 125.
+func TestReadRootsExcludingSplitsFilesFromDirs(t *testing.T) {
+	root := t.TempDir()
+	secret := filepath.Join(root, "data")   // hidden subtree
+	plainDir := filepath.Join(root, "usr")  // ordinary directory sibling
+	linkedDir := filepath.Join(root, "lib") // symlink -> directory
+	if err := os.MkdirAll(secret, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(plainDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(plainDir, linkedDir); err != nil {
+		t.Fatal(err)
+	}
+	swap := filepath.Join(root, "swapfile") // the regular file that broke CI
+	if err := os.WriteFile(swap, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	broken := filepath.Join(root, "dangling")
+	if err := os.Symlink(filepath.Join(root, "nope"), broken); err != nil {
+		t.Fatal(err)
+	}
+
+	dirs, files := readRootsExcludingFrom(root, []string{secret})
+	has := func(list []string, want string) bool {
+		for _, v := range list {
+			if v == want {
+				return true
+			}
+		}
+		return false
+	}
+
+	if !has(files, swap) {
+		t.Errorf("regular file %q must be granted as a FILE, dirs=%v files=%v", swap, dirs, files)
+	}
+	if has(dirs, swap) {
+		t.Errorf("regular file %q must never be granted directory rights", swap)
+	}
+	if !has(dirs, plainDir) {
+		t.Errorf("directory %q must be granted as a dir, dirs=%v", plainDir, dirs)
+	}
+	// A symlink is classified by what it resolves to, matching how Landlock
+	// resolves the path when the rule is added.
+	if !has(dirs, linkedDir) {
+		t.Errorf("symlink-to-dir %q must be granted as a dir, dirs=%v", linkedDir, dirs)
+	}
+	// An unresolvable path contributes nothing rather than an invalid rule.
+	if has(dirs, broken) || has(files, broken) {
+		t.Errorf("broken symlink %q must not be granted, dirs=%v files=%v", broken, dirs, files)
+	}
+	if has(dirs, secret) || has(files, secret) {
+		t.Errorf("hidden subtree %q must never be granted", secret)
 	}
 }
 

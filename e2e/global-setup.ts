@@ -5,6 +5,7 @@ import * as os from 'os';
 import * as path from 'path';
 import { createE2EHome } from './fixtures/e2e-home';
 import { setupBareRepo } from './fixtures/git-fixture';
+import { startMockDeployServer } from './fixtures/mock-deploy-server';
 import { startMockProviderServer } from './fixtures/mock-provider-server';
 import { fetchWithTimeout, requireFetchOK } from './helpers/http';
 import { terminateProcess } from './helpers/process';
@@ -20,6 +21,7 @@ const logFile = path.join(runDir, 'server.log');
 
 let serverProcess: ChildProcess | null = null;
 let mock: Awaited<ReturnType<typeof startMockProviderServer>> | null = null;
+let deployMock: Awaited<ReturnType<typeof startMockDeployServer>> | null = null;
 let log = '';
 
 /** Playwright global setup with bounded startup and failure cleanup. */
@@ -31,9 +33,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
         e2eHome = createE2EHome();
         const repoUrl = setupBareRepo();
         mock = await startMockProviderServer();
+        deployMock = await startMockDeployServer();
 
         const envData = {
             E2E_MOCK_PROVIDER_URL: mock.baseUrl,
+            E2E_MOCK_DEPLOY_URL: deployMock.baseUrl,
             E2E_TEST_REPO_URL: repoUrl,
             E2E_HEADCOUNT1_HOME: e2eHome,
             E2E_ENV_FILE: envFile,
@@ -42,7 +46,11 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
             E2E_RUN_DIR: runDir,
         };
         fs.writeFileSync(envFile, JSON.stringify(envData, null, 2));
-        Object.assign(process.env, envData, { E2E_MODE: 'true' });
+        Object.assign(process.env, envData, {
+            E2E_MODE: 'true',
+            VERCEL_API_URL: deployMock.baseUrl,
+            GITHUB_API_URL: deployMock.baseUrl,
+        });
 
         const projectRoot = path.resolve(__dirname, '..');
         const prebuiltBinary = path.join(projectRoot, 'agent-orchestrator');
@@ -100,6 +108,7 @@ function appendLog(message: string): void {
 async function cleanupSetup(e2eHome: string): Promise<void> {
     if (serverProcess) await terminateProcess(serverProcess, { group: true, timeoutMs: 3_000 });
     if (mock) await mock.stop();
+    if (deployMock) await deployMock.stop();
     if (e2eHome) {
         try { fs.rmSync(e2eHome, { recursive: true, force: true }); } catch { /* best effort */ }
     }

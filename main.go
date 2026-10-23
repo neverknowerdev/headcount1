@@ -37,6 +37,7 @@ import (
 	"agent-orchestrator/pkg/mailer"
 	"agent-orchestrator/pkg/runtokens"
 	"agent-orchestrator/pkg/secrets"
+	"agent-orchestrator/pkg/secrets/redact"
 	"agent-orchestrator/pkg/setup"
 	"agent-orchestrator/pkg/updater"
 	"agent-orchestrator/pkg/utils"
@@ -138,6 +139,14 @@ func run() error {
 	// keyring snapshot, and every OTHER company's/task's files are all invisible,
 	// while system and home toolchains stay readable. See doc/sandbox-hardening.md.
 	tools.SetHiddenReadDirs([]string{basePath})
+
+	// Keep server-level credentials out of agent transcripts and logs if a
+	// subprocess or error path accidentally includes their values.
+	for _, name := range []string{"SMTP_PASSWORD", "VAULT_TOKEN", "HEADCOUNT1_BOOT_KEY", "DATABASE_URL", "REDIS_URL"} {
+		if value := os.Getenv(name); value != "" {
+			redact.Register("server-credential", value)
+		}
+	}
 
 	dbConnStr := os.Getenv("DATABASE_URL")
 	requestedSchema := strings.TrimSpace(os.Getenv("HEADCOUNT1_MIGRATION_SCHEMA"))

@@ -1018,12 +1018,19 @@ func (e *NativeEngine) executeSession(ctx context.Context, task db.Task, mode st
 	if options.Worker {
 		systemPrompt += "\n\n" + strings.TrimSpace(agentconfig.MustPrompt("utils/worker_init.md"))
 	}
+	if len(environment.envSecretNames) > 0 {
+		names := make([]string, len(environment.envSecretNames))
+		for i, name := range environment.envSecretNames {
+			names[i] = "$" + name
+		}
+		systemPrompt += fmt.Sprintf("\n\nEnvironment: %s. Values are available to shell commands as %s. Use them by reference; secret values are redacted from tool output and run logs.", db.DefaultEnvironmentName, strings.Join(names, ", "))
+	}
 
 	var toolState *sessionToolState
 	if options.Worker {
-		toolState = e.buildWorkerSessionTools(ctx, task, run, agent, provider, model, workspacePath, readOnlyDirs, proxyLogger)
+		toolState = e.buildWorkerSessionTools(ctx, task, run, agent, provider, model, workspacePath, readOnlyDirs, proxyLogger, environment.envSecrets)
 	} else {
-		toolState = e.buildSessionTools(ctx, task, run, agent, company, parent, provider, model, workspacePath, readOnlyDirs, artifactDir, rootRunID, rootTaskID, proxyLogger, mode)
+		toolState = e.buildSessionTools(ctx, task, run, agent, company, parent, provider, model, workspacePath, readOnlyDirs, artifactDir, rootRunID, rootTaskID, proxyLogger, mode, environment.envSecrets)
 		toolState.consultation = options.Consultation
 	}
 	registry := toolState.registry

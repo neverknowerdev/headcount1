@@ -9,7 +9,7 @@ const envFile = process.env.E2E_ENV_FILE || path.join(__dirname, '.e2e-env.json'
 
 /** Always completes within a bounded interval, including setup/test failures. */
 export default async function globalTeardown(): Promise<void> {
-    let data: { E2E_MOCK_PROVIDER_URL?: string; E2E_HEADCOUNT1_HOME?: string; E2E_SERVER_LOG?: string; E2E_RUN_DIR?: string } = {};
+    let data: { E2E_MOCK_PROVIDER_URL?: string; E2E_MOCK_DEPLOY_URL?: string; E2E_HEADCOUNT1_HOME?: string; E2E_SERVER_LOG?: string; E2E_RUN_DIR?: string } = {};
     try {
         if (fs.existsSync(envFile)) data = JSON.parse(fs.readFileSync(envFile, 'utf8'));
     } catch (err) {
@@ -21,6 +21,13 @@ export default async function globalTeardown(): Promise<void> {
             await fetchWithTimeout(`${data.E2E_MOCK_PROVIDER_URL}/__test/shutdown`, { method: 'POST' }, 2_000);
         } catch (err) {
             console.log(`[globalTeardown] mock provider shutdown request failed: ${(err as Error).message}`);
+        }
+    }
+    if (data.E2E_MOCK_DEPLOY_URL) {
+        try {
+            await fetchWithTimeout(`${data.E2E_MOCK_DEPLOY_URL}/__test/shutdown`, { method: 'POST' }, 2_000);
+        } catch (err) {
+            console.log(`[globalTeardown] mock deploy shutdown request failed: ${(err as Error).message}`);
         }
     }
 

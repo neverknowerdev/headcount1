@@ -13,12 +13,21 @@ import (
 type ExecCommand struct {
 	workspacePath string
 	readOnlyDirs  []string
+	// extraEnv is appended to the child's (scrubbed) environment — the
+	// task's environment secrets. The agent can use them ($API_KEY) but any
+	// echo of the values is redacted from the tool output upstream.
+	extraEnv map[string]string
 }
 
 // NewExecCommand creates an ExecCommand tool sandboxed to workspacePath.
 func NewExecCommand(workspacePath string, readOnlyDirs ...string) *ExecCommand {
 	return &ExecCommand{workspacePath: workspacePath, readOnlyDirs: readOnlyDirs}
 }
+
+// SetExtraEnv sets additional NAME=value pairs injected into every command's
+// environment (after the server-secret scrub, which only filters the server's
+// own inherited env — deliberate injections are exempt).
+func (t *ExecCommand) SetExtraEnv(env map[string]string) { t.extraEnv = env }
 
 func (t *ExecCommand) Def() aicli.ToolDef {
 	return aicli.ToolDef{
@@ -68,6 +77,13 @@ func (t *ExecCommand) Execute(ctx context.Context, args json.RawMessage) (string
 	// pointed at the sandbox uid's home); don't clobber it.
 	if cmd.Env == nil {
 		cmd.Env = scrubbedEnv()
+	}
+	// Task environment secrets ride after the scrubbed base env, so they win
+	// over any same-named inherited var. This is the "use but not see" path:
+	// the value exists only in the child process's environment; the agent's
+	// view of it (tool output, message history, run logs) is redacted.
+	for name, value := range t.extraEnv {
+		cmd.Env = append(cmd.Env, name+"="+value)
 	}
 	output, err := cmd.CombinedOutput()
 	result := string(output)
